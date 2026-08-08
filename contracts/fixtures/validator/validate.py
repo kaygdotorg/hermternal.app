@@ -22,6 +22,7 @@ import os
 import re
 import stat
 import statistics
+import string
 import subprocess
 import sys
 import tokenize
@@ -247,6 +248,22 @@ ASSIGNMENT_SECRET_PATTERN = re.compile(
     r"(?P<value>\"[^\"\r\n]{8,128}\"|'[^'\r\n]{8,128}'|[A-Za-z0-9._~+/=%-]{8,128})",
     re.IGNORECASE,
 )
+# The regular expression is the fast path, not the grammar. A second bounded
+# pass below rejects quoted values that the pattern would otherwise skip after
+# an escape, suffix, or missing closing delimiter. Byte counts are enforced
+# while walking so a hostile quoted value never becomes a large intermediate
+# Python string.
+ASSIGNMENT_KEY_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?P<key>[A-Za-z][A-Za-z0-9_.:/-]{0,64})\s*(?P<separator>[=:])\s*",
+    re.IGNORECASE,
+)
+MAX_ASSIGNMENT_VALUE_BYTES = 128
+MAX_STATIC_RENDER_BYTES = MAX_ARTIFACT_BYTES
+MAX_STATIC_RENDER_PARTS = 8_192
+MAX_STATIC_COLLECTION_ITEMS = 256
+MAX_STATIC_MAPPING_FIELDS = 128
+MAX_STATIC_FORMAT_SPEC_BYTES = 256
+MAX_STATIC_FORMAT_FIELD_WIDTH = MAX_ARTIFACT_BYTES
 MAX_URL_LENGTH = 8 * 1024
 MAX_URL_COMPONENT_LENGTH = 4 * 1024
 MAX_URL_QUERY_PAIRS = 128
@@ -640,6 +657,10 @@ EXACT_ASSIGNMENT_ALLOWANCES = {
         "synthetic.invalid",
         "untrusted-value",
     }),
+    # This CLI negative case keeps a credential-shaped header fragment as an
+    # argument to prove errors redact it. Its exact value is scoped to that
+    # reviewed test artifact, not treated as a general safe assignment.
+    "deployment-security/external-allowlist/test_validate.py": frozenset({"raw-value"}),
     "deployment-security/private-network-firewall/test_validate.py": frozenset({"iptables"}),
     "deployment-security/pty-local-adapter/validate.py": frozenset({"synthetic.invalid"}),
     "provider-discovery/test_provider_discovery.py": frozenset({"synthetic.invalid"}),
@@ -1117,6 +1138,158 @@ def _assignment_candidate_from_match(match: re.Match[str]) -> str:
     return candidate
 
 
+def _assignment_byte_length(value: str) -> int:
+    """Return a bounded UTF-8 size without retaining an oversized value."""
+
+    total = 0
+    for character in value:
+        try:
+            total += len(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValidationError() from exc
+        require(total <= MAX_ASSIGNMENT_VALUE_BYTES, "assignment value is too large")
+    return total
+
+
+def _scan_assignment_candidates(
+    text: str,
+    *,
+    allow_synthetic_markers: bool,
+    allowed_assignment_values: frozenset[str],
+    exact_full_allowance: bool,
+) -> None:
+    """Parse credential assignments conservatively after the regex fast path.
+
+    Quoted source syntax is deliberately not decoded. Any backslash, embedded
+    line break, missing quote, or non-delimiter suffix makes the assignment
+    ambiguous and fails closed. Bare values retain the historical token grammar
+    so prose such as ``Authorization: Basic`` and typed parameters do not become
+    false credential assignments.
+    """
+
+    bare_characters = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~+/=%-")
+    trailing_delimiters = frozenset(",;)]}#")
+    for match in ASSIGNMENT_KEY_PATTERN.finditer(text):
+        key = match.group("key")
+        if not _is_credential_key_alias(key):
+            continue
+        separator = match.group("separator")
+        index = match.end()
+        if index >= len(text):
+            # A bare separator is commonly an intermediate result of a static
+            # string construction (``"password" + "="``). It has no value to
+            # classify; quoted empties below remain fail-closed because they
+            # are complete, credential-shaped syntax.
+            continue
+        if text[index] in "'\"":
+            quote = text[index]
+            content_start = index + 1
+            content_index = content_start
+            byte_count = 0
+            while content_index < len(text):
+                character = text[content_index]
+                if character in "\r\n":
+                    raise ValidationError()
+                if character == "\\":
+                    # Escaped quotes and escaped bytes are source syntax, not a
+                    # safely recoverable credential value for this scanner.
+                    raise ValidationError()
+                if character == quote:
+                    candidate = text[content_start:content_index]
+                    trailing = content_index + 1
+                    while trailing < len(text) and text[trailing].isspace():
+                        trailing += 1
+                    if trailing < len(text) and text[trailing] not in trailing_delimiters:
+                        # Do not let an allowed first literal hide a second
+                        # concatenated or suffixed credential value.
+                        raise ValidationError()
+                    _assignment_byte_length(candidate)
+                    _validate_assignment_candidate(
+                        key,
+                        candidate,
+                        allow_synthetic_markers=allow_synthetic_markers,
+                        allowed_assignment_values=allowed_assignment_values,
+                        exact_full_allowance=exact_full_allowance,
+                    )
+                    break
+                try:
+                    byte_count += len(character.encode("utf-8"))
+                except UnicodeError as exc:
+                    raise ValidationError() from exc
+                require(byte_count <= MAX_ASSIGNMENT_VALUE_BYTES, "assignment value is too large")
+                content_index += 1
+            else:
+                raise ValidationError()
+            continue
+
+        value_start = index
+        value_index = value_start
+        byte_count = 0
+        while value_index < len(text):
+            character = text[value_index]
+            if character.isspace() or character in trailing_delimiters:
+                break
+            if character in "'\"":
+                # A closing quote can delimit a bare assignment embedded in a
+                # JSON/string example. Treat it as a delimiter only when the
+                # following byte also closes the surrounding value; a quote
+                # followed by payload remains an ambiguous concatenation.
+                if value_index > value_start:
+                    trailing = value_index + 1
+                    if trailing < len(text) and not (
+                        text[trailing].isspace() or text[trailing] in trailing_delimiters
+                    ):
+                        raise ValidationError()
+                    break
+                break
+            if character == "\\":
+                # An escape after a bare prefix is source syntax we cannot
+                # decode safely. Reject it only once a credential-shaped prefix
+                # is present; short prose/header schemes remain compatible.
+                if value_index > value_start:
+                    raise ValidationError()
+                break
+            if character not in bare_characters:
+                break
+            try:
+                byte_count += len(character.encode("utf-8"))
+            except UnicodeError as exc:
+                raise ValidationError() from exc
+            require(byte_count <= MAX_ASSIGNMENT_VALUE_BYTES, "assignment value is too large")
+            value_index += 1
+        candidate = text[value_start:value_index]
+        if not candidate:
+            if separator == "=":
+                _validate_assignment_candidate(
+                    key,
+                    candidate,
+                    allow_synthetic_markers=allow_synthetic_markers,
+                    allowed_assignment_values=allowed_assignment_values,
+                    exact_full_allowance=exact_full_allowance,
+                )
+            continue
+        # Existing prose and typed annotations intentionally use short words
+        # after a colon (``token: str`` or ``Authorization: Basic``). Only a
+        # detector-length bare token, a reviewed marker, or an exact allowance
+        # enters the shared assignment policy.
+        if len(candidate) < 8 and not (
+            candidate in allowed_assignment_values
+            or _is_placeholder(
+                candidate,
+                allow_synthetic_markers=allow_synthetic_markers,
+                allow_structural_placeholders=False,
+            )
+        ):
+            continue
+        _validate_assignment_candidate(
+            key,
+            candidate,
+            allow_synthetic_markers=allow_synthetic_markers,
+            allowed_assignment_values=allowed_assignment_values,
+            exact_full_allowance=exact_full_allowance,
+        )
+
+
 def _validate_assignment_candidate(
     key: str,
     candidate: str,
@@ -1185,6 +1358,291 @@ def _url_authority(raw_url: str) -> str:
     return authority
 
 
+def _url_components(raw_url: str) -> tuple[str, str, str, str]:
+    """Split one bounded URL without normalizing away suspicious delimiters."""
+
+    require(len(raw_url) <= MAX_URL_LENGTH, "URL is too large")
+    authority = _url_authority(raw_url)
+    separator = raw_url.find("://")
+    authority_end = separator + 3 + len(authority)
+    remainder = raw_url[authority_end:]
+    fragment_index = remainder.find("#")
+    if fragment_index >= 0:
+        fragment = remainder[fragment_index + 1:]
+        remainder = remainder[:fragment_index]
+    else:
+        fragment = ""
+    query_index = remainder.find("?")
+    if query_index >= 0:
+        query = remainder[query_index + 1:]
+        path = remainder[:query_index]
+    else:
+        query = ""
+        path = remainder
+    for component in (authority, path, query, fragment):
+        require(len(component) <= MAX_URL_COMPONENT_LENGTH, "URL component is too large")
+    return authority, path, query, fragment
+
+
+def _regex_component_delimiter(
+    value: str,
+    start: int,
+    *,
+    markers: frozenset[str] = frozenset("/?#"),
+) -> tuple[int, str] | None:
+    """Find one URL delimiter without mistaking regex syntax for URL syntax.
+
+    Regex URL authorities commonly contain non-capturing groups such as
+    ``(?::[0-9]{1,5})?`` and character classes containing URL punctuation.
+    The raw URL splitter must not see the group's ``?`` or ``:`` as a query or
+    port delimiter. Escapes and character classes are skipped; a ``?`` after a
+    completed regex atom is treated as its optional quantifier rather than a
+    query marker. The result is deliberately conservative: unknown authority
+    syntax is still passed to the regex-host policy instead of being normalized.
+    """
+
+    escaped = False
+    in_class = False
+    parenthesis_depth = 0
+    index = start
+    while index < len(value):
+        character = value[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            index += 1
+            continue
+        if character == "[":
+            in_class = True
+            index += 1
+            continue
+        if character == "(":
+            parenthesis_depth += 1
+            index += 1
+            continue
+        if character == ")":
+            if parenthesis_depth:
+                parenthesis_depth -= 1
+            index += 1
+            continue
+        if character == "/" and "/" in markers:
+            # A slash inside a regex path group (``(?:/path)?``) still marks
+            # the URL path. Slashes in classes and escapes were skipped above.
+            return index, character
+        if character == "#" and "#" in markers and parenthesis_depth == 0:
+            return index, character
+        if character == "?" and "?" in markers and parenthesis_depth == 0:
+            previous = value[index - 1] if index > start else ""
+            if previous not in ")]}>*+?":
+                return index, character
+        index += 1
+    return None
+
+
+def _regex_url_components(raw_url: str) -> tuple[str, str, str, str]:
+    """Split a bounded regex URL while preserving regex punctuation."""
+
+    require(len(raw_url) <= MAX_URL_LENGTH, "URL is too large")
+    separator = raw_url.find("://")
+    require(separator > 0, "URL scheme is missing")
+    start = separator + 3
+    authority_marker = _regex_component_delimiter(raw_url, start)
+    authority_end = authority_marker[0] if authority_marker is not None else len(raw_url)
+    authority = raw_url[start:authority_end]
+    require(authority, "URL authority is missing")
+
+    remainder_start = authority_end
+    query_marker = _regex_component_delimiter(raw_url, remainder_start, markers=frozenset("?#"))
+    if query_marker is None:
+        path = raw_url[remainder_start:]
+        query = ""
+        fragment = ""
+    elif query_marker[1] == "#":
+        path = raw_url[remainder_start:query_marker[0]]
+        query = ""
+        fragment = raw_url[query_marker[0] + 1:]
+    elif query_marker[1] == "?":
+        path = raw_url[remainder_start:query_marker[0]]
+        fragment_marker = _regex_component_delimiter(
+            raw_url,
+            query_marker[0] + 1,
+            markers=frozenset("#"),
+        )
+        if fragment_marker is None or fragment_marker[1] != "#":
+            query = raw_url[query_marker[0] + 1:]
+            fragment = ""
+        else:
+            query = raw_url[query_marker[0] + 1:fragment_marker[0]]
+            fragment = raw_url[fragment_marker[0] + 1:]
+    else:
+        path = raw_url[remainder_start:query_marker[0]]
+        query = ""
+        fragment = raw_url[query_marker[0] + 1:]
+    for component in (authority, path, query, fragment):
+        require(len(component) <= MAX_URL_COMPONENT_LENGTH, "URL component is too large")
+    return authority, path, query, fragment
+
+
+def _validate_percent_escapes(component: str) -> None:
+    """Reject malformed percent escapes even in non-key/value URL fields."""
+
+    index = 0
+    while index < len(component):
+        if component[index] == "%":
+            require(index + 2 < len(component), "URL escape is incomplete")
+            require(
+                re.fullmatch(r"[0-9A-Fa-f]{2}", component[index + 1:index + 3]) is not None,
+                "URL escape is malformed",
+            )
+            index += 3
+            continue
+        index += 1
+
+
+def _validate_regex_percent_escapes(component: str) -> None:
+    """Validate URL escapes outside regex classes without rejecting literals."""
+
+    escaped = False
+    in_class = False
+    index = 0
+    while index < len(component):
+        character = component[index]
+        if escaped:
+            # A regex escape for ``%`` still produces a malformed URL byte;
+            # rejecting it keeps the regex and raw URL policies fail-closed.
+            require(character != "%", "URL escape is malformed")
+            escaped = False
+            index += 1
+            continue
+        if character == "\\":
+            escaped = True
+            index += 1
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            index += 1
+            continue
+        if character == "[":
+            in_class = True
+            index += 1
+            continue
+        if character == "%":
+            require(index + 2 < len(component), "URL escape is incomplete")
+            require(
+                re.fullmatch(r"[0-9A-Fa-f]{2}", component[index + 1:index + 3]) is not None,
+                "URL escape is malformed",
+            )
+            index += 3
+            continue
+        index += 1
+    require(not escaped, "URL escape is incomplete")
+
+
+def _validate_port_text(port: str) -> None:
+    """Apply one explicit-port policy to raw and regex-derived authorities."""
+
+    require(port and len(port) <= 5 and port.isascii() and port.isdecimal(), "URL port is malformed")
+    number = int(port)
+    require(1 <= number <= 65535, "URL port is out of range")
+
+
+def _authority_port_text(authority: str) -> str | None:
+    host_port = authority.rsplit("@", 1)[-1]
+    if host_port.startswith("["):
+        closing = host_port.find("]")
+        require(closing >= 0, "URL IPv6 authority is malformed")
+        suffix = host_port[closing + 1:]
+        if not suffix:
+            return None
+        require(suffix.startswith(":"), "URL authority is malformed")
+        return suffix[1:]
+    if ":" not in host_port:
+        return None
+    require(host_port.count(":") == 1, "URL authority is malformed")
+    return host_port.rsplit(":", 1)[1]
+
+
+def _regex_authority_port_text(authority: str) -> str | None:
+    """Find a literal regex-authority port outside groups and classes."""
+
+    host_port = authority.rsplit("@", 1)[-1]
+    if host_port.startswith("["):
+        closing = host_port.find("]")
+        require(closing >= 0, "regex URL IPv6 authority is malformed")
+        bracket_host = host_port[1:closing]
+        # An unescaped ``[... ]`` is usually a regex character class. Treat
+        # only a plain hexadecimal/colon body as bracketed IPv6; otherwise
+        # continue with the regex-aware top-level colon scan below.
+        if ":" in bracket_host and re.fullmatch(r"[0-9A-Fa-f:]+", bracket_host):
+            suffix = host_port[closing + 1:]
+            if not suffix:
+                return None
+            if suffix.startswith(":"):
+                return suffix[1:]
+            # An optional regex port group is not one explicit port value. It
+            # remains subject to the conservative host policy, but must not be
+            # mistaken for malformed literal authority punctuation.
+            if suffix.startswith("("):
+                return None
+            raise ValidationError()
+
+    colon_positions: list[int] = []
+    escaped = False
+    in_class = False
+    parenthesis_depth = 0
+    for index, character in enumerate(host_port):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            continue
+        if character == "[":
+            in_class = True
+            continue
+        if character == "(":
+            parenthesis_depth += 1
+            continue
+        if character == ")":
+            if parenthesis_depth:
+                parenthesis_depth -= 1
+            continue
+        if character == ":" and parenthesis_depth == 0:
+            colon_positions.append(index)
+    if not colon_positions:
+        return None
+    require(len(colon_positions) == 1, "URL authority is malformed")
+    return host_port[colon_positions[0] + 1:]
+
+
+def _validate_url_path_components(path: str, fragment: str) -> None:
+    # Decoding is used only as a bounded validity/size check. The scanner does
+    # not route paths or fragments through assignment semantics.
+    _decode_url_component(path, plus_as_space=False)
+    _decode_url_component(fragment, plus_as_space=False)
+
+
+def _validate_regex_url_path_components(path: str, fragment: str) -> None:
+    # Percent signs inside regex character classes are literals, not complete
+    # URL escapes. Validate the source-aware form without executing the regex.
+    for component in (path, fragment):
+        require(len(component) <= MAX_URL_COMPONENT_LENGTH, "URL component is too large")
+        _validate_regex_percent_escapes(component)
+
+
 def _validate_url_query(
     query: str,
     *,
@@ -1192,8 +1650,13 @@ def _validate_url_query(
     allowed_assignment_values: frozenset[str],
     allowed_synthetic_full_values: frozenset[str],
     source_value: str,
+    regex_pattern: bool = False,
 ) -> None:
     require(len(query) <= MAX_URL_COMPONENT_LENGTH, "URL query is too large")
+    if regex_pattern:
+        _validate_regex_percent_escapes(query)
+    else:
+        _validate_percent_escapes(query)
     pairs = re.split(r"[&;]", query)
     require(len(pairs) <= MAX_URL_QUERY_PAIRS, "URL query has too many fields")
     exact_full_allowance = source_value in allowed_synthetic_full_values
@@ -1214,6 +1677,167 @@ def _validate_url_query(
         )
 
 
+def _validate_raw_url_candidate(
+    raw_url: str,
+    *,
+    allow_synthetic_markers: bool,
+    allowed_assignment_values: frozenset[str],
+    allowed_synthetic_full_values: frozenset[str],
+    source_value: str,
+) -> None:
+    authority, path, query, fragment = _url_components(raw_url)
+    # Backslash is a special-scheme authority separator under WHATWG URL
+    # parsing. Reject it before Python's urlsplit can reinterpret an evil host
+    # as an allowlisted path/userinfo combination.
+    require("\\" not in authority, "ambiguous URL authority is not allowed")
+    _validate_url_path_components(path, fragment)
+    port = _authority_port_text(authority)
+    if port is not None:
+        _validate_port_text(port)
+    if "@" in authority:
+        raw_userinfo = authority.rsplit("@", 1)[0]
+        decoded_userinfo = _decode_url_component(raw_userinfo, plus_as_space=False)
+        if ":" in decoded_userinfo:
+            _username, password = decoded_userinfo.split(":", 1)
+            require(
+                not password or _is_explicit_synthetic_marker(password),
+                "URL userinfo is not allowed",
+            )
+    try:
+        parsed = urlsplit(raw_url)
+        host = parsed.hostname
+        # Accessing .port is intentional: urllib defers malformed and
+        # out-of-range explicit-port errors until this property is read.
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValidationError() from exc
+    if host:
+        # Percent-encoded host delimiters are ambiguous authority syntax. Path,
+        # query, and userinfo are decoded explicitly; host escapes are rejected.
+        require("%" not in host, "URL host escape is not allowed")
+        _require_allowed_url_host(host, allow_synthetic_markers=allow_synthetic_markers)
+    _validate_url_query(
+        query,
+        allow_synthetic_markers=allow_synthetic_markers,
+        allowed_assignment_values=allowed_assignment_values,
+        allowed_synthetic_full_values=allowed_synthetic_full_values,
+        source_value=source_value,
+    )
+
+
+def _validate_regex_authority_escapes(authority: str) -> None:
+    """Allow only regex escapes that recover a concrete authority character."""
+
+    index = 0
+    while index < len(authority):
+        if authority[index] != "\\":
+            index += 1
+            continue
+        _value, consumed, uncertain = _decode_regex_escape(authority, index)
+        require(not uncertain, "regex URL authority escape is ambiguous")
+        require(consumed > index, "regex URL authority escape is incomplete")
+        index = consumed
+
+
+def _regex_decoded_port(authority: str) -> str | None:
+    port = _regex_authority_port_text(authority)
+    if port is None:
+        return None
+    decoded, uncertain = _decode_regex_host(port)
+    require(not uncertain, "regex URL port is ambiguous")
+    _validate_port_text(decoded)
+    return decoded
+
+
+def _validate_regex_url_candidate(
+    raw_url: str,
+    *,
+    allow_synthetic_markers: bool,
+    allowed_assignment_values: frozenset[str],
+    allowed_synthetic_full_values: frozenset[str],
+    source_value: str,
+) -> None:
+    authority, path, query, fragment = _regex_url_components(raw_url)
+    _validate_regex_authority_escapes(authority)
+    _validate_regex_url_path_components(path, fragment)
+    _regex_decoded_port(authority)
+    raw_host_port = authority.rsplit("@", 1)[-1]
+    bracket_host = ""
+    if raw_host_port.startswith("["):
+        closing = raw_host_port.find("]")
+        require(closing >= 0, "regex URL IPv6 authority is malformed")
+        bracket_host = raw_host_port[1:closing]
+    if bracket_host and ":" in bracket_host and re.fullmatch(r"[0-9A-Fa-f:]+", bracket_host):
+        host_text = bracket_host
+    else:
+        port = _regex_authority_port_text(authority)
+        host_text = raw_host_port if port is None else raw_host_port[:-(len(port) + 1)]
+    require("%" not in host_text, "regex URL host escape is not allowed")
+    if "@" in authority:
+        raw_userinfo = authority.rsplit("@", 1)[0]
+        decoded_userinfo, uncertain = _decode_regex_host(raw_userinfo)
+        require(not uncertain, "regex URL userinfo is ambiguous")
+        decoded_userinfo = _decode_url_component(decoded_userinfo, plus_as_space=False)
+        if ":" in decoded_userinfo:
+            _username, password = decoded_userinfo.split(":", 1)
+            require(
+                not password or _is_explicit_synthetic_marker(password),
+                "regex URL userinfo is not allowed",
+            )
+    decoded_host, uncertain = _decode_regex_host(host_text)
+    concrete = tuple(dict.fromkeys(REGEX_HOST_LITERAL_PATTERN.findall(decoded_host)))
+    if uncertain:
+        suffixes = [
+            candidate
+            for candidate in concrete
+            if candidate.casefold().endswith((".test", ".example"))
+            or candidate.casefold() in ALLOWED_URL_HOSTS
+        ]
+        require(bool(suffixes), "regex URL host cannot be recovered safely")
+    require(bool(concrete), "regex URL host is missing")
+    for host in concrete:
+        _require_allowed_url_host(host, allow_synthetic_markers=allow_synthetic_markers)
+    _validate_url_query(
+        query,
+        allow_synthetic_markers=allow_synthetic_markers,
+        allowed_assignment_values=allowed_assignment_values,
+        allowed_synthetic_full_values=allowed_synthetic_full_values,
+        source_value=source_value,
+        regex_pattern=True,
+    )
+
+
+def _regex_url_segment(value: str, start: int) -> str:
+    """Capture one regex URL without stopping inside classes or escapes."""
+
+    end = start
+    escaped = False
+    in_class = False
+    while end < len(value):
+        character = value[end]
+        if escaped:
+            escaped = False
+            end += 1
+            continue
+        if character == "\\":
+            escaped = True
+            end += 1
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            end += 1
+            continue
+        if character == "[":
+            in_class = True
+            end += 1
+            continue
+        if character.isspace() or character in "\"'<>":
+            break
+        end += 1
+    return value[start:end]
+
+
 def _validate_url_hosts(
     value: str,
     *,
@@ -1225,46 +1849,48 @@ def _validate_url_hosts(
 ) -> None:
     if regex_pattern:
         for match in REGEX_SCHEME_PATTERN.finditer(value):
-            raw_url = value[match.start():]
-            for host in _regex_host_literals(raw_url):
-                _require_allowed_url_host(host, allow_synthetic_markers=allow_synthetic_markers)
+            segment = _regex_url_segment(value, match.start())
+            if not segment:
+                continue
+            # A protocol-prefix check (``startswith("https://")``) is not a
+            # URL candidate. Raw URL matching already excludes this shape;
+            # keep regex scanning aligned without weakening real authorities.
+            if segment.casefold() in {"http://", "https://", "ws://", "wss://"}:
+                continue
+            # Preserve exact path-scoped negative-test vocabulary before
+            # splitting adjacent regex URL examples into individual candidates.
+            if segment in allowed_structural_urls:
+                continue
+            starts = [match.start()]
+            for nested in REGEX_SCHEME_PATTERN.finditer(segment, len("https://")):
+                starts.append(match.start() + nested.start())
+            for index, start in enumerate(starts):
+                end = starts[index + 1] if index + 1 < len(starts) else match.start() + len(segment)
+                raw_url = value[start:end]
+                if raw_url in allowed_structural_urls:
+                    continue
+                _validate_regex_url_candidate(
+                    raw_url,
+                    allow_synthetic_markers=allow_synthetic_markers,
+                    allowed_assignment_values=allowed_assignment_values,
+                    allowed_synthetic_full_values=allowed_synthetic_full_values,
+                    source_value=value,
+                )
         return
     for match in URL_PATTERN.finditer(value):
         raw_url = match.group(0)
-        require(len(raw_url) <= MAX_URL_LENGTH, "URL is too large")
         # Domain validators retain exact malformed and reserved URL values as
         # negative-test vocabulary. Do not generalize the allowance to a host
         # suffix: a path-scoped exact token is the only structural bypass.
         if raw_url in allowed_structural_urls:
             continue
-        authority = _url_authority(raw_url)
-        # Backslash is a special-scheme authority separator under WHATWG URL
-        # parsing. Reject it before Python's urlsplit can reinterpret an evil
-        # host as an allowlisted path/userinfo combination.
-        require("\\" not in authority, "ambiguous URL authority is not allowed")
-        if "@" in authority:
-            raw_userinfo = authority.rsplit("@", 1)[0]
-            decoded_userinfo = _decode_url_component(raw_userinfo, plus_as_space=False)
-            if ":" in decoded_userinfo:
-                _username, password = decoded_userinfo.split(":", 1)
-                require(
-                    not password or _is_explicit_synthetic_marker(password),
-                    "URL userinfo is not allowed",
-                )
-        try:
-            parsed = urlsplit(raw_url)
-            host = parsed.hostname
-        except ValueError as exc:
-            raise ValidationError() from exc
-        _validate_url_query(
-            parsed.query,
+        _validate_raw_url_candidate(
+            raw_url,
             allow_synthetic_markers=allow_synthetic_markers,
             allowed_assignment_values=allowed_assignment_values,
             allowed_synthetic_full_values=allowed_synthetic_full_values,
             source_value=value,
         )
-        if host:
-            _require_allowed_url_host(host, allow_synthetic_markers=allow_synthetic_markers)
 
 
 def _validate_text_value(
@@ -1288,6 +1914,13 @@ def _validate_text_value(
         _normalize_scanned_text(value, preserve_controls=True),
     )))
     for scanned_value in scan_values:
+        if check_assignments:
+            _scan_assignment_candidates(
+                scanned_value,
+                allow_synthetic_markers=allow_synthetic_markers,
+                allowed_assignment_values=allowed_assignment_values,
+                exact_full_allowance=value in allowed_synthetic_full_values,
+            )
         for match in PRIVATE_KEY_PATTERN.finditer(scanned_value):
             candidate = match.group(0)
             require(
@@ -1457,9 +2090,184 @@ def _static_scalar(value: Any) -> Any:
 
 
 def _bounded_static_text(value: Any) -> Any:
-    if type(value) is str and len(value) <= MAX_ARTIFACT_BYTES:
+    if type(value) is str and len(value) <= MAX_STATIC_RENDER_BYTES:
         return value
     return _STATIC_UNKNOWN
+
+
+def _bounded_text_concat(parts: Iterable[str], *, separator: str = "") -> Any:
+    """Join known text only after bounding count and final output size."""
+
+    pieces: list[str] = []
+    total = 0
+    for index, part in enumerate(parts):
+        if index >= MAX_STATIC_RENDER_PARTS or type(part) is not str:
+            return _STATIC_UNKNOWN
+        if index:
+            total += len(separator)
+        total += len(part)
+        if total > MAX_STATIC_RENDER_BYTES:
+            return _STATIC_UNKNOWN
+        pieces.append(part)
+    return separator.join(pieces)
+
+
+def _conservative_text_concat(parts: Iterable[str], *, separator: str = "") -> str:
+    """Keep a bounded prefix when an unknown construction would overflow."""
+
+    pieces: list[str] = []
+    total = 0
+    truncated = False
+    for index, part in enumerate(parts):
+        if index >= MAX_STATIC_RENDER_PARTS or type(part) is not str:
+            truncated = True
+            break
+        extra = len(separator) if index else 0
+        if total + extra + len(part) > MAX_STATIC_RENDER_BYTES:
+            truncated = True
+            break
+        if extra:
+            pieces.append(separator)
+            total += extra
+        pieces.append(part)
+        total += len(part)
+    if truncated and total + len(_STATIC_DYNAMIC_VALUE) <= MAX_STATIC_RENDER_BYTES:
+        pieces.append(_STATIC_DYNAMIC_VALUE)
+    return "".join(pieces)
+
+
+def _decimal_exceeds_limit(digits: str, limit: int) -> bool:
+    """Compare decimal width text without converting an attacker-sized integer."""
+
+    normalized = digits.lstrip("0") or "0"
+    limit_text = str(limit)
+    return len(normalized) > len(limit_text) or (
+        len(normalized) == len(limit_text) and normalized > limit_text
+    )
+
+
+def _bounded_format_spec(format_spec: str) -> bool:
+    if len(format_spec) > MAX_STATIC_FORMAT_SPEC_BYTES or "{" in format_spec or "}" in format_spec:
+        return False
+    return not any(
+        _decimal_exceeds_limit(digits, MAX_STATIC_FORMAT_FIELD_WIDTH)
+        for digits in re.findall(r"\d+", format_spec)
+    )
+
+
+def _bounded_scalar_length(value: Any, conversion: str | None = None) -> int | None:
+    if value is _STATIC_UNKNOWN:
+        return None
+    if type(value) is str:
+        length = len(value)
+        if conversion in {"r", "a"}:
+            if length > (MAX_STATIC_RENDER_BYTES - 2) // 2:
+                return None
+            return length * 2 + 2
+        return length
+    if type(value) in {int, float, bool} or value is None:
+        try:
+            return len(repr(value) if conversion in {"r", "a"} else str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
+
+
+def _bounded_format_template(
+    template: str,
+    args: tuple[Any, ...] | list[Any],
+    keywords: dict[str, Any],
+    *,
+    mapping: dict[str, Any] | None = None,
+) -> Any:
+    """Preflight format fields before allowing Python to allocate output."""
+
+    if type(template) is not str or len(template) > MAX_STATIC_RENDER_BYTES:
+        return _STATIC_UNKNOWN
+    formatter = string.Formatter()
+    total = 0
+    fields = 0
+    auto_index = 0
+    try:
+        for literal, field_name, format_spec, conversion in formatter.parse(template):
+            fields += 1
+            if fields > MAX_STATIC_RENDER_PARTS:
+                return _STATIC_UNKNOWN
+            total += len(literal)
+            if total > MAX_STATIC_RENDER_BYTES:
+                return _STATIC_UNKNOWN
+            if field_name is None:
+                continue
+            if format_spec and not _bounded_format_spec(format_spec):
+                return _STATIC_UNKNOWN
+            if field_name == "":
+                field_name = str(auto_index)
+                auto_index += 1
+            value, _ = formatter.get_field(field_name, args, mapping if mapping is not None else keywords)
+            field_length = _bounded_scalar_length(value, conversion)
+            if field_length is None:
+                return _STATIC_UNKNOWN
+            width = max((int(digits) for digits in re.findall(r"\d+", format_spec)), default=0)
+            total += max(field_length, width)
+            if total > MAX_STATIC_RENDER_BYTES:
+                return _STATIC_UNKNOWN
+    except (IndexError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
+        return _STATIC_UNKNOWN
+    try:
+        if mapping is not None:
+            rendered = template.format_map(mapping)
+        else:
+            rendered = template.format(*args, **keywords)
+    except (IndexError, KeyError, AttributeError, TypeError, ValueError, OverflowError):
+        return _STATIC_UNKNOWN
+    return _bounded_static_text(rendered)
+
+
+def _bounded_format_value(value: Any, format_spec: str, conversion: str | None = None) -> Any:
+    if type(format_spec) is not str or not _bounded_format_spec(format_spec):
+        return _STATIC_UNKNOWN
+    if conversion == "s":
+        try:
+            value = str(value)
+        except (TypeError, ValueError, OverflowError):
+            return _STATIC_UNKNOWN
+    elif conversion == "r":
+        try:
+            value = repr(value)
+        except (TypeError, ValueError, OverflowError):
+            return _STATIC_UNKNOWN
+    elif conversion == "a":
+        try:
+            value = ascii(value)
+        except (TypeError, ValueError, OverflowError):
+            return _STATIC_UNKNOWN
+    field_length = _bounded_scalar_length(value)
+    if field_length is None:
+        return _STATIC_UNKNOWN
+    width = max((int(digits) for digits in re.findall(r"\d+", format_spec)), default=0)
+    if max(field_length, width) > MAX_STATIC_RENDER_BYTES:
+        return _STATIC_UNKNOWN
+    try:
+        return _bounded_static_text(format(value, format_spec))
+    except (TypeError, ValueError, OverflowError):
+        return _STATIC_UNKNOWN
+
+
+def _bounded_percent(template: str, value: Any) -> Any:
+    if type(template) is not str or len(template) > MAX_STATIC_RENDER_BYTES:
+        return _STATIC_UNKNOWN
+    # Width and precision are the only percent-format controls that can force a
+    # large allocation before the result can be checked.
+    for digits in re.findall(r"%(?:[-+#0 ]*\d*(?:\.\d+)?)[diouxXeEfFgGcrs%]", template):
+        if any(
+            _decimal_exceeds_limit(number, MAX_STATIC_FORMAT_FIELD_WIDTH)
+            for number in re.findall(r"\d+", digits)
+        ):
+            return _STATIC_UNKNOWN
+    try:
+        return _bounded_static_text(template % value)
+    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return _STATIC_UNKNOWN
 
 
 def _contains_static_unknown(value: Any) -> bool:
@@ -1478,6 +2286,8 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
     if isinstance(node, ast.Name):
         return bindings.get(node.id, _STATIC_UNKNOWN)
     if isinstance(node, ast.Dict):
+        if len(node.keys) > MAX_STATIC_COLLECTION_ITEMS:
+            return _STATIC_UNKNOWN
         result: dict[Any, Any] = {}
         for key_node, value_node in zip(node.keys, node.values):
             if key_node is None:
@@ -1501,6 +2311,8 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
         except (IndexError, KeyError, TypeError):
             return _STATIC_UNKNOWN
     if isinstance(node, ast.JoinedStr):
+        if len(node.values) > MAX_STATIC_RENDER_PARTS:
+            return _STATIC_UNKNOWN
         pieces: list[str] = []
         for part in node.values:
             if isinstance(part, ast.Constant):
@@ -1514,34 +2326,35 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
             formatted = _static_value(part.value, bindings)
             if formatted is _STATIC_UNKNOWN:
                 return _STATIC_UNKNOWN
-            if part.conversion == 115:
-                formatted = str(formatted)
-            elif part.conversion == 114:
-                formatted = repr(formatted)
-            elif part.conversion == 97:
-                formatted = ascii(formatted)
+            conversion = {
+                -1: None,
+                115: "s",
+                114: "r",
+                97: "a",
+            }.get(part.conversion)
+            if part.conversion not in {-1, 115, 114, 97}:
+                return _STATIC_UNKNOWN
             format_spec = ""
             if part.format_spec is not None:
                 format_spec = _static_value(part.format_spec, bindings)
                 if type(format_spec) is not str:
                     return _STATIC_UNKNOWN
-            try:
-                pieces.append(format(formatted, format_spec))
-            except (TypeError, ValueError, OverflowError):
+            rendered = _bounded_format_value(formatted, format_spec, conversion)
+            if rendered is _STATIC_UNKNOWN:
                 return _STATIC_UNKNOWN
-        return _bounded_static_text("".join(pieces))
+            pieces.append(rendered)
+        return _bounded_text_concat(pieces)
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
         left = _static_value(node.left, bindings)
         right = _static_value(node.right, bindings)
         if isinstance(node.op, ast.Add) and type(left) is str and type(right) is str:
-            return _bounded_static_text(left + right)
+            return _bounded_text_concat((left, right))
         if isinstance(node.op, ast.Mod) and type(left) is str and not _contains_static_unknown(right):
-            try:
-                return _bounded_static_text(left % right)
-            except (IndexError, KeyError, TypeError, ValueError, OverflowError):
-                return _STATIC_UNKNOWN
+            return _bounded_percent(left, right)
         return _STATIC_UNKNOWN
     if isinstance(node, (ast.List, ast.Tuple)):
+        if len(node.elts) > MAX_STATIC_COLLECTION_ITEMS:
+            return _STATIC_UNKNOWN
         values: list[Any] = []
         for child in node.elts:
             value = _static_value(child, bindings)
@@ -1567,22 +2380,16 @@ def _static_value(node: ast.AST, bindings: dict[str, Any]) -> Any:
                 if value is _STATIC_UNKNOWN:
                     return _STATIC_UNKNOWN
                 keywords[keyword.arg] = value
-            try:
-                return _bounded_static_text(receiver.format(*args, **keywords))
-            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                return _STATIC_UNKNOWN
+            return _bounded_format_template(receiver, args, keywords)
         if method == "format_map" and type(receiver) is str and len(node.args) == 1 and not node.keywords:
             mapping = _static_value(node.args[0], bindings)
             if not isinstance(mapping, dict) or _contains_static_unknown(mapping):
                 return _STATIC_UNKNOWN
-            try:
-                return _bounded_static_text(receiver.format_map(mapping))
-            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                return _STATIC_UNKNOWN
+            return _bounded_format_template(receiver, (), {}, mapping=mapping)
         if method == "join" and type(receiver) is str and len(node.args) == 1 and not node.keywords:
             values = _static_value(node.args[0], bindings)
             if isinstance(values, (list, tuple)) and all(type(value) is str for value in values):
-                return _bounded_static_text(receiver.join(values))
+                return _bounded_text_concat(values, separator=receiver)
     return _STATIC_UNKNOWN
 
 
@@ -1601,11 +2408,24 @@ def _mapping_probe_from_template(template: str, *, format_map: bool = False) -> 
     and all other fields with detector-length data so mapping syntax cannot
     erase an Authorization header from the conservative scan.
     """
-    if format_map:
-        fields = re.findall(r"{([^{}!:]+)(?:![^}:]+)?(?:\s*:[^}]*)?}", template)
-    else:
-        fields = re.findall(r"%\(([^()]+)\)", template)
-    return {field: _percent_mapping_probe(field) for field in dict.fromkeys(fields)}
+    if len(template) > MAX_STATIC_RENDER_BYTES:
+        return {}
+    pattern = (
+        r"{([^{}!:]+)(?:![^}:]+)?(?:\s*:[^}]*)?}"
+        if format_map
+        else r"%\(([^()]+)\)"
+    )
+    fields: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(pattern, template):
+        field = match.group(1)
+        if field in seen:
+            continue
+        if len(fields) >= MAX_STATIC_MAPPING_FIELDS:
+            break
+        seen.add(field)
+        fields.append(field)
+    return {field: _percent_mapping_probe(field) for field in fields}
 
 
 def _percent_probe_value(
@@ -1730,89 +2550,110 @@ def _with_dynamic_authorization_probe(node: ast.AST, bindings: dict[str, Any], r
         and re.search(r"authorization\s*:", rendered, re.IGNORECASE) is not None
     )
     if _dynamic_authorization_scheme(node, bindings) or dynamic_header_value:
-        return rendered + " Authorization: Basic AAAAAAAAAAAAAAAA"
-    return rendered
+        return _conservative_text_concat((rendered, " Authorization: Basic AAAAAAAAAAAAAAAA"))
+    return rendered[:MAX_STATIC_RENDER_BYTES]
 
 
 def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
     """Render unresolved string expressions with credential-shaped probes."""
     value = _static_value(node, bindings)
     if type(value) is str:
-        return value
+        return value[:MAX_STATIC_RENDER_BYTES]
     if isinstance(node, ast.Constant):
         literal = _static_scalar(node.value)
-        return literal if type(literal) is str else _STATIC_DYNAMIC_VALUE
+        return literal[:MAX_STATIC_RENDER_BYTES] if type(literal) is str else _STATIC_DYNAMIC_VALUE
     if isinstance(node, ast.Name):
         bound = bindings.get(node.id, _STATIC_UNKNOWN)
-        return bound if type(bound) is str else _STATIC_DYNAMIC_VALUE
+        return bound[:MAX_STATIC_RENDER_BYTES] if type(bound) is str else _STATIC_DYNAMIC_VALUE
     if isinstance(node, ast.JoinedStr):
+        if len(node.values) > MAX_STATIC_RENDER_PARTS:
+            return _with_dynamic_authorization_probe(node, bindings, _STATIC_DYNAMIC_VALUE)
         pieces: list[str] = []
         for part in node.values:
             if isinstance(part, ast.Constant):
                 literal = _static_scalar(part.value)
                 pieces.append(literal if type(literal) is str else _STATIC_DYNAMIC_VALUE)
             elif isinstance(part, ast.FormattedValue):
-                pieces.append(_conservative_text(part.value, bindings))
+                formatted = _conservative_text(part.value, bindings)
+                conversion = {
+                    -1: None,
+                    115: "s",
+                    114: "r",
+                    97: "a",
+                }.get(part.conversion)
+                if part.conversion not in {-1, 115, 114, 97}:
+                    pieces.append(_STATIC_DYNAMIC_VALUE)
+                    continue
+                format_spec = ""
+                if part.format_spec is not None:
+                    format_spec = _conservative_text(part.format_spec, bindings)
+                rendered = _bounded_format_value(formatted, format_spec, conversion)
+                pieces.append(rendered if rendered is not _STATIC_UNKNOWN else _STATIC_DYNAMIC_VALUE)
             else:
                 pieces.append(_STATIC_DYNAMIC_VALUE)
-        return _with_dynamic_authorization_probe(node, bindings, "".join(pieces))
+        return _with_dynamic_authorization_probe(
+            node,
+            bindings,
+            _conservative_text_concat(pieces),
+        )
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
         left = _conservative_text(node.left, bindings)
         right = _conservative_text(node.right, bindings)
         if isinstance(node.op, ast.Add):
-            return _with_dynamic_authorization_probe(node, bindings, left + right)
-        try:
-            if isinstance(node.right, ast.Tuple):
-                values = tuple(_conservative_text(child, bindings) for child in node.right.elts)
-                rendered = left % values
-            else:
-                rendered = left % right
-        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
-            rendered = left + " " + right
-        try:
-            credential_probe = left % _percent_probe_value(node.right, bindings, template=left)
-        except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+            rendered = _conservative_text_concat((left, right))
+            return _with_dynamic_authorization_probe(node, bindings, rendered)
+        if isinstance(node.right, ast.Tuple) and len(node.right.elts) <= MAX_STATIC_COLLECTION_ITEMS:
+            values = tuple(_conservative_text(child, bindings) for child in node.right.elts)
+            rendered = _bounded_percent(left, values)
+        else:
+            rendered = _bounded_percent(left, right)
+        if rendered is _STATIC_UNKNOWN:
+            rendered = _conservative_text_concat((left, right), separator=" ")
+        probe_value = _percent_probe_value(node.right, bindings, template=left)
+        credential_probe = _bounded_percent(left, probe_value)
+        if credential_probe is _STATIC_UNKNOWN:
             credential_probe = left
         # Scan both ordinary conservative rendering and the auth-scheme probe.
         # This preserves known template context without letting an unresolved
         # `%s` choose `Basic` or another credential scheme only at runtime.
-        return _with_dynamic_authorization_probe(node, bindings, rendered + " " + credential_probe)
+        combined = _conservative_text_concat((rendered, credential_probe), separator=" ")
+        return _with_dynamic_authorization_probe(node, bindings, combined)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         method = node.func.attr
         receiver = _conservative_text(node.func.value, bindings)
         if method == "format":
+            if len(node.args) > MAX_STATIC_COLLECTION_ITEMS or len(node.keywords) > MAX_STATIC_COLLECTION_ITEMS:
+                return _with_dynamic_authorization_probe(
+                    node,
+                    bindings,
+                    _conservative_text_concat((receiver, _STATIC_DYNAMIC_VALUE), separator=" "),
+                )
             args = [_conservative_text(argument, bindings) for argument in node.args]
             keywords = {
                 keyword.arg: _conservative_text(keyword.value, bindings)
                 for keyword in node.keywords
                 if keyword.arg is not None
             }
-            try:
-                rendered = receiver.format(*args, **keywords)
-            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                rendered = receiver + " " + " ".join(args + list(keywords.values()))
+            rendered = _bounded_format_template(receiver, args, keywords)
+            if rendered is _STATIC_UNKNOWN:
+                rendered = _conservative_text_concat((receiver, *args, *keywords.values()), separator=" ")
             return _with_dynamic_authorization_probe(node, bindings, rendered)
         if method == "format_map" and len(node.args) == 1 and not node.keywords:
             mapping = _static_value(node.args[0], bindings)
+            rendered = _STATIC_UNKNOWN
             if isinstance(mapping, dict) and not _contains_static_unknown(mapping):
-                try:
-                    return _with_dynamic_authorization_probe(
-                        node,
-                        bindings,
-                        receiver.format_map(mapping),
-                    )
-                except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                    pass
-            probe = _mapping_probe_from_template(receiver, format_map=True)
-            try:
-                rendered = receiver.format_map(probe)
-            except (IndexError, KeyError, ValueError, TypeError, OverflowError):
-                rendered = receiver + " " + " ".join(probe.values())
+                rendered = _bounded_format_template(receiver, (), {}, mapping=mapping)
+            if rendered is _STATIC_UNKNOWN:
+                probe = _mapping_probe_from_template(receiver, format_map=True)
+                rendered = _bounded_format_template(receiver, (), {}, mapping=probe)
+                if rendered is _STATIC_UNKNOWN:
+                    rendered = _conservative_text_concat((receiver, *probe.values()), separator=" ")
             return _with_dynamic_authorization_probe(node, bindings, rendered)
         if method == "join" and len(node.args) == 1 and not node.keywords:
             sequence = node.args[0]
-            if isinstance(sequence, (ast.List, ast.Tuple)):
-                rendered = receiver.join(_conservative_text(child, bindings) for child in sequence.elts)
+            if isinstance(sequence, (ast.List, ast.Tuple)) and len(sequence.elts) <= MAX_STATIC_COLLECTION_ITEMS:
+                values = [_conservative_text(child, bindings) for child in sequence.elts]
+                rendered = _conservative_text_concat(values, separator=receiver)
                 return _with_dynamic_authorization_probe(node, bindings, rendered)
             # Preserve the known separator and mark only the unknown payload.
             # A credential prefix in the receiver still fails closed, while an
@@ -1821,7 +2662,7 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
             return _with_dynamic_authorization_probe(
                 node,
                 bindings,
-                receiver + _STATIC_DYNAMIC_VALUE,
+                _conservative_text_concat((receiver, _STATIC_DYNAMIC_VALUE)),
             )
         # Unsupported string methods retain any statically visible prefix. If
         # that prefix is an Authorization header, the unknown method result gets
@@ -1829,7 +2670,7 @@ def _conservative_text(node: ast.AST, bindings: dict[str, Any]) -> str:
         return _with_dynamic_authorization_probe(
             node,
             bindings,
-            receiver + " " + _STATIC_DYNAMIC_VALUE,
+            _conservative_text_concat((receiver, _STATIC_DYNAMIC_VALUE), separator=" "),
         )
     return _STATIC_DYNAMIC_VALUE
 
