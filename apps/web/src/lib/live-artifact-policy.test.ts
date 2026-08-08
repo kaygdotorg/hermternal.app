@@ -135,6 +135,65 @@ describe('live Playwright artifact policy', () => {
     expect(mismatchedRedacted).not.toContain('synthetic-user');
   });
 
+  it('fails closed for unterminated comments before or inside editable markup', () => {
+    const insideEditable =
+      '<div contenteditable="plaintext-only"><!-- <span>synthetic-password</span>';
+    const afterEditable =
+      '<div contenteditable="true">safe-ui</div><!-- synthetic-user';
+    const topLevel = '<!-- <div contenteditable="true">synthetic-password';
+    const malformedComment =
+      '<div contenteditable="true"><!-- synthetic-password --';
+
+    for (const markup of [insideEditable, afterEditable, topLevel, malformedComment]) {
+      const redacted = redactLiveText(markup, []) as string;
+      expect(redacted).toContain(LIVE_ARTIFACT_REDACTION);
+      expect(redacted).not.toContain('synthetic-password');
+      expect(redacted).not.toContain('synthetic-user');
+    }
+  });
+
+  it('fails closed when diagnostic writes are rejected, silent, or unreadable', () => {
+    const falseSetter = new Proxy(
+      { message: 'synthetic-password' },
+      { set: () => false }
+    );
+    const silentSetterTarget = { message: 'synthetic-password' };
+    const silentSetter = new Proxy(silentSetterTarget, {
+      set: () => true
+    });
+    const throwingGetter = {};
+    Object.defineProperty(throwingGetter, 'message', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        throw new Error('diagnostic getter failed');
+      },
+      set: () => undefined
+    });
+    const throwingDescriptor = new Proxy(
+      { message: 'synthetic-password' },
+      {
+        getOwnPropertyDescriptor: () => {
+          throw new Error('diagnostic descriptor failed');
+        }
+      }
+    );
+
+    expect(() => redactTestErrors([falseSetter], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+    expect(() => redactTestErrors([silentSetter], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+    expect(silentSetterTarget.message).toBe('synthetic-password');
+    expect(() => redactTestErrors([throwingGetter], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+    expect(() => redactTestErrors([throwingDescriptor], ['synthetic-password'])).toThrow(
+      'redaction failed'
+    );
+  });
+
   it('scrubs every valid editable content mode before page teardown', async () => {
     document.body.innerHTML = `
       <form>

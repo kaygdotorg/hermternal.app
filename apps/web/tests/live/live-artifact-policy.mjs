@@ -15,6 +15,7 @@ const REDACTION_MAX_ARRAY_ITEMS = 512;
 const REDACTION_MAX_PROPERTIES = 1024;
 const REDACTION_BUDGET_MESSAGE = 'live artifact redaction budget exceeded';
 const REDACTION_FAILURE_MESSAGE = 'live artifact redaction failed';
+const HTML_UNTERMINATED_COMMENT = -2;
 const EDITABLE_CONTENT_MODES = new Set(['', 'true', 'plaintext-only']);
 const HTML_VOID_ELEMENTS = new Set([
   'area',
@@ -82,6 +83,10 @@ export function isLiveArtifactDirectory(directory) {
  * @returns {number}
  */
 function findHtmlTagEnd(value, start) {
+  if (value.startsWith('<!--', start)) {
+    const commentEnd = value.indexOf('-->', start + 4);
+    return commentEnd < 0 ? HTML_UNTERMINATED_COMMENT : commentEnd + 2;
+  }
   let quote = '';
   for (let index = start + 1; index < value.length; index += 1) {
     const character = value[index];
@@ -148,6 +153,7 @@ function findNextEditableOpening(value, start) {
     const opening = value.indexOf('<', cursor);
     if (opening < 0) return undefined;
     const end = findHtmlTagEnd(value, opening);
+    if (end === HTML_UNTERMINATED_COMMENT) return { malformedStart: opening };
     if (end < 0) {
       return hasEditableContentAttribute(value.slice(opening)) ? { malformedStart: opening } : undefined;
     }
@@ -172,7 +178,7 @@ function findMatchingClosingTag(value, opening) {
     const next = value.indexOf('<', cursor);
     if (next < 0) return undefined;
     const end = findHtmlTagEnd(value, next);
-    if (end < 0) return undefined;
+    if (end === HTML_UNTERMINATED_COMMENT || end < 0) return undefined;
     const tag = parseHtmlTag(value, next, end);
     if (tag) {
       if (tag.closing) {
@@ -286,10 +292,16 @@ function createRedactionState() {
   };
 }
 
+/**
+ * @returns {never}
+ */
 function throwRedactionBudget() {
   throw new Error(REDACTION_BUDGET_MESSAGE);
 }
 
+/**
+ * @returns {never}
+ */
 function throwRedactionFailure() {
   throw new Error(REDACTION_FAILURE_MESSAGE);
 }
@@ -329,11 +341,56 @@ function redactBoundedString(value, secrets, state) {
  * @param {unknown} value
  */
 function writeDiagnosticValue(target, key, descriptor, value) {
-  if (value === descriptor.value) return;
+  if (Object.is(value, descriptor.value)) return;
   if (descriptor.writable !== true) throwRedactionFailure();
+  let didSet;
+  let updatedDescriptor;
+  let readBack;
   try {
-    Reflect.set(target, key, value);
+    didSet = Reflect.set(target, key, value);
+    updatedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    readBack = Reflect.get(target, key);
   } catch {
+    throwRedactionFailure();
+  }
+  if (
+    didSet !== true ||
+    !updatedDescriptor ||
+    !('value' in updatedDescriptor) ||
+    !Object.is(updatedDescriptor.value, value) ||
+    !Object.is(readBack, value) ||
+    updatedDescriptor.writable !== descriptor.writable ||
+    updatedDescriptor.enumerable !== descriptor.enumerable ||
+    updatedDescriptor.configurable !== descriptor.configurable
+  ) {
+    throwRedactionFailure();
+  }
+}
+
+/**
+ * @param {object} target
+ * @param {string | symbol} key
+ * @param {PropertyDescriptor} descriptor
+ * @param {unknown} value
+ */
+function verifyAccessorWrite(target, key, descriptor, value) {
+  let updatedDescriptor;
+  let readBack;
+  try {
+    updatedDescriptor = Reflect.getOwnPropertyDescriptor(target, key);
+    readBack = Reflect.get(target, key);
+  } catch {
+    throwRedactionFailure();
+  }
+  if (
+    !updatedDescriptor ||
+    'value' in updatedDescriptor ||
+    updatedDescriptor.get !== descriptor.get ||
+    updatedDescriptor.set !== descriptor.set ||
+    updatedDescriptor.enumerable !== descriptor.enumerable ||
+    updatedDescriptor.configurable !== descriptor.configurable ||
+    !Object.is(readBack, value)
+  ) {
     throwRedactionFailure();
   }
 }
@@ -355,13 +412,16 @@ function redactAccessorValue(target, key, descriptor, secrets, state, depth) {
     throwRedactionFailure();
   }
   const redacted = redactTestDiagnosticValue(current, secrets, state, depth + 1);
-  if (redacted === current) return;
+  if (Object.is(redacted, current)) return;
   if (typeof descriptor.set !== 'function') throwRedactionFailure();
+  let didSet;
   try {
-    Reflect.set(target, key, redacted);
+    didSet = Reflect.set(target, key, redacted);
   } catch {
     throwRedactionFailure();
   }
+  if (didSet !== true) throwRedactionFailure();
+  verifyAccessorWrite(target, key, descriptor, redacted);
 }
 
 /**
@@ -382,7 +442,13 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
   consumeRedactionNode(state, depth);
   state.visited.add(value);
 
-  const keys = Reflect.ownKeys(value);
+  /** @type {(string | symbol)[]} */
+  let keys;
+  try {
+    keys = Reflect.ownKeys(value);
+  } catch {
+    throwRedactionFailure();
+  }
   if (keys.length > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
   if (Array.isArray(value)) {
     if (value.length > REDACTION_MAX_ARRAY_ITEMS || state.arrayItems + value.length > REDACTION_MAX_ARRAY_ITEMS) {
@@ -396,8 +462,14 @@ function redactTestDiagnosticValue(value, secrets, state, depth) {
     if (key === 'location') continue;
     state.properties += 1;
     if (state.properties > REDACTION_MAX_PROPERTIES) throwRedactionBudget();
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor) continue;
+    /** @type {PropertyDescriptor | undefined} */
+    let descriptor;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    } catch {
+      throwRedactionFailure();
+    }
+    if (!descriptor) throwRedactionFailure();
     if ('value' in descriptor) {
       const redacted = redactTestDiagnosticValue(descriptor.value, secrets, state, depth + 1);
       writeDiagnosticValue(value, key, descriptor, redacted);
