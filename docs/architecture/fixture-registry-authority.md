@@ -111,9 +111,13 @@ The verifier rejects local `info/grafts`, shallow metadata,
 `objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
 partial-clone/promisor settings, and local include or URL-redirection config.
 A disposable plain clone is therefore required when the caller is operating
-from a Git worktree. The host's `/usr/bin/git` is checked as an absolute,
-regular executable; Git helper lookup is fixed to `/usr/bin:/bin`, while
-system/global config and inherited `GIT_*` redirect variables are removed.
+from a Git worktree. A fresh single-head clone can omit the unreachable
+historical and active binding/source objects after a restack, so callers must
+seed all four exact protected commit OIDs into local `refs/fixture-authority/*`
+refs before verification; the verifier never infers a replacement from `HEAD`.
+The host's `/usr/bin/git` is checked as an absolute, regular executable; Git
+helper lookup is fixed to `/usr/bin:/bin`, while system/global config and
+inherited `GIT_*` redirect variables are removed.
 These host paths are a trusted-host boundary for this synthetic fixture proof,
 not a claim about production deployment security.
 
@@ -137,8 +141,8 @@ Run the standalone verifier against a checkout of the historical final
 predecessor with:
 
 ```sh
-python3 scripts/verify_fixture_registry_authority.py
-python3 -O scripts/verify_fixture_registry_authority.py
+python3 -B scripts/verify_fixture_registry_authority.py
+python3 -O -B scripts/verify_fixture_registry_authority.py
 ```
 
 The current aggregate checkout is checked by the distinct hardened authority;
@@ -157,11 +161,17 @@ traceback. No command fetches a remote or opens a network connection. Run the
 focused regression suite in both interpreter modes:
 
 ```sh
-python3 scripts/test_fixture_registry_authority.py
-python3 -O scripts/test_fixture_registry_authority.py
-python3 -m py_compile scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
-python3 -O -m py_compile scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
+python3 -B scripts/test_fixture_registry_authority.py
+python3 -O -B scripts/test_fixture_registry_authority.py
+python3 -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=0) for path in sys.argv[1:]]' \
+  scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
+python3 -O -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=1) for path in sys.argv[1:]]' \
+  scripts/verify_fixture_registry_authority.py scripts/test_fixture_registry_authority.py
 ```
+
+The `-B` flags keep these checks from creating rejected `__pycache__`
+entries; the compile-only checks use `compile` rather than `py_compile`, which
+writes bytecode even when `-B` is present.
 
 ## Rewrite resistance
 
