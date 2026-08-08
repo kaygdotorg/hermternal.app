@@ -203,6 +203,7 @@ export class LiveWorkspaceSession {
     try {
       const session = await this.rest.getSession(sessionId, operation.signal);
       if (!this.isCurrent(operation.generation)) return;
+      this.assertRequestedSession(session, sessionId);
       await this.openSession(session, this.snapshot.sessions, operation);
     } catch (error) {
       this.publishLoadFailure(error, operation.generation);
@@ -477,6 +478,7 @@ export class LiveWorkspaceSession {
     try {
       const session = await this.rest.getSession(sessionId, operation.signal);
       if (!this.ownsFactoryRetry(operation)) return;
+      this.assertRequestedSession(session, sessionId);
       await this.openSession(session, sessions, operation);
     } catch (error) {
       if (this.ownsFactoryRetry(operation)) this.publishLoadFailure(error, operation.generation);
@@ -1030,6 +1032,16 @@ export class LiveWorkspaceSession {
     this.activePromptOwnership = undefined;
     this.supersedeRetry();
     this.publish({ ...this.snapshot, state: 'retryable-error', permanentFailure: undefined });
+  }
+
+  private assertRequestedSession(session: LiveSession, requestedSessionId: string): void {
+    // REST may expose canonical aliases at its transport boundary, but a
+    // workspace selection or retry owns the exact durable ID the user chose.
+    // Reject a detail response for another ID before openSession can read or
+    // publish its history, create Chat, or reserve any draft ownership.
+    if (session.id !== requestedSessionId) {
+      throw new LiveRestError('invalid-response');
+    }
   }
 
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {
