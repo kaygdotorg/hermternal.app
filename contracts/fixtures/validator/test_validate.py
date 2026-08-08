@@ -24,26 +24,12 @@ import validate
 from fixture_authority_test_source import PROTECTED_OBJECTS, seed_protected_objects
 
 
-AUTHORITY_PIN_PATH = validate.REPO_ROOT / "scripts/fixture_registry_authority.v2.hardened.pin.json"
-
-
 def _active_authority_environment() -> dict[str, str]:
-    """Load the post-rotation runtime pin used by local synthetic tests."""
+    """Provision the reviewed source constants as the external runtime pins."""
 
-    pin = json.loads(AUTHORITY_PIN_PATH.read_text(encoding="utf-8"))
-    if pin.get("schema") != "hermternal.fixture-registry-authority-pin.v1":
-        raise AssertionError("active authority pin schema changed")
-    if pin.get("authority_path") != validate.VALIDATOR_AUTHORITY_PATH:
-        raise AssertionError("active authority pin path changed")
-    authority_commit = pin.get("authority_commit")
-    source_commit = pin.get("source_commit")
-    if not isinstance(authority_commit, str) or not validate.HEX40.fullmatch(authority_commit):
-        raise AssertionError("active authority introduction pin is invalid")
-    if not isinstance(source_commit, str) or not validate.HEX40.fullmatch(source_commit):
-        raise AssertionError("active authority source pin is invalid")
     return {
-        validate.ACTIVE_AUTHORITY_COMMIT_ENV: authority_commit,
-        validate.ACTIVE_SOURCE_COMMIT_ENV: source_commit,
+        validate.ACTIVE_AUTHORITY_COMMIT_ENV: validate.ACTIVE_AUTHORITY_COMMIT,
+        validate.ACTIVE_SOURCE_COMMIT_ENV: validate.ACTIVE_SOURCE_COMMIT,
     }
 
 
@@ -134,6 +120,103 @@ def _clone_plain_object_repository(*, seed: bool) -> tuple[tempfile.TemporaryDir
     else:
         _assert_protected_objects_missing(object_repo)
     return temporary, object_repo
+
+
+def _create_alternate_authority_repository() -> tuple[tempfile.TemporaryDirectory[str], Path, str, str]:
+    """Create a valid alternate authority/source pair for external-pin tests."""
+
+    temporary = tempfile.TemporaryDirectory(prefix="fixture-validator-alternate-authority-")
+    object_repo = Path(temporary.name) / "repo"
+    completed = subprocess.run(
+        [
+            "git",
+            "clone",
+            "--no-local",
+            "--single-branch",
+            "--no-hardlinks",
+            "--quiet",
+            str(validate.REPO_ROOT),
+            str(object_repo),
+        ],
+        cwd=validate.REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        temporary.cleanup()
+        raise AssertionError(completed.stderr or completed.stdout)
+    try:
+        _seed_protected_objects(object_repo)
+    except AssertionError:
+        temporary.cleanup()
+        raise
+    source_commit = validate.ACTIVE_SOURCE_COMMIT
+    completed = subprocess.run(
+        ["git", "checkout", "--quiet", "--detach", source_commit],
+        cwd=object_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        temporary.cleanup()
+        raise AssertionError(completed.stderr or completed.stdout)
+    alternate_path = object_repo / "scripts/fixture_registry_authority.v2.alternate.json"
+    authority_bytes = subprocess.check_output(
+        ["git", "show", f"{validate.ACTIVE_AUTHORITY_COMMIT}:{validate.VALIDATOR_AUTHORITY_PATH}"],
+        cwd=object_repo,
+    )
+    alternate_path.write_bytes(authority_bytes)
+    completed = subprocess.run(
+        ["git", "add", "--", alternate_path.name],
+        cwd=alternate_path.parent,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        temporary.cleanup()
+        raise AssertionError(completed.stderr or completed.stdout)
+    for key, value in (("user.email", "fixture-registry-test@example.invalid"), ("user.name", "Fixture Registry Test")):
+        completed = subprocess.run(
+            ["git", "config", key, value],
+            cwd=object_repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            temporary.cleanup()
+            raise AssertionError(completed.stderr or completed.stdout)
+    completed = subprocess.run(
+        ["git", "commit", "--quiet", "-m", "test: add alternate fixture authority"],
+        cwd=object_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        temporary.cleanup()
+        raise AssertionError(completed.stderr or completed.stdout)
+    authority_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=object_repo,
+        text=True,
+    ).strip()
+    actual_source = subprocess.check_output(
+        ["git", "rev-parse", "HEAD^1"],
+        cwd=object_repo,
+        text=True,
+    ).strip()
+    if actual_source != source_commit:
+        temporary.cleanup()
+        raise AssertionError("alternate authority source is not its direct predecessor")
+    authority = json.loads(alternate_path.read_text(encoding="utf-8"))
+    if authority.get("source_commit") != source_commit:
+        temporary.cleanup()
+        raise AssertionError("alternate authority manifest source changed")
+    return temporary, object_repo, authority_commit, source_commit
 
 
 class StrictJsonTests(unittest.TestCase):
@@ -509,6 +592,56 @@ class CliTests(unittest.TestCase):
         )
         return temporary
 
+    def _run_alternate_authority_probe(
+        self,
+        object_repo: Path,
+        authority_commit: str,
+        source_commit: str,
+        *,
+        optimized: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        """Exercise the authenticated helper against an independently valid pair."""
+
+        probe = (
+            "import json,sys;"
+            "from pathlib import Path;"
+            "import validate;"
+            "verifier=validate._authenticated_authority_verifier(validate.REPO_ROOT);"
+            "trusted=verifier.load_trusted_authority(Path(sys.argv[1]),"
+            "authority_path=sys.argv[2],"
+            "expected_authority_commit=sys.argv[3],"
+            "expected_source_commit=sys.argv[4]);"
+            "print(json.dumps({'authority_commit':trusted['authority_commit'],"
+            "'source_commit':trusted['source_commit']},sort_keys=True,separators=(',',':')))"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(
+            [
+                "-c",
+                probe,
+                str(object_repo),
+                "scripts/fixture_registry_authority.v2.alternate.json",
+                authority_commit,
+                source_commit,
+            ]
+        )
+        environment = dict(os.environ)
+        validator_path = str(validate.REPO_ROOT / "contracts/fixtures/validator")
+        environment["PYTHONPATH"] = validator_path + os.pathsep + environment.get("PYTHONPATH", "")
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            command,
+            cwd=validate.REPO_ROOT,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
     def _scan_artifact_bytes(self, relative_path: str, data: bytes) -> None:
         """Run one artifact scanner without manufacturing a replacement trust root."""
         with tempfile.TemporaryDirectory(prefix="fixture-scanner-") as directory:
@@ -591,6 +724,53 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(normal.stderr, "")
                 self.assertEqual(optimized.stderr, "")
                 self.assertEqual(json.loads(normal.stdout), json.loads(optimized.stdout))
+
+    def test_valid_alternate_authority_source_pair_is_not_runtime_authorized(self) -> None:
+        temporary, object_repo, authority_commit, source_commit = _create_alternate_authority_repository()
+        self.addCleanup(temporary.cleanup)
+        probes = {
+            optimized: self._run_alternate_authority_probe(
+                object_repo,
+                authority_commit,
+                source_commit,
+                optimized=optimized,
+            )
+            for optimized in (False, True)
+        }
+        self.assertEqual(probes[False].returncode, 0)
+        self.assertEqual(probes[True].returncode, 0)
+        self.assertEqual(probes[False].stdout, probes[True].stdout)
+        self.assertEqual(
+            json.loads(probes[False].stdout),
+            {"authority_commit": authority_commit, "source_commit": source_commit},
+        )
+        self.assertEqual(probes[False].stderr, "")
+        self.assertEqual(probes[True].stderr, "")
+        overrides = {
+            validate.ACTIVE_AUTHORITY_COMMIT_ENV: authority_commit,
+            validate.ACTIVE_SOURCE_COMMIT_ENV: source_commit,
+        }
+        blocked = {
+            optimized: self._run(
+                optimized=optimized,
+                object_repo=object_repo,
+                environment_overrides=overrides,
+            )
+            for optimized in (False, True)
+        }
+        self.assertEqual(blocked[False].returncode, 1)
+        self.assertEqual(blocked[True].returncode, 1)
+        self.assertEqual(blocked[False].stdout, blocked[True].stdout)
+        for optimized, result in blocked.items():
+            with self.subTest(optimized=optimized):
+                self.assertEqual(result.stderr, "")
+                self.assertLessEqual(len(result.stdout.strip()), validate.MAX_ERROR_LENGTH)
+                self.assertNotIn(authority_commit, result.stdout)
+                self.assertNotIn(source_commit, result.stdout)
+                payload = json.loads(result.stdout)
+                self.assertFalse(payload["ok"])
+                self.assertFalse(payload["live_claim"])
+                self.assertEqual(payload["evidence_status"], "blocked")
 
     def test_plain_object_repository_is_required_and_separate(self) -> None:
         missing = self._run(include_object_repo=False)
@@ -707,6 +887,31 @@ class CliTests(unittest.TestCase):
         schema["$defs"]["file"]["additionalProperties"] = True
         alternate_schema.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root, "--schema", str(alternate_schema))
+
+    def test_coordinated_helper_and_sha_mutation_fails_in_both_modes(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        helper = repo_root / validate.HARDENED_AUTHORITY_VERIFIER_PATH
+        mutated = helper.read_bytes() + b"\\n# coordinated helper mutation\\n"
+        helper.write_bytes(mutated)
+        validator_path = repo_root / "contracts/fixtures/validator/validate.py"
+        source = validator_path.read_text(encoding="utf-8")
+        original = f'HARDENED_AUTHORITY_VERIFIER_SHA256 = "{validate.HARDENED_AUTHORITY_VERIFIER_SHA256}"'
+        replacement = f'HARDENED_AUTHORITY_VERIFIER_SHA256 = "{hashlib.sha256(mutated).hexdigest()}"'
+        self.assertIn(original, source)
+        validator_path.write_text(source.replace(original, replacement, 1), encoding="utf-8")
+        normal = self._run(repo_root=repo_root)
+        optimized = self._run(optimized=True, repo_root=repo_root)
+        self.assertEqual(normal.returncode, 1)
+        self.assertEqual(optimized.returncode, 1)
+        self.assertEqual(normal.stdout, optimized.stdout)
+        self.assertEqual(normal.stderr, "")
+        self.assertEqual(optimized.stderr, "")
+        self.assertLessEqual(len(normal.stdout.strip()), validate.MAX_ERROR_LENGTH)
+        self.assertNotIn("coordinated helper mutation", normal.stdout)
+        payload = json.loads(normal.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["live_claim"])
+        self.assertEqual(payload["evidence_status"], "blocked")
 
     def test_registered_python_sensitive_value_is_rejected_in_both_modes(self) -> None:
         self._append_artifact_and_block(
