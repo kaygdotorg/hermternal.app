@@ -378,15 +378,18 @@
         {#key formResetKey}
           <!-- `dialog` has no native navigation target outside a dialog. The
                reset-type primary action clears live values without script,
-               while hydrated submit handling stays accessible. -->
+               while hydrated submit handling stays accessible. Synthetic
+               fixtures suppress password managers; live controls intentionally
+               omit those markers so username/current-password semantics remain
+               discoverable while the hydration fence is still active. -->
           <form
             bind:this={passwordForm}
             aria-busy={effectiveState === 'password-submitting'}
             aria-label="Hermes password sign in"
-            autocomplete="off"
+            autocomplete={discoveryMode === 'live' ? undefined : 'off'}
             class="password-form"
             data-field-ownership={fieldOwnershipReady ? 'ready' : 'pending'}
-            data-form-type="other"
+            data-form-type={discoveryMode === 'live' ? undefined : 'other'}
             method="dialog"
             onsubmit={handlePasswordSubmit}
           >
@@ -394,9 +397,9 @@
             <input
               id="auth-username"
               autocomplete={discoveryMode === 'live' ? 'username' : 'off'}
-              data-1p-ignore
-              data-lpignore="true"
-              data-fixture-field="username"
+              data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
+              data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
+              data-fixture-field={discoveryMode === 'live' ? undefined : 'username'}
               disabled={effectiveState === 'password-submitting'}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter username'}
               name={discoveryMode === 'live' ? 'username' : undefined}
@@ -425,9 +428,9 @@
             <input
               id="auth-password"
               autocomplete={discoveryMode === 'live' ? 'current-password' : 'off'}
-              data-1p-ignore
-              data-lpignore="true"
-              data-fixture-field="password"
+              data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
+              data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
+              data-fixture-field={discoveryMode === 'live' ? undefined : 'password'}
               disabled={effectiveState === 'password-submitting'}
               name={discoveryMode === 'live' ? 'password' : undefined}
               placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}

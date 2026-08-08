@@ -71,17 +71,26 @@ describe('AuthPreview', () => {
     expect(screen.getByRole('button', { name: 'Sign in' })).toHaveAttribute('type', 'reset');
   });
 
-  it('fences live fields until hydration owns focus and declares field ownership explicitly', async () => {
+  it('fences live fields until hydration owns focus and preserves password-manager semantics', async () => {
     render(AuthPreview, { discoveryMode: 'live', state: 'password' });
 
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
     const username = screen.getByLabelText('Username');
     const password = screen.getByLabelText('Password');
     expect(form).toHaveAttribute('data-field-ownership', 'pending');
+    expect(form).not.toHaveAttribute('autocomplete');
+    expect(form).not.toHaveAttribute('data-form-type');
     expect(username).toHaveAttribute('readonly');
     expect(password).toHaveAttribute('readonly');
     expect(username).toHaveAttribute('autocomplete', 'username');
     expect(password).toHaveAttribute('autocomplete', 'current-password');
+    expect(username).toHaveAttribute('name', 'username');
+    expect(password).toHaveAttribute('name', 'password');
+    for (const field of [username, password]) {
+      expect(field).not.toHaveAttribute('data-1p-ignore');
+      expect(field).not.toHaveAttribute('data-lpignore');
+      expect(field).not.toHaveAttribute('data-fixture-field');
+    }
 
     await waitFor(() => expect(form).toHaveAttribute('data-field-ownership', 'ready'));
     expect(username).not.toHaveAttribute('readonly');
