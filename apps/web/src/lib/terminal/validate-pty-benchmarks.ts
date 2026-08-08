@@ -29,13 +29,17 @@ const BENCHMARK_SPECS = {
       "expectedTicketCount",
       "expectedFactoryCount",
       "staleSocketIdentityMatchesStage",
+      "staleSocketIdMatchesStage",
       "staleSocketClosedExactly",
       "staleSocketNeverOpened",
       "replacementIdentityMatchesExpected",
+      "replacementSocketIdUnique",
       "replacementOpenedExactlyOnce",
       "replacementClosedExactlyOnce",
       "replacementReachedAttached",
       "expectedOwnerIsOnlyActiveOwner",
+      "activeSocketIsReplacement",
+      "socketClosureLedgerExact",
       "noDuplicateOwners",
       "allCallbacksNullAfterClose",
       "staleCallbacksExercised",
@@ -60,11 +64,15 @@ const BENCHMARK_SPECS = {
       "cleanupCalls",
       "duplicateOwnerViolations",
       "activeOwnerCount",
+      "activeSocketIds",
       "expectedOwnerIdentity",
       "activeOwnerIdentities",
+      "staleSocketIds",
       "staleSocketIdentities",
+      "staleSocketId",
       "staleSocketIdentity",
       "staleSocketCloseCalls",
+      "replacementSocketId",
       "replacementSocketIdentity",
       "replacementSocketCloseCalls",
       "socketClosures",
@@ -127,16 +135,22 @@ const BENCHMARK_SPECS = {
     assertionKeys: [
       "connectingGuard",
       "staleSocketNeverOpened",
+      "expectedValidatorCount",
       "expectedFactoryCount",
       "expectedTicketCount",
       "replacementOpenedExactlyOnce",
       "replacementAttached",
       "expectedOwnerIsOnlyActiveOwner",
+      "activeSocketIsReplacement",
       "noDuplicateOwners",
       "staleSocketIdentityFence",
+      "staleSocketIdFence",
+      "replacementIdentityMatchesExpected",
+      "replacementSocketIdUnique",
       "replacementClosedExactlyOnce",
       "exactSocketCleanup",
       "allCallbacksNullAfterClose",
+      "replacementCallbacksBound",
       "staleCallbacksExercised",
       "staleOnopenIgnored",
       "staleOnmessageIgnored",
@@ -149,19 +163,26 @@ const BENCHMARK_SPECS = {
     ],
     runKeys: [
       "sampleMs",
+      "validatorCalls",
       "ticketRequests",
       "socketFactoryCalls",
       "openedSockets",
       "cleanupCalls",
       "duplicateOwnerViolations",
       "activeOwnerCount",
+      "activeSocketIds",
       "expectedOwnerIdentity",
       "activeOwnerIdentities",
+      "staleSocketIds",
       "staleSocketIdentities",
+      "staleSocketId",
+      "staleSocketIdentity",
       "staleSocketCloseCalls",
+      "replacementSocketId",
       "replacementSocketIdentity",
       "replacementSocketCloseCalls",
       "socketClosures",
+      "callbackProofApplicable",
       "staleOpenCalls",
       "allCallbacksNullAfterClose",
       "staleOnopenDispatches",
@@ -174,6 +195,7 @@ const BENCHMARK_SPECS = {
       "assertions",
     ],
     runCounters: [
+      "validatorCalls",
       "ticketRequests",
       "socketFactoryCalls",
       "openedSockets",
@@ -192,6 +214,7 @@ const BENCHMARK_SPECS = {
       "postCloseNoticeEvents",
     ],
     totalCounters: [
+      "validatorCalls",
       "ticketRequests",
       "socketFactoryCalls",
       "openedSockets",
@@ -246,21 +269,75 @@ function asStringArray(value: unknown, label: string): string[] {
   return value.map((entry, index) => asString(entry, `${label}[${index}]`));
 }
 
+// Keep owner fields and physical socket IDs separate so same-owner
+// supersession cannot hide stale cleanup or replacement ownership drift.
+interface OwnerIdentity {
+  readonly sessionId: string;
+  readonly attach: string;
+  readonly processIdentity: string;
+}
+
+function asOwnerIdentity(value: unknown, label: string): OwnerIdentity {
+  const owner = asRecord(value, label);
+  assertExactKeys(owner, ["sessionId", "attach", "processIdentity"], label);
+  return {
+    sessionId: asString(owner.sessionId, `${label}.sessionId`),
+    attach: asString(owner.attach, `${label}.attach`),
+    processIdentity: asString(
+      owner.processIdentity,
+      `${label}.processIdentity`,
+    ),
+  };
+}
+
+function asOwnerIdentityArray(value: unknown, label: string): OwnerIdentity[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((entry, index) =>
+    asOwnerIdentity(entry, `${label}[${index}]`),
+  );
+}
+
+function sameOwnerIdentity(
+  actual: OwnerIdentity,
+  expected: OwnerIdentity,
+): boolean {
+  return (
+    actual.sessionId === expected.sessionId &&
+    actual.attach === expected.attach &&
+    actual.processIdentity === expected.processIdentity
+  );
+}
+
 interface SocketClosure {
-  readonly identity: string;
+  readonly socketId: string;
+  readonly ownerIdentity: OwnerIdentity;
   readonly closeCalls: number;
+  readonly opened: boolean;
 }
 
 function asSocketClosures(value: unknown, label: string): SocketClosure[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value.map((entry, index) => {
     const closure = asRecord(entry, `${label}[${index}]`);
+    assertExactKeys(
+      closure,
+      ["socketId", "ownerIdentity", "closeCalls", "opened"],
+      `${label}[${index}]`,
+    );
+    if (typeof closure.opened !== "boolean") {
+      throw new Error(`${label}[${index}].opened must be a boolean`);
+    }
     return {
-      identity: asString(closure.identity, `${label}[${index}].identity`),
+      socketId: asString(closure.socketId, `${label}[${index}].socketId`),
+      ownerIdentity: asOwnerIdentity(
+        closure.ownerIdentity,
+        `${label}[${index}].ownerIdentity`,
+      ),
       closeCalls: asFiniteNumber(
         closure.closeCalls,
         `${label}[${index}].closeCalls`,
       ),
+      opened: closure.opened,
     };
   });
 }
@@ -278,6 +355,34 @@ function expectStringArray(
   }
 }
 
+function expectOwnerIdentity(
+  actual: unknown,
+  expected: OwnerIdentity,
+  label: string,
+): void {
+  const parsed = asOwnerIdentity(actual, label);
+  if (!sameOwnerIdentity(parsed, expected)) {
+    throw new Error(`${label} did not match the expected owner identity`);
+  }
+}
+
+function expectOwnerIdentityArray(
+  actual: readonly OwnerIdentity[],
+  expected: readonly OwnerIdentity[],
+  label: string,
+): void {
+  if (
+    actual.length !== expected.length ||
+    actual.some(
+      (owner, index) =>
+        expected[index] === undefined ||
+        !sameOwnerIdentity(owner, expected[index]!),
+    )
+  ) {
+    throw new Error(`${label} did not match the expected ownership identities`);
+  }
+}
+
 function expectSocketClosures(
   actual: readonly SocketClosure[],
   expected: readonly SocketClosure[],
@@ -285,11 +390,16 @@ function expectSocketClosures(
 ): void {
   if (
     actual.length !== expected.length ||
-    actual.some(
-      (closure, index) =>
-        closure.identity !== expected[index]?.identity ||
-        closure.closeCalls !== expected[index]?.closeCalls,
-    )
+    actual.some((closure, index) => {
+      const wanted = expected[index];
+      return (
+        wanted === undefined ||
+        closure.socketId !== wanted.socketId ||
+        !sameOwnerIdentity(closure.ownerIdentity, wanted.ownerIdentity) ||
+        closure.closeCalls !== wanted.closeCalls ||
+        closure.opened !== wanted.opened
+      );
+    })
   ) {
     throw new Error(
       `${label} did not match the exact per-socket cleanup ledger`,
@@ -407,6 +517,7 @@ function expectedRunCounters(
   }
   const replacement = stage === "replace";
   return {
+    validatorCalls: replacement ? 2 : 1,
     ticketRequests: replacement ? 2 : 1,
     socketFactoryCalls: replacement ? 1 : 0,
     openedSockets: replacement ? 1 : 0,
@@ -700,25 +811,82 @@ function validateOwnershipProof(
   const reconnect =
     schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
   const replacement = stage === "replace";
+  const reconnectOwner: OwnerIdentity = {
+    sessionId: "benchmark-session",
+    attach: "benchmark-attach",
+    processIdentity: "benchmark-process",
+  };
+  const replacementOwner: OwnerIdentity = {
+    sessionId: "benchmark-session-b",
+    attach: "benchmark-attach-b",
+    processIdentity: "benchmark-process-b",
+  };
   const expectedOwnerIdentity = reconnect
-    ? "benchmark-session"
+    ? reconnectOwner
     : replacement
-      ? "benchmark-session-b"
+      ? replacementOwner
       : null;
   const expectedActiveIdentities =
     expectedOwnerIdentity === null ? [] : [expectedOwnerIdentity];
+  const expectedActiveSocketIds =
+    expectedOwnerIdentity === null
+      ? []
+      : [reconnect && stage === "factory" ? "socket-2" : "socket-1"];
   const expectedStaleIdentities =
-    reconnect && stage === "factory" ? ["benchmark-session"] : [];
-  const expectedSocketClosures = reconnect
+    reconnect && stage === "factory" ? [reconnectOwner] : [];
+  const expectedStaleSocketIds =
+    reconnect && stage === "factory" ? ["socket-1"] : [];
+  const expectedStaleSocketId = expectedStaleSocketIds[0] ?? null;
+  const expectedReplacementSocketId =
+    expectedOwnerIdentity === null
+      ? null
+      : reconnect && stage === "factory"
+        ? "socket-2"
+        : "socket-1";
+  const expectedSocketClosures: SocketClosure[] = reconnect
     ? stage === "factory"
       ? [
-          { identity: "benchmark-session", closeCalls: 1 },
-          { identity: "benchmark-session", closeCalls: 1 },
+          {
+            socketId: "socket-1",
+            ownerIdentity: reconnectOwner,
+            closeCalls: 1,
+            opened: false,
+          },
+          {
+            socketId: "socket-2",
+            ownerIdentity: reconnectOwner,
+            closeCalls: 1,
+            opened: true,
+          },
         ]
-      : [{ identity: "benchmark-session", closeCalls: 1 }]
+      : [
+          {
+            socketId: "socket-1",
+            ownerIdentity: reconnectOwner,
+            closeCalls: 1,
+            opened: true,
+          },
+        ]
     : replacement
-      ? [{ identity: "benchmark-session-b", closeCalls: 1 }]
+      ? [
+          {
+            socketId: "socket-1",
+            ownerIdentity: replacementOwner,
+            closeCalls: 1,
+            opened: true,
+          },
+        ]
       : [];
+
+  const activeSocketIds = asStringArray(
+    run.activeSocketIds,
+    `${label}.activeSocketIds`,
+  );
+  expectStringArray(
+    activeSocketIds,
+    expectedActiveSocketIds,
+    `${label}.activeSocketIds`,
+  );
 
   if (expectedOwnerIdentity === null) {
     if (run.expectedOwnerIdentity !== null) {
@@ -732,44 +900,86 @@ function validateOwnershipProof(
       );
     }
   } else {
-    if (
-      asString(run.expectedOwnerIdentity, `${label}.expectedOwnerIdentity`) !==
-      expectedOwnerIdentity
-    ) {
+    expectOwnerIdentity(
+      run.expectedOwnerIdentity,
+      expectedOwnerIdentity,
+      `${label}.expectedOwnerIdentity`,
+    );
+    if (run.replacementSocketIdentity === null) {
       throw new Error(
-        `${label}.expectedOwnerIdentity did not match the authorized owner`,
+        `${label}.replacementSocketIdentity must not be null with a replacement socket`,
       );
     }
-    if (
-      asString(
-        run.replacementSocketIdentity,
-        `${label}.replacementSocketIdentity`,
-      ) !== expectedOwnerIdentity
-    ) {
-      throw new Error(
-        `${label}.replacementSocketIdentity did not match the authorized owner`,
-      );
-    }
+    expectOwnerIdentity(
+      run.replacementSocketIdentity,
+      expectedOwnerIdentity,
+      `${label}.replacementSocketIdentity`,
+    );
   }
 
-  expectStringArray(
-    asStringArray(run.activeOwnerIdentities, `${label}.activeOwnerIdentities`),
+  expectOwnerIdentityArray(
+    asOwnerIdentityArray(
+      run.activeOwnerIdentities,
+      `${label}.activeOwnerIdentities`,
+    ),
     expectedActiveIdentities,
     `${label}.activeOwnerIdentities`,
   );
   expectStringArray(
-    asStringArray(run.staleSocketIdentities, `${label}.staleSocketIdentities`),
+    asStringArray(run.staleSocketIds, `${label}.staleSocketIds`),
+    expectedStaleSocketIds,
+    `${label}.staleSocketIds`,
+  );
+  expectOwnerIdentityArray(
+    asOwnerIdentityArray(
+      run.staleSocketIdentities,
+      `${label}.staleSocketIdentities`,
+    ),
     expectedStaleIdentities,
     `${label}.staleSocketIdentities`,
   );
-  if (reconnect) {
-    const expectedStaleIdentity = expectedStaleIdentities[0] ?? null;
-    if (run.staleSocketIdentity !== expectedStaleIdentity) {
+
+  const staleSocketId =
+    run.staleSocketId === null
+      ? null
+      : asString(run.staleSocketId, `${label}.staleSocketId`);
+  if (staleSocketId !== expectedStaleSocketId) {
+    throw new Error(
+      `${label}.staleSocketId did not match the deferred socket ledger`,
+    );
+  }
+  const staleSocketIdentity =
+    run.staleSocketIdentity === null
+      ? null
+      : asOwnerIdentity(
+          run.staleSocketIdentity,
+          `${label}.staleSocketIdentity`,
+        );
+  if (expectedStaleIdentities.length === 0) {
+    if (staleSocketIdentity !== null) {
       throw new Error(
-        `${label}.staleSocketIdentity did not match the deferred socket ledger`,
+        `${label}.staleSocketIdentity must be null without a stale socket`,
       );
     }
+  } else if (
+    staleSocketIdentity === null ||
+    !sameOwnerIdentity(staleSocketIdentity, expectedStaleIdentities[0]!)
+  ) {
+    throw new Error(
+      `${label}.staleSocketIdentity did not match the deferred socket ledger`,
+    );
   }
+
+  const replacementSocketId =
+    run.replacementSocketId === null
+      ? null
+      : asString(run.replacementSocketId, `${label}.replacementSocketId`);
+  if (replacementSocketId !== expectedReplacementSocketId) {
+    throw new Error(
+      `${label}.replacementSocketId did not match the replacement socket ledger`,
+    );
+  }
+
   expectSocketClosures(
     asSocketClosures(run.socketClosures, `${label}.socketClosures`),
     expectedSocketClosures,
@@ -779,6 +989,35 @@ function validateOwnershipProof(
     throw new Error(
       `${label}.allCallbacksNullAfterClose did not prove callback disownership`,
     );
+  }
+
+  if (!reconnect) {
+    // Abort, close, and detach allocate no socket; only replacement can prove
+    // callback binding and stale-event replay, so enforce that split explicitly.
+    if (typeof run.callbackProofApplicable !== "boolean") {
+      throw new Error(`${label}.callbackProofApplicable must be a boolean`);
+    }
+    if (run.callbackProofApplicable !== replacement) {
+      throw new Error(
+        `${label}.callbackProofApplicable did not match the action`,
+      );
+    }
+    const expectedCallbackDispatches = replacement ? 1 : 0;
+    for (const key of [
+      "staleOnopenDispatches",
+      "staleOnmessageDispatches",
+      "staleOnerrorDispatches",
+      "staleOncloseDispatches",
+    ] as const) {
+      if (
+        asFiniteNumber(run[key], `${label}.${key}`) !==
+        expectedCallbackDispatches
+      ) {
+        throw new Error(
+          `${label}.${key} did not match callback-proof applicability`,
+        );
+      }
+    }
   }
 }
 
