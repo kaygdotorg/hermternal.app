@@ -401,6 +401,92 @@ test('account menu exposes the approved Sign out state on desktop and in the mob
   }
 });
 
+test('Paper computed account-menu and drawer materials match the approved light and dark states', async ({ page }) => {
+  const cases = [
+    { appearance: 'light', width: 1440, mobile: false },
+    { appearance: 'dark', width: 1440, mobile: false },
+    { appearance: 'light', width: 390, mobile: true },
+    { appearance: 'dark', width: 390, mobile: true }
+  ];
+
+  for (const fixture of cases) {
+    await page.setViewportSize({ width: fixture.width, height: 960 });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Appearance' }).selectOption(fixture.appearance);
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+    let drawer: import('@playwright/test').Locator | undefined;
+    if (fixture.mobile) {
+      await page.getByRole('button', { name: 'Open conversations' }).click();
+      drawer = page.getByTestId('mobile-session-drawer');
+      await expect(drawer).toBeVisible();
+    }
+
+    const scope = fixture.mobile ? drawer! : page.locator('.sidebar');
+    const trigger = scope.getByRole('button', { name: 'Open account menu' });
+    await trigger.click();
+    const menu = page.locator(`#${fixture.mobile ? 'mobile' : 'desktop'}-account-menu`);
+    await expect(menu).toBeVisible();
+    // Establish keyboard modality before reading the focused-state material;
+    // programmatic focus after a pointer activation is intentionally not
+    // :focus-visible in Chromium. ArrowDown does not leave the menu/drawer.
+    await page.keyboard.press('ArrowDown');
+    await expect(menu.getByRole('menuitem', { name: 'Sign out' })).toBeFocused();
+
+    const computed = await menu.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const item = element.querySelector<HTMLElement>('[role="menuitem"]');
+      if (!item) throw new Error('The account menu fixture has no menu item.');
+      item.focus({ focusVisible: true } as FocusOptions);
+      const focus = getComputedStyle(item);
+      const parentDrawer = element.closest('[data-testid="mobile-session-drawer"]');
+      const drawerStyle = parentDrawer ? getComputedStyle(parentDrawer) : undefined;
+      const nested = parentDrawer?.querySelector<HTMLElement>('.session-list');
+      return {
+        background: style.backgroundColor,
+        border: style.borderTopColor,
+        radius: style.borderRadius,
+        shadow: style.boxShadow,
+        focusStyle: focus.outlineStyle,
+        focusWidth: focus.outlineWidth,
+        focusOffset: focus.outlineOffset,
+        drawerBackground: drawerStyle?.backgroundColor ?? null,
+        drawerBorder: drawerStyle?.borderTopColor ?? null,
+        drawerRadius: drawerStyle?.borderRadius ?? null,
+        drawerShadow: drawerStyle?.boxShadow ?? null,
+        nestedBackground: nested ? getComputedStyle(nested).backgroundColor : null
+      };
+    });
+
+    const normalize = (value: string): string => value.replace(/\s+/g, '').toLowerCase();
+    expect(normalize(computed.background)).toMatch(
+      fixture.appearance === 'light' ? /^rgba?\(255,255,255(?:,1)?\)$/ : /^rgba?\(23,28,36(?:,1)?\)$/
+    );
+    expect(computed.radius).toBe('18px');
+    expect(computed.shadow).toContain('22px 60px');
+    expect(computed.shadow).toContain('2px 8px');
+    expect(computed.focusStyle).toBe('solid');
+    expect(computed.focusWidth).toBe('2px');
+    expect(computed.focusOffset).toBe('2px');
+
+    if (fixture.mobile) {
+      expect(normalize(computed.drawerBackground!)).toMatch(
+        fixture.appearance === 'light' ? /^rgba?\(248,250,253(?:,1)?\)$/ : /^rgba?\(23,28,36(?:,0?\.?(?:96|961))?\)$/
+      );
+      expect(computed.drawerRadius).toBe('22px');
+      expect(computed.drawerShadow).toContain(fixture.appearance === 'light' ? '24px 70px' : '22px 58px');
+      expect(computed.drawerBorder).toBeTruthy();
+      expect(normalize(computed.nestedBackground!)).toMatch(/^rgba?\(0,0,0(?:,0)?\)$/);
+    }
+
+    await page.keyboard.press('Escape');
+    if (fixture.mobile) {
+      await page.keyboard.press('Escape');
+      await expect(drawer!).toBeHidden();
+    }
+  }
+});
+
 test('genuine mobile account activation preserves current scroll through immediate Escape and reuse', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 1600 });
   await page.goto(previewUrl('/ui-preview'));
@@ -558,6 +644,47 @@ test('Paper effective width switches exactly at 760px without a tabbed desktop r
       await expect(workspace.locator('.sidebar')).toBeVisible();
     }
   }
+});
+
+test('account-menu geometry follows the named container inside a wide viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const workspace = page.locator('.workspace-preview');
+  const container = page.locator('.workspace-preview-container');
+  await container.evaluate((element) => {
+    element.style.width = '700px';
+  });
+  await expect(workspace).toHaveCSS('width', '700px');
+  await expect(workspace.locator('.mobile-toolbar')).toBeVisible();
+  await expect(workspace.locator('.sidebar')).toBeHidden();
+
+  await workspace.getByRole('button', { name: 'Open conversations' }).click();
+  const drawer = page.getByTestId('mobile-session-drawer');
+  const mobileTrigger = drawer.getByRole('button', { name: 'Open account menu' });
+  await mobileTrigger.click();
+  const mobileMenu = page.locator('#mobile-account-menu');
+  await expect(mobileMenu).toBeVisible();
+  expect((await mobileMenu.boundingBox())?.width).toBe(308);
+  expect((await mobileMenu.boundingBox())?.height).toBe(143);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await expect(drawer).toBeHidden();
+
+  await container.evaluate((element) => {
+    element.style.width = '1440px';
+  });
+  await expect(workspace).toHaveCSS('width', '1440px');
+  await expect(workspace.locator('.mobile-toolbar')).toBeHidden();
+  await expect(workspace.locator('.sidebar')).toBeVisible();
+
+  const desktopTrigger = workspace.locator('.sidebar').getByRole('button', { name: 'Open account menu' });
+  await desktopTrigger.click();
+  const desktopMenu = page.locator('#desktop-account-menu');
+  await expect(desktopMenu).toBeVisible();
+  expect((await desktopMenu.boundingBox())?.width).toBe(242);
+  expect((await desktopMenu.boundingBox())?.height).toBe(159);
 });
 
 test('Paper action labels stay under a stationary pointer through repeated hover transitions', async ({ page }) => {

@@ -78,6 +78,33 @@ describe('Pill', () => {
     expect(onActivate).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { label: 'A then B', order: ['A', 'B'] },
+    { label: 'B then A', order: ['B', 'A'] }
+  ])('suppresses delayed compatibility clicks for cancelled A and re-gesture B in either order ($label)', ({ order }) => {
+    const onActivate = vi.fn();
+    render(Pill, { label: 'Rapid', onActivate });
+
+    const button = screen.getByRole('button', { name: 'Rapid' });
+    fireEvent.pointerDown(button, { button: 0, pointerId: 41, pointerType: 'mouse' });
+    fireEvent.pointerCancel(button, { pointerId: 41, pointerType: 'mouse' });
+    fireEvent.pointerDown(button, { button: 0, pointerId: 42, pointerType: 'mouse' });
+    expect(onActivate).toHaveBeenCalledTimes(2);
+    expect(onActivate.mock.calls.map(([event]) => event?.type)).toEqual(['pointerdown', 'pointerdown']);
+
+    // Compatibility clicks do not expose their originating pointer ID. The
+    // queued gesture owner must suppress either delivery order without
+    // dropping the second pointer's immediate activation.
+    for (const _pointer of order) fireEvent.click(button, { detail: 1 });
+    expect(onActivate).toHaveBeenCalledTimes(2);
+
+    // detail=0 remains a legitimate keyboard/assistive-technology activation,
+    // even while delayed compatibility suppression is being drained.
+    fireEvent.click(button, { detail: 0 });
+    expect(onActivate).toHaveBeenCalledTimes(3);
+    expect(onActivate.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'click' });
+  });
+
   it('only exposes pressed and expanded semantics for opted-in controls', () => {
     render(Pill, {
       ariaControls: 'provider-panel',

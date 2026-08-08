@@ -453,6 +453,7 @@
     --radius-input: 12px;
     --radius-nested-glass: 14px;
     --radius-popover: 18px;
+    --radius-structural: 22px;
     --radius-glass: 22px;
     position: relative;
     box-sizing: border-box;
@@ -823,11 +824,18 @@
       height: 756px;
       max-height: calc(100% - 88px);
       overflow: hidden;
-      border: 1px solid var(--chrome-line);
-      border-radius: 28px;
-      background: var(--chrome-surface);
-      box-shadow: var(--chrome-shadow);
+      border: 1px solid #36415224;
+      border-radius: var(--radius-structural);
+      background: #f8fafd;
+      box-shadow: #16181d3d 0 24px 70px, #16181d1f 0 2px 10px;
       contain: layout paint;
+    }
+
+    .workspace-preview[data-appearance='dark'] .mobile-session-drawer,
+    .workspace-preview[data-appearance='dark'] .mobile-workspace-drawer {
+      border-color: #f4f6fa24;
+      background: #171c24f5;
+      box-shadow: #ffffff12 0 1px 0 inset, #00000070 0 22px 58px;
     }
 
     .mobile-session-drawer {
@@ -838,6 +846,9 @@
       width: min(366px, calc(100% - 24px));
     }
 
+    /* The outer drawer owns the Paper material. Nested fixture surfaces stay
+       transparent so their translucent chrome cannot tint or double-shadow the
+       approved 342x756 light/dark drawer. */
     .mobile-session-drawer :global(.session-list),
     .mobile-workspace-drawer :global(.inspector) {
       box-sizing: border-box;
@@ -846,8 +857,10 @@
       height: 100%;
       min-height: 0;
       border: 0;
-      border-radius: 27px;
+      border-radius: var(--radius-structural);
+      background: transparent;
       box-shadow: none;
+      backdrop-filter: none;
     }
 
     /* Keep the 44px account target inside the clipped Paper drawer. The

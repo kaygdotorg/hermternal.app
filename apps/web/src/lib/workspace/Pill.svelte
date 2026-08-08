@@ -27,16 +27,20 @@
   export let disabled = false;
   export let buttonType: 'button' | 'submit' | 'reset' = 'button';
   export let role: string | undefined = undefined;
-  export let onActivate: (() => void) | undefined = undefined;
+  export let onActivate: ((event?: Event) => void) | undefined = undefined;
   /** Optional native keydown hook for controls that own a nested interaction scope. */
   export let onKeyDown: ((event: KeyboardEvent) => void) | undefined = undefined;
   export let element: HTMLButtonElement | undefined = undefined;
+
+  type PointerGesture = { pointerId: number; sequence: number };
 
   let driftX = 0;
   let driftY = 0;
   let pressed = false;
   let pressPulse = 0;
-  let pointerActivationHandled = false;
+  let pointerGestureSequence = 0;
+  const activePointerGestures = new Map<number, PointerGesture[]>();
+  const queuedCompatibilityGestures: PointerGesture[] = [];
 
   function reducedMotion(): boolean {
     return typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -59,28 +63,63 @@
     pressed = false;
   }
 
+  function rememberPointerGesture(event: PointerEvent): void {
+    const gesture = { pointerId: event.pointerId, sequence: ++pointerGestureSequence };
+    const gestures = activePointerGestures.get(event.pointerId) ?? [];
+    gestures.push(gesture);
+    activePointerGestures.set(event.pointerId, gestures);
+    queuedCompatibilityGestures.push(gesture);
+  }
+
+  function releasePointerGesture(event: PointerEvent): void {
+    const gestures = activePointerGestures.get(event.pointerId);
+    if (!gestures?.length) return;
+    gestures.pop();
+    if (gestures.length === 0) activePointerGestures.delete(event.pointerId);
+  }
+
+  function consumeCompatibilityGesture(): boolean {
+    // Compatibility clicks do not expose the originating pointer ID. Consume
+    // one queued gesture rather than attributing the click to the newest
+    // pointer: cancelled A followed by B can deliver A/B clicks in either
+    // order, and both must remain single-owned.
+    const gesture = queuedCompatibilityGestures.shift();
+    if (!gesture) return false;
+
+    const gestures = activePointerGestures.get(gesture.pointerId);
+    if (gestures) {
+      const index = gestures.findIndex((candidate) => candidate.sequence === gesture.sequence);
+      if (index >= 0) gestures.splice(index, 1);
+      if (gestures.length === 0) activePointerGestures.delete(gesture.pointerId);
+    }
+    return true;
+  }
+
   function handlePointerDown(event: PointerEvent): void {
     if (disabled || !onActivate || event.button !== 0) return;
     pressed = true;
-    pointerActivationHandled = true;
+    rememberPointerGesture(event);
     pressPulse = 0;
     requestAnimationFrame(() => {
       pressPulse = 1;
     });
-    // Pointer activation is immediate. The following click is suppressed so
-    // mouse and touch cannot emit the same presentation action twice.
-    onActivate();
+    // Pointer activation is immediate. Each pointer gets one queued
+    // compatibility suppression so delayed A/B clicks cannot be mistaken for
+    // a newer gesture. Keyboard and assistive detail=0 clicks bypass it.
+    onActivate(event);
   }
 
-  function handlePointerUp(): void {
+  function handlePointerUp(event: PointerEvent): void {
     pressed = false;
+    releasePointerGesture(event);
     // Suppression stays armed until the compatibility click is observed. A
     // leave/re-entry sequence may deliver that click after a later task.
   }
 
-  function handlePointerCancel(): void {
+  function handlePointerCancel(event: PointerEvent): void {
     resetMotion();
-    // Keep suppression armed in case a host synthesizes a compatibility click
+    releasePointerGesture(event);
+    // Keep suppression queued in case a host synthesizes a compatibility click
     // after cancellation. Keyboard and assistive clicks are distinguished below.
   }
 
@@ -93,14 +132,12 @@
 
   function handleClick(event: MouseEvent): void {
     if (disabled || !onActivate) return;
-    if (pointerActivationHandled && event.detail > 0) {
-      pointerActivationHandled = false;
-      return;
-    }
+    if (event.detail > 0 && consumeCompatibilityGesture()) return;
     // Keyboard and assistive activation use an untrusted/detail-zero click and
-    // remain available even after a pointer leaves or is cancelled. Keep the
-    // pointer suppression armed so a later compatibility click is still consumed.
-    onActivate();
+    // remain available even after a pointer leaves or is cancelled. Keep any
+    // queued pointer suppression armed so a later compatibility click is still
+    // consumed.
+    onActivate(event);
   }
 </script>
 

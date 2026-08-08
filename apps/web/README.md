@@ -26,6 +26,12 @@ The planned chat surface has one profile, provider-neutral discovery, session re
 - `src/routes/ui-preview/` composes both packages and exposes local selectors for state and appearance. It records only action type names as visible test evidence.
 - `src/lib/transport/` remains the independent W-01 mock transport for the root scaffold. The presentation packages do not import it and do not create a hidden production transport path.
 
+### Workspace interaction invariants
+
+The account menu is a mock interaction surface, not a session or authentication integration. Its delayed focus work is fenced by a per-instance generation, focus-transfer epoch, and shared active-visible owner. An unrelated synchronous focus transfer wins even when it returns to the same DOM node captured at open. Resize and named-container changes invalidate hidden instances before held animation-frame continuations can restore focus or consume Escape; only the visible active menu closes first, leaving a mobile drawer open.
+
+Pills activate immediately on pointer down and queue one compatibility-click suppression per pointer gesture. Cancellation, leave/re-entry, and a second pointer cannot turn delayed A/B compatibility clicks into extra actions, regardless of delivery order. `detail=0` keyboard and assistive-technology clicks remain independent. All fixture data, actions, and interactions described here are synthetic and transport-free.
+
 These packages are presentation-only and transport-independent. Do not add provider SDKs, gateway calls, browser-readable reusable credentials, callback parsing, production authentication, or live data to them.
 
 Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.

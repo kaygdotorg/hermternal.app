@@ -85,6 +85,77 @@ describe('WorkspacePreview', () => {
     expect(nextControl).toHaveFocus();
   });
 
+  it('does not steal focus after an unrelated transfer returns to the same trigger', async () => {
+    render(WorkspacePreview, { state: 'ready' });
+
+    const trigger = screen.getByRole('button', { name: 'Open account menu' });
+    const nextControl = screen.getByRole('button', { name: 'Start a new chat' });
+    trigger.focus();
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' });
+    nextControl.focus();
+    trigger.focus();
+
+    const menu = await screen.findByRole('menu', { name: 'Account menu' });
+    const signOut = within(menu).getByRole('menuitem', { name: 'Sign out' });
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+    await new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+
+    // The final target equals focusAtOpen, but the epoch history proves that
+    // focus left the transition and returned. The delayed continuation must
+    // yield instead of moving focus into Sign out.
+    expect(trigger).toHaveFocus();
+    expect(signOut).not.toHaveFocus();
+  });
+
+  it('invalidates a held focus continuation when resize hides the desktop instance', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+
+    try {
+      render(WorkspacePreview, { state: 'ready' });
+      const desktopTrigger = screen.getByRole('button', { name: 'Open account menu' });
+      fireEvent.pointerDown(desktopTrigger, { button: 0, pointerId: 51, pointerType: 'mouse' });
+      const desktopMenu = await screen.findByRole('menu', { name: 'Account menu' });
+      const desktopSidebar = desktopTrigger.closest('.sidebar') as HTMLElement;
+      expect(desktopSidebar).toBeInTheDocument();
+
+      // The inline style models the synchronous hidden transition that a real
+      // container-query resize produces before any queued rAF continuation.
+      desktopSidebar.style.display = 'none';
+      window.dispatchEvent(new Event('resize'));
+      await waitFor(() => expect(screen.queryByRole('menu', { name: 'Account menu' })).not.toBeInTheDocument());
+
+      const conversations = screen.getByRole('button', { name: 'Open conversations', hidden: true });
+      await fireEvent.click(conversations);
+      const drawer = screen.getByTestId('mobile-session-drawer');
+      const mobileTrigger = within(drawer).getByRole('button', { name: 'Open account menu', hidden: true });
+      fireEvent.pointerDown(mobileTrigger, { button: 0, pointerId: 52, pointerType: 'touch' });
+      const mobileMenu = await within(drawer).findByRole('menu', { name: 'Account menu', hidden: true });
+      expect(mobileMenu).toBeInTheDocument();
+
+      fireEvent.keyDown(mobileTrigger, { key: 'Escape' });
+      await waitFor(() => expect(within(drawer).queryByRole('menu', { name: 'Account menu', hidden: true })).not.toBeInTheDocument());
+      expect(screen.getByTestId('mobile-session-drawer')).toBe(drawer);
+
+      // Release every held continuation after ownership has changed. The stale
+      // desktop callback must remain fenced and cannot re-focus Sign out or
+      // consume the visible drawer's Escape path.
+      for (const callback of frames.splice(0)) callback(0);
+      expect(desktopMenu).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('intercepts immediate mobile Escape before menu focus settles', async () => {
     render(WorkspacePreview, { state: 'ready' });
 

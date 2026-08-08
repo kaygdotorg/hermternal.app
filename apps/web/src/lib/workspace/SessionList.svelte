@@ -1,3 +1,11 @@
+<script context="module" lang="ts">
+  type AccountMenuOwner = {
+    token: symbol;
+  };
+
+  let activeAccountMenuOwner: AccountMenuOwner | undefined;
+</script>
+
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import Pill from './Pill.svelte';
@@ -11,8 +19,15 @@
   export let onSignOut: () => void = () => {};
   export let accountMenuId = 'account-menu';
 
+  const accountMenuOwnerToken = Symbol('account-menu-instance');
+  const focusTransferHistory = new Map<number, Element | null>();
+
   let accountMenuOpen = false;
   let signOutPending = false;
+  let accountMenuVisible = true;
+  let accountMenuVisibilityEpoch = 0;
+  let focusTransferEpoch = 0;
+  let sessionList: HTMLElement | undefined;
   let accountMenuTrigger: HTMLButtonElement | undefined;
   let accountMenu: HTMLElement | undefined;
   let accountMenuFocusGeneration = 0;
@@ -34,6 +49,85 @@
       scrollPositions.push({ top: documentScroller.scrollTop, left: documentScroller.scrollLeft, element: documentScroller });
     }
     return scrollPositions;
+  }
+
+  function recordFocusTransfer(event: FocusEvent): void {
+    focusTransferEpoch += 1;
+    focusTransferHistory.set(focusTransferEpoch, event.target as Element | null);
+    // A bounded history keeps repeated focus transitions cheap while retaining
+    // enough ownership evidence for every delayed open/close continuation.
+    if (focusTransferHistory.size > 128) {
+      const oldest = focusTransferHistory.keys().next().value;
+      if (typeof oldest === 'number') focusTransferHistory.delete(oldest);
+    }
+  }
+
+  function focusTransfersSince(epoch: number): Array<Element | null> {
+    return Array.from(focusTransferHistory.entries())
+      .filter(([transferEpoch]) => transferEpoch > epoch)
+      .sort(([left], [right]) => left - right)
+      .map(([, target]) => target);
+  }
+
+  function isSessionListVisible(): boolean {
+    const element = sessionList;
+    if (!element?.isConnected) return false;
+
+    // jsdom has no layout tree and does not evaluate container queries, so its
+    // computed style reports the base desktop display:none for the mobile
+    // drawer even when the drawer is mounted. Honor explicit inline hiding in
+    // tests, then let semantic unit tests claim ownership despite CSS-only
+    // visibility; real browsers use the computed-style and box checks below.
+    const jsdom = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent);
+    if (jsdom) {
+      let inlineAncestor: HTMLElement | null = element;
+      while (inlineAncestor) {
+        if (inlineAncestor.style.display === 'none' || inlineAncestor.style.visibility === 'hidden') return false;
+        inlineAncestor = inlineAncestor.parentElement;
+      }
+      return true;
+    }
+
+    let ancestor: HTMLElement | null = element;
+    while (ancestor) {
+      const style = getComputedStyle(ancestor);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      ancestor = ancestor.parentElement;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const documentRect = document.documentElement.getBoundingClientRect();
+    if (documentRect.width === 0 && documentRect.height === 0) return true;
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function releaseAccountMenuOwner(): void {
+    if (activeAccountMenuOwner?.token === accountMenuOwnerToken) activeAccountMenuOwner = undefined;
+  }
+
+  function claimAccountMenuOwner(): void {
+    activeAccountMenuOwner = { token: accountMenuOwnerToken };
+  }
+
+  function invalidateHiddenAccountMenu(): void {
+    accountMenuFocusGeneration += 1;
+    accountMenuOpen = false;
+    releaseAccountMenuOwner();
+  }
+
+  function refreshAccountMenuVisibility(): boolean {
+    const nextVisible = isSessionListVisible();
+    if (nextVisible !== accountMenuVisible) {
+      accountMenuVisible = nextVisible;
+      accountMenuVisibilityEpoch += 1;
+      if (!nextVisible) invalidateHiddenAccountMenu();
+    }
+    return accountMenuVisible;
+  }
+
+  function ownsVisibleAccountMenu(): boolean {
+    if (!refreshAccountMenuVisibility()) return false;
+    return activeAccountMenuOwner?.token === accountMenuOwnerToken;
   }
 
   $: pinned = sessions.filter((session) => session.group === 'pinned');
@@ -82,9 +176,49 @@
     );
   }
 
-  async function focusAccountMenuStart(generation: number, focusAtOpen: Element | null): Promise<void> {
+  function focusTransferBelongsToMenuOpenTransition(target: Element | null): boolean {
+    return (
+      target === accountMenuTrigger ||
+      target === document.body ||
+      target === document.documentElement ||
+      Boolean(target && accountMenu?.contains(target))
+    );
+  }
+
+  function hasUnrelatedFocusTransfer(epoch: number, closingMenu?: HTMLElement): boolean {
+    return focusTransfersSince(epoch).some((target) => !focusBelongsToMenuTransition(target, closingMenu));
+  }
+
+  async function focusAccountMenuStart(
+    generation: number,
+    visibilityEpochAtOpen: number,
+    focusEpochAtOpen: number,
+    focusAtOpen: Element | null,
+    preservePriorControl: boolean
+  ): Promise<void> {
     await afterActivationFrame();
-    if (generation !== accountMenuFocusGeneration || !accountMenuOpen) return;
+    if (
+      generation !== accountMenuFocusGeneration ||
+      visibilityEpochAtOpen !== accountMenuVisibilityEpoch ||
+      !accountMenuOpen ||
+      !ownsVisibleAccountMenu()
+    )
+      return;
+
+    // Touch activation in the mobile drawer intentionally leaves focus on the
+    // prior control. Do not turn a delayed presentation continuation into a
+    // focus jump merely because the menu DOM now exists.
+    if (preservePriorControl) return;
+
+    // A focus identity alone is insufficient: an unrelated synchronous
+    // next-control -> trigger transfer can end on the same node captured at
+    // open. The epoch/history proves whether the trigger stayed owned.
+    if (
+      focusTransfersSince(focusEpochAtOpen).some(
+        (target) => !focusTransferBelongsToMenuOpenTransition(target)
+      )
+    )
+      return;
 
     const focused = document.activeElement;
     // Do not steal focus from a control the user reached while the menu was
@@ -98,23 +232,37 @@
     focusWithoutScroll(accountMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])'));
   }
 
-  function openAccountMenu(): void {
-    if (signOutPending) return;
+  function openAccountMenu(activationEvent?: Event): void {
+    if (signOutPending || !refreshAccountMenuVisibility()) return;
     const generation = ++accountMenuFocusGeneration;
+    const visibilityEpochAtOpen = accountMenuVisibilityEpoch;
+    const focusEpochAtOpen = focusTransferEpoch;
     const focusAtOpen = document.activeElement;
+    const pointerType = activationEvent?.type === 'pointerdown' ? (activationEvent as PointerEvent).pointerType : undefined;
+    const preservePriorControl = pointerType === 'touch' && focusAtOpen !== accountMenuTrigger;
     accountMenuOpen = true;
-    void focusAccountMenuStart(generation, focusAtOpen);
+    claimAccountMenuOwner();
+    void focusAccountMenuStart(generation, visibilityEpochAtOpen, focusEpochAtOpen, focusAtOpen, preservePriorControl);
   }
 
   async function closeAccountMenu(restoreFocus = true): Promise<void> {
     const generation = ++accountMenuFocusGeneration;
+    const visibilityEpochAtClose = accountMenuVisibilityEpoch;
+    const focusEpochAtClose = focusTransferEpoch;
     const closingMenu = accountMenu;
     const focusAtClose = document.activeElement;
     const ownsFocusAtClose = focusBelongsToMenuTransition(focusAtClose, closingMenu);
     accountMenuOpen = false;
+    releaseAccountMenuOwner();
     if (!restoreFocus || !ownsFocusAtClose) return;
     await afterActivationFrame();
-    if (generation !== accountMenuFocusGeneration || accountMenuOpen) return;
+    if (
+      generation !== accountMenuFocusGeneration ||
+      visibilityEpochAtClose !== accountMenuVisibilityEpoch ||
+      accountMenuOpen ||
+      hasUnrelatedFocusTransfer(focusEpochAtClose, closingMenu)
+    )
+      return;
 
     // Do not steal focus from a control the user reached while the menu was
     // closing. Body focus is the browser's expected handoff after removing the
@@ -124,9 +272,9 @@
     focusWithoutScroll(accountMenuTrigger);
   }
 
-  function toggleAccountMenu(): void {
+  function toggleAccountMenu(activationEvent?: Event): void {
     if (accountMenuOpen) void closeAccountMenu();
-    else openAccountMenu();
+    else openAccountMenu(activationEvent);
   }
 
   function requestSignOut(): void {
@@ -140,7 +288,7 @@
   }
 
   function handleAccountMenuKeydown(event: KeyboardEvent): void {
-    if (!accountMenuOpen || event.key !== 'Escape') return;
+    if (!accountMenuOpen || event.key !== 'Escape' || !ownsVisibleAccountMenu()) return;
     // The trigger owns this handler while focus is still settling. Stop before
     // WorkspacePreview's window handler can close the surrounding mobile drawer.
     event.preventDefault();
@@ -149,28 +297,55 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent): void {
-    if (!accountMenuOpen || event.key !== 'Escape') return;
+    if (!accountMenuOpen || event.key !== 'Escape' || !ownsVisibleAccountMenu()) return;
     // Touch pointerdown can open the menu while focus remains on another drawer
     // control. Capture Escape before WorkspacePreview's window bubble handler so
-    // the nested account menu closes without dismissing the whole drawer.
+    // the nested account menu closes without dismissing the whole drawer. A
+    // hidden stale instance first invalidates itself in ownsVisibleAccountMenu,
+    // leaving the visible instance as the only Escape owner.
     event.preventDefault();
     event.stopImmediatePropagation();
     void closeAccountMenu();
   }
 
   onMount(() => {
+    const handleResize = (): void => {
+      // ResizeObserver covers named-container changes; the synchronous window
+      // path also invalidates hidden instances before a held rAF can run.
+      refreshAccountMenuVisibility();
+    };
+
+    window.addEventListener('focusin', recordFocusTransfer, true);
     window.addEventListener('keydown', handleWindowKeydown, true);
-    return () => window.removeEventListener('keydown', handleWindowKeydown, true);
+    window.addEventListener('resize', handleResize);
+
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(handleResize);
+    const resizeTargets = [
+      sessionList,
+      sessionList?.parentElement,
+      sessionList?.closest<HTMLElement>('.workspace-preview'),
+      sessionList?.closest<HTMLElement>('.workspace-preview-container')
+    ].filter((target): target is HTMLElement => Boolean(target));
+    for (const target of resizeTargets) observer?.observe(target);
+
+    refreshAccountMenuVisibility();
+    return () => {
+      window.removeEventListener('focusin', recordFocusTransfer, true);
+      window.removeEventListener('keydown', handleWindowKeydown, true);
+      window.removeEventListener('resize', handleResize);
+      observer?.disconnect();
+      releaseAccountMenuOwner();
+    };
   });
 
   function handleAccountMenuFocusOut(event: FocusEvent): void {
-    if (!accountMenuOpen) return;
+    if (!accountMenuOpen || !ownsVisibleAccountMenu()) return;
     const next = event.relatedTarget as Node | null;
     if (!next || !accountMenu?.contains(next)) void closeAccountMenu(false);
   }
 </script>
 
-<nav aria-label="Conversations" class="session-list">
+<nav aria-label="Conversations" bind:this={sessionList} class="session-list">
   <div class="sidebar-heading">
     <span class="brand-mark">hermternal</span>
     <Pill ariaLabel="Collapse conversations" icon="arrow-left" iconOnly label="Collapse" variant="ghost" />
@@ -482,7 +657,11 @@
     border-radius: var(--radius-popover, 18px);
     background: var(--surface, var(--color-paper, #fff));
     color: var(--ink, #16181d);
-    box-shadow: 0 18px 40px color-mix(in srgb, var(--ink, #16181d) 16%, transparent);
+    box-shadow: #1f263429 0 22px 60px, #1f263414 0 2px 8px;
+  }
+
+  :global(.workspace-preview[data-appearance='dark']) .account-menu {
+    box-shadow: #00000066 0 22px 60px, #00000033 0 2px 8px;
   }
 
   .account-menu-header {
@@ -579,7 +758,10 @@
     padding-inline: 12px;
   }
 
-  @media (max-width: 760px) {
+  /* Account-menu geometry follows the workspace shell's named container, not
+     the viewport. A narrow workspace inside a wide browser still gets the
+     approved 308px mobile menu while a wide container keeps 242px desktop. */
+  @container workspace-preview (max-width: 760px) {
     .account-menu {
       bottom: 158px;
       left: 15px;
