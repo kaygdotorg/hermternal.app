@@ -214,13 +214,13 @@ necessarily retain those unreachable objects; seed all four protected OIDs into
 local `refs/fixture-authority/*` refs before running either validator mode. The
 aggregate and standalone suites consume the same explicit, offline,
 repository-versioned source at `scripts/fixture_registry_authority.objects.bundle`.
-Its 2,773,905 bytes are pinned by SHA-256
-`d7b53ef94f73ad46ced487a67605912b0f9fcbb53c974c9823a62de34f5860bb`, and
+Its 5,513,876 bytes are pinned by SHA-256
+`0dac056472aff080499b72fdc5bd252e52118afceb5792bd14c53afecf1d8c01`, and
 `git bundle list-heads` is required to contain exactly these four refs:
 
 ```text
-refs/fixture-authority/active-authority 09c31b705bb4cac683b88e65a4abbd82cfc67f0f
-refs/fixture-authority/active-source d236941781904514224701756c713d545320eb0e
+refs/fixture-authority/active-authority ddaede0e7d43e973ea5b68e8b464f4e26991f282
+refs/fixture-authority/active-source 47a97474aab3cf5800713cf2c1a8a18a37c561cc
 refs/fixture-authority/historical-authority 285acdcf9c11c049180a7844e689eee0f1490de4
 refs/fixture-authority/historical-source 263cb75adcf153d6fe252636b064e5fbc3e3f877
 ```
@@ -234,8 +234,8 @@ git -C "$OBJECT_REPO" fetch --no-tags --quiet \
   "$PWD/scripts/fixture_registry_authority.objects.bundle" \
   285acdcf9c11c049180a7844e689eee0f1490de4:refs/fixture-authority/historical-authority \
   263cb75adcf153d6fe252636b064e5fbc3e3f877:refs/fixture-authority/historical-source \
-  09c31b705bb4cac683b88e65a4abbd82cfc67f0f:refs/fixture-authority/active-authority \
-  d236941781904514224701756c713d545320eb0e:refs/fixture-authority/active-source
+  ddaede0e7d43e973ea5b68e8b464f4e26991f282:refs/fixture-authority/active-authority \
+  47a97474aab3cf5800713cf2c1a8a18a37c561cc:refs/fixture-authority/active-source
 ```
 
 The aggregate test classes assert that an unseeded clean clone is blocked before
