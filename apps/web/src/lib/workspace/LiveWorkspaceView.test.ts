@@ -45,6 +45,23 @@ describe('LiveWorkspaceView', () => {
     expect(session.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a root-owned session reusable when the authenticated slot unmounts', async () => {
+    const session = createSession({
+      state: 'ready',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: []
+    });
+    const view = render(LiveWorkspaceView, { session, disposeSessionOnDestroy: false });
+
+    await waitFor(() => expect(session.initialize).toHaveBeenCalledTimes(1));
+    view.unmount();
+
+    expect(session.dispose).not.toHaveBeenCalled();
+  });
+
   it('renders truthful live empty state and disables input without a server session', async () => {
     const session = createSession({
       state: 'empty',

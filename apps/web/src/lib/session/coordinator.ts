@@ -496,6 +496,10 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     terminalBindingReady = false;
     terminalBindingFocusOwnerSequence = undefined;
     terminalStatus = 'detached';
+    // A Terminal focus intent is owned by the lease that made the renderer
+    // current. Revoke it with that lease so a remounted Terminal cannot consume
+    // a stale request after session replacement or authentication expiry.
+    if (lastFocusIntent?.mode === 'terminal') lastFocusIntent = undefined;
     if (lease) cleanupBinding(lease);
   };
 
@@ -735,6 +739,14 @@ export function createSessionCoordinator(options: SessionCoordinatorOptions): Se
     const adoptBinding = (value: unknown): TerminalBinding => {
       if (adoptedBinding !== undefined) {
         if (adoptedBinding !== value) cleanupUnknownBinding(value);
+        if (
+          !current(generation, sessionId) ||
+          pending.cancelled ||
+          !ownsActiveTerminalLease(adoptedBinding) ||
+          adoptedBinding.isValid?.() === false
+        ) {
+          throw new SessionCoordinatorError('stale-operation');
+        }
         terminalBindingFocusOwnerSequence = pending.focusOwnerSequence;
         return adoptedBinding;
       }
