@@ -479,7 +479,11 @@
   "pty_lifecycle": {
     "attach": "attached",
     "before_ttl_reap": 0,
+    "boundary_elapsed_seconds": 1800,
+    "boundary_reap": 0,
+    "boundary_reattach": "reattached",
     "detach": "detached",
+    "expired_elapsed_seconds": 1801,
     "host_requirement": "posix_or_wsl",
     "input": "forwarded",
     "kill": "not_claimed",
