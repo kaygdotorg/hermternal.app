@@ -133,14 +133,17 @@ Git `commit` object, not an annotated tag object. Path resolution, Git
 executable, config, and subprocess failures are converted to the same bounded
 redacted authority error.
 
-Run the standalone verifier from a plain checkout with:
+Run the standalone verifier against a checkout of the historical final
+predecessor with:
 
 ```sh
 python3 scripts/verify_fixture_registry_authority.py
 python3 -O scripts/verify_fixture_registry_authority.py
 ```
 
-When the source and checkout roots differ, pass canonical absolute paths:
+The current aggregate checkout is checked by the distinct hardened authority;
+use `--checkout-root` when the plain object repository and historical
+predecessor checkout are separate. Pass canonical absolute paths:
 
 ```sh
 python3 scripts/verify_fixture_registry_authority.py \\
