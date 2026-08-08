@@ -1,5 +1,39 @@
 # Terminal renderer boundary
 
+## Current-session PTY bridge
+
+`current-session-terminal.ts` is a prototype-only adapter from the coordinator's
+`TerminalSessionPort` to one renderer-neutral `PtyTransport`. It has no live
+Hermes proof and its tests use synthetic transports, ticket responses, sockets,
+and byte frames.
+
+- A renderer-ready gate delays the first attach or explicit reconnect until the
+  lazy renderer has a sink. The bridge never queues or decodes bytes while the
+  gate is closed.
+- Presentation receives raw `Uint8Array` values by reference and compact state
+  only. Attach handles, process identities, ticket values, terminal content, and
+  raw adapter errors are neither retained in bridge state nor logged. Browser
+  composition passes a ticket-bearing URL ephemerally to its trusted injected
+  socket factory; it never reaches listeners, diagnostics, storage, or an
+  untrusted callback.
+- `lifecycleIdentity` exposes the coordinator's actual binding reference and the
+  PTY transport's native generation. It intentionally does not manufacture a
+  root lifecycle number. A later workspace fence can compare this narrow pair.
+- The bridge is the one cleanup-decision owner for a binding operation. Detach,
+  Close, replacement, stale callbacks, and unmount invalidate once. An ignored
+  in-flight operation remains quarantined; replacement waits until it settles,
+  then its one deferred cleanup runs before the shared adapter can serve the
+  next binding. Detach preserves the PTY transport's detach semantics; Close is
+  an explicit closed state.
+- `4401` and `4403` become the closed `authentication-required` and
+  `incompatible-origin` presentation failures. Ticket values, close reasons,
+  and adapter exceptions never cross this boundary.
+- Browser composition captures a valid `http(s)` browser origin before ticket
+  minting, so SSR or missing/opaque origin evidence fails closed rather than
+  routing a ticket to a fallback authority. Attach mode remains fail-closed
+  unless the caller supplies the issuance-owned `validateAttachment` seam;
+  omitted validation is intentionally legacy-only.
+
 `renderer.ts` owns the browser-only Terminal boundary for W-22. It does not import Chat, PTY transport, session coordination, credentials, or live Hermes code.
 
 ## Runtime contract
