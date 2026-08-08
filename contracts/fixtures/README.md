@@ -183,24 +183,35 @@ CHECKOUT="$PWD"
 OBJECT_REPO=/absolute/path/to/separate/plain-clone
 export HERMTERNAL_FIXTURE_AUTHORITY_COMMIT=<protected-authority-introduction>
 export HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT=<protected-source-predecessor>
-python3 contracts/fixtures/validator/validate.py \
+export PYTHONDONTWRITEBYTECODE=1
+python3 -B contracts/fixtures/validator/validate.py \
   --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
-python3 -O contracts/fixtures/validator/validate.py \
+python3 -O -B contracts/fixtures/validator/validate.py \
   --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
-python3 contracts/fixtures/validator/test_validate.py
-python3 -O contracts/fixtures/validator/test_validate.py
-python3 -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
-python3 -O -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
-python3 -m py_compile \
+python3 -B contracts/fixtures/validator/test_validate.py
+python3 -O -B contracts/fixtures/validator/test_validate.py
+python3 -B -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -O -B -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=0) for path in sys.argv[1:]]' \
+  contracts/fixtures/validator/validate.py \
+  contracts/fixtures/validator/test_validate.py
+python3 -O -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=1) for path in sys.argv[1:]]' \
   contracts/fixtures/validator/validate.py \
   contracts/fixtures/validator/test_validate.py
 ```
 
+`-B` and `PYTHONDONTWRITEBYTECODE=1` are intentional. The central validator
+rejects any unindexed `__pycache__` entry, and `py_compile` writes bytecode even
+when `-B` is supplied. The two compile-only commands therefore call Python's
+built-in `compile` without writing a cache.
+
 The protected values are review/CI inputs, not values inferred from a branch,
 tag, or the checkout. The plain clone must contain the exact protected
-historical and active binding objects, must not be a linked worktree, and must
-not use alternates, shallow or promisor metadata, replacement refs, grafts, or
-redirecting Git configuration.
+historical and active authority/source objects, must not be a linked worktree,
+and must not use alternates, shallow or promisor metadata, replacement refs,
+grafts, or redirecting Git configuration. A fresh single-head clone does not
+necessarily retain those unreachable objects; seed all four protected OIDs into
+local `refs/fixture-authority/*` refs before running either validator mode.
 
 The repository does not yet have a checked-in GitHub Actions workflow that
 runs this aggregate validator, its test suite, and the `python -O` equivalents.
