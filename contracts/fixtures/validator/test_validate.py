@@ -1069,6 +1069,52 @@ class CliTests(unittest.TestCase):
                     source.encode("utf-8"),
                 )
 
+    def test_dynamic_percent_fields_and_mapping_tuples_never_reach_formatting(self) -> None:
+        """Keep ``*`` width/precision operands unknown before allocation in both modes."""
+
+        probe = (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('percent_probe_validate', sys.argv[1])\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "class Bomb:\n"
+            "    def __str__(self):\n"
+            "        raise RuntimeError('percent formatting executed')\n"
+            "    def __float__(self):\n"
+            "        raise RuntimeError('percent formatting executed')\n"
+            "mapping = {'args': (10**1000000, Bomb())}\n"
+            "cases = [\n"
+            "    ('%*s', (10**1000000, Bomb())),\n"
+            "    ('%.*f', (10**1000000, Bomb())),\n"
+            "    ('%*.*f', (10**1000000, 10**1000000, Bomb())),\n"
+            "    ('%*s', mapping['args']),\n"
+            "]\n"
+            "for template, operand in cases:\n"
+            "    result = module._bounded_percent(template, operand)\n"
+            "    if result is not module._STATIC_UNKNOWN:\n"
+            "        raise SystemExit(2)\n"
+            "raise SystemExit(0)\n"
+        )
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(["-c", probe, str(validate.__file__)])
+            completed = subprocess.run(
+                command,
+                cwd=validate.REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            with self.subTest(optimized=optimized):
+                self.assertEqual(completed.returncode, 0, completed)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "")
+
     def test_unresolved_mapping_probe_cardinality_is_bounded(self) -> None:
         template = "Authorization: " + "".join(
             "{field" + str(index) + "}" for index in range(validate.MAX_STATIC_MAPPING_FIELDS * 4)
@@ -1167,6 +1213,14 @@ class CliTests(unittest.TestCase):
 
     def test_regex_urls_share_raw_authority_query_and_port_policy(self) -> None:
         regex_rejections = (
+            're.compile(r"https:\\/\\/api.live.invalid/token")\n',
+            're.compile(r"https:\\x2f\\x2fapi.live.invalid/token")\n',
+            're.compile(r"https:\\u002f\\u002fapi.live.invalid/token")\n',
+            're.compile(r"https:\\U0000002f\\U0000002fapi.live.invalid/token")\n',
+            're.compile(r"https:\\057\\057api.live.invalid/token")\n',
+            're.compile(r"https:\\N{SOLIDUS}\\N{SOLIDUS}api.live.invalid/token")\n',
+            're.compile(r"https:[/][/]api.live.invalid/token")\n',
+            're.compile(r"https:[\\/][\\/]api.live.invalid/token")\n',
             're.compile(r"https://user%3Aunredacted-secret-value-123456@synthetic\\.invalid")\n',
             're.compile(r"https://evil\\.example\\.com\\\\@synthetic\\.invalid")\n',
             're.compile(r"https://synthetic\\.invalid/%ZZ")\n',
@@ -1243,6 +1297,8 @@ class CliTests(unittest.TestCase):
         snippets = (
             b're.compile(r"^https://[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?$")\n',
             b're.compile(r"^https://[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&\'()*+,;=:@/%-]*)?$")\n',
+            b're.compile(r"^https:\\/\\/[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?$")\n',
+            b're.compile(r"^https:[/][/]api.hermternal.test(?::[0-9]{1,5})?$")\n',
             b'if target.startswith("https://"):\n    pass\n',
         )
         for source in snippets:
@@ -1453,6 +1509,26 @@ class CliTests(unittest.TestCase):
         baseline["normal"]["samples_ms"] = samples
         baseline["normal"]["distribution_ms"] = self._distribution(samples)
         baseline["artifact_size_bytes"] = sum(record["size_bytes"] for record in baseline["artifact_manifest"])
+        baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+        self._assert_blocked_in_both_modes(repo_root)
+
+    def test_stale_manifest_or_baseline_is_a_hard_merge_blocker(self) -> None:
+        """Protected evidence needs external authority-root/rotation approval before regeneration."""
+
+        # These mutations stay in disposable copies. Never refresh a checked-in
+        # manifest, baseline, authority JSON, or pin to make a scanner test pass.
+        repo_root = self._copy_fixture_repo()
+        readme = repo_root / "contracts/fixtures/connection-restoration/README.md"
+        readme.write_text(
+            readme.read_text(encoding="utf-8") + "\nreview-only local artifact drift\n",
+            encoding="utf-8",
+        )
+        self._assert_blocked_in_both_modes(repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        baseline_path = repo_root / "contracts/fixtures/validator/validation-baseline.json"
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        baseline["normal"]["samples_ms"][0] += 1.0
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
         self._assert_blocked_in_both_modes(repo_root)
 
