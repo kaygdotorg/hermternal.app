@@ -336,6 +336,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "contract",
                 "deployment",
                 "product",
+                "proof_run",
                 "browser_journey",
                 "browser_evidence",
                 "positive_cases",
@@ -365,6 +366,15 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(set(deployment["parity_fixtures"]), {"static_route_grammar", "deep_link_cases"})
         self.assertEqual(set(self.evidence["browser_evidence"]), set(traefik_proof.BROWSER_EVIDENCE_ROOT_KEYS))
         self.assertEqual(self.evidence["browser_evidence"]["observations"], {"blocker": "provider_unavailable"})
+        self.assertEqual(self.evidence["proof_run"], traefik_proof.SYNTHETIC_PROOF_RUN)
+        self.assertEqual(self.evidence["proof_run"]["status"], "synthetic_observed")
+        self.assertEqual(self.evidence["proof_run"]["scope"], "synthetic_local")
+        self.assertFalse(self.evidence["proof_run"]["live_run"])
+        self.assertFalse(self.evidence["proof_run"]["compatible"])
+        self.assertEqual(
+            self.evidence["proof_run"]["completion_gate"],
+            "exact_reviewed_merged_commit_authorized_real_hermes",
+        )
         self.assertEqual(len(self.evidence["positive_cases"]), 11)
         self.assertEqual(len(self.evidence["negative_cases"]), 23)
 
@@ -409,6 +419,19 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             browser_evidence=self._browser_evidence("failed"),
         )
         self.assertEqual(failed["browser_evidence"]["observations"], {"failure": "browser_assertion_failed"})
+
+    def test_browser_events_do_not_upgrade_synthetic_deployment_claim(self) -> None:
+        manifest = traefik_proof.render_manifest(
+            build_sha=EXPECTED_BUILD_SHA,
+            build_digest=EXPECTED_BUILD_DIGEST,
+            traefik_config_digest=EXPECTED_CONFIG_DIGEST,
+            browser_journey="passed",
+            browser_evidence=self._browser_evidence("passed"),
+        )
+        self.assertEqual(manifest["browser_journey"], "passed")
+        self.assertEqual(manifest["proof_run"], traefik_proof.SYNTHETIC_PROOF_RUN)
+        self.assertFalse(manifest["proof_run"]["live_run"])
+        self.assertFalse(manifest["proof_run"]["compatible"])
 
 
 if __name__ == "__main__":

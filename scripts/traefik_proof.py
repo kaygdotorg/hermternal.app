@@ -57,6 +57,19 @@ BROWSER_BLOCKER_CODES = {
 }
 BROWSER_FAILURE_CODE = "browser_assertion_failed"
 
+# Route cases and browser evidence are local fixture observations. Keep their
+# deployment meaning explicit: this renderer cannot authorize a live run or
+# turn loopback mocks into proof of the private non-loopback Hermes topology.
+SYNTHETIC_PROOF_RUN = {
+    "status": "synthetic_observed",
+    "scope": "synthetic_local",
+    "live_run": False,
+    "compatible": False,
+    "topology": "loopback_only_disposable",
+    "required_live_topology": "private_non_loopback_hermes_9119_default_deny_proxy_identity",
+    "completion_gate": "exact_reviewed_merged_commit_authorized_real_hermes",
+}
+
 # These are deterministic proof paths, not operator or user home paths.  The
 # dynamic file is derived from storage_root and is never taken from input.
 DEFAULT_RUNTIME_INPUTS: dict[str, object] = {
@@ -600,6 +613,10 @@ def render_manifest(
             "build_commit": build_sha,
             "static_manifest_sha256": build_digest,
         },
+        # This renderer never upgrades synthetic observations into deployment
+        # compatibility. A separately reviewed live run must exercise the exact
+        # merged commit against authorized Hermes in the required topology.
+        "proof_run": dict(SYNTHETIC_PROOF_RUN),
         "browser_journey": resolved_journey,
         "browser_evidence": normalized_evidence,
         "positive_cases": POSITIVE_CASES,

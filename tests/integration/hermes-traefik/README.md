@@ -1,7 +1,7 @@
 # Disposable Traefik proof evidence
 
 **Operation:** issue #92 / DEP-05 Traefik HTTPS and prefix-routing proof
-**Status:** redacted edge/upstream policy evidence; browser journey blocked by provider
+**Status:** synthetic-local edge/upstream policy evidence only; browser journey blocked by provider; live deployment not proven
 **Proxy:** Traefik only; this lane does not compare or replace the Caddy proof
 
 This directory retains the bounded, synthetic observations for the first
@@ -19,6 +19,14 @@ That loopback-only listener is the disposable issue #92 proof exception. The
 normal deployment topology remains a fixed private non-loopback Hermes bind on
 TCP `9119`, with a default-deny firewall that allows only the selected Caddy or
 Traefik proxy identity. This artifact is not a public deployment approval.
+
+The retained `proof_run` is deliberately `synthetic_observed` with
+`scope=synthetic_local`, `live_run=false`, and `compatible=false`. Positive
+route cases therefore describe only local renderer and mock-upstream behavior;
+they do not complete the deployment proof. The completion gate is an exact
+reviewed and merged build commit exercised against authorized real Hermes in
+that private non-loopback/default-deny topology. A separate live run must
+supply that evidence before any deployment-complete or compatibility claim.
 
 Traefik's native `Query` and `QueryRegexp` matchers can require known query
 keys but cannot reject every unknown key in a raw query. The dynamic config
@@ -65,8 +73,9 @@ that a cookie has `Secure`, `HttpOnly`, `SameSite`, or `Path`: no real
 - the reviewed Hermes source SHA;
 - the same static build and shared route/deep-link fixture identities used by
   the disposable Caddy proof;
-- the deterministic Traefik static/dynamic configuration digest; and
-- the deterministic runtime-input digest.
+- the deterministic Traefik static/dynamic configuration digest;
+- the deterministic runtime-input digest; and
+- the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,
@@ -94,3 +103,6 @@ python3 -m py_compile scripts/traefik_proof.py scripts/test_traefik_proof.py
 These checks are offline and use only standard-library policy and renderer
 models. They do not claim a live Traefik binary, a Hermes process, provider
 availability, cookie attributes, firewall behavior, or issue #90 completion.
+The fixture keeps `proof_run.live_run=false` and `proof_run.compatible=false`;
+only an authorized live exercise of the exact reviewed and merged build against
+real Hermes in the required private topology can clear that deployment gate.

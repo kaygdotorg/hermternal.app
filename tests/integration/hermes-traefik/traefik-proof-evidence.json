@@ -106,6 +106,15 @@
     "build_commit": "521ede32b904a42e22eebb279fd7d404074cd318",
     "static_manifest_sha256": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
   },
+  "proof_run": {
+    "compatible": false,
+    "completion_gate": "exact_reviewed_merged_commit_authorized_real_hermes",
+    "live_run": false,
+    "required_live_topology": "private_non_loopback_hermes_9119_default_deny_proxy_identity",
+    "scope": "synthetic_local",
+    "status": "synthetic_observed",
+    "topology": "loopback_only_disposable"
+  },
   "retention": {
     "cookies": "redacted",
     "credentials": "redacted",
