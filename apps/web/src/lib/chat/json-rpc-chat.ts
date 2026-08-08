@@ -508,6 +508,8 @@ export function createJsonRpcChatTransport(
   const ignoredResponseIds = new Set<string>();
   let nextGeneratedId = 0;
   let currentGeneration = 0;
+  // These are one committed identity pair. Explicit restore keeps the pair
+  // unchanged until the server accepts the requested session on this socket.
   let selectedSessionId = options.selectedSessionId;
   // Only server-owned IDs may cross a socket boundary. `session.create` gives
   // the first prompt a connection-local live ID, then workspace confirmation
@@ -524,6 +526,7 @@ export function createJsonRpcChatTransport(
   let reconnectTransitionToken = 0;
   let notifyingReconnectTransition: number | undefined;
   let sessionTransitionPending = false;
+  let sessionTransitionToken = 0;
   let userClosed = false;
 
   if (selectedSessionId !== undefined) {
@@ -1402,7 +1405,10 @@ export function createJsonRpcChatTransport(
     sessionId: string,
     signal?: AbortSignal,
   ): Promise<void> => {
-    setState("restoring", currentGeneration);
+    // The caller owns the identity commit. Keeping the context in `restoring`
+    // until that commit prevents a reentrant observer from sending on the old
+    // identity during the one microtask between `session.resume` and promotion.
+    setState("restoring", context.generation);
     return sendRequest(
       context,
       JSON_RPC_SESSION_RESUME_METHOD,
@@ -1411,13 +1417,13 @@ export function createJsonRpcChatTransport(
       signal,
     ).then(
       () => {
-        if (isCurrentContext(context)) {
-          setState("ready", currentGeneration);
+        if (!isCurrentContext(context)) {
+          throw new JsonRpcChatError("connection-failed", context.generation);
         }
       },
       (error: JsonRpcChatError) => {
         if (isCurrentContext(context) && error.code !== "aborted") {
-          setState("failed", currentGeneration);
+          setState("failed", context.generation);
         }
         throw error;
       },
@@ -1502,6 +1508,10 @@ export function createJsonRpcChatTransport(
             }
             if (reconnectSessionId !== undefined) {
               await restoreInternal(context, reconnectSessionId, controller.signal);
+              if (!isCurrentContext(context) || !ownsAttempt()) {
+                throw new JsonRpcChatError("connection-failed", generation);
+              }
+              setState("ready", generation);
             }
             resolve();
           } catch (error) {
@@ -1565,6 +1575,11 @@ export function createJsonRpcChatTransport(
     if (currentState.status === "closing") {
       return Promise.reject(new JsonRpcChatError("closed", currentGeneration));
     }
+    if (sessionTransitionPending) {
+      // An explicit restore/create owns the current identity transaction. Do
+      // not replace its socket and accidentally resume the previous identity.
+      return Promise.reject(new JsonRpcChatError("invalid-input", currentGeneration));
+    }
     if (userClosed) {
       // A fresh explicit connect is the only user action that reopens a
       // transport after close; callbacks running during `closing` are blocked.
@@ -1582,6 +1597,11 @@ export function createJsonRpcChatTransport(
   const reconnect = (signal?: AbortSignal): Promise<void> => {
     if (userClosed || currentState.status === "closing") {
       return Promise.reject(new JsonRpcChatError("closed", currentGeneration));
+    }
+    if (sessionTransitionPending) {
+      // Reconnect cannot race an explicit restore. Its old identity is not a
+      // safe fallback while the requested identity is awaiting server proof.
+      return Promise.reject(new JsonRpcChatError("invalid-input", currentGeneration));
     }
     const previousAttempt = activeAttempt;
     const previousContext = activeContext;
@@ -1633,6 +1653,7 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
 
+    const transitionToken = ++sessionTransitionToken;
     sessionTransitionPending = true;
     try {
       let created: JsonRpcCreatedSession | undefined;
@@ -1649,6 +1670,13 @@ export function createJsonRpcChatTransport(
       if (!created) {
         throw new JsonRpcChatError("protocol-violation", currentGeneration);
       }
+      if (
+        !isCurrentContext(context) ||
+        currentGeneration !== context.generation ||
+        sessionTransitionToken !== transitionToken
+      ) {
+        throw new JsonRpcChatError("connection-failed", currentGeneration);
+      }
       // The first prompt addresses the ephemeral live ID on this exact socket.
       // The paired stored ID stays non-resumable until workspace reconciliation
       // confirms the first turn, then `promoteSession` owns the durable swap.
@@ -1658,7 +1686,9 @@ export function createJsonRpcChatTransport(
       pendingStoredSessionId = created.storedSessionId;
       return created;
     } finally {
-      sessionTransitionPending = false;
+      if (sessionTransitionToken === transitionToken) {
+        sessionTransitionPending = false;
+      }
     }
   };
 
@@ -1700,15 +1730,34 @@ export function createJsonRpcChatTransport(
     if (activeRequests.size > 0 || sessionTransitionPending) {
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
+
+    // Keep the committed identity visible while `session.resume` is pending.
+    // The requested target is private to this transaction; publishing it early
+    // would let reconnect or prompt submission pair B with a socket restoring A.
+    const transitionToken = ++sessionTransitionToken;
     sessionTransitionPending = true;
-    selectedSessionId = sessionId;
     try {
       await restoreInternal(context, sessionId, signal);
+      if (
+        !isCurrentContext(context) ||
+        currentGeneration !== context.generation ||
+        sessionTransitionToken !== transitionToken ||
+        !sessionTransitionPending
+      ) {
+        throw new JsonRpcChatError("connection-failed", currentGeneration);
+      }
+
+      // Commit all identity fields together only after the server has accepted
+      // the resume on this exact socket generation.
+      selectedSessionId = sessionId;
       reconnectSessionId = sessionId;
       ephemeralSessionGeneration = undefined;
       pendingStoredSessionId = undefined;
+      setState("ready", context.generation);
     } finally {
-      sessionTransitionPending = false;
+      if (sessionTransitionToken === transitionToken) {
+        sessionTransitionPending = false;
+      }
     }
   };
 
@@ -1752,6 +1801,28 @@ export function createJsonRpcChatTransport(
     setState("offline", currentGeneration);
   };
 
+  const getOutboundSessionId = (context: SocketContext): string => {
+    if (sessionTransitionPending || selectedSessionId === undefined) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
+    }
+    if (
+      reconnectSessionId !== undefined &&
+      reconnectSessionId !== selectedSessionId
+    ) {
+      // A selected/reconnect split is never safe to route over a socket.
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
+    }
+    // A live `session.create` ID belongs only to the socket that returned it.
+    // Reconnect must wait for an explicit fresh create, never replay it.
+    if (
+      reconnectSessionId === undefined &&
+      ephemeralSessionGeneration !== context.generation
+    ) {
+      throw new JsonRpcChatError("invalid-input", currentGeneration);
+    }
+    return selectedSessionId;
+  };
+
   const sendPrompt = (
     prompt: string,
     requestOptions: { readonly signal?: AbortSignal } = {},
@@ -1761,16 +1832,7 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("not-connected", currentGeneration);
     }
     validatePrompt(prompt);
-    if (
-      selectedSessionId === undefined ||
-      sessionTransitionPending ||
-      // A live `session.create` ID belongs only to the socket that returned it.
-      // Reconnect must wait for an explicit fresh create, never replay it.
-      (reconnectSessionId === undefined &&
-        ephemeralSessionGeneration !== context.generation)
-    ) {
-      throw new JsonRpcChatError("invalid-input", currentGeneration);
-    }
+    const sessionId = getOutboundSessionId(context);
     if (requestOptions.signal?.aborted) {
       throw new JsonRpcChatError("cancelled", currentGeneration);
     }
@@ -1783,7 +1845,7 @@ export function createJsonRpcChatTransport(
       jsonrpc: JSON_RPC_VERSION,
       id,
       method: JSON_RPC_PROMPT_METHOD,
-      params: { session_id: selectedSessionId, text: prompt },
+      params: { session_id: sessionId, text: prompt },
     };
     assertOutboundFrame(promptPayload, context.generation);
     let resolveCompletion!: (event: JsonRpcCompletionEvent) => void;
@@ -1796,7 +1858,7 @@ export function createJsonRpcChatTransport(
     );
     const record: OperationRecord = {
       id,
-      sessionId: selectedSessionId,
+      sessionId,
       generation: context.generation,
       status: "submitting",
       acknowledgementReceived: false,
@@ -1867,16 +1929,26 @@ export function createJsonRpcChatTransport(
       );
     }
     const context = activeContext;
-    if (!context?.gatewayReady || selectedSessionId === undefined) {
+    if (!context?.gatewayReady) {
       return Promise.reject(
         new JsonRpcChatError("not-connected", currentGeneration),
+      );
+    }
+    let sessionId: string;
+    try {
+      sessionId = getOutboundSessionId(context);
+    } catch (error) {
+      return Promise.reject(
+        error instanceof JsonRpcChatError
+          ? error
+          : new JsonRpcChatError("invalid-input", currentGeneration),
       );
     }
     record.status = "interrupting";
     return sendRequest(
       context,
       JSON_RPC_INTERRUPT_METHOD,
-      { session_id: selectedSessionId },
+      { session_id: sessionId },
       "interrupt",
       signal,
     );
@@ -1903,9 +1975,19 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     const context = activeContext;
-    if (!context?.gatewayReady || selectedSessionId === undefined) {
+    if (!context?.gatewayReady) {
       return Promise.reject(
         new JsonRpcChatError("not-connected", currentGeneration),
+      );
+    }
+    let sessionId: string;
+    try {
+      sessionId = getOutboundSessionId(context);
+    } catch (error) {
+      return Promise.reject(
+        error instanceof JsonRpcChatError
+          ? error
+          : new JsonRpcChatError("invalid-input", currentGeneration),
       );
     }
     pending.responded = true;
@@ -1913,7 +1995,7 @@ export function createJsonRpcChatTransport(
       context,
       JSON_RPC_APPROVAL_METHOD,
       {
-        session_id: selectedSessionId,
+        session_id: sessionId,
         choice: approved ? "once" : "deny",
         all: false,
       },
@@ -1942,9 +2024,18 @@ export function createJsonRpcChatTransport(
       throw new JsonRpcChatError("invalid-input", currentGeneration);
     }
     const context = activeContext;
-    if (!context?.gatewayReady || selectedSessionId === undefined) {
+    if (!context?.gatewayReady) {
       return Promise.reject(
         new JsonRpcChatError("not-connected", currentGeneration),
+      );
+    }
+    try {
+      getOutboundSessionId(context);
+    } catch (error) {
+      return Promise.reject(
+        error instanceof JsonRpcChatError
+          ? error
+          : new JsonRpcChatError("invalid-input", currentGeneration),
       );
     }
     pending.responded = true;

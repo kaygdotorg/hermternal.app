@@ -161,6 +161,14 @@ function emitResponse(
   socket.emitMessage({ jsonrpc: "2.0", id, result });
 }
 
+function emitErrorResponse(socket: FakeWebSocket, id: string): void {
+  socket.emitMessage({
+    jsonrpc: "2.0",
+    id,
+    error: { code: -32000, message: "synthetic restore rejection" },
+  });
+}
+
 function emitEvent(
   socket: FakeWebSocket,
   type: string,
@@ -425,6 +433,165 @@ describe("createJsonRpcChatTransport", () => {
     emitResponse(replacement, resume.id as string, { restored: true });
     await reconnect;
     expect(harness.transport.selectedSessionId).toBe("stored-draft-persisted");
+  });
+
+  it("keeps restore identity private and blocks competing connections until success", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const restore = harness.transport.restore("replacement-session");
+    await flush();
+
+    const resume = frame(socket, 1);
+    expect(resume).toMatchObject({
+      method: JSON_RPC_SESSION_RESUME_METHOD,
+      params: { session_id: "replacement-session" },
+    });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+    expect(() => harness.transport.sendPrompt("blocked during replacement")).toThrowError(
+      expect.objectContaining({ code: "not-connected" }),
+    );
+    expect(socket.sent).toHaveLength(2);
+    await expect(harness.transport.connect()).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "invalid-input",
+    });
+    expect(harness.sockets).toHaveLength(1);
+
+    emitResponse(socket, resume.id as string, { restored: true });
+    await restore;
+    expect(harness.transport.selectedSessionId).toBe("replacement-session");
+    const request = harness.transport.sendPrompt("replacement prompt");
+    expect(frame(socket, 2)).toMatchObject({
+      method: JSON_RPC_PROMPT_METHOD,
+      params: { session_id: "replacement-session", text: "replacement prompt" },
+    });
+    emitEvent(socket, "message.complete", { status: "ok" }, { request_id: request.id });
+    await request.completion;
+  });
+
+  it("keeps A coherent through repeated restore failures, explicit connect, and reconnect", async () => {
+    const harness = makeHarness();
+    const first = await connectHarness(harness);
+
+    const failedRestore = harness.transport.restore("replacement-session");
+    await flush();
+    const firstRestore = frame(first, 1);
+    emitErrorResponse(first, firstRestore.id as string);
+    await expect(failedRestore).rejects.toMatchObject({ code: "server-rejected" });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+
+    const explicitConnect = harness.transport.connect();
+    await flush();
+    const connected = harness.sockets[1];
+    if (!connected) throw new Error("explicit connect socket was not created");
+    connected.emitOpen();
+    emitEvent(connected, JSON_RPC_GATEWAY_READY_EVENT, { explicit: true });
+    await flush();
+    const explicitResume = frame(connected, 0);
+    expect(explicitResume).toMatchObject({
+      method: JSON_RPC_SESSION_RESUME_METHOD,
+      params: { session_id: "session-marker-001" },
+    });
+    emitResponse(connected, explicitResume.id as string, { restored: true });
+    await explicitConnect;
+    const explicitPrompt = harness.transport.sendPrompt("A after explicit connect");
+    expect(frame(connected, 1)).toMatchObject({
+      method: JSON_RPC_PROMPT_METHOD,
+      params: { session_id: "session-marker-001" },
+    });
+    emitEvent(connected, "message.complete", { status: "ok" }, { request_id: explicitPrompt.id });
+    await explicitPrompt.completion;
+
+    const repeatedFailure = harness.transport.restore("replacement-session");
+    await flush();
+    const secondRestore = frame(connected, 2);
+    emitErrorResponse(connected, secondRestore.id as string);
+    await expect(repeatedFailure).rejects.toMatchObject({ code: "server-rejected" });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+
+    const reconnect = harness.transport.reconnect();
+    await flush();
+    const reconnected = harness.sockets[2];
+    if (!reconnected) throw new Error("reconnect socket was not created");
+    reconnected.emitOpen();
+    emitEvent(reconnected, JSON_RPC_GATEWAY_READY_EVENT, { reconnect: true });
+    await flush();
+    const reconnectResume = frame(reconnected, 0);
+    expect(reconnectResume).toMatchObject({
+      method: JSON_RPC_SESSION_RESUME_METHOD,
+      params: { session_id: "session-marker-001" },
+    });
+    emitResponse(reconnected, reconnectResume.id as string, { restored: true });
+    await reconnect;
+    const reconnectPrompt = harness.transport.sendPrompt("A after reconnect");
+    expect(frame(reconnected, 1)).toMatchObject({
+      method: JSON_RPC_PROMPT_METHOD,
+      params: { session_id: "session-marker-001" },
+    });
+    emitEvent(reconnected, "message.complete", { status: "ok" }, { request_id: reconnectPrompt.id });
+    await reconnectPrompt.completion;
+  });
+
+  it("rejects aborted and stale restore completions without publishing a replacement", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const controller = new AbortController();
+    const aborted = harness.transport.restore("replacement-session", controller.signal);
+    await flush();
+    const staleResume = frame(socket, 1);
+
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ code: "aborted" });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+    emitResponse(socket, staleResume.id as string, { restored: true });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+
+    const connection = harness.transport.connect();
+    await flush();
+    const replacementSocket = harness.sockets[1];
+    if (!replacementSocket) throw new Error("replacement socket was not created");
+    replacementSocket.emitOpen();
+    emitEvent(replacementSocket, JSON_RPC_GATEWAY_READY_EVENT, { replacement: true });
+    await flush();
+    const connectionResume = frame(replacementSocket, 0);
+    expect(connectionResume.params).toEqual({ session_id: "session-marker-001" });
+    emitResponse(replacementSocket, connectionResume.id as string, { restored: true });
+    await connection;
+
+    const replacement = harness.transport.restore("replacement-session-2");
+    await flush();
+    const currentResume = frame(replacementSocket, 1);
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+    emitResponse(replacementSocket, currentResume.id as string, { restored: true });
+    await replacement;
+    expect(harness.transport.selectedSessionId).toBe("replacement-session-2");
+  });
+
+  it("does not let a closed restore generation commit its late success", async () => {
+    const harness = makeHarness();
+    const socket = await connectHarness(harness);
+    const restore = harness.transport.restore("replacement-session");
+    await flush();
+    const resume = frame(socket, 1);
+
+    harness.transport.close();
+    await expect(restore).rejects.toMatchObject({ code: "uncertain-delivery" });
+    emitResponse(socket, resume.id as string, { restored: true });
+    expect(harness.transport.selectedSessionId).toBe("session-marker-001");
+
+    const reconnect = harness.transport.connect();
+    await flush();
+    const replacement = harness.sockets[1];
+    if (!replacement) throw new Error("replacement socket was not created");
+    replacement.emitOpen();
+    emitEvent(replacement, JSON_RPC_GATEWAY_READY_EVENT, { reopened: true });
+    await flush();
+    const reconnectResume = frame(replacement, 0);
+    expect(reconnectResume.params).toEqual({ session_id: "session-marker-001" });
+    emitResponse(replacement, reconnectResume.id as string, { restored: true });
+    await reconnect;
   });
 
   it("uses exact prompt, interrupt, approval, and clarification methods with opaque source payloads", async () => {
