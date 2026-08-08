@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1082,6 +1083,33 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def _send_raw_x_forwarded_host(self, value: bytes) -> tuple[int, dict[str, str]]:
+        """Send raw authority bytes so parser-permitted controls reach the adapter."""
+
+        port = str(self.server.server_address[1]).encode("ascii")
+        request = b"".join(
+            (
+                b"POST /check HTTP/1.0\r\n",
+                b"Host: 127.0.0.1:" + port + b"\r\n",
+                b"X-Forwarded-For: 127.0.0.1\r\n",
+                b"X-Forwarded-Host: " + value + b"\r\n",
+                b"X-Forwarded-Method: GET\r\n",
+                b"X-Forwarded-Port: 19444\r\n",
+                b"X-Forwarded-Proto: https\r\n",
+                b"X-Forwarded-Uri: /\r\n",
+                b"\r\n",
+            )
+        )
+        connection = socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=2)
+        try:
+            connection.sendall(request)
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+            response.read()
+            return response.status, {key.lower(): value for key, value in response.getheaders()}
+        finally:
+            connection.close()
+
     def _forwarded(
         self,
         *,
@@ -1211,18 +1239,48 @@ class ForwardAuthAdapterTests(unittest.TestCase):
         )
         self.assertEqual(status, 414)
 
-    def test_adapter_rejects_missing_uri_and_denies_noncanonical_authority(self) -> None:
+    def test_adapter_rejects_missing_uri_and_malformed_authority(self) -> None:
         headers = [(name, value) for name, value in self._forwarded() if name != "X-Forwarded-Uri"]
         status, _ = self._send(headers)
         self.assertEqual(status, 400)
-        headers = self._forwarded()
         headers = [
             (name, "traefik-92.test") if name == "X-Forwarded-Host" else (name, value)
-            for name, value in headers
+            for name, value in self._forwarded()
         ]
         status, response_headers = self._send(headers)
-        self.assertEqual(status, 421)
+        self.assertEqual(status, 400)
         self.assertEqual(response_headers["x-hermternal-policy"], "deny")
+
+    def test_adapter_raw_authority_vectors_keep_valid_wrong_host_at_421(self) -> None:
+        invalid_authorities = (
+            ("empty", b""),
+            ("space", b" "),
+            ("nul", b"\x00"),
+            ("c0", b"\x1f"),
+            ("del", b"\x7f"),
+            ("missing_port", b"wrong.test"),
+            ("empty_port", b"wrong.test:"),
+            ("non_numeric_port", b"wrong.test:notaport"),
+            ("out_of_range_port", b"wrong.test:65536"),
+            ("malformed_bracket", b"[::1:19444"),
+            ("unbracketed_ipv6", b"::1:19444"),
+            ("bracket_without_separator", b"[::1]19444"),
+            ("userinfo", b"user@wrong.test:19444"),
+        )
+        for label, authority in invalid_authorities:
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(authority)
+                self.assertEqual(status, 400)
+                self.assertEqual(response_headers["x-hermternal-policy"], "deny")
+
+        for label, authority, expected_status, expected_policy in (
+            ("canonical", b"traefik-92.test:19444", 200, "allow"),
+            ("valid_wrong", b"wrong.test:19444", 421, "deny"),
+        ):
+            with self.subTest(authority=label):
+                status, response_headers = self._send_raw_x_forwarded_host(authority)
+                self.assertEqual(status, expected_status)
+                self.assertEqual(response_headers["x-hermternal-policy"], expected_policy)
 
 
 class TraefikEvidenceContractTests(unittest.TestCase):
