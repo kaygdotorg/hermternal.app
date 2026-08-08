@@ -112,6 +112,21 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }
 
   get state(): CurrentSessionTerminalState {
+    if (
+      this.currentState.sessionId !== undefined &&
+      this.currentState.sessionId === this.invalidatedSessionId &&
+      this.activeBinding === undefined
+    ) {
+      // Do not let a renderer read the last stale session through the state
+      // getter after the workspace has rejected it. Keep the transport-owned
+      // session identity private for a later explicit reconnect/attach.
+      return Object.freeze({
+        status: 'detached',
+        generation: this.currentState.generation,
+        outputMayBeTruncated: this.currentState.outputMayBeTruncated,
+        explicitlyClosed: this.explicitlyClosed
+      });
+    }
     return this.currentState;
   }
 

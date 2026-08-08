@@ -13,7 +13,9 @@ or is rejected by bridge disposal; teardown never resolves readiness, and no
 application-level byte buffer repairs a late attach. Workspace ownership
 rejection also invalidates the matching stale binding and detaches its PTY;
 stale state, notices, and bytes are not hidden while an old binding remains
-active.
+active. After that rejection, the bridge's public state getter projects a
+session-less detached state until a later attach or reconnect owns the session;
+the transport's opaque session identity remains private for recovery.
 
 ## Runtime contract
 
