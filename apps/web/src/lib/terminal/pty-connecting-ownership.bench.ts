@@ -28,6 +28,39 @@ const REPLACEMENT_INPUT: PtyConnectionInput = {
 const ACTIONS = ["abort", "close", "detach", "replace"] as const;
 type Action = (typeof ACTIONS)[number];
 
+interface BenchmarkOwnerIdentity {
+  readonly sessionId: string;
+  readonly attach?: string;
+  readonly processIdentity?: string;
+}
+
+interface SocketClosure {
+  readonly socketId: string;
+  readonly ownerIdentity: BenchmarkOwnerIdentity;
+  readonly closeCalls: number;
+  readonly opened: boolean;
+}
+
+function ownerIdentityFor(input: PtyConnectionInput): BenchmarkOwnerIdentity {
+  // Keep the ledger tied to the PTY identity; detachedAtMs is local evidence.
+  return Object.freeze({
+    sessionId: input.sessionId,
+    ...(input.attach ? { attach: input.attach } : {}),
+    ...(input.processIdentity ? { processIdentity: input.processIdentity } : {}),
+  });
+}
+
+function sameOwnerIdentity(
+  left: BenchmarkOwnerIdentity,
+  right: BenchmarkOwnerIdentity,
+): boolean {
+  return (
+    left.sessionId === right.sessionId &&
+    left.attach === right.attach &&
+    left.processIdentity === right.processIdentity
+  );
+}
+
 interface CallbackSnapshot {
   readonly onopen: ((event?: unknown) => void) | null;
   readonly onmessage: ((event: { readonly data: unknown }) => void) | null;
@@ -43,7 +76,8 @@ interface StaleCallbackDispatches {
 }
 
 class BenchmarkSocket implements PtyWebSocket {
-  readonly identity: string;
+  readonly socketId: string;
+  readonly ownerIdentity: BenchmarkOwnerIdentity;
   onopen: ((event?: unknown) => void) | null = null;
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
@@ -53,8 +87,9 @@ class BenchmarkSocket implements PtyWebSocket {
   closed = false;
   closeCalls = 0;
 
-  constructor(identity: string) {
-    this.identity = identity;
+  constructor(socketId: string, ownerIdentity: BenchmarkOwnerIdentity) {
+    this.socketId = socketId;
+    this.ownerIdentity = ownerIdentity;
   }
 
   send(): void {}
@@ -106,21 +141,37 @@ class BenchmarkSocket implements PtyWebSocket {
   }
 }
 
+function snapshotSocket(socket: BenchmarkSocket): SocketClosure {
+  return {
+    socketId: socket.socketId,
+    ownerIdentity: socket.ownerIdentity,
+    closeCalls: socket.closeCalls,
+    opened: socket.opened,
+  };
+}
+
 interface RunProof {
   readonly sampleMs: number;
+  readonly validatorCalls: number;
   readonly ticketRequests: number;
   readonly socketFactoryCalls: number;
   readonly openedSockets: number;
   readonly cleanupCalls: number;
   readonly duplicateOwnerViolations: number;
   readonly activeOwnerCount: number;
-  readonly expectedOwnerIdentity: string | null;
-  readonly activeOwnerIdentities: readonly string[];
-  readonly staleSocketIdentities: readonly string[];
+  readonly activeSocketIds: readonly string[];
+  readonly expectedOwnerIdentity: BenchmarkOwnerIdentity | null;
+  readonly activeOwnerIdentities: readonly BenchmarkOwnerIdentity[];
+  readonly staleSocketIds: readonly string[];
+  readonly staleSocketIdentities: readonly BenchmarkOwnerIdentity[];
+  readonly staleSocketId: string | null;
+  readonly staleSocketIdentity: BenchmarkOwnerIdentity | null;
   readonly staleSocketCloseCalls: number;
-  readonly replacementSocketIdentity: string | null;
+  readonly replacementSocketId: string | null;
+  readonly replacementSocketIdentity: BenchmarkOwnerIdentity | null;
   readonly replacementSocketCloseCalls: number;
-  readonly socketClosures: readonly Readonly<{ readonly identity: string; readonly closeCalls: number }>[];
+  readonly socketClosures: readonly SocketClosure[];
+  readonly callbackProofApplicable: boolean;
   readonly staleOpenCalls: number;
   readonly allCallbacksNullAfterClose: boolean;
   readonly staleOnopenDispatches: number;
@@ -175,9 +226,13 @@ async function runAction(action: Action): Promise<RunProof> {
   let replacementPromise: Promise<void> | undefined;
   let actionTaken = false;
   let actionStartedAt: number | undefined;
+  let validatorCalls = 0;
   let ticketRequests = 0;
   let socketFactoryCalls = 0;
   let openedSockets = 0;
+  let nextSocketId = 0;
+  const inputOwnerIdentity = ownerIdentityFor(INPUT);
+  const replacementOwnerIdentity = ownerIdentityFor(REPLACEMENT_INPUT);
 
   const onEvent = (event: PtyTransportEvent): void => {
     events.push(event);
@@ -193,13 +248,27 @@ async function runAction(action: Action): Promise<RunProof> {
   };
   const createWebSocket = (upgrade: PtyWebSocketUpgradeRequest): BenchmarkSocket => {
     socketFactoryCalls += 1;
-    const socket = new BenchmarkSocket(upgrade.query.resume);
+    const ownerIdentity =
+      upgrade.query.resume === inputOwnerIdentity.sessionId
+        ? inputOwnerIdentity
+        : upgrade.query.resume === replacementOwnerIdentity.sessionId
+          ? replacementOwnerIdentity
+          : undefined;
+    if (!ownerIdentity || upgrade.query.attach !== ownerIdentity.attach) {
+      throw new Error("benchmark factory received an unexpected PTY owner");
+    }
+    // The local sequence distinguishes physical sockets without weakening the
+    // structured PTY owner identity used by the ownership assertions.
+    const socket = new BenchmarkSocket(`socket-${++nextSocketId}`, ownerIdentity);
     sockets.push(socket);
     return socket;
   };
 
   transport = createPtyTransport({
-    validateAttachment: () => true,
+    validateAttachment: () => {
+      validatorCalls += 1;
+      return true;
+    },
     ticketProvider: async () => {
       ticketRequests += 1;
       return `benchmark-ticket-${ticketRequests}`;
@@ -216,7 +285,9 @@ async function runAction(action: Action): Promise<RunProof> {
   const sampleMs = roundSample(performance.now() - actionStartedAt);
   await flush();
 
-  const replacementSocket = sockets.find((socket) => socket.identity === REPLACEMENT_INPUT.sessionId);
+  const replacementSocket = sockets.find((socket) =>
+    sameOwnerIdentity(socket.ownerIdentity, replacementOwnerIdentity),
+  );
   if (action === "replace") {
     if (!replacementPromise || !replacementSocket) {
       throw new Error("replacement action did not allocate an identity-owned socket");
@@ -226,14 +297,20 @@ async function runAction(action: Action): Promise<RunProof> {
     await within(replacementPromise, "replacement onopen");
   }
   const replacementAttached = action !== "replace" || transport.state.status === "attached";
-  const staleSockets = sockets.filter((socket) => socket.identity === INPUT.sessionId);
+  const staleSockets = sockets.filter((socket) =>
+    sameOwnerIdentity(socket.ownerIdentity, inputOwnerIdentity),
+  );
   const staleOpenCalls = staleSockets.filter((socket) => socket.opened).length;
-  const expectedOwnerIdentity = action === "replace" ? REPLACEMENT_INPUT.sessionId : null;
-  const activeOwnerIdentities = sockets
-    .filter((socket) => socket.opened && !socket.closed)
-    .map((socket) => socket.identity);
+  const expectedOwnerIdentity = action === "replace" ? replacementOwnerIdentity : null;
+  const activeSockets = sockets.filter((socket) => socket.opened && !socket.closed);
+  const activeSocketIds = activeSockets.map((socket) => socket.socketId);
+  const activeOwnerIdentities = activeSockets.map((socket) => socket.ownerIdentity);
   const activeOwnerCount = activeOwnerIdentities.length;
   const duplicateOwnerViolations = activeOwnerCount > 1 ? 1 : 0;
+  // The connecting guard intentionally allocates no socket for abort, Close, or
+  // detach. Their callback proof is therefore inapplicable, while replacement
+  // must bind and replay every callback on its allocated socket.
+  const callbackProofApplicable = action === "replace";
   const callbackSnapshots = sockets.map((socket) => ({
     socket,
     callbacks: socket.captureCallbacks(),
@@ -268,38 +345,71 @@ async function runAction(action: Action): Promise<RunProof> {
   const postCloseBytesEvents = postCloseEvents.filter((event) => event.type === "bytes").length;
   const postCloseNoticeEvents = postCloseEvents.filter((event) => event.type === "notice").length;
   const cleanupCalls = sockets.reduce((total, socket) => total + socket.closeCalls, 0);
-  const staleSocketIdentities = staleSockets.map((socket) => socket.identity);
+  const staleSocketIds = staleSockets.map((socket) => socket.socketId);
+  const staleSocketIdentities = staleSockets.map((socket) => socket.ownerIdentity);
+  const staleSocketId = staleSockets[0]?.socketId ?? null;
+  const staleSocketIdentity = staleSockets[0]?.ownerIdentity ?? null;
   const staleSocketCloseCalls = staleSockets.reduce((total, socket) => total + socket.closeCalls, 0);
-  const replacementSocketIdentity = replacementSocket?.identity ?? null;
+  const replacementSocketId = replacementSocket?.socketId ?? null;
+  const replacementSocketIdentity = replacementSocket?.ownerIdentity ?? null;
   const replacementSocketCloseCalls = replacementSocket?.closeCalls ?? 0;
-  const socketClosures = sockets.map((socket) => ({
-    identity: socket.identity,
-    closeCalls: socket.closeCalls,
-  }));
+  // Record the exact post-close state for every allocated physical socket.
+  const socketClosures = sockets.map(snapshotSocket);
   const assertions = {
     connectingGuard: staleSockets.length === 0,
     staleSocketNeverOpened: staleOpenCalls === 0,
+    expectedValidatorCount: validatorCalls === (action === "replace" ? 2 : 1),
     expectedFactoryCount: socketFactoryCalls === (action === "replace" ? 1 : 0),
     expectedTicketCount: ticketRequests === (action === "replace" ? 2 : 1),
-    replacementOpenedExactlyOnce: action !== "replace" || (replacementSocket?.opened === true && openedSockets === 1),
+    replacementOpenedExactlyOnce:
+      action !== "replace" || (replacementSocket?.opened === true && openedSockets === 1),
     replacementAttached,
     expectedOwnerIsOnlyActiveOwner:
       activeOwnerIdentities.length === (expectedOwnerIdentity === null ? 0 : 1) &&
-      (expectedOwnerIdentity === null || activeOwnerIdentities[0] === expectedOwnerIdentity),
+      (expectedOwnerIdentity === null ||
+        sameOwnerIdentity(activeOwnerIdentities[0]!, expectedOwnerIdentity)),
+    activeSocketIsReplacement:
+      action !== "replace" ||
+      (activeSocketIds.length === 1 && activeSocketIds[0] === replacementSocketId),
     noDuplicateOwners: duplicateOwnerViolations === 0,
     staleSocketIdentityFence: staleSocketIdentities.length === 0 && staleSocketCloseCalls === 0,
+    staleSocketIdFence: staleSocketIds.length === 0 && staleSocketId === null,
+    replacementIdentityMatchesExpected:
+      action !== "replace" ||
+      (replacementSocketIdentity !== null &&
+        sameOwnerIdentity(replacementSocketIdentity, expectedOwnerIdentity!)),
+    replacementSocketIdUnique:
+      action !== "replace" || replacementSocketId !== null && replacementSocketId !== staleSocketId,
     replacementClosedExactlyOnce: action !== "replace" || replacementSocketCloseCalls === 1,
-    exactSocketCleanup: action !== "replace" || socketClosures.length === 1 && socketClosures.every((socket) => socket.closeCalls === 1),
+    exactSocketCleanup:
+      action !== "replace" ||
+      (socketClosures.length === 1 &&
+        socketClosures.every((socket) => socket.closeCalls === 1 && socket.opened)),
     allCallbacksNullAfterClose,
+    replacementCallbacksBound:
+      !callbackProofApplicable ||
+      (callbackSnapshots.length === 1 &&
+        callbackSnapshots.every(
+          ({ callbacks }) =>
+            callbacks.onopen !== null &&
+            callbacks.onmessage !== null &&
+            callbacks.onerror !== null &&
+            callbacks.onclose !== null,
+        )),
     staleCallbacksExercised:
-      staleOnopenDispatches === activeOwnerCount &&
-      staleOnmessageDispatches === activeOwnerCount &&
-      staleOnerrorDispatches === activeOwnerCount &&
-      staleOncloseDispatches === activeOwnerCount,
-    staleOnopenIgnored: staleOnopenDispatches === activeOwnerCount && postCloseStateEvents === 0,
-    staleOnmessageIgnored: staleOnmessageDispatches === activeOwnerCount && postCloseBytesEvents === 0,
-    staleOnerrorIgnored: staleOnerrorDispatches === activeOwnerCount && postCloseStateEvents === 0,
-    staleOncloseIgnored: staleOncloseDispatches === activeOwnerCount && postCloseStateEvents === 0,
+      !callbackProofApplicable ||
+      (staleOnopenDispatches === 1 &&
+        staleOnmessageDispatches === 1 &&
+        staleOnerrorDispatches === 1 &&
+        staleOncloseDispatches === 1),
+    staleOnopenIgnored:
+      !callbackProofApplicable || staleOnopenDispatches === 1 && postCloseStateEvents === 0,
+    staleOnmessageIgnored:
+      !callbackProofApplicable || staleOnmessageDispatches === 1 && postCloseBytesEvents === 0,
+    staleOnerrorIgnored:
+      !callbackProofApplicable || staleOnerrorDispatches === 1 && postCloseStateEvents === 0,
+    staleOncloseIgnored:
+      !callbackProofApplicable || staleOncloseDispatches === 1 && postCloseStateEvents === 0,
     noPostCloseStateEvents: postCloseStateEvents === 0,
     noPostCloseBytesEvents: postCloseBytesEvents === 0,
     noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
@@ -311,19 +421,26 @@ async function runAction(action: Action): Promise<RunProof> {
 
   return {
     sampleMs,
+    validatorCalls,
     ticketRequests,
     socketFactoryCalls,
     openedSockets,
     cleanupCalls,
     duplicateOwnerViolations,
     activeOwnerCount,
+    activeSocketIds,
     expectedOwnerIdentity,
     activeOwnerIdentities,
+    staleSocketIds,
     staleSocketIdentities,
+    staleSocketId,
+    staleSocketIdentity,
     staleSocketCloseCalls,
+    replacementSocketId,
     replacementSocketIdentity,
     replacementSocketCloseCalls,
     socketClosures,
+    callbackProofApplicable: callbackProofApplicable,
     staleOpenCalls,
     allCallbacksNullAfterClose,
     staleOnopenDispatches,
@@ -363,6 +480,7 @@ for (const action of ACTIONS) {
     distribution: distribution(measured.samples),
     runs: measured.runs,
     totals: {
+      validatorCalls: total("validatorCalls"),
       ticketRequests: total("ticketRequests"),
       socketFactoryCalls: total("socketFactoryCalls"),
       openedSockets: total("openedSockets"),

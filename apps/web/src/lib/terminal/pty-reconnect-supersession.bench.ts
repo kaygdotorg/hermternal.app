@@ -23,6 +23,39 @@ const INPUT: PtyConnectionInput = {
 const STAGES = ["validator", "ticket", "factory"] as const;
 type Stage = (typeof STAGES)[number];
 
+interface BenchmarkOwnerIdentity {
+  readonly sessionId: string;
+  readonly attach?: string;
+  readonly processIdentity?: string;
+}
+
+interface SocketClosure {
+  readonly socketId: string;
+  readonly ownerIdentity: BenchmarkOwnerIdentity;
+  readonly closeCalls: number;
+  readonly opened: boolean;
+}
+
+function ownerIdentityFor(input: PtyConnectionInput): BenchmarkOwnerIdentity {
+  // detachedAtMs is local expiry evidence, not part of the PTY owner identity.
+  return Object.freeze({
+    sessionId: input.sessionId,
+    ...(input.attach ? { attach: input.attach } : {}),
+    ...(input.processIdentity ? { processIdentity: input.processIdentity } : {}),
+  });
+}
+
+function sameOwnerIdentity(
+  left: BenchmarkOwnerIdentity,
+  right: BenchmarkOwnerIdentity,
+): boolean {
+  return (
+    left.sessionId === right.sessionId &&
+    left.attach === right.attach &&
+    left.processIdentity === right.processIdentity
+  );
+}
+
 interface CallbackSnapshot {
   readonly onopen: ((event?: unknown) => void) | null;
   readonly onmessage: ((event: { readonly data: unknown }) => void) | null;
@@ -38,7 +71,8 @@ interface StaleCallbackDispatches {
 }
 
 class BenchmarkSocket implements PtyWebSocket {
-  readonly identity: string;
+  readonly socketId: string;
+  readonly ownerIdentity: BenchmarkOwnerIdentity;
   onopen: ((event?: unknown) => void) | null = null;
   onmessage: ((event: { readonly data: unknown }) => void) | null = null;
   onerror: ((event?: unknown) => void) | null = null;
@@ -48,8 +82,9 @@ class BenchmarkSocket implements PtyWebSocket {
   closed = false;
   closeCalls = 0;
 
-  constructor(identity: string) {
-    this.identity = identity;
+  constructor(socketId: string, ownerIdentity: BenchmarkOwnerIdentity) {
+    this.socketId = socketId;
+    this.ownerIdentity = ownerIdentity;
   }
 
   send(): void {}
@@ -101,6 +136,15 @@ class BenchmarkSocket implements PtyWebSocket {
   }
 }
 
+function snapshotSocket(socket: BenchmarkSocket): SocketClosure {
+  return {
+    socketId: socket.socketId,
+    ownerIdentity: socket.ownerIdentity,
+    closeCalls: socket.closeCalls,
+    opened: socket.opened,
+  };
+}
+
 interface RunProof {
   readonly sampleMs: number;
   readonly validatorCalls: number;
@@ -113,14 +157,18 @@ interface RunProof {
   readonly cleanupCalls: number;
   readonly duplicateOwnerViolations: number;
   readonly activeOwnerCount: number;
-  readonly expectedOwnerIdentity: string;
-  readonly activeOwnerIdentities: readonly string[];
-  readonly staleSocketIdentities: readonly string[];
-  readonly staleSocketIdentity: string | null;
+  readonly activeSocketIds: readonly string[];
+  readonly expectedOwnerIdentity: BenchmarkOwnerIdentity;
+  readonly activeOwnerIdentities: readonly BenchmarkOwnerIdentity[];
+  readonly staleSocketIds: readonly string[];
+  readonly staleSocketIdentities: readonly BenchmarkOwnerIdentity[];
+  readonly staleSocketId: string | null;
+  readonly staleSocketIdentity: BenchmarkOwnerIdentity | null;
   readonly staleSocketCloseCalls: number;
-  readonly replacementSocketIdentity: string;
+  readonly replacementSocketId: string;
+  readonly replacementSocketIdentity: BenchmarkOwnerIdentity;
   readonly replacementSocketCloseCalls: number;
-  readonly socketClosures: readonly Readonly<{ readonly identity: string; readonly closeCalls: number }>[];
+  readonly socketClosures: readonly SocketClosure[];
   readonly staleCleanupCalls: number;
   readonly staleOpenCalls: number;
   readonly allCallbacksNullAfterClose: boolean;
@@ -180,6 +228,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
   let ticketRequests = 0;
   let socketFactoryCalls = 0;
   let openedSockets = 0;
+  let nextSocketId = 0;
+  const ownerIdentity = ownerIdentityFor(INPUT);
   const sockets: BenchmarkSocket[] = [];
   const events: PtyTransportEvent[] = [];
   let staleSocket: BenchmarkSocket | undefined;
@@ -205,7 +255,12 @@ async function runStage(stage: Stage): Promise<RunProof> {
     upgrade: PtyWebSocketUpgradeRequest,
   ): Promise<BenchmarkSocket> | BenchmarkSocket => {
     socketFactoryCalls += 1;
-    const socket = new BenchmarkSocket(upgrade.query.resume);
+    if (upgrade.query.resume !== ownerIdentity.sessionId || upgrade.query.attach !== ownerIdentity.attach) {
+      throw new Error("benchmark factory received an unexpected PTY owner");
+    }
+    // The sequence distinguishes two physical sockets that intentionally share
+    // one PTY owner during supersession and recovery.
+    const socket = new BenchmarkSocket(`socket-${++nextSocketId}`, ownerIdentity);
     sockets.push(socket);
     if (stage === "factory" && socketFactoryCalls === 1) {
       staleSocket = socket;
@@ -260,10 +315,10 @@ async function runStage(stage: Stage): Promise<RunProof> {
   openedSockets += 1;
   await within(recovery, `${stage} recovery open`);
   const recoveryAttached = transport.state.status === "attached";
-  const expectedOwnerIdentity = INPUT.sessionId;
-  const activeOwnerIdentities = sockets
-    .filter((socket) => socket.opened && !socket.closed)
-    .map((socket) => socket.identity);
+  const expectedOwnerIdentity = ownerIdentity;
+  const activeSockets = sockets.filter((socket) => socket.opened && !socket.closed);
+  const activeSocketIds = activeSockets.map((socket) => socket.socketId);
+  const activeOwnerIdentities = activeSockets.map((socket) => socket.ownerIdentity);
   const activeOwnerCountBeforeCleanup = activeOwnerIdentities.length;
   const callbackSnapshots = sockets.map((socket) => ({
     socket,
@@ -300,15 +355,17 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const postCloseNoticeEvents = postCloseEvents.filter((event) => event.type === "notice").length;
 
   const cleanupCalls = sockets.reduce((total, socket) => total + socket.closeCalls, 0);
-  const staleSocketIdentities = staleSocket ? [staleSocket.identity] : [];
-  const staleSocketIdentity = staleSocket?.identity ?? null;
+  const staleSocketIds = staleSocket ? [staleSocket.socketId] : [];
+  const staleSocketIdentities = staleSocket ? [staleSocket.ownerIdentity] : [];
+  const staleSocketId = staleSocket?.socketId ?? null;
+  const staleSocketIdentity = staleSocket?.ownerIdentity ?? null;
   const staleSocketCloseCalls = staleSocket?.closeCalls ?? 0;
-  const replacementSocketIdentity = replacement.identity;
+  const replacementSocketId = replacement.socketId;
+  const replacementSocketIdentity = replacement.ownerIdentity;
   const replacementSocketCloseCalls = replacement.closeCalls;
-  const socketClosures = sockets.map((socket) => ({
-    identity: socket.identity,
-    closeCalls: socket.closeCalls,
-  }));
+  // Capture the post-close ledger: closeCalls and opened are exact per physical
+  // socket, even when stale and replacement sockets share one PTY owner.
+  const socketClosures = sockets.map(snapshotSocket);
   const staleCleanupCalls = staleSocketCloseCalls;
   const staleOpenCalls = staleSocket?.opened ? 1 : 0;
   const duplicateOwnerViolations = activeOwnerCountBeforeCleanup > 1 ? 1 : 0;
@@ -323,16 +380,34 @@ async function runStage(stage: Stage): Promise<RunProof> {
     expectedFactoryCount: socketFactoryCalls === (stage === "factory" ? 2 : 1),
     staleSocketIdentityMatchesStage:
       stage === "factory"
-        ? staleSocketIdentities.length === 1 && staleSocketIdentities[0] === expectedOwnerIdentity
+        ? staleSocketIdentities.length === 1 &&
+          sameOwnerIdentity(staleSocketIdentities[0]!, expectedOwnerIdentity)
         : staleSocketIdentities.length === 0,
+    staleSocketIdMatchesStage:
+      stage !== "factory" ||
+      (staleSocketIds.length === 1 && staleSocketIds[0] !== replacementSocketId),
     staleSocketClosedExactly: stage !== "factory" || staleSocketCloseCalls === 1,
     staleSocketNeverOpened: staleOpenCalls === 0,
-    replacementIdentityMatchesExpected: replacementSocketIdentity === expectedOwnerIdentity,
+    replacementIdentityMatchesExpected: sameOwnerIdentity(
+      replacementSocketIdentity,
+      expectedOwnerIdentity,
+    ),
+    replacementSocketIdUnique: replacementSocketId !== staleSocketId,
     replacementOpenedExactlyOnce: replacement.opened && openedSockets === 1,
     replacementClosedExactlyOnce: replacementSocketCloseCalls === 1,
     replacementReachedAttached: recoveryAttached,
     expectedOwnerIsOnlyActiveOwner:
-      activeOwnerIdentities.length === 1 && activeOwnerIdentities[0] === expectedOwnerIdentity,
+      activeOwnerIdentities.length === 1 &&
+      sameOwnerIdentity(activeOwnerIdentities[0]!, expectedOwnerIdentity),
+    activeSocketIsReplacement:
+      activeSocketIds.length === 1 && activeSocketIds[0] === replacementSocketId,
+    socketClosureLedgerExact:
+      socketClosures.length === (stage === "factory" ? 2 : 1) &&
+      socketClosures.every(
+        (closure) =>
+          closure.closeCalls === 1 &&
+          closure.opened === (closure.socketId === replacementSocketId),
+      ),
     noDuplicateOwners: duplicateOwnerViolations === 0,
     allCallbacksNullAfterClose,
     staleCallbacksExercised:
@@ -365,11 +440,15 @@ async function runStage(stage: Stage): Promise<RunProof> {
     cleanupCalls,
     duplicateOwnerViolations,
     activeOwnerCount: activeOwnerCountBeforeCleanup,
+    activeSocketIds,
     expectedOwnerIdentity,
     activeOwnerIdentities,
+    staleSocketIds,
     staleSocketIdentities,
+    staleSocketId,
     staleSocketIdentity,
     staleSocketCloseCalls,
+    replacementSocketId,
     replacementSocketIdentity,
     replacementSocketCloseCalls,
     socketClosures,
