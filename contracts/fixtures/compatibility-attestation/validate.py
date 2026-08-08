@@ -35,11 +35,12 @@ OPERATION = "C-04"
 CONTRACT = "dashboard-v0.0.1"
 HERMES_REPOSITORY = "NousResearch/hermes-agent"
 HERMES_SHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
-# Immutable fixture data is reviewed against this exact prior PR head. The
+# Immutable fixture data is reviewed against the exact prior descendant that
+# contains the refreshed attestation and final proof-matrix bytes. The
 # executing validator is checked separately against the current HEAD blob so
-# this correction can evolve without a self-referential commit hash.
-REVIEWED_COMMIT = "1314b005a614d5b3ac6deedb789f6b84dbc47d2a"
-REVIEWED_TREE = "352c97341ac93d706ed03db9c8fa704875096282"
+# the snapshot can remain immutable without a self-referential commit hash.
+REVIEWED_COMMIT = "4c2c2bc5a91e0432f68ec841b6386ebe6b912f29"
+REVIEWED_TREE = "b3d4ce3b3144c36f9972eb5a23ca354ac0fbf696"
 VALIDATOR_PATH = "contracts/fixtures/compatibility-attestation/validate.py"
 VALIDATOR_COMMAND = "python3 contracts/fixtures/compatibility-attestation/validate.py"
 ATTESTATION_RELATIVE = "contracts/fixtures/compatibility-attestation/revision_attestation.json"
@@ -99,8 +100,8 @@ EVIDENCE = {
     "route_manifest": {
         "path": "contracts/hermes-dashboard/manifest.md",
         "contract_revision": CONTRACT,
-        "sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
-        "size_bytes": 17859,
+        "sha256": "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
+        "size_bytes": 18396,
     },
     "source_review": {
         "path": "contracts/fixtures/source-audit/planning-reconciliation/planning_review.json",
@@ -109,8 +110,8 @@ EVIDENCE = {
     },
     "proxy_proof": {
         "path": "docs/deployment/proof-matrix.md",
-        "sha256": "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212",
-        "size_bytes": 16167,
+        "sha256": "01a12174bf770e5380505a5c89930d36b8ba4e43b22b27df1b89dbf9623055a9",
+        "size_bytes": 18532,
     },
 }
 

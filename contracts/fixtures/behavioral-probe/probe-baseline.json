@@ -132,24 +132,24 @@
     ],
     "evidence_mode": "worktree_recomputed_against_approved_commit",
     "immutable_evidence": false,
-    "canonical_baseline_sha256": "4b135c68b219a19e32b0850bb9750cc5c8b6177f1f9f8d3da956291a9b541b17",
+    "canonical_baseline_sha256": "0f26bcac01ed76fdae0268803ff1358dcfe22f6bf198eb6601a015fb1fef3cfe",
     "canonical_baseline_size_bytes": 2792,
     "baseline_file_size_bytes": 4059,
-    "artifact_manifest_sha256": "a58c5f0a597c69e0950cbb2022accb336a7f03b957c29c3899b55845dee38605",
+    "artifact_manifest_sha256": "85df13759cf92b343061aa075c8c6929d334668c3ab3809a94eb6597526a6330",
     "artifact_manifest": [
       {
         "path": "README.md",
-        "sha256": "7a3f350bef2d83d832103ab57f283f6ff8f072a34a42c9cdaea38ad17376d065",
+        "sha256": "875b83f523c7ec4ff8e6c28e542f80ae734a73f79118bd27b1294f444b7e8dc9",
         "size_bytes": 9387
       },
       {
         "path": "probe-fixtures.json",
-        "sha256": "9e9ba4463c1203b9963b14a6d33a04674f967530fb210f1dd77ba881a073ad87",
+        "sha256": "9958c4c3f32946e7301fdffa5a861b36f7921ada8b394ea72e07405b7c1d3fef",
         "size_bytes": 71389
       },
       {
         "path": "validate.py",
-        "sha256": "3dbb2a18ce9e8b16482a0c75aaec857607a7dc4a4126a6f156094947e569df60",
+        "sha256": "aa426279c5844475af765b45990e55c519c1814ee98c1f445ac65f981550f75d",
         "size_bytes": 54195
       },
       {

@@ -46,24 +46,24 @@ FAILURE_LIMIT = 240
 # These identities are local reproducibility pins. The aggregate registry is
 # the later integration trust root; the reviewed proof-matrix Git object below
 # independently binds the source contract used by each synthetic observation.
-PINNED_CASES_SHA256 = "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34"
-PINNED_BASELINE_SHA256 = "b79897e192b320157af65a130df442f5d48c52b0d1058a506a1d93dc5b3dfbc2"
-PINNED_SEMANTICS_SHA256 = "0d2cab9a0a709f9f1bf88ff91c53053af3d12c3d1cc5eb3dd0e227a02f71372f"
-PINNED_BASELINE_EVIDENCE_SHA256 = "5d988329644b6fc400b71d074f6d19ee3511deed6bfab23580f0f58366841e4e"
-PINNED_VALIDATOR_SOURCE_SHA256 = "adc43a0e3e7414d35d888cacc14ef10d503ff32e51bd6c15a0eb62b4c245ea12"
+PINNED_CASES_SHA256 = "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"
+PINNED_BASELINE_SHA256 = "bacfe65e85f703df2d7a898861be619763d456174c15f1aa802c9015c97df731"
+PINNED_SEMANTICS_SHA256 = "3d9fb573e84dd354c685e352534bfdbce91760f937c2090e06a4185bb4a86c84"
+PINNED_BASELINE_EVIDENCE_SHA256 = "de3b1bac5c02e76b37704858b92ad360f0fba7a8771e1dd9e4acf4c8448424bd"
+PINNED_VALIDATOR_SOURCE_SHA256 = "a088481536a2737d7402517976d87287b11d290ba90cbc581cfb2e7db42d30a2"
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (8253, "0ff1ee8c929dc0ac70292b7ed4876cbf96ff93f84d68e3799b3adb82607c7f40"),
-    "cases.json": (52421, "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34"),
-    "test_validate.py": (16401, "eb7e6c3290f3643235f56822245f245c9f5b46a7ff9703d197c18556da667f1e"),
+    "README.md": (12251, "7a1a913f43de99f06ff8977aadfb43e728a044ecfb32b90b9386e47ca50c822d"),
+    "cases.json": (52421, "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"),
+    "test_validate.py": (45430, "c26b484d3396be9496e055540e7c1e103777d8ba7cfbacc9f2c22096483c5e94"),
 }
 
 # The deployment proof matrix is an immutable, local Git source contract. It
 # supplies the forwarding-header and public-to-private mapping requirements;
 # the per-row binding below prevents copying an allow request into another row.
-REVIEWED_PROOF_MATRIX_COMMIT = "fbaebbcf445d89e0b3968c884d0ae4ccb40744cb"
+REVIEWED_PROOF_MATRIX_COMMIT = "4c2c2bc5a91e0432f68ec841b6386ebe6b912f29"
 REVIEWED_PROOF_MATRIX_PATH = "docs/deployment/proof-matrix.md"
-REVIEWED_PROOF_MATRIX_BYTES = 16167
-REVIEWED_PROOF_MATRIX_SHA256 = "52fb8d0fb9f21ee7a80c5796343c3893a7f715c93fd47e832f5be098bc865212"
+REVIEWED_PROOF_MATRIX_BYTES = 18532
+REVIEWED_PROOF_MATRIX_SHA256 = "01a12174bf770e5380505a5c89930d36b8ba4e43b22b27df1b89dbf9623055a9"
 
 ROOT_KEYS = ("schema", "fixture_id", "issue", "contract", "hermes_source_sha", "synthetic_only", "live_claim", "proof_mode", "mapping", "policy", "evidence_contract", "cases")
 MAPPING_KEYS = (

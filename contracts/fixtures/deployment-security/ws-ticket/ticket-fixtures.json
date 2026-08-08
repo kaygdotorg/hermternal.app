@@ -5,7 +5,7 @@
   "contract": "dashboard-v0.0.1",
   "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
   "route_manifest": "contracts/hermes-dashboard/manifest.md",
-  "route_manifest_sha256": "3c6b44dc8dd90836f4fc5c5158d459959c569fb811db4b198e87d78ea5010197",
+  "route_manifest_sha256": "0f2f1ea3af722cf2d14f6a43754a8430d20bae98d335b961c64b3f1229bd07c1",
   "synthetic_only": true,
   "purpose": "Prove ticket acquisition, ephemeral upgrade-query use, rejection, expiry, reuse, bounded-fragment redaction, error-layer distinction, and redaction with local semantic adapters only.",
   "proof": {

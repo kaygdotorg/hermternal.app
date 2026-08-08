@@ -156,7 +156,10 @@ failure probe in both modes and requires matching bounded output.
 The validator accepts only the canonical `cases.json` path and code-pins its
 raw digest. It also binds every row to its observation index, exact request
 object, and the reviewed `docs/deployment/proof-matrix.md` Git object
-(`fbaebbcf445d89e0b3968c884d0ae4ccb40744cb`). A canonical semantic digest covers
+(`4c2c2bc5a91e0432f68ec841b6386ebe6b912f29`), whose pinned size is 18532
+bytes and whose SHA-256 is
+`01a12174bf770e5380505a5c89930d36b8ba4e43b22b27df1b89dbf9623055a9`. A
+canonical semantic digest covers
 the mapping, policy, evidence contract, raw requests, source-row evidence, and
 independently computed outcomes, plus the baseline digest. The baseline repeats
 the semantic digest and binds the normalized README, cases, validator, and
@@ -168,11 +171,9 @@ local pins together. The independent five-file identity and rotation authority
 must therefore be supplied by the aggregate registry owner in a separately
 reviewed prior Git object; this fixture does not edit `contracts/fixtures/index.json`
 or claim to close that trust boundary before that owner-controlled registration.
-The baseline and identity must be regenerated only after the source is stable and
-only through that external predecessor anchor. Until that authority is merged,
-the default validator is expected to stop at its bounded stale-pin failure;
-`--skip-baseline` and the focused normal/optimized suites exercise the local
-correction lane without rotating those external pins. The comma-joined origin
+The current proof-matrix pins are refreshed to this exact reviewed snapshot,
+and both normal and optimized validators fail closed if its commit, byte count,
+or digest drifts. The comma-joined origin
 cardinality canary is assembled from separate Python string fragments so the
 aggregate registry scanner does not mistake two synthetic URLs for one live
 host; its runtime mutation value is unchanged. The local scanner also rejects

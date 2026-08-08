@@ -211,19 +211,64 @@ class HostOriginMappingProofTests(unittest.TestCase):
             outputs.append(result.stdout)
         self.assertEqual(outputs[0], outputs[1])
 
-    def test_default_validator_passes_or_reports_external_pin_gate(self) -> None:
-        expected = {"pinned retained artifact size changed", "pinned retained artifact digest changed", "pinned validator identity changed"}
+    def test_default_validator_passes_with_refreshed_pins(self) -> None:
+        expected = {"status": "ok", "fixture_id": "host-origin-mapping-dep-03-f5be9236", "cases": 33, "accepted": 1, "rejected": 32, "synthetic_only": True, "live_claim": False}
         outputs = []
         for optimized in (False, True):
             result = self.run_cli(optimized=optimized)
+            self.assertEqual(result.returncode, 0, result)
             self.assertEqual(result.stderr, "")
-            if result.returncode == 0:
-                self.assertEqual(json.loads(result.stdout), {"status": "ok", "fixture_id": "host-origin-mapping-dep-03-f5be9236", "cases": 33, "accepted": 1, "rejected": 32, "synthetic_only": True, "live_claim": False})
-            else:
-                self.assert_bounded_failure(result)
-                self.assertIn(json.loads(result.stdout)["reason"], expected)
+            self.assertEqual(json.loads(result.stdout), expected)
             outputs.append((result.returncode, result.stdout, result.stderr))
         self.assertEqual(outputs[0], outputs[1])
+
+    def run_proof_matrix_pin_probe(self, attribute: str, value: str, *, optimized: bool = False) -> subprocess.CompletedProcess[str]:
+        probe = (
+            "import importlib" + ".util, sys\n"
+            "spec = importlib" + ".util.spec_from_file_location('probe_validate', sys" + ".argv[1])\n"
+            "module = importlib" + ".util.module_from_spec(spec)\n"
+            "spec" + ".loader.exec_module(module)\n"
+            "attribute = sys" + ".argv[2]\n"
+            "value = int(sys" + ".argv[3]) if attribute" + ".endswith('_BYTES') else sys" + ".argv[3]\n"
+            "setattr(module, attribute, value)\n"
+            "try:\n"
+            "    module" + ".load_reviewed_proof_matrix()\n"
+            "except module" + ".ValidationError as exc:\n"
+            "    print(module" + ".bounded_failure(exc))\n"
+            "    raise SystemExit(2)\n"
+            "raise SystemExit(0)\n"
+        )
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        command.extend(["-c", probe, str(VALIDATOR), attribute, value])
+        return subprocess.run(command, cwd=ROOT.parents[3], text=True, capture_output=True, check=False, timeout=30)
+
+    def test_proof_matrix_pin_drift_fails_closed_in_both_modes(self) -> None:
+        mutations = (
+            ("REVIEWED_PROOF_MATRIX_COMMIT", "0" * 40),
+            ("REVIEWED_PROOF_MATRIX_BYTES", str(validate.REVIEWED_PROOF_MATRIX_BYTES + 1)),
+            ("REVIEWED_PROOF_MATRIX_SHA256", "0" * 64),
+        )
+        for attribute, value in mutations:
+            outputs = []
+            for optimized in (False, True):
+                result = self.run_proof_matrix_pin_probe(attribute, value, optimized=optimized)
+                self.assert_bounded_failure(result)
+                outputs.append((result.returncode, result.stdout, result.stderr))
+            self.assertEqual(outputs[0], outputs[1], attribute)
+
+    def test_proof_matrix_pins_match_current_snapshot(self) -> None:
+        data = validate._read_reviewed_git_artifact(
+            validate._repo_root(ROOT),
+            validate.REVIEWED_PROOF_MATRIX_COMMIT,
+            validate.REVIEWED_PROOF_MATRIX_PATH,
+            validate.REVIEWED_PROOF_MATRIX_BYTES,
+            validate.REVIEWED_PROOF_MATRIX_SHA256,
+        )
+        self.assertEqual(len(data), validate.REVIEWED_PROOF_MATRIX_BYTES)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), validate.REVIEWED_PROOF_MATRIX_SHA256)
+        self.assertEqual(validate.load_reviewed_proof_matrix(), validate.REVIEWED_PROOF_MATRIX_SHA256)
 
     def test_default_validation_reaches_baseline_and_scan_with_current_controlled_identity(self) -> None:
         self.assert_controlled_validation_parity()

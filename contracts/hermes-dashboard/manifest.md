@@ -55,7 +55,7 @@ The client may use these routes:
 | `GET` | `/login` | Server-rendered login entry point. |
 | `GET` | `/api/auth/providers` | Discover the providers exposed by this Dashboard. |
 | `GET` | `/auth/login` | Start the configured browser provider flow. |
-| `GET` | `/auth/callback` | Complete the browser provider flow. |
+| `GET` | `/auth/callback` | Complete the browser provider flow with exactly either `code`+`state`, or literal `error=access_denied`+`error_description`+`state`, in any key order; `code`, `state`, and `error_description` are non-empty safe ASCII (`A-Za-z0-9._~-`) values bounded to 512 characters. |
 | `POST` | `/auth/password-login` | Use the configured password provider when it is advertised. |
 | `POST` | `/auth/logout` | End the Dashboard session. |
 | `GET` | `/api/auth/me` | Verify the authenticated identity. |
@@ -115,7 +115,8 @@ The only selected upload route is `POST /api/chat/image-upload`. It is for valid
 - Path: `WS /api/pty`.
 - Scope: web only on an attested POSIX or WSL Hermes host. It renders the full Hermes TUI. An unsupported or unverified host class blocks Terminal. Apple clients do not use this route in v0.0.1.
 - Authentication: use a fresh gated WebSocket ticket when required.
-- `attach` identifies the keep-alive PTY process. `resume` selects the Hermes conversation identity. `fresh=1` prevents implicit reuse of the active session and starts a fresh identity. These are opaque source-defined query values; the client must not construct their internal keys.
+- The browser upgrade query is exactly `ticket` plus `resume`, with an optional non-empty `attach` value. Key order is not significant; duplicate keys, empty values, unknown parameters, and `fresh` are invalid and must be rejected before upgrade.
+- `ticket` and `attach` are bounded to 512 safe opaque characters; `resume` is bounded to 128 safe opaque characters. `attach` identifies the keep-alive PTY process, and `resume` selects the Hermes conversation identity. The current browser client does not send a `fresh` query parameter; clients must not construct internal identity keys.
 - The keep-alive registry retains a detached PTY for 30 minutes and reattaches it with the same opaque `attach` value.
 - PTY output is binary and byte-preserving. Text input is encoded as UTF-8 bytes. Binary input is forwarded as bytes.
 - The source-defined resize control is the complete byte sequence `ESC [RESIZE:<cols>;<rows>]`. The Dashboard consumes it as a resize command and does not write it to the PTY. Clamp dimensions to 1–2000 columns and 1–1000 rows before sending the control.

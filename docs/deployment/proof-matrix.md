@@ -19,6 +19,45 @@ Terminal mode requires Hermes to run on a POSIX or WSL host. The proof MUST reco
 
 The fixed non-loopback rule is intentional. The reviewed Hermes authentication gate is not active on loopback. Older planning text that names loopback is superseded for this proof.
 
+### Issue #156 disposable Caddy exception
+
+Issue #156 uses the official Hermes launcher on the authorized disposable VM.
+That launcher publishes the Dashboard only on `127.0.0.1:19256`; the proof does
+not change the launcher boundary, add credentials, or expose Hermes on a public
+interface. Caddy listens on its own disposable loopback listener and is reached
+through an owned SSH tunnel. This is a test-lane exception to the general
+non-loopback topology above, not a production deployment recommendation.
+
+The checked-in Caddy renderer is an exact proof fixture, not a deployable
+configuration. It serves the PR #291 static build at `/`, maps the reviewed
+Dashboard surface under exactly one `/hermes` prefix, and denies all other
+methods and paths. It does not implement Traefik. Its redacted evidence binds
+the build SHA, static build digest, runtime Caddyfile digest
+`342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c`, and a reproducible runtime-input manifest. Canonical
+session and message deep links rewrite to `200.html`; only the reviewed root
+scenario selector and the exact OAuth callback forms accept a query: either
+non-empty safe ASCII `code` and `state` values, or literal `error=access_denied`
+with non-empty safe ASCII `error_description` and `state`; each value is bounded
+to 512 characters and key order is independent. Static, client, and other REST
+routes reject query mutations. Chat and PTY
+upgrades use separate exact grammars. The current browser PTY client sends only
+`ticket` plus `resume` and optional non-empty `attach`; `fresh` is unsupported
+and remains edge-denied. The proxy resets all inbound forwarding headers before
+rebuilding trusted public metadata. Local black-box
+Caddy/mock-upstream tests assert these behaviors against the shared static
+route and deep-link fixture identities. The browser journey is derived from
+the bounded `browser_evidence` map: its fixed schema binds `passed`,
+`blocked_provider`, `blocked_empty_session`, or `failed` to the exact build,
+static manifest, rendered Caddyfile, and runtime-input digests. The retained
+map is `blocked_provider` with only `provider_unavailable`; no browser event
+payload is retained. A passed map requires the closed event set, including
+`message.complete: complete`; every other status requires its matching fixed
+marker. Missing, stale, mismatched, malformed, or extra-key maps fail closed.
+The local mock emits no `Set-Cookie`; the renderer-only `Secure` rewrite is not
+an attribute proof, so `HttpOnly`, `SameSite`, and `Path` remain unproven. A
+Caddy binary version or image digest is likewise external metadata, not a
+validated identity in this fixture.
+
 ## Public origin and private bind
 
 The public origin and the private Hermes bind authority are different authorities. The disposable proof MUST resolve that mismatch using the behavior accepted by the pinned Hermes source:

@@ -1,0 +1,294 @@
+{
+  "schema": "hermternal.caddy-proof.v1",
+  "issue": "156",
+  "contract": "dashboard-v0.0.1",
+  "deployment": {
+    "proxy": "caddy",
+    "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+    "runtime_config_sha256": "342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c",
+    "runtime_inputs_schema": "hermternal.caddy-proof.runtime-inputs.v1",
+    "runtime_inputs": {
+      "host": "caddy-156.test",
+      "https_port": 19443,
+      "hermes_port": 19256,
+      "site_root": "/opt/hermternal/caddy-proof/site",
+      "cert_path": "/opt/hermternal/caddy-proof/tls.crt",
+      "key_path": "/opt/hermternal/caddy-proof/tls.key",
+      "storage_root": "/opt/hermternal/caddy-proof"
+    },
+    "runtime_inputs_sha256": "94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4",
+    "parity_fixtures": {
+      "static_route_grammar": {
+        "path": "apps/web/src/lib/static-route-grammar.mjs",
+        "sha256": "f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165"
+      },
+      "deep_link_cases": {
+        "path": "contracts/fixtures/deep-link-grammar/cases.json",
+        "sha256": "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96"
+      }
+    },
+    "hermes_listener": "loopback-only",
+    "public_listener": "loopback-only-disposable"
+  },
+  "product": {
+    "build_commit": "521ede32b904a42e22eebb279fd7d404074cd318",
+    "static_manifest_sha256": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
+  },
+  "browser_journey": "blocked_provider",
+  "browser_evidence": {
+    "schema": "hermternal.caddy-proof.browser-evidence.v1",
+    "status": "blocked_provider",
+    "provenance": {
+      "build_sha": "521ede32b904a42e22eebb279fd7d404074cd318",
+      "build_digest": "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21",
+      "caddyfile_digest": "342952687f19e425bd47126a47b5d17767c27aed99942252d6a6711b2b94f15c",
+      "runtime_inputs_sha256": "94a1c14439486a8e9302ad32400a8ec56ab0ef7f8b019dd8470f5f79c50a91c4"
+    },
+    "observations": {
+      "blocker": "provider_unavailable"
+    }
+  },
+  "positive_cases": [
+    {
+      "id": "root_static",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false
+    },
+    {
+      "id": "root_scenario_static",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "query_policy": "reviewed scenario selector only"
+    },
+    {
+      "id": "deep_link_session",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "fallback": "/200.html"
+    },
+    {
+      "id": "deep_link_message",
+      "status": 200,
+      "layer": "static",
+      "upstream_request": false,
+      "fallback": "/200.html"
+    },
+    {
+      "id": "dashboard_provider_discovery",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "password_login",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "oauth_callback",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true,
+      "query_policy": "non-empty safe ASCII code plus state, or literal error=access_denied plus non-empty safe ASCII error_description plus state; each value <=512; order-independent"
+    },
+    {
+      "id": "ws_ticket",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ws_upgrade",
+      "status": 101,
+      "layer": "hermes",
+      "upstream_request": true,
+      "query_policy": "chat ticket-only"
+    },
+    {
+      "id": "pty_upgrade",
+      "status": 101,
+      "layer": "hermes",
+      "upstream_request": true,
+      "query_policy": "ticket plus resume with optional attach; order-independent"
+    },
+    {
+      "id": "mock_upstream_header_rebuild",
+      "status": 200,
+      "layer": "hermes",
+      "upstream_request": true,
+      "forwarding_policy": "client forwarding metadata deleted before trusted public metadata is rebuilt",
+      "prefix_policy": "single /hermes prefix"
+    }
+  ],
+  "negative_cases": [
+    {
+      "id": "wrong_host",
+      "status": 421,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "wrong_websocket_origin",
+      "status": 403,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "unknown_route",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "unknown_method",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "duplicate_prefix",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "traversal",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "encoded_separator",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "encoded_dot",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "malformed_upgrade",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "missing_ticket",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "root_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "static_asset_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "client_route_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "rest_query_mutation",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_missing_resume",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_extra_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_duplicate_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_empty_value",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "pty_fresh_parameter",
+      "status": 404,
+      "layer": "edge",
+      "upstream_request": false
+    },
+    {
+      "id": "invalid_ticket",
+      "status": 400,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ticket_expired",
+      "status": 403,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "ticket_reuse",
+      "status": 403,
+      "layer": "hermes",
+      "upstream_request": true
+    },
+    {
+      "id": "direct_private_port",
+      "status": "connection_denied",
+      "layer": "network",
+      "upstream_request": false
+    }
+  ],
+  "black_box": {
+    "scope": "local Caddy plus recording mock-upstream only",
+    "route_vectors": "shared static-route grammar and deep-link fixture identities",
+    "assertions": [
+      "valid session and message deep links serve 200.html",
+      "root-only scenario query is accepted",
+      "static, client, and non-callback REST query mutations are edge 404",
+      "OAuth callback accepts only the reviewed code/state or provider-error query forms",
+      "mock upstream receives exact path, query, body, and single prefix",
+      "Forwarded, X-Forwarded-*, and X-Real-IP spoofing is absent upstream",
+      "chat and PTY upgrades use separate exact query grammars"
+    ],
+    "request_material": "redacted"
+  },
+  "cookie_proof": {
+    "status": "not_proven",
+    "reason": "local mock emitted no Set-Cookie; renderer-only Secure rewriting is not a complete cookie-attribute proof"
+  },
+  "retention": {
+    "credentials": "redacted",
+    "cookies": "redacted",
+    "tickets": "redacted",
+    "ticket_fragments": "redacted",
+    "queries": "redacted",
+    "provider_state": "redacted",
+    "transcripts": "redacted"
+  }
+}
