@@ -264,6 +264,7 @@ MAX_STATIC_COLLECTION_ITEMS = 256
 MAX_STATIC_MAPPING_FIELDS = 128
 MAX_STATIC_FORMAT_SPEC_BYTES = 256
 MAX_STATIC_FORMAT_FIELD_WIDTH = MAX_ARTIFACT_BYTES
+MAX_STATIC_FORMAT_NESTING = 64
 MAX_URL_LENGTH = 8 * 1024
 MAX_URL_COMPONENT_LENGTH = 4 * 1024
 MAX_URL_QUERY_PAIRS = 128
@@ -1003,13 +1004,19 @@ def _validate_sensitive_marker(value: Any, *, key: str = "") -> None:
     raise ValidationError()
 
 
+MAX_REGEX_ESCAPE_SOURCE_LENGTH = 64
+
+
 def _decode_regex_escape(text: str, index: int) -> tuple[str, int, bool]:
     """Decode one bounded regex escape, preserving uncertainty explicitly."""
 
     if index + 1 >= len(text) or text[index] != "\\":
         return text[index:index + 1], index + 1, False
     marker = text[index + 1]
-    if marker in ".-":
+    # These escapes are URL syntax once the regex is evaluated. Decode them
+    # before authority, path, and query policy so ``\\x3f`` cannot hide a query
+    # delimiter or ``\\x5c`` can hide an authority backslash.
+    if marker in ".-/:?#\\@&;=%":
         return marker, index + 2, False
     lengths = {"x": 2, "u": 4, "U": 8}
     if marker in lengths:
@@ -1019,12 +1026,16 @@ def _decode_regex_escape(text: str, index: int) -> tuple[str, int, bool]:
             return "?", min(len(text), end), True
         codepoint = int(digits, 16)
         if codepoint > 0x7F:
-            return "?", end, True
-        return chr(codepoint), end, False
+            return "?", min(len(text), end), True
+        return chr(codepoint), min(len(text), end), False
     if marker == "N":
-        end = text.find("}", index + 3)
+        # Never search an unbounded source for a closing brace. A malformed
+        # named escape must consume a bounded prefix and let the caller fail
+        # closed without rescanning the same long suffix.
+        search_end = min(len(text), index + 3 + MAX_REGEX_ESCAPE_SOURCE_LENGTH)
+        end = text.find("}", index + 3, search_end)
         if end < 0:
-            return "?", len(text), True
+            return "?", search_end, True
         name = text[index + 3:end]
         try:
             character = unicodedata.lookup(name)
@@ -1138,6 +1149,49 @@ def _regex_scheme_token(text: str, index: int, expected: str) -> int | None:
     return None
 
 
+def _regex_literal_sequence_end(text: str, index: int, expected: str) -> int | None:
+    cursor = index
+    for character in expected:
+        if cursor - index >= MAX_REGEX_SCHEME_SOURCE_LENGTH:
+            return None
+        next_cursor = _regex_scheme_token(text, cursor, character)
+        if next_cursor is None:
+            return None
+        cursor = next_cursor
+    return cursor
+
+
+def _regex_scheme_delimiter_end(text: str, index: int) -> int | None:
+    cursor = _regex_scheme_token(text, index, ":")
+    if cursor is None:
+        return None
+    cursor = _regex_scheme_token(text, cursor, "/")
+    if cursor is None:
+        return None
+    return _regex_scheme_token(text, cursor, "/")
+
+
+def _regex_class_span(text: str, index: int) -> tuple[int, str] | None:
+    """Return one bounded character-class span without an unbounded search."""
+
+    if index >= len(text) or text[index] != "[":
+        return None
+    cursor = index + 1
+    limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH + 1)
+    while cursor < limit:
+        character = text[cursor]
+        if character == "\\":
+            _decoded, consumed, _uncertain = _decode_regex_escape(text, cursor)
+            if consumed <= cursor:
+                return None
+            cursor = min(consumed, limit)
+            continue
+        if character == "]":
+            return cursor + 1, text[index + 1:cursor]
+        cursor += 1
+    return None
+
+
 def _regex_scheme_match_at(text: str, index: int) -> int | None:
     """Return the end of one literal-equivalent regex URL scheme."""
 
@@ -1145,6 +1199,9 @@ def _regex_scheme_match_at(text: str, index: int) -> int | None:
         cursor = index
         matched = True
         for expected in candidate:
+            if cursor - index >= MAX_REGEX_SCHEME_SOURCE_LENGTH:
+                matched = False
+                break
             next_cursor = _regex_scheme_token(text, cursor, expected)
             if next_cursor is None or next_cursor - index > MAX_REGEX_SCHEME_SOURCE_LENGTH:
                 matched = False
@@ -1155,34 +1212,238 @@ def _regex_scheme_match_at(text: str, index: int) -> int | None:
     return None
 
 
+def _regex_dynamic_scheme_match_at(text: str, index: int) -> int | None:
+    """Find bounded scheme syntax whose matched protocol is not deterministic."""
+
+    class_span = _regex_class_span(text, index)
+    if class_span is not None:
+        class_end, body = class_span
+        # A multi-character first class can match ``h`` while the suffix proves
+        # the source is attempting to express an HTTP-family scheme.
+        if len(body) > 1:
+            suffix_end = _regex_literal_sequence_end(text, class_end, "ttps")
+            if suffix_end is not None:
+                delimiter_end = _regex_scheme_delimiter_end(text, suffix_end)
+                if delimiter_end is not None:
+                    return delimiter_end
+
+    first_end = _regex_scheme_token(text, index, "h")
+    if first_end is not None:
+        class_span = _regex_class_span(text, first_end)
+        if class_span is not None and len(class_span[1]) > 1:
+            suffix_end = _regex_literal_sequence_end(text, class_span[0], "tps")
+            if suffix_end is not None:
+                delimiter_end = _regex_scheme_delimiter_end(text, suffix_end)
+                if delimiter_end is not None:
+                    return delimiter_end
+
+    for prefix in ("https", "http", "wss", "ws"):
+        prefix_end = _regex_literal_sequence_end(text, index, prefix)
+        if prefix_end is None:
+            continue
+        if prefix_end < len(text) and text[prefix_end] == "?":
+            delimiter_end = _regex_scheme_delimiter_end(text, prefix_end + 1)
+            if delimiter_end is not None:
+                return delimiter_end
+        if prefix_end < len(text) and text[prefix_end] == "\\":
+            _decoded, escape_end, uncertain = _decode_regex_escape(text, prefix_end)
+            if uncertain:
+                delimiter_end = _regex_scheme_delimiter_end(text, escape_end)
+                if delimiter_end is not None:
+                    return delimiter_end
+
+    # Keep the alternation grammar deliberately tiny. The inner ``https?``
+    # otherwise stops before ``|`` and would not be recognized as a URL scheme.
+    if text.startswith("(?:", index):
+        limit = min(len(text), index + MAX_REGEX_SCHEME_SOURCE_LENGTH)
+        closing = text.find(")", index + 3, limit)
+        if closing >= 0 and text[index + 3:closing] in {"https?|http", "http|https?"}:
+            delimiter_end = _regex_scheme_delimiter_end(text, closing + 1)
+            if delimiter_end is not None:
+                return delimiter_end
+    return None
+
+
+def _regex_dynamic_authority_is_live(text: str, scheme_end: int) -> bool:
+    """Reject dynamic schemes when their recovered authority is live or unsafe.
+
+    Detector expressions such as ``https?://[^\\s]+`` are source syntax, not a
+    concrete URL that this scanner can classify. Keep those bounded patterns
+    compatible, but do not let a dynamic scheme hide a concrete live host,
+    malformed port, authority backslash, or userinfo password. The same
+    distinction lets synthetic host patterns continue to exercise their local
+    validators without weakening the authority policy.
+    """
+
+    authority_marker = _regex_component_delimiter(text, scheme_end)
+    authority_end = authority_marker[0] if authority_marker is not None else len(text)
+    authority = text[scheme_end:authority_end]
+    if not authority:
+        return True
+    decoded_authority, uncertain = _decode_regex_host(authority)
+    policy_authority, class_flags, policy_uncertain = _regex_decoded_component_tokens(authority)
+    if "\\" in decoded_authority or any(
+        character == "\\" and not class_flags[index]
+        for index, character in enumerate(policy_authority)
+    ):
+        return True
+    if "@" in decoded_authority:
+        userinfo, host_port = decoded_authority.rsplit("@", 1)
+        if ":" in userinfo:
+            _username, password = userinfo.split(":", 1)
+            if password and not _is_explicit_synthetic_marker(password):
+                return True
+    else:
+        host_port = decoded_authority
+    try:
+        port = _regex_authority_port_text(policy_authority)
+    except ValidationError:
+        return True
+    if port is not None:
+        decoded_port, port_uncertain = _decode_regex_host(port)
+        if port_uncertain:
+            return True
+        try:
+            _validate_port_text(decoded_port)
+        except ValidationError:
+            return True
+        raw_host_port = policy_authority.rsplit("@", 1)[-1]
+        if raw_host_port.startswith("["):
+            closing = raw_host_port.find("]")
+            raw_host = raw_host_port[1:closing] if closing >= 0 else raw_host_port
+        else:
+            raw_host = raw_host_port[:-(len(port) + 1)]
+        host_text, _host_uncertain = _decode_regex_host(raw_host)
+    else:
+        host_text = host_port
+    if policy_uncertain and not uncertain:
+        return True
+    if "%" in host_text:
+        return True
+    concrete = tuple(dict.fromkeys(REGEX_HOST_LITERAL_PATTERN.findall(host_text)))
+    if not concrete:
+        return False
+    if not uncertain:
+        # A dynamic protocol over a literal authority is still ambiguous even
+        # when that authority is synthetic; it must not become a safe URL by
+        # choosing one branch of the scheme.
+        return True
+    # A recovered literal suffix can still prove that a dynamic host is
+    # synthetic. Any other concrete label remains live/ambiguous.
+    for host in concrete:
+        try:
+            _require_allowed_url_host(host, allow_synthetic_markers=False)
+        except ValidationError:
+            return True
+    try:
+        _validate_regex_url_candidate(
+            "https://" + text[scheme_end:],
+            allow_synthetic_markers=False,
+            allowed_assignment_values=frozenset(),
+            allowed_synthetic_full_values=frozenset(),
+            source_value=text,
+        )
+    except ValidationError:
+        return True
+    return False
+
+
 def _regex_scheme_matches(text: str) -> Iterator[tuple[int, int]]:
-    """Yield scheme spans outside broad regex classes and escaped syntax."""
+    """Yield deterministic scheme spans and reject dynamic scheme syntax."""
 
     index = 0
     in_class = False
     while index < len(text):
         character = text[index]
+        if not in_class:
+            dynamic_end = _regex_dynamic_scheme_match_at(text, index)
+            if dynamic_end is not None:
+                if _regex_dynamic_authority_is_live(text, dynamic_end):
+                    raise ValidationError()
+                index = dynamic_end
+                continue
+            match_end = _regex_scheme_match_at(text, index)
+            if match_end is not None:
+                yield index, match_end
+                index = match_end
+                continue
         if in_class:
             if character == "\\":
-                index += 2
+                _decoded, consumed, _uncertain = _decode_regex_escape(text, index)
+                index = max(index + 1, consumed)
             elif character == "]":
                 in_class = False
                 index += 1
             else:
                 index += 1
             continue
-        match_end = _regex_scheme_match_at(text, index)
-        if match_end is not None:
-            yield index, match_end
-            index = match_end
-            continue
         if character == "[":
             in_class = True
             index += 1
         elif character == "\\":
-            index += 2
+            _decoded, consumed, _uncertain = _decode_regex_escape(text, index)
+            index = max(index + 1, consumed)
         else:
             index += 1
+
+
+def _regex_decoded_component_tokens(component: str) -> tuple[str, tuple[bool, ...], bool]:
+    """Decode deterministic regex escapes while retaining class boundaries."""
+
+    decoded: list[str] = []
+    in_class: list[bool] = []
+    uncertain = False
+    class_depth = False
+    index = 0
+    while index < len(component):
+        character = component[index]
+        if character == "\\":
+            value, consumed, was_uncertain = _decode_regex_escape(component, index)
+            require(consumed > index, "regex URL escape is incomplete")
+            if was_uncertain:
+                source = component[index:consumed]
+                decoded.extend(source)
+                in_class.extend([class_depth] * len(source))
+                uncertain = True
+            else:
+                decoded.append(value)
+                in_class.append(class_depth)
+            index = consumed
+            continue
+        decoded.append(character)
+        in_class.append(class_depth)
+        if character == "[":
+            class_depth = True
+        elif character == "]" and class_depth:
+            class_depth = False
+        index += 1
+    return "".join(decoded), tuple(in_class), uncertain
+
+
+def _validate_decoded_regex_percent_escapes(component: str) -> None:
+    """Validate percent bytes after deterministic regex escapes are decoded."""
+
+    decoded, class_flags, _uncertain = _regex_decoded_component_tokens(component)
+    index = 0
+    while index < len(decoded):
+        if class_flags[index] or decoded[index] != "%":
+            index += 1
+            continue
+        require(index + 2 < len(decoded), "URL escape is incomplete")
+        require(
+            not class_flags[index + 1]
+            and not class_flags[index + 2]
+            and re.fullmatch(r"[0-9A-Fa-f]{2}", decoded[index + 1:index + 3]) is not None,
+            "URL escape is malformed",
+        )
+        index += 3
+
+
+def _regex_decoded_component(component: str, *, require_concrete: bool = False) -> str:
+    decoded, _class_flags, uncertain = _regex_decoded_component_tokens(component)
+    if require_concrete:
+        require(not uncertain, "regex URL escape is ambiguous")
+    return decoded
 
 
 def _regex_host_literals(raw_url: str) -> tuple[str, ...]:
@@ -1488,7 +1749,7 @@ def _regex_component_delimiter(
     start: int,
     *,
     markers: frozenset[str] = frozenset("/?#"),
-) -> tuple[int, str] | None:
+) -> tuple[int, str, int] | None:
     """Find one URL delimiter without mistaking regex syntax for URL syntax.
 
     Regex URL authorities commonly contain non-capturing groups such as
@@ -1511,8 +1772,10 @@ def _regex_component_delimiter(
             index += 1
             continue
         if character == "\\":
-            escaped = True
-            index += 1
+            decoded, consumed, _uncertain = _decode_regex_escape(value, index)
+            if decoded in markers and not _uncertain:
+                return index, decoded, consumed
+            index = max(index + 1, consumed)
             continue
         if in_class:
             if character == "]":
@@ -1535,13 +1798,13 @@ def _regex_component_delimiter(
         if character == "/" and "/" in markers:
             # A slash inside a regex path group (``(?:/path)?``) still marks
             # the URL path. Slashes in classes and escapes were skipped above.
-            return index, character
+            return index, character, index + 1
         if character == "#" and "#" in markers and parenthesis_depth == 0:
-            return index, character
+            return index, character, index + 1
         if character == "?" and "?" in markers and parenthesis_depth == 0:
             previous = value[index - 1] if index > start else ""
-            if previous not in ")]}>*+?":
-                return index, character
+            if not previous or previous not in ")]}>*+?":
+                return index, character, index + 1
         index += 1
     return None
 
@@ -1567,20 +1830,20 @@ def _regex_url_components(raw_url: str) -> tuple[str, str, str, str]:
     elif query_marker[1] == "#":
         path = raw_url[remainder_start:query_marker[0]]
         query = ""
-        fragment = raw_url[query_marker[0] + 1:]
+        fragment = raw_url[query_marker[2]:]
     elif query_marker[1] == "?":
         path = raw_url[remainder_start:query_marker[0]]
         fragment_marker = _regex_component_delimiter(
             raw_url,
-            query_marker[0] + 1,
+            query_marker[2],
             markers=frozenset("#"),
         )
         if fragment_marker is None or fragment_marker[1] != "#":
-            query = raw_url[query_marker[0] + 1:]
+            query = raw_url[query_marker[2]:]
             fragment = ""
         else:
-            query = raw_url[query_marker[0] + 1:fragment_marker[0]]
-            fragment = raw_url[fragment_marker[0] + 1:]
+            query = raw_url[query_marker[2]:fragment_marker[0]]
+            fragment = raw_url[fragment_marker[2]:]
     else:
         path = raw_url[remainder_start:query_marker[0]]
         query = ""
@@ -1735,11 +1998,13 @@ def _validate_url_path_components(path: str, fragment: str) -> None:
 
 
 def _validate_regex_url_path_components(path: str, fragment: str) -> None:
-    # Percent signs inside regex character classes are literals, not complete
-    # URL escapes. Validate the source-aware form without executing the regex.
+    # Validate both source percent escapes and escapes that decode to percent.
+    # Class contents remain regex syntax, but a deterministic ``\\x25`` outside
+    # a class must still satisfy ordinary URL percent policy.
     for component in (path, fragment):
         require(len(component) <= MAX_URL_COMPONENT_LENGTH, "URL component is too large")
         _validate_regex_percent_escapes(component)
+        _validate_decoded_regex_percent_escapes(component)
 
 
 def _validate_url_query(
@@ -1858,9 +2123,11 @@ def _validate_regex_url_candidate(
 ) -> None:
     authority, path, query, fragment = _regex_url_components(raw_url)
     _validate_regex_authority_escapes(authority)
+    decoded_authority = _regex_decoded_component(authority, require_concrete=True)
+    require("\\" not in decoded_authority, "ambiguous URL authority is not allowed")
     _validate_regex_url_path_components(path, fragment)
-    _regex_decoded_port(authority)
-    raw_host_port = authority.rsplit("@", 1)[-1]
+    _regex_decoded_port(decoded_authority)
+    raw_host_port = decoded_authority.rsplit("@", 1)[-1]
     bracket_host = ""
     if raw_host_port.startswith("["):
         closing = raw_host_port.find("]")
@@ -1869,11 +2136,11 @@ def _validate_regex_url_candidate(
     if bracket_host and ":" in bracket_host and re.fullmatch(r"[0-9A-Fa-f:]+", bracket_host):
         host_text = bracket_host
     else:
-        port = _regex_authority_port_text(authority)
+        port = _regex_authority_port_text(decoded_authority)
         host_text = raw_host_port if port is None else raw_host_port[:-(len(port) + 1)]
     require("%" not in host_text, "regex URL host escape is not allowed")
-    if "@" in authority:
-        raw_userinfo = authority.rsplit("@", 1)[0]
+    if "@" in decoded_authority:
+        raw_userinfo = decoded_authority.rsplit("@", 1)[0]
         decoded_userinfo, uncertain = _decode_regex_host(raw_userinfo)
         require(not uncertain, "regex URL userinfo is ambiguous")
         decoded_userinfo = _decode_url_component(decoded_userinfo, plus_as_space=False)
@@ -1904,6 +2171,18 @@ def _validate_regex_url_candidate(
         source_value=source_value,
         regex_pattern=True,
     )
+    decoded_query = _regex_decoded_component(query)
+    if decoded_query != query:
+        # Re-run ordinary query policy on the decoded representation so escaped
+        # ``?``, ``&``, ``=``, and credential-key/value bytes cannot remain
+        # invisible to the assignment scanner.
+        _validate_url_query(
+            decoded_query,
+            allow_synthetic_markers=allow_synthetic_markers,
+            allowed_assignment_values=allowed_assignment_values,
+            allowed_synthetic_full_values=allowed_synthetic_full_values,
+            source_value=source_value,
+        )
 
 
 def _regex_url_segment(value: str, start: int) -> str:
@@ -2418,10 +2697,14 @@ def _bounded_percent_format(template: str) -> bool:
     return conversions > 0
 
 
-def _bounded_percent_operand(value: Any, depth: int = 0) -> bool:
+def _bounded_percent_operand(
+    value: Any,
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> bool:
     """Bound percent operands without calling repr/str on untrusted shapes."""
 
-    if depth > MAX_STATIC_RENDER_PARTS:
+    if depth > MAX_STATIC_FORMAT_NESTING:
         return False
     if value is _STATIC_UNKNOWN:
         return False
@@ -2430,23 +2713,241 @@ def _bounded_percent_operand(value: Any, depth: int = 0) -> bool:
     if type(value) is int:
         # Comparing directly avoids converting an attacker-sized integer to a
         # decimal string while deciding whether formatting is safe.
-        return abs(value) <= MAX_INTEGER
+        return -MAX_INTEGER <= value <= MAX_INTEGER
     if type(value) is float:
         return math.isfinite(value) and _bounded_scalar_length(value) is not None
     if type(value) in {bool, type(None)}:
         return True
+    if seen is None:
+        seen = set()
     if type(value) in {tuple, list}:
-        return len(value) <= MAX_STATIC_COLLECTION_ITEMS and all(
-            _bounded_percent_operand(child, depth + 1) for child in value
-        )
+        if len(value) > MAX_STATIC_COLLECTION_ITEMS or id(value) in seen:
+            return False
+        seen.add(id(value))
+        try:
+            return all(_bounded_percent_operand(child, depth + 1, seen) for child in value)
+        finally:
+            seen.remove(id(value))
     if type(value) is dict:
-        return len(value) <= MAX_STATIC_MAPPING_FIELDS and all(
-            type(key) is str
-            and len(key) <= MAX_STATIC_FORMAT_SPEC_BYTES
-            and _bounded_percent_operand(child, depth + 1)
-            for key, child in value.items()
-        )
+        if len(value) > MAX_STATIC_MAPPING_FIELDS or id(value) in seen:
+            return False
+        seen.add(id(value))
+        try:
+            return all(
+                type(key) is str
+                and len(key) <= MAX_STATIC_FORMAT_SPEC_BYTES
+                and _bounded_percent_operand(child, depth + 1, seen)
+                for key, child in value.items()
+            )
+        finally:
+            seen.remove(id(value))
     return False
+
+
+def _bounded_percent_value_length(
+    value: Any,
+    *,
+    conversion: str,
+    precision: int | None = None,
+    depth: int = 0,
+    seen: set[int] | None = None,
+) -> int | None:
+    """Estimate one percent field without invoking its formatter."""
+
+    if depth > MAX_STATIC_FORMAT_NESTING:
+        return None
+    if value is _STATIC_UNKNOWN:
+        return None
+    if type(value) is str:
+        if conversion in {"r", "a"}:
+            # ``repr``/``ascii`` can expand control and non-ASCII code points
+            # substantially. Use a fixed worst-case multiplier without calling
+            # either formatter on untrusted source text.
+            if len(value) > (MAX_STATIC_RENDER_BYTES - 2) // 10:
+                return None
+            length = len(value) * 10 + 2
+        else:
+            length = len(value)
+    elif type(value) is int:
+        if not -MAX_INTEGER <= value <= MAX_INTEGER:
+            return None
+        length = len(str(value))
+    elif type(value) is float:
+        if not math.isfinite(value):
+            return None
+        length = max(len(str(value)), len(repr(value)))
+    elif type(value) in {bool, type(None)}:
+        length = len(str(value))
+    elif type(value) in {tuple, list}:
+        if len(value) > MAX_STATIC_COLLECTION_ITEMS:
+            return None
+        if seen is None:
+            seen = set()
+        if id(value) in seen:
+            return None
+        seen.add(id(value))
+        try:
+            total = 2
+            for index, child in enumerate(value):
+                child_length = _bounded_percent_value_length(
+                    child,
+                    conversion="r",
+                    depth=depth + 1,
+                    seen=seen,
+                )
+                if child_length is None:
+                    return None
+                total += child_length + (2 if index else 0)
+                if total > MAX_STATIC_RENDER_BYTES:
+                    return None
+            length = total
+        finally:
+            seen.remove(id(value))
+    elif type(value) is dict:
+        if len(value) > MAX_STATIC_MAPPING_FIELDS:
+            return None
+        if seen is None:
+            seen = set()
+        if id(value) in seen:
+            return None
+        seen.add(id(value))
+        try:
+            total = 2
+            for index, (key, child) in enumerate(value.items()):
+                if type(key) is not str:
+                    return None
+                child_length = _bounded_percent_value_length(
+                    child,
+                    conversion="r",
+                    depth=depth + 1,
+                    seen=seen,
+                )
+                if child_length is None:
+                    return None
+                key_length = _bounded_percent_value_length(
+                    key,
+                    conversion="r",
+                    depth=depth + 1,
+                    seen=seen,
+                )
+                if key_length is None:
+                    return None
+                total += key_length + child_length + (4 if index else 0)
+                if total > MAX_STATIC_RENDER_BYTES:
+                    return None
+            length = total
+        finally:
+            seen.remove(id(value))
+    else:
+        return None
+    if conversion in "eEfFgG":
+        length = max(length, (6 if precision is None else precision) + 8)
+    elif conversion in "diouxX" and precision is not None:
+        length = max(length, precision + 8)
+    elif conversion in "sra" and precision is not None:
+        length = min(length, precision)
+    if conversion == "c":
+        if not ((type(value) is int and -MAX_INTEGER <= value <= MAX_INTEGER) or type(value) is str):
+            return None
+        length = 1
+    return length
+
+
+def _bounded_percent_estimate(template: str, value: Any) -> int | None:
+    """Bound aggregate percent output before Python's ``%`` operation."""
+
+    index = 0
+    literal_total = 0
+    conversions = 0
+    operand_index = 0
+    mapping = value if type(value) is dict else None
+    positional = value if type(value) in {tuple, list} else None
+    total = 0
+    while index < len(template):
+        if template[index] != "%":
+            literal_start = index
+            while index < len(template) and template[index] != "%":
+                index += 1
+            literal_total += index - literal_start
+            total += index - literal_start
+            if total > MAX_STATIC_RENDER_BYTES:
+                return None
+            continue
+        if index + 1 >= len(template):
+            return None
+        if template[index + 1] == "%":
+            total += 1
+            if total > MAX_STATIC_RENDER_BYTES:
+                return None
+            index += 2
+            continue
+        index += 1
+        field_name: str | None = None
+        if index < len(template) and template[index] == "(":
+            closing = template.find(")", index + 1, index + MAX_STATIC_FORMAT_SPEC_BYTES + 1)
+            if closing < 0:
+                return None
+            field_name = template[index + 1:closing]
+            index = closing + 1
+        while index < len(template) and template[index] in _PERCENT_FLAGS:
+            index += 1
+        if index < len(template) and template[index] == "*":
+            return None
+        width_start = index
+        while index < len(template) and template[index].isdigit():
+            index += 1
+        if width_start < index:
+            width_text = template[width_start:index]
+            if _decimal_exceeds_limit(width_text, MAX_STATIC_FORMAT_FIELD_WIDTH):
+                return None
+            width = int(width_text)
+        else:
+            width = 0
+        precision: int | None = None
+        if index < len(template) and template[index] == ".":
+            index += 1
+            if index >= len(template) or template[index] == "*":
+                return None
+            precision_start = index
+            while index < len(template) and template[index].isdigit():
+                index += 1
+            if precision_start == index:
+                return None
+            precision_text = template[precision_start:index]
+            if _decimal_exceeds_limit(precision_text, MAX_STATIC_FORMAT_FIELD_WIDTH):
+                return None
+            precision = int(precision_text)
+        if index < len(template) and template[index] in "hlL":
+            index += 1
+        if index >= len(template) or template[index] not in _PERCENT_CONVERSIONS:
+            return None
+        conversion = template[index]
+        index += 1
+        conversions += 1
+        if conversions > MAX_STATIC_RENDER_PARTS:
+            return None
+        if field_name is not None:
+            if mapping is None or field_name not in mapping:
+                return None
+            operand = mapping[field_name]
+        elif positional is not None and conversions > 1:
+            if operand_index >= len(positional):
+                return None
+            operand = positional[operand_index]
+            operand_index += 1
+        else:
+            operand = value
+        field_length = _bounded_percent_value_length(
+            operand,
+            conversion=conversion,
+            precision=precision,
+        )
+        if field_length is None:
+            return None
+        total += max(width, field_length)
+        if total > MAX_STATIC_RENDER_BYTES:
+            return None
+    return total if conversions else None
 
 
 def _bounded_percent(template: str, value: Any) -> Any:
@@ -2454,8 +2955,12 @@ def _bounded_percent(template: str, value: Any) -> Any:
         return _STATIC_UNKNOWN
     # Both syntax and operands are checked before invoking ``%``. In
     # particular, a mapping-fed tuple must not reach formatting merely because
-    # its mapping lookup was statically recoverable.
+    # its mapping lookup was statically recoverable. The aggregate estimate is
+    # also bounded so repeated literal widths cannot exceed the output budget
+    # one field at a time.
     if not _bounded_percent_format(template) or not _bounded_percent_operand(value):
+        return _STATIC_UNKNOWN
+    if _bounded_percent_estimate(template, value) is None:
         return _STATIC_UNKNOWN
     try:
         return _bounded_static_text(template % value)

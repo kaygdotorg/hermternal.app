@@ -1115,6 +1115,48 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(completed.stdout, "")
                 self.assertEqual(completed.stderr, "")
 
+    def test_percent_aggregate_budget_precedes_formatting(self) -> None:
+        """Reject repeated widths and nested tuple output before ``%`` allocates."""
+
+        probe = (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('percent_budget_validate', sys.argv[1])\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "limit = module.MAX_STATIC_RENDER_BYTES\n"
+            "half = limit // 2 + 1\n"
+            "cases = [\n"
+            "    ('L' * (limit // 2) + '%'+str(half)+'s', 'x'),\n"
+            "    ('%'+str(half)+'s%'+str(half)+'s', ('x', 'y')),\n"
+            "    ('%s', (('x' * half, 'y' * half),)),\n"
+            "    ('%(args)s', {'args': ('x' * half, 'y' * half)}),\n"
+            "    ('%r', '\\x00' * (limit // 2)),\n"
+            "]\n"
+            "for template, operand in cases:\n"
+            "    if module._bounded_percent(template, operand) is not module._STATIC_UNKNOWN:\n"
+            "        raise SystemExit(2)\n"
+            "raise SystemExit(0)\n"
+        )
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(["-c", probe, str(validate.__file__)])
+            completed = subprocess.run(
+                command,
+                cwd=validate.REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            with self.subTest(optimized=optimized):
+                self.assertEqual(completed.returncode, 0, completed)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "")
+
     def test_unresolved_mapping_probe_cardinality_is_bounded(self) -> None:
         template = "Authorization: " + "".join(
             "{field" + str(index) + "}" for index in range(validate.MAX_STATIC_MAPPING_FIELDS * 4)
@@ -1211,6 +1253,52 @@ class CliTests(unittest.TestCase):
                     value.encode("utf-8"),
                 )
 
+    def test_malformed_named_regex_escape_is_bounded_in_both_modes(self) -> None:
+        """Bound malformed ``\\N{...}`` scanning before URL parsing begins."""
+
+        probe = (
+            "import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('named_escape_validate', sys.argv[1])\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules[spec.name] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "limit = module.MAX_REGEX_ESCAPE_SOURCE_LENGTH\n"
+            "class Probe(str):\n"
+            "    def find(self, needle, start=0, end=None):\n"
+            "        if needle == '}' and end is None:\n"
+            "            raise SystemExit(2)\n"
+            "        if needle == '}' and end - start > limit:\n"
+            "            raise SystemExit(3)\n"
+            "        if end is None:\n"
+            "            return super().find(needle, start)\n"
+            "        return super().find(needle, start, end)\n"
+            "text = Probe('https:' + chr(92) + 'N{' + 'x' * (limit * 1024))\n"
+            "decoded, consumed, uncertain = module._decode_regex_escape(text, 6)\n"
+            "if decoded != '?' or not uncertain or consumed > 6 + 3 + limit:\n"
+            "    raise SystemExit(4)\n"
+            "if tuple(module._regex_scheme_matches(text)):\n"
+            "    raise SystemExit(5)\n"
+            "raise SystemExit(0)\n"
+        )
+        for optimized in (False, True):
+            command = [sys.executable]
+            if optimized:
+                command.append("-O")
+            command.extend(["-c", probe, str(validate.__file__)])
+            completed = subprocess.run(
+                command,
+                cwd=validate.REPO_ROOT,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            with self.subTest(optimized=optimized):
+                self.assertEqual(completed.returncode, 0, completed)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "")
+
     def test_regex_urls_share_raw_authority_query_and_port_policy(self) -> None:
         regex_rejections = (
             're.compile(r"https:\\/\\/api.live.invalid/token")\n',
@@ -1221,6 +1309,16 @@ class CliTests(unittest.TestCase):
             're.compile(r"https:\\N{SOLIDUS}\\N{SOLIDUS}api.live.invalid/token")\n',
             're.compile(r"https:[/][/]api.live.invalid/token")\n',
             're.compile(r"https:[\\/][\\/]api.live.invalid/token")\n',
+            're.compile(r"[hH]ttps://api.live.invalid/token")\n',
+            're.compile(r"h[tT]tps://api.live.invalid/token")\n',
+            're.compile(r"https?://api.live.invalid/token")\n',
+            're.compile(r"(?:https?|http)://api.live.invalid/token")\n',
+            're.compile(r"https://synthetic\\.invalid\\x3a0/path")\n',
+            're.compile(r"https://fixture\\x3apassword@synthetic\\.invalid/path")\n',
+            're.compile(r"https://evil.com\\x5c@synthetic\\.invalid/path")\n',
+            're.compile(r"https://synthetic\\.invalid\\x25ZZ/path")\n',
+            're.compile(r"https://synthetic\\.invalid/path\\x25ZZ")\n',
+            're.compile(r"https://synthetic\\.invalid\\x3ftoken=unredacted-secret-value-123456")\n',
             're.compile(r"https://user%3Aunredacted-secret-value-123456@synthetic\\.invalid")\n',
             're.compile(r"https://evil\\.example\\.com\\\\@synthetic\\.invalid")\n',
             're.compile(r"https://synthetic\\.invalid/%ZZ")\n',
@@ -1299,6 +1397,9 @@ class CliTests(unittest.TestCase):
             b're.compile(r"^https://[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~!$&\'()*+,;=:@/%-]*)?$")\n',
             b're.compile(r"^https:\\/\\/[a-z0-9.-]+\\.hermternal\\.test(?::[0-9]{1,5})?$")\n',
             b're.compile(r"^https:[/][/]api.hermternal.test(?::[0-9]{1,5})?$")\n',
+            b're.compile(r"^[h]ttps://api.hermternal.test/token$")\n',
+            b're.compile(r"^h[t]tps://api.hermternal.test/token$")\n',
+            b're.compile(r"^https://synthetic\\.invalid\\x2fv1\\x3fmode=ok$")\n',
             b'if target.startswith("https://"):\n    pass\n',
         )
         for source in snippets:
