@@ -5,7 +5,8 @@ This module is intentionally a proof fixture, not a production deployment
 configuration. It keeps the reviewed method/path surface explicit so a future
 runtime cannot silently replace it with ``/api/*`` or ``/hermes/*``. The
 renderer receives only disposable paths and ports from the proof harness; it
-never reads credentials, cookies, tickets, transcripts, or provider state.
+never reads credentials, cookies, tickets, transcripts, or provider state. Its
+local Caddy checks are synthetic edge evidence, not a live Hermes browser proof.
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ DEFAULT_HERMES_PORT = 19256
 BROWSER_EVIDENCE_SCHEMA = "hermternal.caddy-proof.browser-evidence.v1"
 BROWSER_EVIDENCE_MAX_BYTES = 4096
 RETAINED_EVIDENCE_MAX_BYTES = 64 * 1024
+RETAINED_EVIDENCE_ANCHOR_MAX_BYTES = 128
 GIT_COMMAND_TIMEOUT_SECONDS = 5
+GIT_OUTPUT_MAX_BYTES = 4096
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +47,8 @@ STATIC_BUILD_REQUIRED_FILES = (
     "manifest.webmanifest",
     "service-worker.js",
 )
+# Kept as the documented event vocabulary for callers and tests. A fixed map
+# is intentionally not accepted as execution proof by this local verifier.
 BROWSER_COMPLETION_EVIDENCE = {
     "gateway.ready": "proven",
     "session.resume": "proven",
@@ -593,14 +598,48 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, ob
     return result
 
 
+def _reject_nonfinite_json_constant(value: str) -> object:
+    """Reject Python's non-standard NaN and Infinity JSON extensions."""
+
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _decode_bounded_json(raw: bytes, label: str) -> object:
+    """Decode bounded UTF-8 JSON without accepting parser extensions."""
+
+    if type(raw) is not bytes:
+        raise ValueError(f"{label} is not valid bytes")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{label} is not valid UTF-8") from exc
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message == "duplicate JSON object key":
+            raise ValueError(f"{label} contains a duplicate JSON object key") from exc
+        if message.startswith("non-finite JSON constant:"):
+            raise ValueError(f"{label} contains a non-finite JSON number") from exc
+        raise ValueError(f"{label} is not valid JSON") from exc
+
+
 def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
     """Read at most one byte beyond a fixture limit before rejecting it."""
 
+    if type(limit) is not int or limit < 0:
+        raise ValueError(f"{label} has an invalid bounded input size")
     try:
-        with path.open("rb") as handle:
+        with Path(path).open("rb") as handle:
             data = handle.read(limit + 1)
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
         raise ValueError(f"{label} could not be read") from exc
+    if not isinstance(data, bytes):
+        raise ValueError(f"{label} could not be read")
     if len(data) > limit:
         raise ValueError(f"{label} exceeds the bounded input size")
     return data
@@ -609,43 +648,69 @@ def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
 def _load_bounded_json(path: Path, *, limit: int, label: str) -> object:
     """Decode one bounded UTF-8 JSON document with duplicate-key rejection."""
 
-    raw = _read_bounded_bytes(path, limit, label)
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{label} is not valid UTF-8") from exc
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
-    except ValueError as exc:
-        if str(exc) == "duplicate JSON object key":
-            raise ValueError(f"{label} contains a duplicate JSON object key") from exc
-        raise ValueError(f"{label} is not valid JSON") from exc
+    return _decode_bounded_json(_read_bounded_bytes(path, limit, label), label)
 
 
 def _git_text(repository_root: Path, *arguments: str) -> str:
     """Read one bounded, exact Git value from the repository trust root."""
 
-    root = Path(repository_root).resolve()
+    try:
+        root = Path(repository_root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git repository root is unavailable") from exc
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
     try:
         result = subprocess.run(
             ("git", "-C", str(root), *arguments),
             check=False,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="ascii",
+            stderr=subprocess.PIPE,
+            text=False,
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
-    except (OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError, TypeError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
         raise ValueError("Git provenance could not be checked") from exc
-    if result.returncode != 0:
+    try:
+        returncode = result.returncode
+        output = result.stdout
+        diagnostics = result.stderr
+    except AttributeError as exc:
+        raise ValueError("Git provenance result is malformed") from exc
+    if type(returncode) is not int or returncode != 0:
         raise ValueError("Git provenance could not be checked")
-    value = result.stdout.strip()
-    if not value or "\\n" in value or "\\r" in value:
+    if isinstance(diagnostics, bytes):
+        if len(diagnostics) > GIT_OUTPUT_MAX_BYTES:
+            raise ValueError("Git provenance diagnostics are too large")
+        if diagnostics:
+            raise ValueError("Git provenance output is malformed")
+    elif isinstance(diagnostics, str):
+        if diagnostics:
+            raise ValueError("Git provenance output is malformed")
+    elif diagnostics is not None:
+        raise ValueError("Git provenance diagnostics are malformed")
+    if isinstance(output, bytes):
+        if len(output) > GIT_OUTPUT_MAX_BYTES:
+            raise ValueError("Git provenance output is too large")
+        try:
+            text = output.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Git provenance output is malformed") from exc
+    elif isinstance(output, str):
+        try:
+            if len(output.encode("ascii")) > GIT_OUTPUT_MAX_BYTES:
+                raise ValueError("Git provenance output is too large")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Git provenance output is malformed") from exc
+        text = output
+    else:
         raise ValueError("Git provenance output is malformed")
-    return value
+    if text.endswith("\n"):
+        text = text[:-1]
+    if not text or "\n" in text or "\r" in text or text != text.strip():
+        raise ValueError("Git provenance output is malformed")
+    return text
 
 
 def _git_head(repository_root: Path = PROJECT_ROOT) -> str:
@@ -668,18 +733,28 @@ def _verify_git_commit(build_sha: str, repository_root: Path = PROJECT_ROOT) -> 
     head = _git_head(repository_root)
     if build_sha == head:
         return
-    root = Path(repository_root).resolve()
+    try:
+        root = Path(repository_root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git repository root is unavailable") from exc
     try:
         result = subprocess.run(
             ("git", "-C", str(root), "merge-base", "--is-ancestor", build_sha, head),
             check=False,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError) as exc:
         raise ValueError("Git build ancestry could not be checked") from exc
-    if result.returncode != 0:
+    try:
+        returncode = result.returncode
+    except AttributeError as exc:
+        raise ValueError("Git build ancestry result is malformed") from exc
+    if type(returncode) is not int:
+        raise ValueError("Git build ancestry result is malformed")
+    if returncode != 0:
         raise ValueError("build_sha is not an ancestor of the checked-out Git HEAD")
 
 
@@ -693,7 +768,7 @@ def _derive_git_static_build_provenance(
     static_build_root: Path,
     repository_root: Path = PROJECT_ROOT,
 ) -> dict[str, str]:
-    """Derive the build identity from Git and the actual static tree bytes."""
+    """Identify a local static artifact without claiming browser execution."""
 
     root = Path(static_build_root).resolve()
     if not root.is_dir():
@@ -706,20 +781,64 @@ def _derive_git_static_build_provenance(
     return {"build_sha": build_sha, "build_digest": build_digest}
 
 
-def _committed_retained_build_provenance() -> dict[str, str]:
-    """Read the reviewed historical build pair without trusting CLI strings."""
+def _canonical_retained_path(path: Path) -> Path:
+    """Require the one repository path whose bytes are eligible for retention."""
 
+    try:
+        requested = Path(path)
+        if requested.is_symlink() or RETAINED_EVIDENCE_PATH.is_symlink():
+            raise ValueError("retained input path must not be a symlink")
+        expected = RETAINED_EVIDENCE_PATH.resolve(strict=True)
+        candidate = requested.resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("retained input path could not be resolved") from exc
+    if candidate != expected:
+        raise ValueError("retained input must use the canonical committed path")
+    return candidate
+
+
+def _retained_anchor() -> str:
+    """Read the fixed one-line digest without accepting unbounded anchor data."""
+
+    if RETAINED_EVIDENCE_ANCHOR_PATH.is_symlink():
+        raise ValueError("committed retained evidence anchor must not be a symlink")
+    raw = _read_bounded_bytes(
+        RETAINED_EVIDENCE_ANCHOR_PATH,
+        RETAINED_EVIDENCE_ANCHOR_MAX_BYTES,
+        "committed retained evidence anchor",
+    )
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("committed retained evidence anchor is malformed") from exc
+    # The committed anchor is exactly one lowercase SHA-256 line. Do not use
+    # strip() here: accepting extra bytes would weaken the fixed trust boundary.
+    if re.fullmatch(r"[0-9a-f]{64}\n", text) is None:
+        raise ValueError("committed retained evidence anchor is malformed")
+    return text[:-1]
+
+
+def _read_verified_retained_bytes(path: Path) -> bytes:
+    """Verify path, bounded bytes, and the fixed hash before parsing any fields."""
+
+    canonical_path = _canonical_retained_path(path)
     evidence_bytes = _read_bounded_bytes(
-        RETAINED_EVIDENCE_PATH,
+        canonical_path,
         RETAINED_EVIDENCE_MAX_BYTES,
         "committed retained evidence",
     )
+    if digest_bytes(evidence_bytes) != _retained_anchor():
+        raise ValueError("committed retained evidence anchor does not match")
+    return evidence_bytes
+
+
+def _committed_retained_build_provenance() -> dict[str, str]:
+    """Read the reviewed historical build pair without trusting CLI strings."""
+
+    evidence_bytes = _read_verified_retained_bytes(RETAINED_EVIDENCE_PATH)
     try:
-        evidence = json.loads(
-            evidence_bytes.decode("utf-8"),
-            object_pairs_hook=_reject_duplicate_json_keys,
-        )
-    except (UnicodeDecodeError, ValueError) as exc:
+        evidence = _decode_bounded_json(evidence_bytes, "committed retained evidence")
+    except ValueError as exc:
         raise ValueError("committed retained evidence is malformed") from exc
     if not isinstance(evidence, Mapping):
         raise ValueError("committed retained evidence must be an object")
@@ -732,12 +851,6 @@ def _committed_retained_build_provenance() -> dict[str, str]:
         raise ValueError("committed retained build provenance is malformed")
     if HEX40_RE.fullmatch(build_sha) is None or HEX64_RE.fullmatch(build_digest) is None:
         raise ValueError("committed retained build provenance is malformed")
-    try:
-        anchor = RETAINED_EVIDENCE_ANCHOR_PATH.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeError) as exc:
-        raise ValueError("committed retained evidence anchor is unavailable") from exc
-    if HEX64_RE.fullmatch(anchor) is None or digest_bytes(evidence_bytes) != anchor:
-        raise ValueError("committed retained evidence anchor does not match")
     return {"build_sha": build_sha, "build_digest": build_digest}
 
 
@@ -749,7 +862,7 @@ def _verify_build_provenance(
     static_build_root: Path | None = None,
     repository_root: Path = PROJECT_ROOT,
 ) -> None:
-    """Verify derived standalone or anchored retained build identity."""
+    """Verify build provenance; neither mode verifies browser execution."""
 
     _validate_build_digest(build_digest)
     if mode == "standalone":
@@ -793,9 +906,11 @@ def _resolve_browser_journey(
 
     ``browser_journey`` is accepted only as an optional assertion for callers
     migrating from the original fixture API. It is never a source of status.
-    Every status has a fixed observation shape and the provenance must match
-    the build, static manifest, rendered Caddyfile, and runtime-input digest
-    for this exact proof run.
+    Negative statuses have fixed observation shapes and the provenance must
+    match the build, static manifest, rendered Caddyfile, and runtime-input
+    digest for this exact proof run. A complete event map is not an execution
+    receipt, so ``passed`` is rejected until a separately trusted receipt
+    verifier exists.
     """
 
     if browser_evidence is None:
@@ -816,7 +931,6 @@ def _resolve_browser_journey(
         raise ValueError("browser evidence status is unsupported")
     if browser_journey is not None and browser_journey != status:
         raise ValueError("browser_journey does not match browser evidence")
-
     provenance = browser_evidence["provenance"]
     if not isinstance(provenance, Mapping) or set(provenance) != set(BROWSER_EVIDENCE_PROVENANCE_KEYS):
         raise ValueError("browser evidence provenance keys are incomplete")
@@ -830,6 +944,9 @@ def _resolve_browser_journey(
     if not isinstance(observations, Mapping):
         raise ValueError("browser evidence observations must be a mapping")
     if status == "passed":
+        # Validate the closed shape for useful diagnostics, but never treat it
+        # as execution. This local fixture has no signed attestation or
+        # verifier-generated receipt, so even a complete map fails closed.
         if set(observations) != {"events"}:
             raise ValueError("passed browser evidence must contain only events")
         events = observations["events"]
@@ -840,8 +957,8 @@ def _resolve_browser_journey(
         }
         if normalized_events != BROWSER_COMPLETION_EVIDENCE:
             raise ValueError("passed browser evidence does not prove a complete journey")
-        normalized_observations: dict[str, object] = {"events": normalized_events}
-    elif status in BROWSER_BLOCKED_JOURNEYS:
+        raise ValueError("passed browser evidence requires a trusted execution receipt")
+    if status in BROWSER_BLOCKED_JOURNEYS:
         if set(observations) != {"blocker"}:
             raise ValueError("blocked browser evidence must contain only a blocker")
         if observations["blocker"] != BROWSER_BLOCKER_CODES[status]:
@@ -879,7 +996,9 @@ def render_manifest(
     Retained evidence uses the committed historical build anchor. Standalone
     browser evidence must instead provide a static tree so Git HEAD and its
     exact bytes are derived locally; caller-supplied identity flags are only
-    checked assertions and never establish provenance.
+    checked assertions and never establish provenance. Neither workflow treats
+    caller JSON, a fixed event map, or local Caddy traffic as browser execution;
+    ``passed`` requires a separate trusted receipt and is rejected here.
     """
 
     if not HEX40_RE.fullmatch(build_sha):
@@ -961,9 +1080,12 @@ def _build_static_digest(site_root: Path) -> str:
 
 
 def _load_retained_input(path: Path) -> dict[str, object]:
-    """Load a complete retained manifest for the explicit historical workflow."""
+    """Load only the canonical, hash-anchored historical manifest."""
 
-    value = _load_bounded_json(path, limit=RETAINED_EVIDENCE_MAX_BYTES, label="retained input")
+    # Verify the canonical path and exact bounded bytes before parsing any
+    # caller-visible field. A copied JSON file must not become a new trust root.
+    retained_bytes = _read_verified_retained_bytes(path)
+    value = _decode_bounded_json(retained_bytes, "retained input")
     if not isinstance(value, Mapping):
         raise ValueError("retained input must be an object")
     product = value.get("product")
