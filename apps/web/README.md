@@ -28,6 +28,10 @@ The planned chat surface has one profile, provider-neutral discovery, session re
 
 These packages are presentation-only and transport-independent. Do not add provider SDKs, gateway calls, browser-readable reusable credentials, callback parsing, production authentication, or live data to them.
 
+## Terminal lease boundary
+
+`src/lib/terminal/current-session-terminal.ts` gives a coordinator lease to one settled attach only. Concurrent same-session attaches share that result; input and resize require its active lease. Unsolicited terminal states invalidate the lease. A reconnect keeps the coordinator lease rather than inventing a replacement, while a lease-less reconnect remains input-ineligible. Late detached work stays quarantined; close or disposal escalates its cleanup to close. Adapter errors are reconstructed from allowlisted code and non-negative safe generation only, so injected messages, causes, and foreign properties never cross the bridge.
+
 Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.
 
 User-facing deep-link UI and full-text session-search UI are deferred to `v0.0.2`. Both UIs need redesign. The deep-link and search contracts remain future compatibility references. User-facing sharing is deferred to `v0.0.2`.

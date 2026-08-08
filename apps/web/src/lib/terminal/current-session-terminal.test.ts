@@ -1011,11 +1011,11 @@ describe("CurrentSessionTerminalBridge", () => {
         throw reviewed;
       },
     });
-    expect(
-      await reviewedBridge
-        .attach("session-one", new AbortController().signal)
-        .catch((error) => error),
-    ).toBe(reviewed);
+    const normalized = await reviewedBridge
+      .attach("session-one", new AbortController().signal)
+      .catch((error) => error);
+    expect(normalized).toMatchObject({ code: "invalid-attachment" });
+    expect(normalized).not.toBe(reviewed);
   });
 
   it.each([
@@ -1068,6 +1068,8 @@ describe("CurrentSessionTerminalBridge", () => {
           .filter((event) => event.type === "state")
           .map((event) => event.state.status),
       ).toEqual(["failed"]);
+      expect(fake.detach).not.toHaveBeenCalled();
+      expect(fake.close).not.toHaveBeenCalled();
     },
   );
 
@@ -1218,7 +1220,7 @@ describe("CurrentSessionTerminalBridge", () => {
     expect(fake.detach).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps direct reconnect binding ownership for later detach and close", async () => {
+  it("keeps the coordinator binding through reconnect and invalidates it on failure", async () => {
     const fake = createFakePty();
     const bridge = new CurrentSessionTerminalBridge({
       createTransport: () => fake.pty,
@@ -1228,20 +1230,79 @@ describe("CurrentSessionTerminalBridge", () => {
       }),
     });
 
-    const first = await bridge.attach(
-      "session-one",
-      new AbortController().signal,
-    );
-    first.invalidate();
+    const binding = await bridge.attach("session-one", new AbortController().signal);
     await bridge.reconnect();
-    bridge.detach();
-    expect(fake.detach).toHaveBeenCalledTimes(2);
+    expect(bridge.lifecycleIdentity.binding).toBe(binding);
+    expect(isValid(binding)).toBe(true);
 
-    await bridge.reconnect();
+    fake.reconnect.mockImplementationOnce(() => {
+      throw new PtyTransportError("connection-failed");
+    });
+    await expect(bridge.reconnect()).rejects.toMatchObject({ code: "connection-failed" });
+    expect(isValid(binding)).toBe(false);
+    expect(bridge.lifecycleIdentity.binding).toBeUndefined();
+  });
+
+  it("coalesces concurrent same-session attaches until the shared transport settles", async () => {
+    const fake = createFakePty();
+    const gate = deferred<void>();
+    const originalConnect = fake.connect.getMockImplementation();
+    if (!originalConnect) throw new Error("PTY connect implementation is missing");
+    fake.connect.mockImplementation(async (input, signal) => {
+      await gate.promise;
+      return originalConnect(input, signal);
+    });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const first = bridge.attach("session-one", new AbortController().signal);
+    const second = bridge.attach("session-one", new AbortController().signal);
+    await flush();
+    expect(fake.connect).toHaveBeenCalledTimes(1);
+    gate.resolve(undefined);
+    await expect(second).resolves.toBe(await first);
+  });
+
+  it("escalates quarantined detach cleanup to close and gates I/O on a valid lease", async () => {
+    const fake = createFakePty();
+    const gate = deferred<void>();
+    const originalConnect = fake.connect.getMockImplementation();
+    if (!originalConnect) throw new Error("PTY connect implementation is missing");
+    fake.connect.mockImplementation(async (input, signal) => {
+      await gate.promise;
+      return originalConnect(input, signal);
+    });
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const pending = bridge.attach("session-one", new AbortController().signal);
+    await flush();
+    bridge.invalidateBindingForSession("session-one", bridge.lifecycleIdentity);
     bridge.close();
     expect(fake.close).toHaveBeenCalledTimes(1);
-    expect(bridge.state.status).toBe("closed");
-    expect(bridge.state.reconnectSupported).toBe(false);
+    gate.resolve(undefined);
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(() => bridge.sendInput("x")).toThrowError(
+      expect.objectContaining({ code: "not-attached" }),
+    );
+    expect(() => bridge.resize(80, 24)).toThrowError(
+      expect.objectContaining({ code: "not-attached" }),
+    );
+  });
+
+  it("invalidates a lease on unsolicited closed state and reconstructs injected errors", async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const binding = await bridge.attach("session-one", new AbortController().signal);
+    fake.emit({ type: "state", state: { ...fake.pty.state, status: "closed", generation: 2 } });
+    expect(isValid(binding)).toBe(false);
+
+    const foreign = new PtyTransportError("invalid-attachment", 3);
+    Object.assign(foreign, { message: "ticket=secret", cause: new Error("secret"), foreign: true });
+    const rejecting = new CurrentSessionTerminalBridge({
+      createTransport: () => createFakePty().pty,
+      createAttachment: () => { throw foreign; },
+    });
+    const error = await rejecting.attach("session-two", new AbortController().signal).catch((value) => value);
+    expect(error).toMatchObject({ code: "invalid-attachment", generation: 3 });
+    expect(error).not.toBe(foreign);
+    expect(JSON.stringify(error)).not.toContain("secret");
   });
 
   it.each(["detach", "close"] as const)(
