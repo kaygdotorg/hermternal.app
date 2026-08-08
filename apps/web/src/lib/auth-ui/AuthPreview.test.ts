@@ -199,14 +199,18 @@ describe('AuthPreview', () => {
     vi.stubGlobal('requestAnimationFrame', undefined);
     const view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onPasswordSubmit });
 
-    // Install fake timers before hydration so the initial focus callback is
-    // explicitly released and cannot be mistaken for scrub work.
+    // Svelte's focus routine awaits tick() before scheduling its fallback
+    // timeout. Flush that continuation explicitly so the one observed timer is
+    // known focus work, not an inference from an empty queue.
     await tick();
     await Promise.resolve();
     expect(vi.getTimerCount()).toBe(1);
+    // Release the known focus timer before installing scrub/observer timers so
+    // each later callback can be stepped and attributed to its own phase.
     await vi.advanceTimersToNextTimerAsync();
     await Promise.resolve();
     await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
     const form = screen.getByRole('form', { name: 'Hermes password sign in' });
     expect(form).toHaveAttribute('data-field-ownership', 'ready');
     const username = screen.getByLabelText('Username') as HTMLInputElement;

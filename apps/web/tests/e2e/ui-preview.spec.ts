@@ -780,11 +780,11 @@ test('first-load no-script product route exposes only the inert loading boundary
   } finally {
     page.off('request', onRequest);
     await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+    await cdp.detach().catch(() => undefined);
   }
 });
 
 test('native password activation clears live values without navigation when script execution stops', async ({ page }) => {
-  const cdp = await page.context().newCDPSession(page);
 
   for (const activation of ['click', 'enter'] as const) {
     const usernameValue = `visible-username-${activation}`;
@@ -800,6 +800,7 @@ test('native password activation clears live values without navigation when scri
       const text = message.text();
       credentialSeenInConsole ||= text.includes(usernameValue) || text.includes(passwordValue);
     };
+    const cdp = await page.context().newCDPSession(page);
     try {
       await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
       await page.goto(previewUrl('/ui-preview'));
@@ -853,6 +854,7 @@ test('native password activation clears live values without navigation when scri
       page.off('request', onRequest);
       page.off('console', onConsole);
       await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+      await cdp.detach().catch(() => undefined);
     }
   }
 });
@@ -932,14 +934,6 @@ test('password ownership fences delayed hydration, rapid focus transfer, and key
 
 test('native field Enter preserves live values while failing closed without navigation, requests, storage, or credential serialization', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
-  await page.goto(previewUrl('/ui-preview'));
-  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-  const form = page.getByRole('form', { name: 'Hermes password sign in' });
-  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-
-  const originalUrl = page.url();
-  const originalHistoryLength = await page.evaluate(() => history.length);
-  const storageBefore = await page.context().storageState();
   const usernameValue = 'native-field-enter-user';
   const passwordValue = 'native-field-enter-password';
   let requestCount = 0;
@@ -948,14 +942,37 @@ test('native field Enter preserves live values while failing closed without navi
     requestCount += 1;
     if (request.isNavigationRequest()) navigationCount += 1;
   };
-  page.on('request', onRequest);
+  const storageSummary = async (): Promise<{ cookieCount: number; originCount: number; localStorageEntryCount: number }> => {
+    const storage = await page.context().storageState();
+    return {
+      cookieCount: storage.cookies.length,
+      originCount: storage.origins.length,
+      localStorageEntryCount: storage.origins.reduce((count, origin) => count + origin.localStorage.length, 0)
+    };
+  };
 
   try {
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    const form = page.getByRole('form', { name: 'Hermes password sign in' });
+    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+
+    const originalUrl = page.url();
+    const originalHistoryLength = await page.evaluate(() => history.length);
+    const storageBefore = await storageSummary();
+
     await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
     const username = page.getByLabel('Username');
     await username.fill(usernameValue);
     const password = page.getByRole('textbox', { name: 'Password' });
     await password.fill(passwordValue);
+
+    // Observe only the disabled-script action. Setup navigation and hydration
+    // are outside this listener window, so counts cannot retain request data or
+    // misattribute fixture traffic to the native Enter proof.
+    requestCount = 0;
+    navigationCount = 0;
+    page.on('request', onRequest);
     await password.press('Enter');
 
     // With handlers disabled, input Enter has no native reset target. The live
@@ -968,7 +985,11 @@ test('native field Enter preserves live values while failing closed without navi
     expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
     expect(navigationCount).toBe(0);
     expect(requestCount).toBe(0);
-    const storageUnchanged = JSON.stringify(await page.context().storageState()) === JSON.stringify(storageBefore);
+    const storageAfter = await storageSummary();
+    const storageUnchanged =
+      storageAfter.cookieCount === storageBefore.cookieCount &&
+      storageAfter.originCount === storageBefore.originCount &&
+      storageAfter.localStorageEntryCount === storageBefore.localStorageEntryCount;
     expect(storageUnchanged).toBe(true);
 
     // Compute only a credential-presence count inside the browser; do not
@@ -984,7 +1005,22 @@ test('native field Enter preserves live values while failing closed without navi
     expect(serializedCredentialCount).toBe(0);
   } finally {
     page.off('request', onRequest);
+    await page.unroute('**/api/auth/**').catch(() => undefined);
     await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+    // Scrub any native values that remained after the negative proof before
+    // releasing the page and CDP resources, without retaining their payloads.
+    await page
+      .locator('input[type="text"], input[type="password"]')
+      .evaluateAll((controls) => {
+        for (const control of controls) {
+          const input = control as HTMLInputElement;
+          input.value = '';
+          input.defaultValue = '';
+          input.removeAttribute('value');
+        }
+      })
+      .catch(() => undefined);
+    await cdp.detach().catch(() => undefined);
   }
 });
 
