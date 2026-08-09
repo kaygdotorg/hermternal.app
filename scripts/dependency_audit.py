@@ -641,9 +641,19 @@ def _parse_range_alternative(expression: str) -> list[RangeTerm]:
             if match:
                 operator, token = match.groups()
         version, wildcards = _parse_range_version(token)
+        if operator in {">", ">=", "<", "<="} and all(wildcards):
+            raise ValueError("range-comparator-wildcard")
         terms.append(RangeTerm(operator, version, wildcards))
         index += 1
     return terms
+
+
+def _partial_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[int, int, int]:
+    """Return the exclusive upper bound for a partial comparator operand."""
+
+    if wildcards[0] or wildcards[1]:
+        return (version.major + 1, 0, 0)
+    return (version.major, version.minor + 1, 0)
 
 
 def _caret_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[int, int, int]:
@@ -676,6 +686,14 @@ def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
             return _matches_wildcards(actual, term.version, term.wildcards)
         return _compare_semver(actual, term.version) == 0
     if term.operator in {">=", ">", "<", "<="}:
+        if any(term.wildcards):
+            if term.operator == ">":
+                return actual.core >= _partial_upper(term.version, term.wildcards)
+            if term.operator == ">=":
+                return actual.core >= term.version.core
+            if term.operator == "<":
+                return actual.core < term.version.core
+            return actual.core < _partial_upper(term.version, term.wildcards)
         comparison = _compare_semver(actual, term.version)
         return {
             ">=": comparison >= 0,

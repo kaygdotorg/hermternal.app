@@ -102,7 +102,10 @@ unsatisfied transitive and peer specifications fail closed. Its bounded npm
 subset requires canonical numeric components, rejects leading-zero and repeated
 `v` forms, validates every union arm, and excludes prerelease candidates from
 caret, tilde, comparator, and wildcard ranges unless the range arm explicitly
-admits a prerelease. The same rules apply to required peer ranges. An `npm:`
+admits a prerelease. Comparator operands with omitted or wildcard components
+use npm partial expansion: `>1` becomes `>=2.0.0`, `>1.2.x` becomes
+`>=1.3.0`, and `<=1.2.x` becomes `<1.3.0`; comparator operands that are only a
+wildcard are rejected. The same rules apply to required peer ranges. An `npm:`
 alias must match both the dependency-name lock key and the descriptor's target
 package name, then match its exact target version. Unsupported or ambiguous
 shapes fail closed rather than inventing a network resolution.

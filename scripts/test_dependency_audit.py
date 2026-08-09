@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,46 @@ spec.loader.exec_module(audit)
 
 
 INTEGRITY = "sha512-" + ("A" * 86) + "=="
+
+
+def npm_semver_satisfies(version: str, specification: str) -> bool | None:
+    """Use a locally installed npm semver package as an optional test oracle."""
+
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if node is None or npm is None:
+        return None
+    roots = [ROOT / "node_modules"]
+    try:
+        global_root = Path(
+            subprocess.check_output([npm, "root", "-g"], text=True, stderr=subprocess.DEVNULL).strip()
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        global_root = None
+    if global_root is not None:
+        roots.extend((global_root, global_root / "npm" / "node_modules"))
+    module_roots = [root for root in roots if (root / "semver").is_dir()]
+    if not module_roots:
+        return None
+    script = (
+        "const semver = require('semver'); "
+        "process.stdout.write(String(semver.satisfies(process.argv[1], process.argv[2])));"
+    )
+    environment = os.environ.copy()
+    environment["NODE_PATH"] = os.pathsep.join(str(root) for root in module_roots)
+    try:
+        completed = subprocess.run(
+            [node, "-e", script, version, specification],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0 or completed.stdout.strip() not in {"true", "false"}:
+        return None
+    return completed.stdout.strip() == "true"
 
 
 def synthetic_lock(
@@ -413,6 +454,73 @@ class DependencyAuditTests(unittest.TestCase):
             self.assertIn("lockfile-json5-unsupported", codes, result)
             if b'"configVersion": 1.' in lockfile:
                 self.assertNotIn("lockfile-json-invalid", codes, result)
+
+    def test_comparator_partial_operands_expand_and_reject(self) -> None:
+        cases = (
+            ("1.2.3", ">1", False),
+            ("1.2.3", ">1.2.x", False),
+            ("1.2.3", ">*", False),
+            ("0.9.9", "<1", True),
+            ("1.1.9", "<1.2.x", True),
+            ("1.5.0", "<=1", True),
+            ("1.2.5", "<=1.2.x", True),
+            ("1.2.3", ">=1", True),
+            ("1.2.3", ">=1.2.x", True),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "dependencies": {
+                "gt-major": ">1",
+                "gt-minor": ">1.2.x",
+                "gt-wildcard": ">*",
+                "lt-major": "<1",
+                "lt-minor": "<1.2.x",
+                "le-major": "<=1",
+                "le-minor": "<=1.2.x",
+                "ge-major": ">=1",
+                "ge-minor": ">=1.2.x",
+            },
+            "peerDependencies": {"required-peer": ">=1.2.x"},
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "gt-major": package_record("gt-major", "1.2.3"),
+                "gt-minor": package_record("gt-minor", "1.2.3"),
+                "gt-wildcard": package_record("gt-wildcard", "1.2.3"),
+                "lt-major": package_record("lt-major", "0.9.9"),
+                "lt-minor": package_record("lt-minor", "1.1.9"),
+                "le-major": package_record("le-major", "1.5.0"),
+                "le-minor": package_record("le-minor", "1.2.5"),
+                "ge-major": package_record("ge-major", "1.2.3"),
+                "ge-minor": package_record("ge-minor", "1.2.3"),
+                "required-peer": package_record("required-peer", "1.2.3"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(blocking, {"gt-major", "gt-minor", "gt-wildcard"}, result)
+        self.assertEqual(result["lockfile"]["peer_dependency_gaps"], [], result)
 
     def test_semver_ranges_are_strict_and_prerelease_safe(self) -> None:
         manifest = json.dumps(
