@@ -34,18 +34,279 @@ public enum AppleBenchmarkError: Error, Equatable, Sendable {
 }
 
 public enum BenchmarkJSON {
+    public static let maximumInputBytes = 1_048_576
+    public static let maximumOutputBytes = 1_048_576
+
     public static func encode<T: Encodable>(_ value: T, pretty: Bool = true) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = pretty ? [.prettyPrinted, .sortedKeys] : [.sortedKeys]
-        return try encoder.encode(value)
+        let data = try encoder.encode(value)
+        guard data.count <= maximumOutputBytes else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        return data
     }
 
     public static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
-        try JSONDecoder().decode(type, from: data)
+        guard data.count <= maximumInputBytes else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        var scanner = BoundedJSONScanner(data: data)
+        try scanner.validate()
+        return try JSONDecoder().decode(type, from: data)
     }
 
     public static func canonicalData<T: Encodable>(_ value: T) throws -> Data {
         try encode(value, pretty: false)
+    }
+}
+
+private struct BoundedJSONScanner {
+    private static let maximumDepth = 24
+    private static let maximumNodes = 4_096
+    private static let maximumObjectKeys = 64
+    private static let maximumArrayElements = 256
+    private static let maximumStrings = 4_096
+    private static let maximumStringBytes = 16_384
+
+    private let bytes: [UInt8]
+    private var index = 0
+    private var nodeCount = 0
+    private var arrayCount = 0
+    private var stringCount = 0
+
+    init(data: Data) {
+        bytes = Array(data)
+    }
+
+    mutating func validate() throws {
+        skipWhitespace()
+        try parseValue(depth: 0)
+        skipWhitespace()
+        guard index == bytes.count else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+    }
+
+    private mutating func parseValue(depth: Int) throws {
+        guard depth <= Self.maximumDepth,
+              nodeCount < Self.maximumNodes,
+              index < bytes.count
+        else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        nodeCount += 1
+        switch bytes[index] {
+        case 0x7B:
+            try parseObject(depth: depth)
+        case 0x5B:
+            try parseArray(depth: depth)
+        case 0x22:
+            _ = try parseString()
+        case 0x2D, 0x30...0x39:
+            try parseNumber()
+        case 0x66:
+            try parseLiteral(Array("false".utf8))
+        case 0x6E:
+            try parseLiteral(Array("null".utf8))
+        case 0x74:
+            try parseLiteral(Array("true".utf8))
+        default:
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+    }
+
+    private mutating func parseObject(depth: Int) throws {
+        index += 1
+        skipWhitespace()
+        if consume(0x7D) {
+            return
+        }
+        var keys = Set<String>()
+        var keyCount = 0
+        while true {
+            guard index < bytes.count, bytes[index] == 0x22 else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            let key = try parseString()
+            keyCount += 1
+            guard keyCount <= Self.maximumObjectKeys, keys.insert(key).inserted else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            skipWhitespace()
+            guard consume(0x3A) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            skipWhitespace()
+            try parseValue(depth: depth + 1)
+            skipWhitespace()
+            if consume(0x7D) {
+                return
+            }
+            guard consume(0x2C) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseArray(depth: Int) throws {
+        index += 1
+        arrayCount += 1
+        guard arrayCount <= Self.maximumArrayElements else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        skipWhitespace()
+        if consume(0x5D) {
+            return
+        }
+        var elementCount = 0
+        while true {
+            elementCount += 1
+            guard elementCount <= Self.maximumArrayElements else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            try parseValue(depth: depth + 1)
+            skipWhitespace()
+            if consume(0x5D) {
+                return
+            }
+            guard consume(0x2C) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseString() throws -> String {
+        let start = index
+        guard consume(0x22) else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        stringCount += 1
+        guard stringCount <= Self.maximumStrings else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        while index < bytes.count {
+            let byte = bytes[index]
+            if byte == 0x22 {
+                index += 1
+                guard index - start <= Self.maximumStringBytes * 2 else {
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+                let raw = Data(bytes[start..<index])
+                guard let value = try? JSONDecoder().decode(String.self, from: raw),
+                      value.utf8.count <= Self.maximumStringBytes
+                else {
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+                return value
+            }
+            guard byte >= 0x20 else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            if byte == 0x5C {
+                index += 1
+                guard index < bytes.count else {
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+                switch bytes[index] {
+                case 0x22, 0x2F, 0x5C, 0x62, 0x66, 0x6E, 0x72, 0x74:
+                    index += 1
+                case 0x75:
+                    guard index + 4 < bytes.count,
+                          bytes[(index + 1)...(index + 4)].allSatisfy(Self.isHexByte)
+                    else {
+                        throw AppleBenchmarkError.evidenceMalformed
+                    }
+                    index += 5
+                default:
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+            } else {
+                index += 1
+            }
+            guard index - start <= Self.maximumStringBytes * 2 else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+        }
+        throw AppleBenchmarkError.evidenceMalformed
+    }
+
+    private mutating func parseNumber() throws {
+        if consume(0x2D) && index >= bytes.count {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        if consume(0x30) {
+            if index < bytes.count, bytes[index] >= 0x30, bytes[index] <= 0x39 {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+        } else {
+            guard consumeDigit(nonZero: true) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            while consumeDigit(nonZero: false) {}
+        }
+        if consume(0x2E) {
+            guard consumeDigit(nonZero: false) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            while consumeDigit(nonZero: false) {}
+        }
+        if index < bytes.count, bytes[index] == 0x65 || bytes[index] == 0x45 {
+            index += 1
+            _ = consume(0x2B) || consume(0x2D)
+            guard consumeDigit(nonZero: false) else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+            while consumeDigit(nonZero: false) {}
+        }
+    }
+
+    private mutating func parseLiteral(_ literal: [UInt8]) throws {
+        guard index + literal.count <= bytes.count,
+              Array(bytes[index..<(index + literal.count)]) == literal
+        else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+        index += literal.count
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else {
+            return false
+        }
+        index += 1
+        return true
+    }
+
+    private mutating func consumeDigit(nonZero: Bool) -> Bool {
+        guard index < bytes.count else {
+            return false
+        }
+        let byte = bytes[index]
+        let valid = nonZero ? (byte >= 0x31 && byte <= 0x39) : (byte >= 0x30 && byte <= 0x39)
+        if valid {
+            index += 1
+        }
+        return valid
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count {
+            switch bytes[index] {
+            case 0x20, 0x09, 0x0A, 0x0D:
+                index += 1
+            default:
+                return
+            }
+        }
+    }
+
+    private static func isHexByte(_ byte: UInt8) -> Bool {
+        (byte >= 0x30 && byte <= 0x39) ||
+        (byte >= 0x41 && byte <= 0x46) ||
+        (byte >= 0x61 && byte <= 0x66)
     }
 }
 
@@ -262,16 +523,18 @@ public enum EvidenceValidator {
                   run.optimization == "not_applicable",
                   run.repetitions == run.rawSamples.count,
                   run.repetitions >= AppleWorkloadFixture.minimumRepetitions,
+                  run.rawSamples.count <= workload.repetitions.maximum,
                   run.rawSamples.allSatisfy({ $0.isFinite && $0 > 0 }),
                   isSHA256(run.sampleProvenanceSHA256),
-                  run.distribution == DistributionCalculator.calculate(run.rawSamples),
                   run.distribution.min <= run.distribution.p50,
                   run.distribution.p50 <= run.distribution.p95,
                   run.distribution.p95 <= run.distribution.p99,
                   run.distribution.p99 <= run.distribution.max,
                   run.environment.device == "not_claimed",
                   run.environment.browser == "not_applicable",
-                  (try? sampleProvenanceSHA256(for: run)) == run.sampleProvenanceSHA256
+                  (try? sampleProvenanceSHA256(for: run)) == run.sampleProvenanceSHA256,
+                  let expectedDistribution = try? DistributionCalculator.calculate(run.rawSamples),
+                  run.distribution == expectedDistribution
             else {
                 throw AppleBenchmarkError.evidenceMalformed
             }
@@ -410,7 +673,12 @@ private struct SampleProvenancePayload: Encodable, Sendable {
 }
 
 public enum DistributionCalculator {
-    public static func calculate(_ samples: [Double]) -> Distribution {
+    public static func calculate(_ samples: [Double]) throws -> Distribution {
+        guard !samples.isEmpty,
+              samples.allSatisfy({ $0.isFinite && $0 > 0 })
+        else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
         let ordered = samples.sorted()
         let p50 = percentile(ordered, quantile: 0.50)
         let p95 = percentile(ordered, quantile: 0.95)

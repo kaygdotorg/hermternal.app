@@ -109,7 +109,7 @@ public struct AppleBenchmarkRunner: Sendable {
                     )
                     sequence += repetitions
 
-                    let distribution = DistributionCalculator.calculate(samples)
+                    let distribution = try DistributionCalculator.calculate(samples)
                     let command = "offline apple mock workload \(operation.id)"
                     let provisionalRun = EvidenceRun(
                         id: runID,

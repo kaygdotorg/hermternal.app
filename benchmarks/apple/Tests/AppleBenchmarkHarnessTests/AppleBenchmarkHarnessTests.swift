@@ -44,7 +44,7 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
 
     func testDistributionUsesSharedR7Method() {
         let samples = (1...30).map(Double.init)
-        let distribution = DistributionCalculator.calculate(samples)
+        let distribution = try! DistributionCalculator.calculate(samples)
 
         XCTAssertEqual(distribution.min, 1.0)
         XCTAssertEqual(distribution.p50, 15.5)
@@ -95,7 +95,9 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         XCTAssertEqual(result.evidence.runs.count, loaded.fixture.operations.count * 3 * 2)
         XCTAssertTrue(result.evidence.runs.allSatisfy { $0.repetitions == 30 })
         XCTAssertTrue(result.evidence.runs.allSatisfy { $0.rawSamples.allSatisfy { $0 > 0 } })
-        XCTAssertTrue(result.evidence.runs.allSatisfy { $0.distribution == DistributionCalculator.calculate($0.rawSamples) })
+        XCTAssertTrue(result.evidence.runs.allSatisfy {
+            $0.distribution == (try? DistributionCalculator.calculate($0.rawSamples))
+        })
         XCTAssertTrue(result.evidence.runs.allSatisfy { $0.environment.device == "not_claimed" })
         XCTAssertNil(result.evidence.threshold)
         XCTAssertNil(result.evidence.budget)
@@ -275,6 +277,33 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
                 workload: loaded.fixture,
                 fixtureSHA256: BenchmarkHash.sha256(loaded.bytes)
             )
+        )
+    }
+
+    func testEmptyDistributionFailsClosedWithoutIndexing() {
+        XCTAssertThrowsError(try DistributionCalculator.calculate([])) { error in
+            XCTAssertEqual(error as? AppleBenchmarkError, .evidenceMalformed)
+        }
+    }
+
+    func testBoundedJSONRejectsDuplicateKeysAndOversizedTrees() throws {
+        let duplicateKeys = Data("{\"value\":true,\"value\":false}".utf8)
+        XCTAssertThrowsError(
+            try BenchmarkJSON.decode([String: Bool].self, from: duplicateKeys)
+        )
+
+        let oversizedString = Data(
+            ("{\"value\":\"" + String(repeating: "x", count: 16_385) + "\"}").utf8
+        )
+        XCTAssertThrowsError(
+            try BenchmarkJSON.decode([String: String].self, from: oversizedString)
+        )
+
+        let excessiveArray = Data(
+            ("[" + Array(repeating: "0", count: 257).joined(separator: ",") + "]").utf8
+        )
+        XCTAssertThrowsError(
+            try BenchmarkJSON.decode([Int].self, from: excessiveArray)
         )
     }
 
