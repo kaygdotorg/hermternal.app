@@ -19,8 +19,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_BUNDLE_PATH = REPO_ROOT / "scripts" / "fixture_registry_authority.objects.bundle"
-TRUSTED_BUNDLE_SIZE_BYTES = 49_823_195
-TRUSTED_BUNDLE_SHA256 = "b975a7c17e41d9fa3470bdca09752ba74386cc99bcd6d56a465fdd715a7aa782"
+TRUSTED_BUNDLE_SIZE_BYTES = 54_009_465
+TRUSTED_BUNDLE_SHA256 = "4987822c0049f9f9d9caaf41d8ecaae7573bc60fd9f9c4c85e0320eb2071eea5"
 
 # These are the only refs exported by the bundle. The bundle contains the
 # reachable trees/blobs needed to read each commit, but its advertised ref set
@@ -28,8 +28,8 @@ TRUSTED_BUNDLE_SHA256 = "b975a7c17e41d9fa3470bdca09752ba74386cc99bcd6d56a465fdd7
 PROTECTED_OBJECTS = (
     ("historical-authority", "285acdcf9c11c049180a7844e689eee0f1490de4"),
     ("historical-source", "263cb75adcf153d6fe252636b064e5fbc3e3f877"),
-    ("active-authority", "b01fd589c90ef9e768cc0170c829569783255f00"),
-    ("active-source", "dda83ab73191ea696f941bfb18496e4f4a70e748"),
+    ("active-authority", "1238826b64872059b8f4682c4f14307b3aa20044"),
+    ("active-source", "3e8ca2123bc042197a513674c1791229829c38bf"),
 )
 EXPECTED_BUNDLE_REFS = {
     f"refs/fixture-authority/{name}": commit for name, commit in PROTECTED_OBJECTS

@@ -91,10 +91,10 @@ category-bounded: ordinary metadata and loose objects use
 `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (64 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (128 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
-second) wall-clock deadline. The final successor bundle produced a 53,949,336-byte macOS fresh-clone pack,
-leaving 13,159,528 bytes under the finite 64 MiB per-pack cap. A seeded clone
-retains two packs plus metadata; its measured snapshot total is 104,271,517
-bytes, leaving 29,946,211 bytes under the independent 128 MiB aggregate cap.
+second) wall-clock deadline. The final successor bundle produced a 53,985,403-byte macOS fresh-clone pack,
+leaving 13,123,461 bytes under the finite 64 MiB per-pack cap. A seeded clone
+retains two packs plus metadata; its measured snapshot total is 108,497,294
+bytes, leaving 25,720,434 bytes under the independent 128 MiB aggregate cap.
 without weakening the 1 MiB non-pack limit, entry/file/path budgets, output limits, or
 the deadline. The separately bounded strict Git process cap is 30 seconds;
 the measured seeded 96,034,354-byte snapshot completed strict fsck in 9.061 seconds on
