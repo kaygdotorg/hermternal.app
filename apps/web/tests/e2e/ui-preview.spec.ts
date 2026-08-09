@@ -547,6 +547,13 @@ async function installPreviewIndexedDbSpy(page: Page, options: PreviewIndexedDbS
       let cleanupComplete = false;
       const restore = (): PreviewIndexedDbSpyCleanup => {
         if (cleanupComplete) return { restored: true, cleanupFailure: false };
+        const currentGlobalDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        const ownsGlobal = currentGlobalDescriptor &&
+          'value' in currentGlobalDescriptor &&
+          currentGlobalDescriptor.value === publishedProbe;
+        // Do not touch unknown wrappers or globals after ownership is lost. The
+        // caller can repair the published probe and retry cleanup safely.
+        if (!ownsGlobal) return { restored: false, cleanupFailure: true };
         const methodResults = [
           restoreDescriptor(factoryPrototype, 'open', originalOpenDescriptor),
           restoreDescriptor(factoryPrototype, 'databases', originalDatabasesDescriptor),
@@ -554,11 +561,7 @@ async function installPreviewIndexedDbSpy(page: Page, options: PreviewIndexedDbS
           restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor),
           restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor)
         ];
-        const currentGlobalDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
-        const globalResult =
-          currentGlobalDescriptor && 'value' in currentGlobalDescriptor && currentGlobalDescriptor.value === publishedProbe
-            ? restoreDescriptor(window, globalName, previousGlobalDescriptor)
-            : false;
+        const globalResult = restoreDescriptor(window, globalName, previousGlobalDescriptor);
         const restored = [...methodResults, globalResult].every(Boolean);
         if (restored) cleanupComplete = true;
         return { restored, cleanupFailure: !restored };
@@ -1759,7 +1762,7 @@ test('first-load no-script product route exposes only the inert loading boundary
     expect(cleanupFailure).toBe(false);
   });
 
-  test('preview IndexedDB spy cleanup reports ownership loss and succeeds on retry', async ({ page }, testInfo) => {
+  test('preview IndexedDB spy cleanup reports ownership loss without overwriting current wrappers, then succeeds on retry', async ({ page }, testInfo) => {
     expect(testInfo.project.name).toBe('chromium-auth-safe');
     expect(testInfo.project.use.trace).toBe('off');
     expect(testInfo.project.use.screenshot).toBe('off');
@@ -1767,6 +1770,8 @@ test('first-load no-script product route exposes only the inert loading boundary
 
     const spyGlobal = '__uiPreviewStorageEvidenceIndexedDbSpy';
     const recoveryGlobal = '__uiPreviewStorageEvidenceIndexedDbRecovery';
+    const hostileGlobal = '__uiPreviewStorageIndexedDbHostileGlobal';
+    const hostileGetGlobal = '__uiPreviewStorageIndexedDbHostileGet';
     let cleanupCompleted = false;
     await page.goto(previewUrl('/ui-preview'));
 
@@ -1793,9 +1798,82 @@ test('first-load no-script product route exposes only the inert loading boundary
       }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
       expect(moved).toBe(true);
 
-      const failedCleanup = await restorePreviewIndexedDbSpy(page, spyGlobal);
+      const replaced = await page.evaluate(({ globalName, hostileGlobalName, hostileGetName }) => {
+        try {
+          const storePrototype = IDBObjectStore.prototype;
+          const getDescriptor = Object.getOwnPropertyDescriptor(storePrototype, 'get');
+          if (!getDescriptor || !('value' in getDescriptor) || typeof getDescriptor.value !== 'function') return false;
+          const currentGet = getDescriptor.value as (this: IDBObjectStore, query?: IDBValidKey) => IDBRequest;
+          const hostileGet = function (this: IDBObjectStore, query?: IDBValidKey): IDBRequest {
+            return Reflect.apply(currentGet, this, query === undefined ? [] : [query]) as IDBRequest;
+          };
+          Object.defineProperty(storePrototype, 'get', { ...getDescriptor, value: hostileGet });
+          const hostileValue = { kind: 'hostile-preview-probe' };
+          Object.defineProperty(window, hostileGlobalName, {
+            configurable: true,
+            enumerable: false,
+            writable: false,
+            value: hostileValue
+          });
+          Object.defineProperty(window, hostileGetName, {
+            configurable: true,
+            enumerable: false,
+            writable: false,
+            value: hostileGet
+          });
+          Object.defineProperty(window, globalName, {
+            configurable: true,
+            enumerable: false,
+            writable: false,
+            value: hostileValue
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      }, { globalName: spyGlobal, hostileGlobalName: hostileGlobal, hostileGetName: hostileGetGlobal });
+      expect(replaced).toBe(true);
+
+      // Invoke the stale owner directly. Cleanup must report the lost global
+      // without replacing the current hostile get wrapper.
+      const failedCleanup = await page.evaluate((recoveryName): PreviewIndexedDbSpyCleanup => {
+        const descriptor = Object.getOwnPropertyDescriptor(window, recoveryName);
+        if (!descriptor || !('value' in descriptor)) return { restored: false, cleanupFailure: true };
+        const probe = descriptor.value as { restore?: () => PreviewIndexedDbSpyCleanup };
+        if (typeof probe.restore !== 'function') return { restored: false, cleanupFailure: true };
+        try {
+          return probe.restore();
+        } catch {
+          return { restored: false, cleanupFailure: true };
+        }
+      }, recoveryGlobal);
       expect(failedCleanup.restored).toBe(false);
       expect(failedCleanup.cleanupFailure).toBe(true);
+
+      const hostileState = await page.evaluate(({ globalName, hostileGlobalName, hostileGetName }) => {
+        const globalDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        const hostileGlobalDescriptor = Object.getOwnPropertyDescriptor(window, hostileGlobalName);
+        const getDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'get');
+        const hostileGetDescriptor = Object.getOwnPropertyDescriptor(window, hostileGetName);
+        return {
+          globalSurvived: Boolean(
+            globalDescriptor &&
+              hostileGlobalDescriptor &&
+              'value' in globalDescriptor &&
+              'value' in hostileGlobalDescriptor &&
+              globalDescriptor.value === hostileGlobalDescriptor.value
+          ),
+          getSurvived: Boolean(
+            getDescriptor &&
+              hostileGetDescriptor &&
+              'value' in getDescriptor &&
+              'value' in hostileGetDescriptor &&
+              getDescriptor.value === hostileGetDescriptor.value
+          )
+        };
+      }, { globalName: spyGlobal, hostileGlobalName: hostileGlobal, hostileGetName: hostileGetGlobal });
+      expect(hostileState.globalSurvived).toBe(true);
+      expect(hostileState.getSurvived).toBe(true);
 
       const republished = await page.evaluate(({ globalName, recoveryName }) => {
         const descriptor = Object.getOwnPropertyDescriptor(window, recoveryName);
@@ -1806,7 +1884,7 @@ test('first-load no-script product route exposes only the inert loading boundary
           writable: false,
           value: descriptor.value
         });
-        return Reflect.deleteProperty(window, recoveryName);
+        return true;
       }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
       expect(republished).toBe(true);
 
@@ -1815,22 +1893,40 @@ test('first-load no-script product route exposes only the inert loading boundary
       expect(retriedCleanup.cleanupFailure).toBe(false);
       cleanupCompleted = true;
     } finally {
-      if (!cleanupCompleted) {
-        await page.evaluate(({ globalName, recoveryName }) => {
+      await page.evaluate(({ globalName, recoveryName, hostileGlobalName, hostileGetName, cleanupCompleted }) => {
+        const recovery = Object.getOwnPropertyDescriptor(window, recoveryName);
+        const candidate = recovery && 'value' in recovery ? recovery.value as { restore?: () => unknown } : undefined;
+        if (!cleanupCompleted && candidate?.restore) {
           const current = Object.getOwnPropertyDescriptor(window, globalName);
-          const recovery = Object.getOwnPropertyDescriptor(window, recoveryName);
-          const candidate = current && 'value' in current ? current.value : recovery && 'value' in recovery ? recovery.value : null;
-          if (candidate && typeof (candidate as { restore?: () => unknown }).restore === 'function') {
+          if (!current || !('value' in current) || current.value !== candidate) {
             try {
-              (candidate as { restore: () => unknown }).restore();
+              Object.defineProperty(window, globalName, {
+                configurable: true,
+                enumerable: false,
+                writable: false,
+                value: candidate
+              });
             } catch {
               // The test result already reports the sanitized cleanup failure.
             }
           }
-          if (current?.configurable) Reflect.deleteProperty(window, globalName);
-          if (recovery?.configurable) Reflect.deleteProperty(window, recoveryName);
-        }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
-      }
+          try {
+            candidate.restore();
+          } catch {
+            // The test result already reports the sanitized cleanup failure.
+          }
+        }
+        for (const name of [globalName, recoveryName, hostileGlobalName, hostileGetName]) {
+          const descriptor = Object.getOwnPropertyDescriptor(window, name);
+          if (descriptor?.configurable) Reflect.deleteProperty(window, name);
+        }
+      }, {
+        globalName: spyGlobal,
+        recoveryName: recoveryGlobal,
+        hostileGlobalName: hostileGlobal,
+        hostileGetName: hostileGetGlobal,
+        cleanupCompleted
+      });
     }
   });
 
