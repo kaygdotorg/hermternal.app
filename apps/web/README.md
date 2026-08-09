@@ -187,14 +187,18 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   is marked before password-login transport starts, so malformed, oversized, or body-read failures still
   trigger a server logout attempt; cookie and browser-state cleanup are independent attempts and any
   logout or cleanup failure remains observable and fails closed. Every JSON request uses same-origin
-  page-context `fetch` with browser-owned cookies and one 30-second projection deadline. A
-  `ReadableStream` reader counts actual decompressed chunks before accumulation, rejects a declared
-  length above 256 KiB, cancels and aborts when the actual stream would exceed 256 KiB, and fails
-  closed for absent/non-streaming bodies, missing or lying lengths, and read/timeout errors. Page
-  validation returns only bounded provider, auth, or fixed history-count projections; it never returns
-  a raw response body. The mode never retains IDs, timestamps, bodies, prompt/response text, endpoints,
-  headers, raw errors, or artifacts, and it is mutually exclusive with screenshot capture. No live
-  reconciliation was run for this correction.
+  page-context `fetch` with browser-owned cookies and one 30-second projection deadline. The transport
+  races both the initial fetch promise and every `ReadableStream.read()` against that same deadline.
+  On timeout it aborts the controller, cancels an acquired reader without waiting for a hostile cancel
+  promise, clears its timers, and settles even when fetch or read ignores AbortSignal. A reader counts
+  actual decompressed chunks before accumulation, rejects a declared length above 256 KiB, cancels and
+  aborts when the actual stream would exceed 256 KiB, and fails closed for absent/non-streaming bodies,
+  missing or lying lengths, and read/timeout errors. Abort listeners are one-shot and timeout handles
+  are cleared; the regression asserts no active listener or timer remains. Page validation returns only
+  bounded provider, auth, or fixed history-count projections; it never returns a raw response body or
+  transport diagnostics. The mode never retains IDs, timestamps, bodies, prompt/response text,
+  endpoints, headers, raw errors, or artifacts, and it is mutually exclusive with screenshot capture.
+  No live reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

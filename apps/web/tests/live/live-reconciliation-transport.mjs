@@ -111,8 +111,8 @@ export async function requestLiveReconciliationProjection(page, request) {
         return { role: message.role, content: message.content };
       }
 
-      /** @param {any} response @param {AbortController} controller */
-      async function readBoundedJson(response, controller) {
+      /** @param {any} response @param {AbortController} controller @param {number} deadline */
+      async function readBoundedJson(response, controller, deadline) {
         if (!response || response.body === null || typeof response.body?.getReader !== 'function') {
           controller.abort();
           throw new Error('live reconciliation response body is not streamable');
@@ -133,9 +133,39 @@ export async function requestLiveReconciliationProjection(page, request) {
         const chunks = [];
         let bytes = 0;
         let chunkCount = 0;
+        let cancelRequested = false;
+        const cancelReader = () => {
+          if (cancelRequested) return;
+          cancelRequested = true;
+          // Do not wait for a hostile or stalled cancel promise. The fixed
+          // timeout result must still reach cleanup, while this best-effort
+          // cancellation releases the browser stream when it cooperates.
+          void Promise.resolve(reader.cancel()).catch(() => undefined);
+        };
+        const readNextChunk = async () => {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            cancelReader();
+            controller.abort();
+            throw new Error('live reconciliation transport timed out');
+          }
+          let timer;
+          const deadlinePromise = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              cancelReader();
+              controller.abort();
+              reject(new Error('live reconciliation transport timed out'));
+            }, remaining);
+          });
+          try {
+            return await Promise.race([reader.read(), deadlinePromise]);
+          } finally {
+            clearTimeout(timer);
+          }
+        };
         try {
           while (true) {
-            const next = await reader.read();
+            const next = await readNextChunk();
             if (!next || next.done === true) break;
             const chunk = next.value;
             if (!(chunk instanceof Uint8Array)) {
@@ -156,11 +186,7 @@ export async function requestLiveReconciliationProjection(page, request) {
             bytes += chunk.byteLength;
           }
         } catch (error) {
-          try {
-            await reader.cancel();
-          } catch {
-            // The transport is already failing closed; do not expose cancel errors.
-          }
+          cancelReader();
           controller.abort();
           if (error instanceof Error && error.message.startsWith('live reconciliation')) throw error;
           throw new Error('live reconciliation response body read failed');
@@ -188,9 +214,15 @@ export async function requestLiveReconciliationProjection(page, request) {
         const remaining = projectionDeadline - Date.now();
         if (remaining <= 0) throw new Error('live reconciliation transport timed out');
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), remaining);
+        let timer;
+        const fetchDeadline = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error('live reconciliation transport timed out'));
+          }, remaining);
+        });
         try {
-          const response = await fetch(new URL(path, baseURL).href, {
+          const fetchResult = fetch(new URL(path, baseURL).href, {
             method: options.method ?? 'GET',
             headers: {
               accept: 'application/json',
@@ -202,6 +234,7 @@ export async function requestLiveReconciliationProjection(page, request) {
             redirect: 'error',
             signal: controller.signal
           });
+          const response = /** @type {Response} */ (await Promise.race([fetchResult, fetchDeadline]));
           if (
             response.status !== 200 ||
             response.headers.get('content-type')?.toLowerCase().includes('application/json') !== true
@@ -209,12 +242,12 @@ export async function requestLiveReconciliationProjection(page, request) {
             controller.abort();
             throw new Error('live reconciliation response was not approved');
           }
-          return await readBoundedJson(response, controller);
+          return await readBoundedJson(response, controller, projectionDeadline);
         } catch (error) {
           if (error instanceof Error && error.message.startsWith('live reconciliation')) throw error;
           throw new Error('live reconciliation transport failed');
         } finally {
-          clearTimeout(timeout);
+          clearTimeout(timer);
         }
       }
 

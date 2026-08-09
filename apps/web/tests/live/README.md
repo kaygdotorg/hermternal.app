@@ -153,13 +153,18 @@ session correlation and history boundary. This reconciliation cannot clear
 uncertain delivery. It preserves `promptCount===0` in the no-submit lane and
 never prints IDs, timestamps, bodies, prompt/response text, endpoints, headers,
 raw errors, or artifacts. Every JSON request uses same-origin page-context
-`fetch` with browser-owned cookies and one 30-second projection deadline. A
-ReadableStream reader counts actual decompressed chunks before accumulation,
-rejects a declared length above 256 KiB, cancels and aborts when the actual
-stream would exceed 256 KiB, and fails closed for absent/non-streaming bodies,
-missing or lying lengths, and read/timeout errors. Page validation returns only
-bounded provider, auth, or fixed history-count projections; it never returns a
-raw response body.
+`fetch` with browser-owned cookies and one 30-second projection deadline. The
+transport races both the initial fetch promise and every `ReadableStream.read()`
+against that same deadline. On timeout it aborts the controller, cancels an
+acquired reader without waiting for a hostile cancel promise, clears its timers,
+and settles even when fetch or read ignores AbortSignal. A reader counts actual
+decompressed chunks before accumulation, rejects a declared length above 256
+KiB, cancels and aborts when the actual stream would exceed 256 KiB, and fails
+closed for absent/non-streaming bodies, missing or lying lengths, and read/
+timeout errors. Abort listeners are one-shot and timeout handles are cleared;
+the regression asserts no active listener or timer remains. Page validation
+returns only bounded provider, auth, or fixed history-count projections; it
+never returns a raw response body or transport diagnostics.
 
 Finally it verifies logout and clears cookies, Web Storage, IndexedDB, Cache
 Storage, and service workers. The login-request risk is marked before the
