@@ -657,12 +657,14 @@ def _partial_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple
 
 
 def _caret_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[int, int, int]:
-    if wildcards[0]:
-        return (version.major + 1, 0, 0)
     if version.major > 0:
         return (version.major + 1, 0, 0)
-    if wildcards[1] or version.minor > 0:
+    if wildcards[1]:
+        return (1, 0, 0)
+    if version.minor > 0:
         return (0, version.minor + 1, 0)
+    if wildcards[2]:
+        return (0, 1, 0)
     return (0, 0, version.patch + 1)
 
 
@@ -702,6 +704,8 @@ def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
             "<=": comparison <= 0,
         }[term.operator]
     if term.operator in {"^", "~"}:
+        if term.operator == "^" and term.wildcards[0]:
+            return True
         lower = _compare_semver(actual, term.version) >= 0
         upper_core = _caret_upper(term.version, term.wildcards) if term.operator == "^" else _tilde_upper(term.version, term.wildcards)
         upper = actual.core < upper_core

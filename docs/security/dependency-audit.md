@@ -106,9 +106,11 @@ prerelease comparator with the candidate's exact major, minor, and patch tuple.
 Comparator operands with omitted or wildcard components
 use npm partial expansion: `>1` becomes `>=2.0.0`, `>1.2.x` becomes
 `>=1.3.0`, and `<=1.2.x` becomes `<1.3.0`; comparator operands that are only a
-wildcard are rejected. The same rules apply to required peer ranges. An `npm:`
-alias must match both the dependency-name lock key and the descriptor's target
-package name, then match its exact target version. Unsupported or ambiguous
+wildcard are rejected. Partial caret bounds follow npm's zero-major rules:
+`^0` and `^0.x` include `0.2.0` below `<1.0.0`, while `^0.0` and `^0.0.x`
+include `0.0.1` below `<0.1.0`. The same rules apply to required peer ranges.
+An `npm:` alias must match both the dependency-name lock key and the descriptor's
+target package name, then match its exact target version. Unsupported or ambiguous
 shapes fail closed rather than inventing a network resolution.
 
 ## Current origin/dev baseline

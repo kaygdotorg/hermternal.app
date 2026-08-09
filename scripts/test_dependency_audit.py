@@ -599,6 +599,70 @@ class DependencyAuditTests(unittest.TestCase):
             result,
         )
 
+    def test_partial_caret_ranges_use_npm_lower_and_upper_bounds(self) -> None:
+        cases = (
+            ("0.2.0", "^0", True),
+            ("0.2.0", "^0.x", True),
+            ("0.0.1", "^0.0", True),
+            ("0.0.1", "^0.0.x", True),
+            ("0.999.999", "^0", True),
+            ("1.0.0", "^0", False),
+            ("0.1.0", "^0.0", False),
+            ("0.2.0", "^0.0", False),
+            ("0.2.0", "^0.2", True),
+            ("0.3.0", "^0.2", False),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "dependencies": {
+                "caret-zero": "^0",
+                "caret-zero-x": "^0.x",
+                "caret-zero-zero": "^0.0",
+                "caret-zero-zero-x": "^0.0.x",
+            },
+            "peerDependencies": {"required-peer-caret": "^0.0"},
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "caret-zero": package_record("caret-zero", "0.2.0"),
+                "caret-zero-x": package_record("caret-zero-x", "0.2.0"),
+                "caret-zero-zero": package_record("caret-zero-zero", "0.0.1"),
+                "caret-zero-zero-x": package_record("caret-zero-zero-x", "0.0.1"),
+                "required-peer-caret": package_record("required-peer-caret", "0.0.1"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "review", result)
+        self.assertEqual(
+            {item["name"] for item in result["inventory"]["transitive"]},
+            {
+                "caret-zero",
+                "caret-zero-x",
+                "caret-zero-zero",
+                "caret-zero-zero-x",
+                "required-peer-caret",
+            },
+            result,
+        )
+        self.assertEqual(result["lockfile"]["peer_dependency_gaps"], [], result)
+
     def test_semver_ranges_are_strict_and_prerelease_safe(self) -> None:
         manifest = json.dumps(
             {
