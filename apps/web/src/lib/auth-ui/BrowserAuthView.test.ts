@@ -14,6 +14,14 @@ const identity: AuthIdentity = {
   expiresAt: 2_000_000_000
 };
 
+const oauthProvider = {
+  id: 'nous',
+  name: 'Nous',
+  monogram: 'N',
+  kind: 'oauth' as const,
+  description: 'OAuth · opens the provider'
+};
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
@@ -175,7 +183,7 @@ describe('BrowserAuthView', () => {
     expect(discoverProviders).not.toHaveBeenCalled();
   });
 
-  it('keeps internal logout pending and recovery out of the approved AuthPreview families', async () => {
+  it('keeps pending logout in the authenticated projection', async () => {
     const pendingLogout = deferred<void>();
     const client: BrowserAuthClient = {
       verify: vi.fn(async () => identity),
@@ -201,7 +209,7 @@ describe('BrowserAuthView', () => {
     expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
   });
 
-  it('does not turn logout recovery into generic sign-in UI', async () => {
+  it('projects logout recovery into the generic failure family with a working retry', async () => {
     const logout = vi
       .fn<BrowserAuthClient['logout']>()
       .mockRejectedValueOnce(new BrowserAuthError('logout-failed'))
@@ -220,11 +228,36 @@ describe('BrowserAuthView', () => {
 
     await session.logout();
     await waitFor(() => expect(session.current.status).toBe('logout_failed'));
-    expect(screen.queryByTestId('auth-preview')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Retry sign out' })).not.toBeInTheDocument();
+    expect(session.current).toMatchObject({ status: 'logout_failed', identity });
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'failure');
+    expect(screen.getByRole('heading', { name: 'Sign-in did not complete' })).toBeInTheDocument();
 
-    await session.logout();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(session.current.status).toBe('signed_out'));
     expect(logout).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed for live OAuth without entering the password form', async () => {
+    const session = new BrowserAuthSession({
+      client: {
+        verify: vi.fn(async () => {
+          throw new BrowserAuthError('identity-unverified', 401);
+        }),
+        loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
+        logout: vi.fn(async () => undefined)
+      },
+      discoverProviders: vi.fn(async () => ({ providers: [oauthProvider] })),
+      invalidateLocalSession: vi.fn()
+    });
+    render(BrowserAuthView, { session });
+
+    const oauthButton = await screen.findByRole('button', { name: 'Continue with Nous' });
+    fireEvent.click(oauthButton);
+
+    await waitFor(() => expect(session.current.selectedProviderId).toBe('nous'));
+    expect(session.current.providers[0]).toMatchObject({ id: 'nous', kind: 'oauth' });
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    expect(screen.queryByRole('form', { name: 'Hermes password sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sign in to Hermes' })).not.toBeInTheDocument();
   });
 });

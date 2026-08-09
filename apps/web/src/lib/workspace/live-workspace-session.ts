@@ -28,6 +28,31 @@ import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/tr
 import { mapLiveMessages, mapLiveSessions } from './live-workspace';
 import type { SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
+const MAX_COMPOSER_DRAFT_TEXT_LENGTH = 4096;
+const MAX_COMPOSER_DRAFT_ATTACHMENTS = 8;
+const MAX_ATTACHMENT_ID_LENGTH = 128;
+const MAX_ATTACHMENT_NAME_LENGTH = 128;
+const MAX_ATTACHMENT_MEDIA_TYPE_LENGTH = 96;
+
+/** Metadata-only attachment state allowed to cross an auth remount. */
+export interface ComposerAttachmentMetadata {
+  readonly id: string;
+  readonly name: string;
+  readonly mediaType?: string;
+  readonly sizeBytes?: number;
+}
+
+/**
+ * One bounded unsent composer draft. This is root-owned ephemeral UI state, not
+ * a transcript mirror: it contains no image bytes, paths, credentials, or
+ * transport payloads, and is released by explicit discard, terminal teardown,
+ * logout, or root disposal.
+ */
+export interface LiveWorkspaceDraft {
+  readonly text: string;
+  readonly attachments: readonly ComposerAttachmentMetadata[];
+}
+
 export interface LiveWorkspaceSnapshot {
   readonly state: WorkspaceRuntimeState;
   /** One durable Hermes session owns both Chat and Terminal presentation. */
@@ -36,6 +61,8 @@ export interface LiveWorkspaceSnapshot {
   readonly activeSessionId?: string;
   readonly title: string;
   readonly model: string;
+  /** The bounded local composer state is separate from server-owned history. */
+  readonly draft?: LiveWorkspaceDraft;
   readonly timeline: TimelineItem[];
   /** Semantic terminal cause retained separately from the broad UI state. */
   readonly permanentFailure?: LiveWorkspacePermanentFailure;
@@ -153,6 +180,9 @@ export class LiveWorkspaceSession {
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly clarifications = new Map<string, PendingClarification>();
   private snapshot: LiveWorkspaceSnapshot = initialSnapshot();
+  // This root-owned reference is deliberately independent of the auth view. The
+  // view may unmount on expiry, while the route-owned workspace remains alive.
+  private composerDraft: LiveWorkspaceDraft | undefined;
   private controller: AbortController | undefined;
   private chat: JsonRpcChatTransport | undefined;
   private activeRequest: JsonRpcChatRequest | undefined;
@@ -210,6 +240,31 @@ export class LiveWorkspaceSession {
     return this.snapshot;
   }
 
+  /** Read-only access for a remounted presentation; no browser storage is used. */
+  get currentDraft(): Readonly<LiveWorkspaceDraft> | undefined {
+    return this.composerDraft;
+  }
+
+  /**
+   * Retain only bounded text and metadata. Callers never hand this state to the
+   * server; the send boundary clears it only after the transport accepts a turn.
+   */
+  setComposerDraft(draft: LiveWorkspaceDraft | undefined): void {
+    this.assertActive();
+    const next = normalizeComposerDraft(draft);
+    if (draftsEqual(this.composerDraft, next)) return;
+    this.composerDraft = next;
+    this.publish({ ...this.snapshot });
+  }
+
+  /** Explicit user discard and terminal teardown both use this boundary. */
+  clearComposerDraft(): void {
+    this.assertActive();
+    if (this.composerDraft === undefined) return;
+    this.composerDraft = undefined;
+    this.publish({ ...this.snapshot });
+  }
+
   /** Resources are lazy so signed-out roots do not mint PTY tickets or sockets. */
   get coordinator(): SessionCoordinator | undefined {
     return this.ensureCoordinatorResources()?.coordinator;
@@ -253,10 +308,12 @@ export class LiveWorkspaceSession {
 
   detachTerminal(): void {
     this.terminalBridge?.detach();
+    if (!this.disposed) this.clearComposerDraft();
   }
 
   closeTerminal(): void {
     this.terminalBridge?.close();
+    if (!this.disposed) this.clearComposerDraft();
   }
 
   subscribe(subscriber: LiveWorkspaceSubscriber): () => void {
@@ -373,7 +430,7 @@ export class LiveWorkspaceSession {
     }
   }
 
-  sendPrompt(text: string): void {
+  sendPrompt(text: string): boolean {
     this.assertActive();
     const chat = this.chat;
     const generation = this.generation;
@@ -385,7 +442,7 @@ export class LiveWorkspaceSession {
       this.activeRequest !== undefined ||
       (this.snapshot.state !== 'ready' && this.snapshot.state !== 'empty' && this.snapshot.state !== 'stopped')
     )
-      return;
+      return false;
 
     // Completion publication can synchronously reenter through a subscriber
     // while the completed request still owns its REST reconciliation. Reject
@@ -395,10 +452,10 @@ export class LiveWorkspaceSession {
     try {
       request = chat.sendPrompt(text);
     } catch {
-      if (!this.ownsPromptStart(generation, chat, operationSignal) || this.activeRequest !== undefined) return;
+      if (!this.ownsPromptStart(generation, chat, operationSignal) || this.activeRequest !== undefined) return false;
       this.advanceRefreshEpoch();
       this.publish({ ...this.snapshot, state: 'retryable-error' });
-      return;
+      return false;
     }
 
     // sendPrompt can synchronously deliver callbacks. Do not adopt a returned
@@ -412,7 +469,7 @@ export class LiveWorkspaceSession {
       } catch {
         // A stale transport owns cleanup of its own request.
       }
-      return;
+      return false;
     }
 
     // Allocate the prompt epoch only after the synchronous transport call has
@@ -430,6 +487,9 @@ export class LiveWorkspaceSession {
     };
     this.activeRequest = request;
     this.activePromptOwnership = ownership;
+    // Clearing happens only after the transport returned an owned request. A
+    // rejected or stale send keeps the bounded draft available for recovery.
+    this.composerDraft = undefined;
     const userItem: TimelineItem = {
       kind: 'user-message',
       id: `${request.id}:user`,
@@ -450,6 +510,7 @@ export class LiveWorkspaceSession {
     void request.completion
       .then(() => this.refreshMessagesAfterCompletion(ownership))
       .catch((error) => this.handlePromptFailure(ownership, error));
+    return true;
   }
 
   async stop(): Promise<void> {
@@ -646,6 +707,9 @@ export class LiveWorkspaceSession {
     // close callbacks can synchronously re-enter; no callback may publish or
     // observe a still-active workspace during disposal.
     this.disposed = true;
+    // Disposal is the permanent privacy boundary. Invalidation preserves the
+    // draft for reauthentication; root disposal must release it instead.
+    this.composerDraft = undefined;
     this.subscribers.clear();
     this.revokeCleanupPublicationOwnership();
     this.disposeCoordinatorResources();
@@ -791,6 +855,12 @@ export class LiveWorkspaceSession {
       return;
     }
 
+    if (isSettledTerminalState(event.state) && this.snapshot.mode === 'terminal') {
+      // A PTY can settle without a button action (for example process exit or a
+      // transport close). Treat that terminal boundary like explicit teardown;
+      // auth invalidation has already revoked this event's ownership above.
+      this.clearComposerDraft();
+    }
     if (isSettledTerminalState(event.state) && coordinator) {
       const state = coordinator.state;
       const settlement: TerminalSettlement = {
@@ -1654,13 +1724,20 @@ export class LiveWorkspaceSession {
 
   private publish(snapshot: LiveWorkspaceSnapshot): void {
     if (this.disposed) return;
+    // Draft state is reconstructed on every publication so a reset, history
+    // replacement, or remount cannot retain a stale snapshot-local reference.
+    const { draft: _staleDraft, ...snapshotWithoutDraft } = snapshot;
+    const withDraft =
+      this.composerDraft === undefined
+        ? snapshotWithoutDraft
+        : { ...snapshotWithoutDraft, draft: this.composerDraft };
     // Factory failure is latched for one authentication lifecycle. Initialization
     // and REST publications must not erase the sanitized failure and turn the
     // Terminal control into a silent no-op.
     const nextSnapshot =
-      this.terminalFactoryFailed && snapshot.terminal === undefined
-        ? { ...snapshot, terminal: terminalFactoryFailureState() }
-        : snapshot;
+      this.terminalFactoryFailed && withDraft.terminal === undefined
+        ? { ...withDraft, terminal: terminalFactoryFailureState() }
+        : withDraft;
     this.snapshot = nextSnapshot;
     this.subscribers.forEach((subscriber) => subscriber(nextSnapshot));
   }
@@ -1668,6 +1745,63 @@ export class LiveWorkspaceSession {
   private assertActive(): void {
     if (this.disposed) throw new Error('Live workspace session is disposed.');
   }
+}
+
+function normalizeComposerDraft(draft: LiveWorkspaceDraft | undefined): LiveWorkspaceDraft | undefined {
+  if (draft === undefined) return undefined;
+  const text = typeof draft.text === 'string' ? draft.text.slice(0, MAX_COMPOSER_DRAFT_TEXT_LENGTH) : '';
+  const attachments: ComposerAttachmentMetadata[] = [];
+  const seenIds = new Set<string>();
+  const candidates = Array.isArray(draft.attachments) ? draft.attachments : [];
+  for (const candidate of candidates) {
+    if (candidate === null || typeof candidate !== 'object') continue;
+    const id = boundedMetadataString(candidate.id, MAX_ATTACHMENT_ID_LENGTH);
+    const name = boundedMetadataString(candidate.name, MAX_ATTACHMENT_NAME_LENGTH);
+    if (!id || !name || seenIds.has(id)) continue;
+    seenIds.add(id);
+    const mediaType = boundedMetadataString(candidate.mediaType, MAX_ATTACHMENT_MEDIA_TYPE_LENGTH);
+    const sizeBytes =
+      typeof candidate.sizeBytes === 'number' &&
+      Number.isSafeInteger(candidate.sizeBytes) &&
+      candidate.sizeBytes >= 0
+        ? candidate.sizeBytes
+        : undefined;
+    attachments.push({
+      id,
+      name,
+      ...(mediaType ? { mediaType } : {}),
+      ...(sizeBytes === undefined ? {} : { sizeBytes })
+    });
+    if (attachments.length >= MAX_COMPOSER_DRAFT_ATTACHMENTS) break;
+  }
+
+  if (text.length === 0 && attachments.length === 0) return undefined;
+  return Object.freeze({ text, attachments: Object.freeze(attachments) });
+}
+
+function boundedMetadataString(value: unknown, limit: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().slice(0, limit);
+  return normalized || undefined;
+}
+
+function draftsEqual(
+  left: LiveWorkspaceDraft | undefined,
+  right: LiveWorkspaceDraft | undefined
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.text !== right.text || left.attachments.length !== right.attachments.length) {
+    return false;
+  }
+  return left.attachments.every((attachment, index) => {
+    const other = right.attachments[index];
+    return (
+      attachment.id === other?.id &&
+      attachment.name === other.name &&
+      attachment.mediaType === other.mediaType &&
+      attachment.sizeBytes === other.sizeBytes
+    );
+  });
 }
 
 function initialSnapshot(): LiveWorkspaceSnapshot {

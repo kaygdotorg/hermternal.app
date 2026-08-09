@@ -15,6 +15,30 @@
   } from './types';
   import type { Appearance } from '$lib/workspace/types';
 
+  /**
+   * Live discovery must not borrow fixture identities while the registry is
+   * pending. These neutral rows keep the approved Paper rhythm without
+   * presenting a provider name or capability as a live fact.
+   */
+  const PENDING_PROVIDERS: AuthProvider[] = [
+    {
+      id: 'pending-provider-manifest',
+      name: 'Provider manifest',
+      monogram: 'P',
+      kind: 'oauth',
+      description: 'Loading · no sign-in action yet',
+      mobileDescription: 'Provider manifest'
+    },
+    {
+      id: 'pending-provider-entries',
+      name: 'Provider entries',
+      monogram: 'P',
+      kind: 'password',
+      description: 'Waiting for a complete response',
+      mobileDescription: 'Provider entries'
+    }
+  ];
+
   export let appearance: Appearance = 'light';
   export let state: AuthViewState = 'provider-selection';
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
@@ -33,7 +57,14 @@
   // status screens may intentionally carry no providers while pending or failed.
   $: effectiveState = state === 'provider-selection' && !validatedProviders ? 'provider-unavailable' : state;
   $: safeProviders = validatedProviders ?? [];
-  $: pendingProviders = safeProviders.length > 0 ? safeProviders : DEFAULT_PROVIDERS;
+  // A live pending state has no trusted registry yet. Never render the local
+  // fixture identities there, even if a caller supplies stale provider data.
+  $: pendingProviders =
+    discoveryMode === 'live'
+      ? PENDING_PROVIDERS
+      : safeProviders.length > 0
+        ? safeProviders
+        : DEFAULT_PROVIDERS;
   $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
   $: isPasswordSubmitting = effectiveState === 'password-submitting' || (effectiveState === 'password' && passwordSubmitting);
   $: activeDiscoveryFailure = discoveryFailureVariantForState(effectiveState);
@@ -82,7 +113,9 @@
     isPasswordSubmitting
       ? 'Signing in to Hermes. The form is disabled while this mocked state completes.'
       : effectiveState === 'callback'
-        ? 'Completing sign-in. Checking the provider response and creating a protected browser session.'
+        ? discoveryMode === 'live'
+          ? 'Completing sign-in. Checking the provider response and creating a protected browser session.'
+          : 'Completing sign-in. Static callback state only; no provider response is read.'
         : effectiveState === 'discovery-pending'
           ? 'Discovering sign-in methods. Provider actions are unavailable while the result is pending.'
           : isDiscoveryFailureState(effectiveState) && activeDiscoveryFailure === 'retry'
@@ -94,7 +127,7 @@
       : effectiveState === 'session-expired'
         ? 'Session expired. Sign in again or discard the retained local draft.'
         : isDiscoveryFailureState(effectiveState) && activeDiscoveryFailure !== 'retry'
-          ? 'Provider discovery stopped. No usable provider list was returned.'
+          ? `${discoveryFailureHeading(activeDiscoveryFailure)}. ${discoveryFailureCopy(activeDiscoveryFailure)}`
           : '';
 
   onMount(() => {
@@ -128,29 +161,58 @@
   }
 
   function discoveryFailureHeading(value: AuthDiscoveryFailureVariant): string {
-    return value === 'retry' ? 'Retry provider discovery' : 'Provider discovery stopped';
+    if (value === 'retry') return 'Retry provider discovery';
+    if (value === 'empty') return 'No sign-in methods available';
+    if (value === 'malformed') return 'Provider discovery returned incompatible data';
+    if (value === 'aborted') return 'Provider discovery was cancelled';
+    return 'Provider discovery stopped';
   }
 
   function discoveryFailureCopy(value: AuthDiscoveryFailureVariant): string {
-    return value === 'retry'
-      ? 'The previous result was unknown. A fresh user action is required before another lookup.'
-      : 'No usable provider list was returned. The client fails closed and does not invent a fallback.';
+    if (value === 'retry') {
+      return 'The previous result was unknown. A fresh user action is required before another lookup.';
+    }
+    if (value === 'empty') {
+      return 'A successful empty provider registry is outside the pinned response contract. The preview fails closed and exposes no invented provider.';
+    }
+    if (value === 'malformed') {
+      return 'The provider response did not match the reviewed schema. The preview fails closed and exposes no invented sign-in method.';
+    }
+    if (value === 'aborted') {
+      return 'The provider discovery request was cancelled before a usable registry was received. No provider action is available.';
+    }
+    return 'No usable provider list was returned. The client fails closed and does not invent a fallback.';
   }
 
   function discoveryFailureDetail(value: AuthDiscoveryFailureVariant): string {
-    return value === 'retry' ? 'Ready to retry' : 'provider_unavailable';
+    if (value === 'retry') return 'Ready to retry provider discovery';
+    if (value === 'empty') return 'invalid_empty_provider_registry';
+    if (value === 'malformed') return 'invalid_response';
+    if (value === 'aborted') return 'aborted';
+    return 'provider_unavailable';
   }
 
   function discoveryFailureDetailCopy(value: AuthDiscoveryFailureVariant): string {
-    return value === 'retry'
-      ? 'Retry is idempotent; duplicate submits stay blocked until the result returns.'
-      : 'Empty or malformed provider data was rejected before sign-in choices were shown.';
+    if (value === 'retry') {
+      return 'Retry is idempotent; duplicate submits stay blocked until the result returns.';
+    }
+    if (value === 'empty') {
+      return 'Retry discovery after Hermes reports the reviewed provider registry or exact unavailable response.';
+    }
+    if (value === 'malformed') {
+      return 'Unknown fields are ignored only after bounded strict parsing; malformed or unsafe data is rejected.';
+    }
+    if (value === 'aborted') return 'Cancellation leaves no provider list and does not expose response data.';
+    return 'The endpoint did not provide a usable provider registry. No fallback provider is invented.';
   }
 
-  function discoveryFailureMetadata(value: AuthDiscoveryFailureVariant): string {
-    return value === 'retry'
-      ? 'Mocked fixture · user initiated · safe to cancel'
-      : 'Mocked fixture · empty + malformed · no credentials';
+  function discoveryFailureMetadata(value: AuthDiscoveryFailureVariant, mode: AuthDiscoveryMode): string {
+    const source = mode === 'live' ? 'Live boundary' : 'Mocked fixture';
+    if (value === 'retry') return `${source} · user initiated · safe to retry`;
+    if (value === 'empty') return `${source} · empty registry · no credentials`;
+    if (value === 'malformed') return `${source} · malformed response · no credentials`;
+    if (value === 'aborted') return `${source} · cancelled · no credentials`;
+    return `${source} · provider unavailable · no credentials`;
   }
 
   function resetPasswordEntry(): void {
@@ -287,13 +349,20 @@
         </div>
 
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Connected to the configured HTTPS origin. Only providers reported by Hermes are shown.
+          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
+            ? 'Connected to the configured HTTPS origin. Only providers reported by Hermes are shown.'
+            : 'Synthetic fixture only · provider choices are local presentation data; no discovery request is made.'}
         </p>
       {:else if effectiveState === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
           <h1 bind:this={stateHeading} tabindex="-1">Discovering sign-in methods</h1>
-          <p>Waiting for the configured Hermes deployment to report provider capabilities. No fallback is guessed.</p>
+          <p>
+            <span class="desktop-copy">Waiting for the configured Hermes deployment to report provider capabilities. No fallback is guessed.</span>
+            <span class="mobile-copy">{discoveryMode === 'live'
+              ? 'Live discovery · no provider action until the list is valid.'
+              : 'Mocked only · no provider action until the list is valid.'}</span>
+          </p>
         </header>
 
         <div class="provider-list" aria-label="Provider discovery in progress" aria-busy="true">
@@ -308,7 +377,9 @@
           </div>
         {/if}
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Mocked only · provider discovery is pending; controls stay unavailable until a valid list arrives.
+          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
+            ? 'Live discovery · provider discovery is pending; controls stay unavailable until a valid list arrives.'
+            : 'Mocked only · provider discovery is pending; controls stay unavailable until a valid list arrives.'}
         </p>
       {:else if isPasswordState}
         <header class="panel-heading">
@@ -406,41 +477,55 @@
         {/key}
 
         {#if isPasswordSubmitting}
-          <p class="interaction-note">Static mocked state · 44px targets · focus order is fields → sign in → cancel.</p>
+          <p class="interaction-note">{discoveryMode === 'live'
+            ? 'Live request state · 44px targets · focus order is fields → sign in → cancel.'
+            : 'Static mocked state · 44px targets · focus order is fields → sign in → cancel.'}</p>
         {/if}
       {:else if effectiveState === 'callback'}
         <div class="callback-progress" aria-hidden="true"><span></span></div>
         <div class="callback-message">
           <h1 bind:this={stateHeading} tabindex="-1">Completing sign-in</h1>
-          <p>Checking the provider response and creating a protected browser session.</p>
+          <p>{discoveryMode === 'live'
+            ? 'Checking the provider response and creating a protected browser session.'
+            : 'Static callback state only. No provider response is read and no browser session is created.'}</p>
         </div>
         <div class="privacy-note">
           <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
-          <p>Do not close this tab. Callback parameters are checked once and are never shown in the interface.</p>
+          <p>{discoveryMode === 'live'
+            ? 'Do not close this tab. Callback parameters are checked once and are never shown in the interface.'
+            : 'Prototype-only callback presentation. No callback parameters or transcript data are read.'}</p>
         </div>
         <Pill label="Cancel and return to providers" variant="ghost" onActivate={() => handleAction({ type: 'cancel-callback' })} />
       {:else if effectiveState === 'session-expired'}
         <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
         <div class="session-copy">
           <h1 bind:this={stateHeading} tabindex="-1">Session expired</h1>
-          <p>Sign in again to continue. Your draft stays on this device until authentication completes.</p>
+          <p>{discoveryMode === 'live'
+            ? 'Sign in again to continue. Your bounded local draft stays in memory until authentication completes.'
+            : 'Sign in again to continue. This fixture keeps a bounded local draft in memory until authentication completes.'}</p>
         </div>
         <div class="session-actions">
           <Pill label="Sign in again" variant="action" onActivate={() => handleAction({ type: 'sign-in-again' })} />
           <Pill label="Discard draft" variant="ghost" onActivate={() => handleAction({ type: 'discard-draft' })} />
         </div>
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Mocked session gate · draft retained locally. No prompt was sent after the session expired.
+          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
+            ? 'Live session gate · draft retained locally. No prompt was sent after the session expired.'
+            : 'Mocked session gate · draft retained locally. No prompt was sent after the session expired.'}
         </p>
       {:else if effectiveState === 'failure'}
         <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
         <div class="failure-heading">
           <h1 bind:this={stateHeading} tabindex="-1">Sign-in did not complete</h1>
-          <p>{discoveryMode === 'live' && failureMessage ? failureMessage : 'Hermes rejected this attempt. No session was created and no provider was tried automatically.'}</p>
+          <p>{discoveryMode === 'live' && failureMessage
+            ? failureMessage
+            : 'Static failure state only. No session was created and no provider was tried automatically.'}</p>
         </div>
         <div class="failure-detail">
-          <strong>{discoveryMode === 'live' && failureCode ? failureCode : 'The provider rejected this request'}</strong>
-          <p>{discoveryMode === 'live' && failureCode ? 'The fixed diagnostic contains no credential or callback parameter detail.' : 'Try again, or choose another provider. Error details do not include credentials or callback parameters.'}</p>
+          <strong>{discoveryMode === 'live' && failureCode ? failureCode : 'static_fixture_failure'}</strong>
+          <p>{discoveryMode === 'live' && failureCode
+            ? 'The fixed diagnostic contains no credential or callback parameter detail.'
+            : 'Try again, or choose another provider. This fixture reads no provider response and retains no credentials.'}</p>
         </div>
         <div class="failure-actions">
           <Pill label="Try again" icon="refresh" variant="action" onActivate={() => handleAction({ type: 'retry-authentication' })} />
@@ -463,7 +548,7 @@
           <Pill label="Retry discovery" icon="refresh" variant="action" onActivate={() => handleAction({ type: 'retry-discovery' })} />
           <Pill label="Back to sign-in" variant="ghost" onActivate={() => handleAction({ type: 'back-to-sign-in' })} />
         </div>
-        <p class="metadata">{discoveryFailureMetadata(activeDiscoveryFailure)}</p>
+        <p class="metadata">{discoveryFailureMetadata(activeDiscoveryFailure, discoveryMode)}</p>
       {/if}
     </div>
   </div>
@@ -482,9 +567,6 @@
     --danger-surface: var(--color-gate-light-error-surface);
     --focus: var(--color-gate-light-focus);
     --action-ink: var(--color-gate-light-action-ink);
-    --radius-pill: var(--radius-pill);
-    --radius-input: var(--radius-input);
-    --radius-structural: var(--radius-structural);
     position: relative;
     box-sizing: border-box;
     width: 100%;

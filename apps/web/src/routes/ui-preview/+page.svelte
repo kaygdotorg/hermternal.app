@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import AuthPreview from '$lib/auth-ui/AuthPreview.svelte';
   import { discoverProviders } from '$lib/auth-ui/provider-discovery';
   import { DEFAULT_PROVIDERS } from '$lib/auth-ui/fixtures';
   import WorkspacePreview from '$lib/workspace/WorkspacePreview.svelte';
+  import type { LiveWorkspaceDraft } from '$lib/workspace/live-workspace-session';
   import {
     authStateForProviderKind,
     type AuthAction,
@@ -60,13 +61,59 @@
   let discoveryAbortController: AbortController | undefined;
   let discoveryAttempt = 0;
   let discoveryActive = false;
-  let draftRetained = false;
+
+  const MAX_UNSENT_DRAFT_LENGTH = 4096;
+  const MAX_UNSENT_DRAFT_ATTACHMENTS = 8;
+  const FIXTURE_UNSENT_DRAFT: LiveWorkspaceDraft = {
+    text: 'A pending fixture draft for the current Hermes conversation.',
+    attachments: []
+  };
+  // Keep one bounded payload for this mounted preview only. It is never rendered,
+  // serialized, or merged into the synthetic timeline, so this is draft state,
+  // not a transcript mirror. Explicit lifecycle handlers and route teardown drop
+  // the reference; no browser storage participates in its lifetime.
+  let currentUnsentDraft: LiveWorkspaceDraft | undefined;
+
+  function restoreCurrentUnsentDraft(): void {
+    if (currentUnsentDraft !== undefined) return;
+    currentUnsentDraft = {
+      text: FIXTURE_UNSENT_DRAFT.text.slice(0, MAX_UNSENT_DRAFT_LENGTH),
+      attachments: [...FIXTURE_UNSENT_DRAFT.attachments]
+    };
+  }
+
+  function setCurrentUnsentDraft(draft: LiveWorkspaceDraft | undefined): void {
+    if (draft === undefined) {
+      currentUnsentDraft = undefined;
+      return;
+    }
+    const text = typeof draft.text === 'string' ? draft.text.slice(0, MAX_UNSENT_DRAFT_LENGTH) : '';
+    const attachments = draft.attachments
+      .slice(0, MAX_UNSENT_DRAFT_ATTACHMENTS)
+      .filter((attachment) => attachment.id.length > 0 && attachment.name.length > 0)
+      .map((attachment) => ({
+        id: attachment.id.slice(0, 128),
+        name: attachment.name.slice(0, 128),
+        ...(attachment.mediaType ? { mediaType: attachment.mediaType.slice(0, 96) } : {}),
+        ...(attachment.sizeBytes === undefined ? {} : { sizeBytes: attachment.sizeBytes })
+      }));
+    currentUnsentDraft = text.length > 0 || attachments.length > 0 ? { text, attachments } : undefined;
+  }
+
+  function clearCurrentUnsentDraft(): void {
+    currentUnsentDraft = undefined;
+  }
 
   function formatState(value: string): string {
     return value
       .split('-')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
+  }
+
+  function handleAuthStateSelection(event: Event): void {
+    const nextState = (event.currentTarget as HTMLSelectElement).value;
+    if (nextState === 'session-expired') restoreCurrentUnsentDraft();
   }
 
   function isLiveDiscoveryRequested(): boolean {
@@ -108,6 +155,24 @@
 
   function handleRuntimeAction(action: WorkspaceAction): void {
     lastRuntimeAction = action.type;
+
+    // The fixture treats a send action as the successful prompt boundary. The
+    // live workspace owns transport uncertainty separately; this preview only
+    // drops the one local draft after an explicit successful fixture action.
+    if (action.type === 'send') clearCurrentUnsentDraft();
+
+    // Returning to sign-in or ending the Terminal lifecycle ends this mounted
+    // draft's ownership. Reauthentication can restore it only before these
+    // explicit clears, and teardown clears the final in-memory reference too.
+    if (
+      action.type === 'return-to-sign-in' ||
+      action.type === 'back-to-sessions' ||
+      action.type === 'dismiss' ||
+      action.type === 'terminal-close' ||
+      action.type === 'terminal-detach'
+    ) {
+      clearCurrentUnsentDraft();
+    }
   }
 
   function handleAuthAction(action: AuthAction): void {
@@ -126,8 +191,11 @@
         startProviderDiscovery();
         return;
       }
+      // Fixture retry has no async boundary. Resolve it directly to the
+      // deterministic provider-selection state instead of showing a pending
+      // transition that cannot produce a new provider response.
       providers = DEFAULT_PROVIDERS;
-      authState = 'discovery-pending';
+      authState = 'provider-selection';
       return;
     }
 
@@ -155,7 +223,7 @@
       action.type === 'discard-draft'
     ) {
       authState = 'provider-selection';
-      if (action.type === 'discard-draft') draftRetained = false;
+      if (action.type === 'discard-draft') clearCurrentUnsentDraft();
     }
 
     if (action.type === 'retry-authentication') {
@@ -165,9 +233,10 @@
     if (action.type === 'submit-password-fixture') authState = 'password-submitting';
 
     if (action.type === 'sign-in-again') {
-      // The approved expiry family retains the local draft until the next
-      // authentication completes; this fixture only models that local gate.
-      draftRetained = true;
+      // The fixture has no network completion event. Treat this explicit
+      // recovery action as the successful auth boundary and restore the same
+      // bounded draft reference, never a transcript copy or a new boolean.
+      restoreCurrentUnsentDraft();
       authState = 'provider-selection';
     }
   }
@@ -188,6 +257,12 @@
 
     startProviderDiscovery();
     return stopProviderDiscovery;
+  });
+
+  onDestroy(() => {
+    // This route-local draft must die with the mounted preview. The explicit
+    // clear keeps a future remount from acquiring stale in-memory state.
+    clearCurrentUnsentDraft();
   });
 </script>
 
@@ -240,7 +315,13 @@
     </div>
     <p class="section-note">{lastRuntimeAction}</p>
     <div class="runtime-stage">
-      <WorkspacePreview {appearance} state={runtimeState} onAction={handleRuntimeAction} />
+      <WorkspacePreview
+        {appearance}
+        composerDraft={currentUnsentDraft}
+        state={runtimeState}
+        onAction={handleRuntimeAction}
+        onDraftChange={setCurrentUnsentDraft}
+      />
     </div>
   </section>
 
@@ -263,7 +344,7 @@
               {/each}
             </select>
           {:else}
-            <select bind:value={authState} aria-label="Authentication state">
+            <select bind:value={authState} aria-label="Authentication state" onchange={handleAuthStateSelection}>
               {#each authStates as state}
                 <option value={state}>{formatState(state)}</option>
               {/each}
@@ -272,7 +353,14 @@
         </label>
       </div>
     </div>
-    <p class="section-note" data-auth-action-count={authActionCount}>{lastAuthAction}{draftRetained ? ' · draft retained locally' : ''}</p>
+    <p
+      class="section-note"
+      data-auth-action-count={authActionCount}
+      data-draft-attachment-count={currentUnsentDraft?.attachments.length ?? 0}
+      data-draft-state={currentUnsentDraft === undefined ? 'empty' : 'retained'}
+    >
+      {lastAuthAction}{currentUnsentDraft === undefined ? '' : ' · draft retained locally'}
+    </p>
     <div class="auth-stage">
       <AuthPreview
         {appearance}
@@ -426,8 +514,13 @@
 
   select:focus-visible,
   .back-link:focus-visible {
-    outline: 3px solid color-mix(in srgb, var(--color-auth-signal) 32%, transparent);
+    outline: 3px solid color-mix(in srgb, var(--color-gate-light-focus) 32%, transparent);
     outline-offset: 3px;
+  }
+
+  .preview-page[data-appearance='dark'] select:focus-visible,
+  .preview-page[data-appearance='dark'] .back-link:focus-visible {
+    outline-color: var(--color-gate-dark-focus);
   }
 
   select:disabled {
@@ -448,8 +541,16 @@
     text-decoration: none;
   }
 
+  .preview-page[data-appearance='dark'] .back-link {
+    color: var(--color-dark-signal);
+  }
+
   .back-link:hover {
     background: color-mix(in srgb, var(--color-auth-signal) 8%, transparent);
+  }
+
+  .preview-page[data-appearance='dark'] .back-link:hover {
+    background: color-mix(in srgb, var(--color-dark-signal) 12%, transparent);
   }
 
   .preview-section {
@@ -534,6 +635,12 @@
       justify-content: center;
       border: 1px solid var(--color-line);
       background: var(--color-paper);
+    }
+
+    .preview-page[data-appearance='dark'] .back-link {
+      border-color: var(--color-dark-line);
+      background: var(--color-dark-paper);
+      color: var(--color-dark-signal);
     }
 
     .runtime-stage,

@@ -24,7 +24,7 @@ describe('AuthPreview', () => {
     expect(screen.getByRole('button', { name: 'Hermes password' })).toBeInTheDocument();
     expect(screen.getByText('OAuth · opens the provider')).toBeInTheDocument();
     expect(screen.getByText('Username and password supported')).toBeInTheDocument();
-    expect(screen.getByText(/Only providers reported by Hermes are shown/)).toBeInTheDocument();
+    expect(screen.getByText('Synthetic fixture only · provider choices are local presentation data; no discovery request is made.')).toBeInTheDocument();
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
     expect(screen.queryByText(/deep link/i)).not.toBeInTheDocument();
   });
@@ -42,6 +42,35 @@ describe('AuthPreview', () => {
     render(AuthPreview, { state: 'provider-selection' });
     expect(screen.getByRole('button', { name: 'Continue with Nous' })).toBeInTheDocument();
     expect(screen.getByText('OAuth · opens the provider')).toBeInTheDocument();
+  });
+
+  it('fails closed for live pending discovery and never renders fixture providers', () => {
+    render(AuthPreview, { state: 'discovery-pending', discoveryMode: 'live', providers: DEFAULT_PROVIDERS });
+
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
+    expect(screen.getByText('Waiting for the configured Hermes deployment to report provider capabilities. No fallback is guessed.')).toBeInTheDocument();
+    expect(screen.getByText('Live discovery · no provider action until the list is valid.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Checking provider manifest, loading' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Validating provider entries, loading' })).toBeDisabled();
+    expect(screen.getByText('Loading · no sign-in action yet', { selector: '.pill-description' })).toBeInTheDocument();
+    expect(screen.getByText('Waiting for a complete response', { selector: '.pill-description' })).toBeInTheDocument();
+    expect(screen.getByText('Provider manifest', { selector: '.mobile-label' })).toBeInTheDocument();
+    expect(screen.getByText('Provider entries', { selector: '.mobile-label' })).toBeInTheDocument();
+    expect(screen.getByText('Loading · no sign-in action yet', { selector: '.mobile-description' })).toBeInTheDocument();
+    expect(screen.getByText('Waiting for a complete response', { selector: '.mobile-description' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Nous/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Hermes password/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Live discovery · provider discovery is pending; controls stay unavailable until a valid list arrives.')).toBeInTheDocument();
+  });
+
+  it('keeps live source labels distinct from fixture copy', async () => {
+    const view = render(AuthPreview, { state: 'provider-selection', discoveryMode: 'live' });
+    expect(screen.getByText('Connected to the configured HTTPS origin. Only providers reported by Hermes are shown.')).toBeInTheDocument();
+    expect(screen.queryByText(/Synthetic fixture only/)).not.toBeInTheDocument();
+
+    await view.rerender({ state: 'discovery-malformed' });
+    expect(screen.getByText('Live boundary · malformed response · no credentials')).toBeInTheDocument();
+    expect(screen.queryByText(/Mocked fixture/)).not.toBeInTheDocument();
   });
 
   it.each([
@@ -172,9 +201,9 @@ describe('AuthPreview', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Signing in to Hermes' })).toHaveFocus());
 
     for (const [state, heading, text] of [
-      ['callback', 'Completing sign-in', 'Checking the provider response and creating a protected browser session.'],
-      ['failure', 'Sign-in did not complete', 'Hermes rejected this attempt. No session was created'],
-      ['session-expired', 'Session expired', 'Your draft stays on this device'],
+      ['callback', 'Completing sign-in', 'Static callback state only. No provider response is read and no browser session is created.'],
+      ['failure', 'Sign-in did not complete', 'Static failure state only. No session was created'],
+      ['session-expired', 'Session expired', 'This fixture keeps a bounded local draft in memory'],
       ['discovery-pending', 'Discovering sign-in methods', 'No fallback is guessed.']
     ] as const) {
       await view.rerender({ state, passwordSubmitting: false });
@@ -184,18 +213,72 @@ describe('AuthPreview', () => {
     }
   });
 
-  it('renders retry and unavailable discovery outcomes inside one discovery family', async () => {
+  it('keeps live callback and failure copy tied to the live boundary', async () => {
+    const view = render(AuthPreview, {
+      state: 'callback',
+      discoveryMode: 'live',
+      failureCode: 'network',
+      failureMessage: 'Authentication is unavailable.'
+    });
+
+    expect(screen.getByText('Checking the provider response and creating a protected browser session.')).toBeInTheDocument();
+    expect(screen.getByText('Do not close this tab. Callback parameters are checked once and are never shown in the interface.')).toBeInTheDocument();
+
+    await view.rerender({ state: 'failure', discoveryMode: 'live' });
+    expect(screen.getByText('Authentication is unavailable.')).toBeInTheDocument();
+    expect(screen.getByText('network')).toBeInTheDocument();
+    expect(screen.queryByText(/Static failure state only/)).not.toBeInTheDocument();
+  });
+
+  it('renders distinct recovery copy for every discovery leaf', async () => {
     const view = render(AuthPreview, { state: 'discovery-retry' });
     expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-retry');
     expect(screen.getByRole('heading', { name: 'Retry provider discovery' })).toBeInTheDocument();
     expect(screen.getByText('The previous result was unknown. A fresh user action is required before another lookup.')).toBeInTheDocument();
+    expect(screen.getByText('Ready to retry provider discovery')).toBeInTheDocument();
+    expect(screen.getByText('Retry is idempotent; duplicate submits stay blocked until the result returns.')).toBeInTheDocument();
 
-    for (const state of ['discovery-empty', 'discovery-malformed', 'discovery-aborted', 'provider-unavailable'] as const) {
-      await view.rerender({ state });
-      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', state);
-      expect(screen.getByRole('heading', { name: 'Provider discovery stopped' })).toBeInTheDocument();
-      expect(screen.getByText('No usable provider list was returned. The client fails closed and does not invent a fallback.')).toBeInTheDocument();
-      expect(screen.getByText('Empty or malformed provider data was rejected before sign-in choices were shown.')).toBeInTheDocument();
+    for (const outcome of [
+      {
+        state: 'discovery-empty',
+        heading: 'No sign-in methods available',
+        copy: 'A successful empty provider registry is outside the pinned response contract. The preview fails closed and exposes no invented provider.',
+        detail: 'invalid_empty_provider_registry',
+        detailCopy: 'Retry discovery after Hermes reports the reviewed provider registry or exact unavailable response.',
+        metadata: 'Mocked fixture · empty registry · no credentials'
+      },
+      {
+        state: 'discovery-malformed',
+        heading: 'Provider discovery returned incompatible data',
+        copy: 'The provider response did not match the reviewed schema. The preview fails closed and exposes no invented sign-in method.',
+        detail: 'invalid_response',
+        detailCopy: 'Unknown fields are ignored only after bounded strict parsing; malformed or unsafe data is rejected.',
+        metadata: 'Mocked fixture · malformed response · no credentials'
+      },
+      {
+        state: 'discovery-aborted',
+        heading: 'Provider discovery was cancelled',
+        copy: 'The provider discovery request was cancelled before a usable registry was received. No provider action is available.',
+        detail: 'aborted',
+        detailCopy: 'Cancellation leaves no provider list and does not expose response data.',
+        metadata: 'Mocked fixture · cancelled · no credentials'
+      },
+      {
+        state: 'provider-unavailable',
+        heading: 'Provider discovery stopped',
+        copy: 'No usable provider list was returned. The client fails closed and does not invent a fallback.',
+        detail: 'provider_unavailable',
+        detailCopy: 'The endpoint did not provide a usable provider registry. No fallback provider is invented.',
+        metadata: 'Mocked fixture · provider unavailable · no credentials'
+      }
+    ] as const) {
+      await view.rerender({ state: outcome.state });
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', outcome.state);
+      expect(screen.getByRole('heading', { name: outcome.heading })).toBeInTheDocument();
+      expect(screen.getByText(outcome.copy, { exact: true })).toBeInTheDocument();
+      expect(screen.getByText(outcome.detail, { exact: true })).toBeInTheDocument();
+      expect(screen.getByText(outcome.detailCopy, { exact: true })).toBeInTheDocument();
+      expect(screen.getByText(outcome.metadata, { exact: true })).toBeInTheDocument();
     }
   });
 
@@ -203,7 +286,7 @@ describe('AuthPreview', () => {
     const onAction = vi.fn();
     render(AuthPreview, { state: 'session-expired', onAction });
 
-    expect(screen.getByText('Sign in again to continue. Your draft stays on this device until authentication completes.')).toBeInTheDocument();
+    expect(screen.getByText('Sign in again to continue. This fixture keeps a bounded local draft in memory until authentication completes.')).toBeInTheDocument();
     expect(screen.getByText('Mocked session gate · draft retained locally. No prompt was sent after the session expired.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Sign in again' }));
     expect(onAction).toHaveBeenCalledWith({ type: 'sign-in-again' });

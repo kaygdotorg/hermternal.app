@@ -38,14 +38,16 @@ describe('ProviderCard', () => {
     expect(onAction).toHaveBeenLastCalledWith({ type: 'choose-provider', providerId: 'nous', providerKind: 'oauth' });
   });
 
-  it('fails closed while provider discovery is pending with explicit pending copy', () => {
+  it('fails closed while provider discovery is pending with exact desktop and narrow copy', () => {
     render(ProviderCard, { provider, pending: true, disabled: true });
 
-    const button = screen.getByRole('button', { name: 'Continue with Nous, loading' });
+    const button = screen.getByRole('button', { name: 'Checking provider manifest, loading' });
     expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('title', 'Continue with Nous, loading');
-    expect(screen.getByText(/Checking provider manifest/)).toBeInTheDocument();
-    expect(screen.getByText(/Loading · no sign-in action yet/)).toBeInTheDocument();
+    expect(button).toHaveAttribute('title', 'Checking provider manifest, loading');
+    expect(screen.getByText('Checking provider manifest', { selector: '.pill-label' })).toBeInTheDocument();
+    expect(screen.getByText('Loading · no sign-in action yet', { selector: '.pill-description' })).toBeInTheDocument();
+    expect(screen.getByText('Provider manifest', { selector: '.mobile-label' })).toBeInTheDocument();
+    expect(screen.getByText('Loading · no sign-in action yet', { selector: '.mobile-description' })).toBeInTheDocument();
   });
 
   it('renders unavailable capabilities as visible disabled rows', () => {
@@ -61,5 +63,8 @@ describe('ProviderCard', () => {
     const button = screen.getByRole('button', { name: 'Provider Neutral, unavailable' });
     expect(button).toBeDisabled();
     expect(screen.getByText(unavailable.description)).toBeInTheDocument();
+    // Narrow layouts keep the full capability explanation in the Pill rather
+    // than replacing real provider data with the compact pending overlay.
+    expect(screen.queryByText(unavailable.description, { selector: '.mobile-description' })).not.toBeInTheDocument();
   });
 });

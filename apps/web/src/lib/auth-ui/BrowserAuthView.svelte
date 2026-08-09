@@ -5,7 +5,12 @@
   import AuthPreview from './AuthPreview.svelte';
   import { browserAuthErrorMessage } from './browser-auth';
   import { BrowserAuthSession, type BrowserAuthSnapshot } from './browser-auth-session';
-  import type { AuthAction, AuthViewState, PasswordSubmission } from './types';
+  import {
+    authStateForProviderKind,
+    type AuthAction,
+    type AuthViewState,
+    type PasswordSubmission
+  } from './types';
 
   export let session: BrowserAuthSession;
   export let appearance: Appearance = 'light';
@@ -16,17 +21,22 @@
   let lastPublishedIdentity: AuthIdentity | undefined;
 
   $: authState = toViewState(snapshot);
-  $: keepAuthenticatedProjection =
-    snapshot.status === 'authenticated' || snapshot.status === 'logging_out' || snapshot.status === 'logout_failed';
+  $: keepAuthenticatedProjection = snapshot.status === 'authenticated' || snapshot.status === 'logging_out';
   $: if (snapshot.status === 'authenticated' && snapshot.identity !== lastPublishedIdentity) {
     lastPublishedIdentity = snapshot.identity;
     if (snapshot.identity) onAuthenticated(snapshot.identity);
   }
 
   function handleAction(action: AuthAction): void {
-    // Logout remains an internal lifecycle boundary until Paper approves a
-    // visible pending/recovery family. Generic auth controls cannot interrupt it.
-    if (snapshot.status === 'logging_out' || snapshot.status === 'logout_failed') return;
+    // The approved failure family supplies the visible retry. Keep its action
+    // internal so recovery reuses the retained identity and session lifecycle.
+    if (action.type === 'retry-authentication' && snapshot.status === 'logout_failed') {
+      void session.logout();
+      return;
+    }
+    // A pending logout remains an authenticated projection and cannot be
+    // interrupted by generic auth controls.
+    if (snapshot.status === 'logging_out') return;
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
       return;
@@ -86,9 +96,17 @@
     if (value.status === 'provider_unavailable') return 'provider-unavailable';
     if (value.status === 'password_submitting') return 'password-submitting';
     if (value.status === 'expired') return 'session-expired';
+    if (value.status === 'logout_failed') return 'failure';
     if (value.status === 'failed') return 'failure';
-    if (value.selectedProviderId) return 'password';
-    return 'provider-selection';
+    if (!value.selectedProviderId) return 'provider-selection';
+
+    const selectedProvider = value.providers.find((provider) => provider.id === value.selectedProviderId);
+    if (!selectedProvider) return 'provider-unavailable';
+    // This view is the live browser boundary. OAuth has a fixture callback
+    // family, but no reviewed live callback transport, so it must fail closed
+    // instead of entering the password form or implying a provider window.
+    if (selectedProvider.kind === 'oauth') return 'provider-unavailable';
+    return authStateForProviderKind(selectedProvider.kind);
   }
 </script>
 

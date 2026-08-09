@@ -3,7 +3,11 @@
   import Pill from './Pill.svelte';
   import TerminalSurface from './TerminalSurface.svelte';
   import WorkspacePreview from './WorkspacePreview.svelte';
-  import type { LiveWorkspaceSession, LiveWorkspaceSnapshot } from './live-workspace-session';
+  import type {
+    LiveWorkspaceDraft,
+    LiveWorkspaceSession,
+    LiveWorkspaceSnapshot
+  } from './live-workspace-session';
   import type {
     CurrentSessionTerminalBridge,
     CurrentSessionTerminalLifecycleStamp
@@ -223,7 +227,11 @@
     chatHandoffRunning = false;
   }
 
-  function handleAction(action: WorkspaceAction): void {
+  function handleDraftChange(next: LiveWorkspaceDraft | undefined): void {
+    session.setComposerDraft(next);
+  }
+
+  function handleAction(action: WorkspaceAction): void | boolean {
     if (action.type === 'return-to-sign-in') {
       if (
         snapshot.permanentFailure?.reason === 'authentication-required' ||
@@ -252,11 +260,17 @@
     }
     if (action.type === 'set-mode') void requestMode(action.mode);
     if (action.type === 'terminal-reconnect') void session.reconnectTerminal();
-    if (action.type === 'terminal-detach') session.detachTerminal();
-    if (action.type === 'terminal-close') session.closeTerminal();
+    if (action.type === 'terminal-detach') {
+      session.detachTerminal();
+      session.clearComposerDraft();
+    }
+    if (action.type === 'terminal-close') {
+      session.closeTerminal();
+      session.clearComposerDraft();
+    }
     if (action.type === 'new-session') void session.createSession();
     if (action.type === 'select-session') void session.selectSession(action.sessionId);
-    if (action.type === 'send') session.sendPrompt(action.text);
+    if (action.type === 'send') return session.sendPrompt(action.text);
     if (action.type === 'stop') void session.stop();
     if (action.type === 'retry' || action.type === 'check-connection') void session.retryConnection();
     if (action.type === 'cancel-reconnect') session.cancelReconnect();
@@ -284,6 +298,7 @@
     terminalPresentationActive={terminalLayerVisible}
     dataMode="live"
     interactionEnabled={snapshot.activeSessionId !== undefined}
+    composerDraft={snapshot.draft}
     mode={snapshot.mode ?? 'chat'}
     model={snapshot.model}
     permanentFailure={snapshot.permanentFailure}
@@ -294,6 +309,7 @@
     timelineItems={snapshot.timeline}
     title={snapshot.title}
     onAction={handleAction}
+    onDraftChange={handleDraftChange}
   />
   {#if terminal || (snapshot.terminal?.status === 'failed' && terminalModeEnabled)}
     <div

@@ -275,9 +275,46 @@ describe('BrowserAuthSession', () => {
 
     await session.initialize();
     await session.logout();
+    expect(session.current).toEqual({
+      status: 'logout_failed',
+      identity,
+      providers: [],
+      errorCode: 'logout-failed'
+    });
+
     await session.logout();
 
     expect(logout).toHaveBeenCalledTimes(2);
+    expect(session.current).toEqual({ status: 'signed_out', providers: [] });
+  });
+
+  it('retains identity and aborts the failed logout generation before recovery retry', async () => {
+    const failedLogout = deferred<void>();
+    const retryLogout = deferred<void>();
+    const signals: AbortSignal[] = [];
+    const logout = vi.fn((signal?: AbortSignal) => {
+      if (signal) signals.push(signal);
+      return signals.length === 1 ? failedLogout.promise : retryLogout.promise;
+    });
+    const session = new BrowserAuthSession({
+      client: client({ logout }),
+      discoverProviders: async () => ({ providers: [] }),
+      invalidateLocalSession: vi.fn()
+    });
+
+    await session.initialize();
+    const firstAttempt = session.logout();
+    expect(session.current).toMatchObject({ status: 'logging_out', identity });
+    failedLogout.reject(new BrowserAuthError('logout-failed'));
+    await firstAttempt;
+
+    expect(session.current).toMatchObject({ status: 'logout_failed', identity });
+    const recovery = session.logout();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(session.current).toMatchObject({ status: 'logging_out', identity });
+
+    retryLogout.resolve();
+    await recovery;
     expect(session.current).toEqual({ status: 'signed_out', providers: [] });
   });
 
