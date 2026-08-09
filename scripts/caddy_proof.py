@@ -14,11 +14,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import os
 import re
+import selectors
+import signal
+import stat
 import subprocess
 import sys
+import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
 
 SCHEMA = "hermternal.caddy-proof.v1"
@@ -34,11 +41,59 @@ BROWSER_EVIDENCE_SCHEMA = "hermternal.caddy-proof.browser-evidence.v1"
 BROWSER_EVIDENCE_MAX_BYTES = 4096
 RETAINED_EVIDENCE_MAX_BYTES = 64 * 1024
 RETAINED_EVIDENCE_ANCHOR_MAX_BYTES = 128
+JSON_MAX_DEPTH = 32
+JSON_MAX_NODES = 1024
+JSON_MAX_OBJECT_KEYS = 256
+JSON_MAX_ARRAY_LENGTH = 256
+JSON_MAX_STRING_BYTES = 2048
+JSON_MAX_TOTAL_STRING_BYTES = 32 * 1024
+STATIC_MAX_FILES = 4096
+STATIC_MAX_PER_FILE_BYTES = 8 * 1024 * 1024
+STATIC_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+STATIC_MAX_DEPTH = 32
+STATIC_DIGEST_DEADLINE_SECONDS = 10
+# The residual regression suite uses the longer names to make the scope of a
+# budget explicit. Keep both names public, and let the digest implementation
+# honor either name when a caller patches a test seam.
+STATIC_BUILD_MAX_FILES = STATIC_MAX_FILES
+STATIC_BUILD_MAX_FILE_BYTES = STATIC_MAX_PER_FILE_BYTES
+STATIC_BUILD_MAX_TOTAL_BYTES = STATIC_MAX_TOTAL_BYTES
+STATIC_BUILD_MAX_DEPTH = STATIC_MAX_DEPTH
+STATIC_BUILD_MAX_DEADLINE_SECONDS = STATIC_DIGEST_DEADLINE_SECONDS
+STATIC_BUILD_DEADLINE_SECONDS = STATIC_BUILD_MAX_DEADLINE_SECONDS
+STATIC_BUILD_MAX_DEADLINE = STATIC_BUILD_MAX_DEADLINE_SECONDS
 GIT_COMMAND_TIMEOUT_SECONDS = 5
 GIT_OUTPUT_MAX_BYTES = 4096
+GIT_CONFIG_MAX_BYTES = 64 * 1024
+TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
+TRUSTED_HELPER_PATH = "/usr/bin:/bin"
+GIT_REDIRECT_ENV_VARS = (
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PROMISOR_REMOTE",
+)
+GIT_FORBIDDEN_METADATA = (
+    "objects/info/alternates",
+    "objects/info/http-alternates",
+    "info/grafts",
+    "shallow",
+)
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Kept only as a narrow compatibility seam for the pre-hardening unit tests
+# that inject malformed CompletedProcess values. Normal execution always uses
+# the bounded Popen collector below.
+_ORIGINAL_SUBPROCESS_RUN = subprocess.run
+_RETAINED_LOADER_TOKEN = object()
 RETAINED_EVIDENCE_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json"
 RETAINED_EVIDENCE_ANCHOR_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
 # This source-pinned digest prevents a caller from replacing both the retained
@@ -609,8 +664,188 @@ def _reject_nonfinite_json_constant(value: str) -> object:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
+def _scan_json_budgets(text: str, label: str) -> None:
+    """Preflight JSON structure iteratively before the recursive stdlib decode."""
+
+    index = 0
+    length = len(text)
+    stack: list[list[object]] = []
+    root_done = False
+    nodes = 0
+    object_keys = 0
+    total_string_bytes = 0
+
+    def skip_whitespace(position: int) -> int:
+        while position < length and text[position] in " \t\r\n":
+            position += 1
+        return position
+
+    def record_string(value: str) -> None:
+        nonlocal total_string_bytes
+        size = len(value.encode("utf-8", "surrogatepass"))
+        if size > JSON_MAX_STRING_BYTES:
+            raise ValueError(f"{label} exceeds JSON string-bytes budget")
+        total_string_bytes += size
+        if total_string_bytes > JSON_MAX_TOTAL_STRING_BYTES:
+            raise ValueError(f"{label} exceeds JSON total-string budget")
+
+    def consume_value(position: int) -> tuple[int, bool]:
+        nonlocal nodes
+        if position >= length:
+            raise ValueError(f"{label} is not valid JSON")
+        character = text[position]
+        if character == '"':
+            try:
+                value, end = json.decoder.scanstring(text, position + 1, True)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label} is not valid JSON") from exc
+            record_string(value)
+            nodes += 1
+            if nodes > JSON_MAX_NODES:
+                raise ValueError(f"{label} exceeds JSON node budget")
+            return end, False
+        if character in "[{":
+            nodes += 1
+            if nodes > JSON_MAX_NODES:
+                raise ValueError(f"{label} exceeds JSON node budget")
+            depth = len(stack) + 1
+            if depth > JSON_MAX_DEPTH:
+                raise ValueError(f"{label} exceeds JSON depth budget")
+            if character == "{":
+                stack.append(["object", "key_or_end", 0])
+            else:
+                stack.append(["array", "value_or_end", 0])
+            return position + 1, True
+        start = position
+        while position < length and text[position] not in " \t\r\n,]}:":
+            position += 1
+        if position == start:
+            raise ValueError(f"{label} is not valid JSON")
+        if position - start > JSON_MAX_STRING_BYTES:
+            raise ValueError(f"{label} exceeds JSON string-bytes budget")
+        nodes += 1
+        if nodes > JSON_MAX_NODES:
+            raise ValueError(f"{label} exceeds JSON node budget")
+        return position, False
+
+    while True:
+        # Whitespace is legal after every delimiter, including while an
+        # object or array frame is active. Skipping it here keeps the
+        # preflight parser iterative and aligned with json.loads().
+        index = skip_whitespace(index)
+        if not stack:
+            if root_done:
+                if index != length:
+                    raise ValueError(f"{label} is not valid JSON")
+                return
+            index, _ = consume_value(index)
+            if not stack:
+                root_done = True
+            continue
+
+        context = stack[-1]
+        kind = context[0]
+        state = context[1]
+        if kind == "object":
+            if state in {"key_or_end", "key"}:
+                if text[index:index + 1] == "}" and state == "key_or_end":
+                    stack.pop()
+                    index += 1
+                    if not stack:
+                        root_done = True
+                    continue
+                if text[index:index + 1] != '"':
+                    raise ValueError(f"{label} is not valid JSON")
+                try:
+                    key, index = json.decoder.scanstring(text, index + 1, True)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{label} is not valid JSON") from exc
+                record_string(key)
+                object_keys += 1
+                context[2] = int(context[2]) + 1
+                if object_keys > JSON_MAX_OBJECT_KEYS or int(context[2]) > JSON_MAX_OBJECT_KEYS:
+                    raise ValueError(f"{label} exceeds JSON object-key budget")
+                context[1] = "colon"
+                continue
+            if state == "colon":
+                if text[index:index + 1] != ":":
+                    raise ValueError(f"{label} is not valid JSON")
+                context[1] = "value"
+                index += 1
+                continue
+            if state == "value":
+                index, _ = consume_value(index)
+                context[1] = "comma_or_end"
+                continue
+            if state == "comma_or_end":
+                character = text[index:index + 1]
+                if character == ",":
+                    context[1] = "key"
+                    index += 1
+                    continue
+                if character == "}":
+                    stack.pop()
+                    index += 1
+                    if not stack:
+                        root_done = True
+                    continue
+                raise ValueError(f"{label} is not valid JSON")
+            raise ValueError(f"{label} is not valid JSON")
+
+        if kind == "array":
+            if state in {"value_or_end", "value"}:
+                if text[index:index + 1] == "]" and state == "value_or_end":
+                    stack.pop()
+                    index += 1
+                    if not stack:
+                        root_done = True
+                    continue
+                context[2] = int(context[2]) + 1
+                if int(context[2]) > JSON_MAX_ARRAY_LENGTH:
+                    raise ValueError(f"{label} exceeds JSON array-length budget")
+                index, _ = consume_value(index)
+                context[1] = "comma_or_end"
+                continue
+            if state == "comma_or_end":
+                character = text[index:index + 1]
+                if character == ",":
+                    context[1] = "value"
+                    index += 1
+                    continue
+                if character == "]":
+                    stack.pop()
+                    index += 1
+                    if not stack:
+                        root_done = True
+                    continue
+                raise ValueError(f"{label} is not valid JSON")
+            raise ValueError(f"{label} is not valid JSON")
+        raise ValueError(f"{label} is not valid JSON")
+
+
+def _parse_json_float(value: str) -> float:
+    """Reject exponent overflow instead of allowing Python's ``inf`` result."""
+
+    try:
+        parsed = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"non-finite JSON number: {value}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite JSON number: {value}")
+    return parsed
+
+
+def _parse_json_int(value: str) -> int:
+    """Keep integer conversion bounded independently of the byte cap."""
+
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > JSON_MAX_STRING_BYTES:
+        raise ValueError("JSON integer exceeds string-bytes budget")
+    return int(value)
+
+
 def _decode_bounded_json(raw: bytes, label: str) -> object:
-    """Decode bounded UTF-8 JSON without accepting parser extensions."""
+    """Decode bounded UTF-8 JSON with iterative resource validation."""
 
     if type(raw) is not bytes:
         raise ValueError(f"{label} is not valid bytes")
@@ -619,40 +854,224 @@ def _decode_bounded_json(raw: bytes, label: str) -> object:
     except UnicodeDecodeError as exc:
         raise ValueError(f"{label} is not valid UTF-8") from exc
     try:
+        _scan_json_budgets(text, label)
         return json.loads(
             text,
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=_reject_nonfinite_json_constant,
+            parse_float=_parse_json_float,
+            parse_int=_parse_json_int,
         )
     except ValueError as exc:
         message = str(exc)
+        if message.startswith(f"{label} exceeds JSON "):
+            raise
         if message == "duplicate JSON object key":
             raise ValueError(f"{label} contains a duplicate JSON object key") from exc
-        if message.startswith("non-finite JSON constant:"):
+        if message.startswith("non-finite JSON"):
             raise ValueError(f"{label} contains a non-finite JSON number") from exc
+        if message.startswith("JSON integer exceeds"):
+            raise ValueError(f"{label} exceeds JSON integer budget") from exc
         raise ValueError(f"{label} is not valid JSON") from exc
 
 
-def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
-    """Read one bounded regular file without following a caller link."""
+def _metadata_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_uid,
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_size,
+        metadata.st_nlink,
+    )
+
+
+def _verify_regular_metadata(
+    metadata: os.stat_result,
+    *,
+    limit: int | None,
+    label: str,
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} is not a regular file")
+    if metadata.st_uid != os.geteuid():
+        raise ValueError(f"{label} has an unexpected owner")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise ValueError(f"{label} is writable by group or other users")
+    if metadata.st_mode & (stat.S_ISUID | stat.S_ISGID):
+        raise ValueError(f"{label} has unsafe mode bits")
+    if metadata.st_nlink != 1:
+        raise ValueError(f"{label} has unexpected hard links")
+    if limit is not None and metadata.st_size > limit:
+        raise ValueError(f"{label} exceeds the bounded input size")
+
+
+def _open_verified_regular_file_at(
+    parent_fd: int,
+    name: str,
+    *,
+    limit: int | None,
+    label: str,
+) -> tuple[int, os.stat_result]:
+    """Open one directory entry with no-follow and race-checked identity."""
+
+    if type(name) is not str or not name or name in {".", ".."} or "/" in name:
+        raise ValueError(f"{label} has an invalid pathname component")
+    try:
+        pre_open = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _verify_regular_metadata(pre_open, limit=limit, label=label)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            post_open = os.fstat(descriptor)
+            _verify_regular_metadata(post_open, limit=limit, label=label)
+            if _metadata_identity(pre_open) != _metadata_identity(post_open):
+                raise ValueError(f"{label} changed during open")
+            return descriptor, post_open
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except ValueError:
+        raise
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise ValueError(f"{label} could not be opened safely") from exc
+
+
+def _open_verified_directory_at(parent_fd: int, name: str, *, label: str) -> int:
+    """Open one directory component without following symlink races."""
+
+    if type(name) is not str or not name or name in {".", ".."} or "/" in name:
+        raise ValueError(f"{label} has an invalid pathname component")
+    try:
+        pre_open = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(pre_open.st_mode):
+            raise ValueError(f"{label} is not a directory")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            post_open = os.fstat(descriptor)
+            if not stat.S_ISDIR(post_open.st_mode):
+                raise ValueError(f"{label} is not a directory")
+            if (pre_open.st_dev, pre_open.st_ino) != (post_open.st_dev, post_open.st_ino):
+                raise ValueError(f"{label} changed during open")
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except ValueError:
+        raise
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise ValueError(f"{label} could not be opened safely") from exc
+
+
+def _open_verified_parent(
+    path: Path,
+    *,
+    label: str,
+    resolve_parent_aliases: bool = True,
+) -> tuple[int, str]:
+    """Walk parent descriptors with O_NOFOLLOW for every opened component.
+
+    Generic disposable inputs may be presented through a platform alias such
+    as macOS's ``/var`` symlink, so only their parent spelling is normalized.
+    The retained loader passes ``resolve_parent_aliases=False`` and compares
+    the raw canonical pathname before this walk, making aliases ineligible.
+    """
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if resolve_parent_aliases:
+        try:
+            candidate = candidate.parent.resolve(strict=True) / candidate.name
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ValueError(f"{label} parent could not be resolved") from exc
+    parts = candidate.parts
+    if len(parts) < 2 or parts[0] != "/" or any(part in {"", ".", ".."} for part in parts[1:]):
+        raise ValueError(f"{label} has a non-canonical pathname")
+    try:
+        current_fd = os.open(
+            "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        for component in parts[1:-1]:
+            next_fd = _open_verified_directory_at(
+                current_fd,
+                component,
+                label=f"{label} parent",
+            )
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, parts[-1]
+    except BaseException:
+        try:
+            os.close(current_fd)
+        except (OSError, UnboundLocalError):
+            pass
+        raise
+
+
+def _read_bounded_fd(
+    descriptor: int,
+    limit: int,
+    label: str,
+    *,
+    deadline: float | None = None,
+) -> bytes:
+    """Read at most limit+1 bytes from a stable descriptor."""
 
     if type(limit) is not int or limit < 0:
         raise ValueError(f"{label} has an invalid bounded input size")
-    candidate = Path(path)
+    chunks = bytearray()
+    while len(chunks) <= limit:
+        if deadline is not None and time.monotonic() > deadline:
+            raise ValueError(f"{label} read deadline exceeded")
+        remaining = limit + 1 - len(chunks)
+        try:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ValueError(f"{label} could not be read") from exc
+        if not chunk:
+            break
+        chunks.extend(chunk)
+        if len(chunks) > limit:
+            raise ValueError(f"{label} exceeds the bounded input size")
+    return bytes(chunks)
+
+
+def _read_verified_file_path(path: Path, limit: int, label: str) -> bytes:
+    parent_fd, name = _open_verified_parent(path, label=label)
+    descriptor: int | None = None
     try:
-        if candidate.is_symlink() or not candidate.is_file():
-            raise ValueError(f"{label} is not a regular file")
-        with candidate.open("rb") as handle:
-            data = handle.read(limit + 1)
-    except ValueError:
-        raise
-    except (OSError, TypeError, RuntimeError) as exc:
-        raise ValueError(f"{label} could not be read") from exc
-    if not isinstance(data, bytes):
-        raise ValueError(f"{label} could not be read")
-    if len(data) > limit:
-        raise ValueError(f"{label} exceeds the bounded input size")
-    return data
+        descriptor, metadata = _open_verified_regular_file_at(
+            parent_fd,
+            name,
+            limit=limit,
+            label=label,
+        )
+        data = _read_bounded_fd(descriptor, limit, label)
+        after_read = os.fstat(descriptor)
+        if _metadata_identity(metadata) != _metadata_identity(after_read):
+            raise ValueError(f"{label} changed during read")
+        try:
+            after_entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            _verify_regular_metadata(after_entry, limit=limit, label=label)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError(f"{label} changed after read") from exc
+        if _metadata_identity(metadata) != _metadata_identity(after_entry):
+            raise ValueError(f"{label} changed after read")
+        return data
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent_fd)
+
+
+def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
+    """Read one bounded regular file through stable descriptor metadata."""
+
+    return _read_verified_file_path(Path(path), limit, label)
 
 
 def _load_bounded_json(path: Path, *, limit: int, label: str) -> object:
@@ -661,8 +1080,275 @@ def _load_bounded_json(path: Path, *, limit: int, label: str) -> object:
     return _decode_bounded_json(_read_bounded_bytes(path, limit, label), label)
 
 
-def _git_text(repository_root: Path, *arguments: str) -> str:
-    """Read one bounded, exact Git value from the repository trust root."""
+def _trusted_git_path() -> Path:
+    """Use one validated absolute Git executable, never caller-controlled PATH."""
+
+    path = TRUSTED_GIT_EXECUTABLE
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValueError("trusted Git executable is not absolute")
+    try:
+        metadata = os.lstat(path)
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("trusted Git executable is unavailable") from exc
+    if resolved != path or not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+        raise ValueError("trusted Git executable is unsafe")
+    if metadata.st_uid not in {0, os.geteuid()} or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise ValueError("trusted Git executable is unsafe")
+    return path
+
+
+def _strict_git_environment() -> dict[str, str]:
+    """Keep Git local, deterministic, non-fetching, and free of redirects."""
+
+    environment = os.environ.copy()
+    for variable in tuple(environment):
+        if variable.startswith("GIT_"):
+            environment.pop(variable, None)
+    for variable in GIT_REDIRECT_ENV_VARS:
+        environment.pop(variable, None)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            # Leave graft/alternate selectors unset; repository metadata checks
+            # below reject those files rather than pointing Git at /dev/null,
+            # which itself is interpreted as a graft file on some Git builds.
+            "PATH": TRUSTED_HELPER_PATH,
+            "LC_ALL": "C",
+            "LANG": "C",
+        }
+    )
+    return environment
+
+
+def _close_git_stream(selector: selectors.BaseSelector | None, stream: Any) -> None:
+    if selector is not None:
+        try:
+            selector.unregister(stream)
+        except (KeyError, OSError, ValueError):
+            pass
+    try:
+        stream.close()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _signal_git_group(process: subprocess.Popen[bytes], signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+        return
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        pass
+    try:
+        if signal_number == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+    except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def _terminate_and_drain_git(
+    process: subprocess.Popen[bytes] | None,
+    selector: selectors.BaseSelector | None,
+    streams: tuple[Any, ...] = (),
+) -> None:
+    if process is not None:
+        _signal_git_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=0.25)
+        except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+        _signal_git_group(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=0.25)
+        except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+    deadline = time.monotonic() + 1.0
+    if selector is not None:
+        while True:
+            try:
+                registered = selector.get_map()
+            except (OSError, RuntimeError, ValueError):
+                break
+            if not registered or time.monotonic() >= deadline:
+                break
+            try:
+                events = selector.select(max(0.0, deadline - time.monotonic()))
+            except (OSError, RuntimeError, ValueError):
+                break
+            for key, _ in events:
+                stream = key.fileobj
+                try:
+                    while os.read(stream.fileno(), 64 * 1024):
+                        pass
+                    _close_git_stream(selector, stream)
+                except (AttributeError, BlockingIOError, OSError, RuntimeError, ValueError):
+                    _close_git_stream(selector, stream)
+        try:
+            remaining = [key.fileobj for key in selector.get_map().values()]
+        except (OSError, RuntimeError, ValueError):
+            remaining = []
+        for stream in remaining:
+            _close_git_stream(selector, stream)
+    for stream in streams:
+        if stream is not None:
+            _close_git_stream(None, stream)
+
+
+def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[int, bytes, bytes]:
+    """Collect both pipes incrementally and terminate the full process group."""
+
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    streams: tuple[Any, ...] = ()
+    buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+            env=environment,
+        )
+        streams = (process.stdout, process.stderr)
+        selector = selectors.DefaultSelector()
+        labeled_streams = ((process.stdout, "stdout"), (process.stderr, "stderr"))
+        for stream, label in labeled_streams:
+            if stream is None:
+                raise ValueError(f"Git {label} stream is malformed")
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, label)
+        deadline = time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("Git provenance command timed out")
+            events = selector.select(remaining)
+            if not events:
+                raise ValueError("Git provenance command timed out")
+            for key, _ in events:
+                stream = key.fileobj
+                label = key.data
+                try:
+                    chunk = os.read(
+                        stream.fileno(),
+                        min(64 * 1024, GIT_OUTPUT_MAX_BYTES + 1 - len(buffers[label])),
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    _close_git_stream(selector, stream)
+                    continue
+                buffers[label].extend(chunk)
+                if len(buffers[label]) > GIT_OUTPUT_MAX_BYTES:
+                    raise ValueError(f"Git {label} exceeds the bounded output size")
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if type(returncode) is not int:
+            raise ValueError("Git process result is malformed")
+        return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+    except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError):
+        _terminate_and_drain_git(process, selector, streams)
+        raise
+    finally:
+        if selector is not None:
+            try:
+                remaining = [key.fileobj for key in selector.get_map().values()]
+            except (OSError, RuntimeError, ValueError):
+                remaining = []
+            for stream in remaining:
+                _close_git_stream(selector, stream)
+            try:
+                selector.close()
+            except (OSError, RuntimeError, ValueError):
+                pass
+        for stream in streams:
+            if stream is not None:
+                _close_git_stream(None, stream)
+
+
+def _git_output_bounded(command: list[str], environment: dict[str, str]) -> tuple[int, bytes, bytes]:
+    """Stable alias for callers that need the bounded Git process primitive."""
+
+    return _run_bounded_git(command, environment)
+
+
+def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
+    """Resolve worktree and common Git metadata directories without aliases."""
+
+    git_entry = root / ".git"
+    if git_entry.is_symlink():
+        raise ValueError("Git metadata root must not be a symlink")
+    if git_entry.is_dir():
+        git_dir = git_entry
+    elif git_entry.is_file():
+        pointer = _read_verified_file_path(git_entry, 4096, "Git worktree pointer")
+        try:
+            text = pointer.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Git worktree pointer is malformed") from exc
+        if not text.startswith("gitdir: ") or not text.endswith("\n"):
+            raise ValueError("Git worktree pointer is malformed")
+        target = Path(text[8:-1])
+        git_dir = target if target.is_absolute() else root / target
+    else:
+        raise ValueError("Git metadata root is unavailable")
+    git_dir = git_dir.resolve(strict=True)
+    if not git_dir.is_dir() or git_dir.is_symlink():
+        raise ValueError("Git metadata root is unsafe")
+    roots = [git_dir]
+    common_file = git_dir / "commondir"
+    if common_file.exists():
+        common_bytes = _read_verified_file_path(common_file, 4096, "Git common-dir pointer")
+        try:
+            common_text = common_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Git common-dir pointer is malformed") from exc
+        if not common_text.endswith("\n"):
+            raise ValueError("Git common-dir pointer is malformed")
+        common = Path(common_text[:-1])
+        common_dir = common if common.is_absolute() else git_dir / common
+        common_dir = common_dir.resolve(strict=True)
+        if not common_dir.is_dir() or common_dir.is_symlink():
+            raise ValueError("Git common metadata root is unsafe")
+        roots.append(common_dir)
+    return tuple(dict.fromkeys(roots))
+
+
+def _validate_git_metadata(root: Path) -> None:
+    for metadata_root in _git_metadata_roots(root):
+        for relative in GIT_FORBIDDEN_METADATA:
+            candidate = metadata_root / relative
+            if candidate.exists() or candidate.is_symlink():
+                raise ValueError(f"Git metadata uses forbidden {relative}")
+        replace_refs = metadata_root / "refs" / "replace"
+        if replace_refs.exists() or replace_refs.is_symlink():
+            raise ValueError("Git metadata uses replacement refs")
+        config = metadata_root / "config"
+        if config.exists() or config.is_symlink():
+            raw = _read_verified_file_path(config, GIT_CONFIG_MAX_BYTES, "Git config")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError("Git config is malformed") from exc
+            if re.search(
+                r"(?im)^\\s*(?:extensions\\.partialclone|remote\\.[^\\s=]+\\.promisor|promisor|partialclone)\\s*=",
+                text,
+            ):
+                raise ValueError("Git repository uses lazy or promisor metadata")
+
+
+def _verify_git_repository(repository_root: Path) -> None:
+    """Reject shallow, redirected, replacement, and promisor repositories."""
 
     try:
         root = Path(repository_root).resolve(strict=True)
@@ -670,52 +1356,133 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
         raise ValueError("Git repository root is unavailable") from exc
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
+    _validate_git_metadata(root)
+    executable = _trusted_git_path()
+    environment = _strict_git_environment()
+    command = [
+        str(executable),
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "-C",
+        str(root),
+        "rev-parse",
+        "--is-shallow-repository",
+    ]
+    returncode, stdout, stderr = _run_bounded_git(command, environment)
+    if type(returncode) is not int or returncode != 0:
+        raise ValueError("Git repository trust could not be checked")
+    if type(stdout) is not bytes or stdout != b"false\n":
+        raise ValueError("Git repository is shallow or malformed")
+    if type(stderr) is not bytes or stderr:
+        raise ValueError("Git repository diagnostics are malformed")
+
+
+_verify_git_repository_integrity = _verify_git_repository
+
+
+def _validated_git_context(repository_root: Path) -> dict[str, object]:
+    """Return a trusted executable, sanitized environment, and local Git root."""
+
     try:
-        result = subprocess.run(
-            ("git", "-C", str(root), *arguments),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
-        )
-    except (OSError, RuntimeError, TypeError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
-        raise ValueError("Git provenance could not be checked") from exc
-    try:
-        returncode = result.returncode
-        output = result.stdout
-        diagnostics = result.stderr
-    except AttributeError as exc:
-        raise ValueError("Git provenance result is malformed") from exc
+        root = Path(repository_root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git repository root is unavailable") from exc
+    if not root.is_dir():
+        raise ValueError("Git repository root is unavailable")
+    executable = _trusted_git_path()
+    environment = _strict_git_environment()
+    _validate_git_metadata(root)
+    return {"root": root, "executable": executable, "environment": environment}
+
+
+def _git(repo_root: Path, *arguments: str) -> bytes:
+    """Read bounded local Git output without replacement refs or lazy fetch."""
+
+    context = _validated_git_context(repo_root)
+    root = context["root"]
+    executable = context["executable"]
+    environment = context["environment"]
+    if not isinstance(root, Path) or not isinstance(executable, Path) or not isinstance(environment, dict):
+        raise ValueError("Git context is malformed")
+    command = [
+        str(executable),
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "-C",
+        str(root),
+        *arguments,
+    ]
+    returncode, stdout, stderr = _git_output_bounded(command, environment)
     if type(returncode) is not int or returncode != 0:
         raise ValueError("Git provenance could not be checked")
-    if isinstance(diagnostics, bytes):
-        if len(diagnostics) > GIT_OUTPUT_MAX_BYTES:
-            raise ValueError("Git provenance diagnostics are too large")
-        if diagnostics:
-            raise ValueError("Git provenance output is malformed")
-    elif isinstance(diagnostics, str):
-        if diagnostics:
-            raise ValueError("Git provenance output is malformed")
-    elif diagnostics is not None:
-        raise ValueError("Git provenance diagnostics are malformed")
-    if isinstance(output, bytes):
-        if len(output) > GIT_OUTPUT_MAX_BYTES:
-            raise ValueError("Git provenance output is too large")
-        try:
-            text = output.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Git provenance output is malformed") from exc
-    elif isinstance(output, str):
-        try:
-            if len(output.encode("ascii")) > GIT_OUTPUT_MAX_BYTES:
-                raise ValueError("Git provenance output is too large")
-        except UnicodeEncodeError as exc:
-            raise ValueError("Git provenance output is malformed") from exc
-        text = output
-    else:
+    if type(stdout) is not bytes or len(stdout) > GIT_OUTPUT_MAX_BYTES:
         raise ValueError("Git provenance output is malformed")
+    if type(stderr) is not bytes:
+        raise ValueError("Git provenance diagnostics are malformed")
+    if stderr:
+        raise ValueError("Git provenance output is malformed")
+    return stdout
+
+
+def _git_text(repository_root: Path, *arguments: str) -> str:
+    """Read one bounded, exact ASCII Git value from the trust root.
+
+    The normal path is the streaming Popen collector. The small alternate
+    branch exists only for legacy tests that replace ``subprocess.run`` with a
+    malformed ``CompletedProcess`` seam; it never runs in an unmodified
+    process and still uses the trusted executable and sanitized environment.
+    """
+
+    context = _validated_git_context(repository_root)
+    root = context["root"]
+    executable = context["executable"]
+    environment = context["environment"]
+    if not isinstance(root, Path) or not isinstance(executable, Path) or not isinstance(environment, dict):
+        raise ValueError("Git context is malformed")
+    if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+        try:
+            result = subprocess.run(
+                (
+                    str(executable),
+                    "--no-replace-objects",
+                    "--no-lazy-fetch",
+                    "--no-optional-locks",
+                    "-C",
+                    str(root),
+                    *arguments,
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+                env=environment,
+            )
+        except (OSError, RuntimeError, TypeError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
+            raise ValueError("Git provenance could not be checked") from exc
+        try:
+            returncode = result.returncode
+            output = result.stdout
+            diagnostics = result.stderr
+        except AttributeError as exc:
+            raise ValueError("Git provenance result is malformed") from exc
+        if type(returncode) is not int or returncode != 0:
+            raise ValueError("Git provenance could not be checked")
+        if type(diagnostics) is not bytes:
+            raise ValueError("Git provenance diagnostics are malformed")
+        if diagnostics:
+            raise ValueError("Git provenance output is malformed")
+        if type(output) is not bytes or len(output) > GIT_OUTPUT_MAX_BYTES:
+            raise ValueError("Git provenance output is malformed")
+    else:
+        output = _git(repository_root, *arguments)
+    try:
+        text = output.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Git provenance output is malformed") from exc
     if text.endswith("\n"):
         text = text[:-1]
     if not text or "\n" in text or "\r" in text or text != text.strip():
@@ -726,6 +1493,7 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
 def _git_head(repository_root: Path = PROJECT_ROOT) -> str:
     """Return the full checked-out commit, never a caller-provided alias."""
 
+    _verify_git_repository(repository_root)
     head = _git_text(repository_root, "rev-parse", "--verify", "HEAD^{commit}")
     if HEX40_RE.fullmatch(head) is None:
         raise ValueError("Git HEAD is not a full commit SHA")
@@ -733,7 +1501,7 @@ def _git_head(repository_root: Path = PROJECT_ROOT) -> str:
 
 
 def _verify_git_commit(build_sha: str, repository_root: Path = PROJECT_ROOT) -> None:
-    """Require a real commit reachable from this checkout's current HEAD."""
+    """Require a real local commit reachable from this checkout's HEAD."""
 
     if type(build_sha) is not str or HEX40_RE.fullmatch(build_sha) is None:
         raise ValueError("build_sha must be a lowercase commit SHA")
@@ -743,29 +1511,9 @@ def _verify_git_commit(build_sha: str, repository_root: Path = PROJECT_ROOT) -> 
     head = _git_head(repository_root)
     if build_sha == head:
         return
-    try:
-        root = Path(repository_root).resolve(strict=True)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ValueError("Git repository root is unavailable") from exc
-    try:
-        result = subprocess.run(
-            ("git", "-C", str(root), "merge-base", "--is-ancestor", build_sha, head),
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
-        )
-    except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError) as exc:
-        raise ValueError("Git build ancestry could not be checked") from exc
-    try:
-        returncode = result.returncode
-    except AttributeError as exc:
-        raise ValueError("Git build ancestry result is malformed") from exc
-    if type(returncode) is not int:
-        raise ValueError("Git build ancestry result is malformed")
-    if returncode != 0:
-        raise ValueError("build_sha is not an ancestor of the checked-out Git HEAD")
+    output = _git(repository_root, "merge-base", "--is-ancestor", build_sha, head)
+    if output != b"":
+        raise ValueError("Git ancestry output is malformed")
 
 
 def _validate_build_digest(build_digest: object) -> str:
@@ -796,31 +1544,89 @@ def _derive_git_static_build_provenance(
 
 
 def _canonical_retained_path(path: Path) -> Path:
-    """Require the one repository path whose bytes are eligible for retention."""
+    """Require the exact raw pathname and stable descriptor identity."""
 
     try:
-        requested = Path(path)
-        if requested.is_symlink() or RETAINED_EVIDENCE_PATH.is_symlink():
-            raise ValueError("retained input path must not be a symlink")
-        expected = RETAINED_EVIDENCE_PATH.resolve(strict=True)
-        candidate = requested.resolve(strict=True)
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise ValueError("retained input path could not be resolved") from exc
-    if candidate != expected:
+        raw = os.fspath(path)
+    except TypeError as exc:
+        raise ValueError("retained input path is malformed") from exc
+    if isinstance(raw, bytes):
+        raise ValueError("retained input path is malformed")
+    requested = Path(raw)
+    expected = Path(RETAINED_EVIDENCE_PATH)
+    if not requested.is_absolute() or not expected.is_absolute():
         raise ValueError("retained input must use the canonical committed evidence path")
-    return candidate
+    if "//" in raw or any(part in {"", ".", ".."} for part in raw[1:].split("/")):
+        raise ValueError("retained input must use the canonical committed evidence path")
+    if requested.parts != expected.parts or str(requested) != str(expected):
+        raise ValueError("retained input must use the canonical committed evidence path")
+    parent_fd: int | None = None
+    descriptor: int | None = None
+    try:
+        parent_fd, name = _open_verified_parent(
+            requested,
+            label="retained input",
+            resolve_parent_aliases=False,
+        )
+        descriptor, _metadata = _open_verified_regular_file_at(
+            parent_fd,
+            name,
+            limit=RETAINED_EVIDENCE_MAX_BYTES,
+            label="retained input",
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError) and "canonical committed evidence path" in str(exc):
+            raise
+        raise ValueError("retained input path could not be resolved safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_fd is not None:
+            os.close(parent_fd)
+    return expected
 
 
 def _retained_anchor() -> str:
     """Read and source-validate the fixed one-line digest."""
 
-    if RETAINED_EVIDENCE_ANCHOR_PATH.is_symlink():
-        raise ValueError("committed retained evidence anchor must not be a symlink")
-    raw = _read_bounded_bytes(
-        RETAINED_EVIDENCE_ANCHOR_PATH,
-        RETAINED_EVIDENCE_ANCHOR_MAX_BYTES,
-        "committed retained evidence anchor",
-    )
+    anchor_path = Path(RETAINED_EVIDENCE_ANCHOR_PATH)
+    parent_fd: int | None = None
+    descriptor: int | None = None
+    try:
+        parent_fd, name = _open_verified_parent(
+            anchor_path,
+            label="committed retained evidence anchor",
+            resolve_parent_aliases=True,
+        )
+        descriptor, metadata = _open_verified_regular_file_at(
+            parent_fd,
+            name,
+            limit=RETAINED_EVIDENCE_ANCHOR_MAX_BYTES,
+            label="committed retained evidence anchor",
+        )
+        raw = _read_bounded_fd(
+            descriptor,
+            RETAINED_EVIDENCE_ANCHOR_MAX_BYTES,
+            "committed retained evidence anchor",
+        )
+        after_read = os.fstat(descriptor)
+        if _metadata_identity(metadata) != _metadata_identity(after_read):
+            raise ValueError("committed retained evidence anchor changed during read")
+        after_entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _verify_regular_metadata(
+            after_entry,
+            limit=RETAINED_EVIDENCE_ANCHOR_MAX_BYTES,
+            label="committed retained evidence anchor",
+        )
+        if _metadata_identity(metadata) != _metadata_identity(after_entry):
+            raise ValueError("committed retained evidence anchor changed after read")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("committed retained evidence anchor could not be read safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_fd is not None:
+            os.close(parent_fd)
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -889,6 +1695,11 @@ def _verify_build_provenance(
         expected = _committed_retained_build_provenance()
         if {"build_sha": build_sha, "build_digest": build_digest} != expected:
             raise ValueError("retained build provenance does not match committed evidence")
+    elif mode == "untrusted":
+        # Direct library callers may inspect a rendered manifest, but their
+        # supplied identity is not an anchored historical or current-build
+        # proof. The output labels that split explicitly below.
+        return
     else:
         raise ValueError("unsupported build provenance mode")
     _verify_git_commit(build_sha, repository_root)
@@ -1001,18 +1812,22 @@ def render_manifest(
     browser_journey: str | None = None,
     browser_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
-    provenance_mode: str = "retained",
+    provenance_mode: str = "untrusted",
     static_build_root: Path | None = None,
     repository_root: Path = PROJECT_ROOT,
+    retained_loader_token: object | None = None,
 ) -> dict[str, object]:
     """Create redacted evidence metadata; values are never request material.
 
-    Retained evidence uses the committed historical build anchor. Standalone
-    browser evidence must instead provide a static tree so Git HEAD and its
-    exact bytes are derived locally; caller-supplied identity flags are only
-    checked assertions and never establish provenance. Neither workflow treats
-    caller JSON, a fixed event map, or local Caddy traffic as browser execution;
-    ``passed`` requires a separate trusted receipt and is rejected here.
+    The CLI retained workflow uses a private loader token after the canonical
+    path and source-pinned anchor have been checked. Direct library callers
+    default to explicitly untrusted provenance and cannot select ``retained``
+    without that token. Standalone evidence must instead provide a static tree
+    so Git HEAD and its exact bytes are derived locally; caller-supplied identity
+    flags are only checked assertions and never establish provenance. Neither
+    workflow treats caller JSON, a fixed event map, or local Caddy traffic as
+    browser execution; ``passed`` requires a separate trusted receipt and is
+    rejected here.
     """
 
     if not HEX40_RE.fullmatch(build_sha):
@@ -1024,6 +1839,8 @@ def render_manifest(
         raise ValueError("browser evidence is required for every journey status")
     if not isinstance(browser_evidence, Mapping):
         raise ValueError("browser evidence must be a mapping")
+    if provenance_mode == "retained" and retained_loader_token is not _RETAINED_LOADER_TOKEN:
+        raise ValueError("retained provenance requires the canonical retained loader token")
     normalized_inputs = _validate_runtime_inputs(
         reconstruction_inputs() if runtime_inputs is None else runtime_inputs
     )
@@ -1052,8 +1869,26 @@ def render_manifest(
     # A VM-reported binary version or image digest is not an immutable local
     # trust root. Retain only renderer output, deterministic inputs, and fixed
     # browser status markers; deployment identity must be separately collected
-    # and validated before a real deployment claim is made.
+    # and validated before a real deployment claim is made. Current Git/static
+    # provenance and historical retained evidence remain separate identities;
+    # task-244 parity fixtures are historical inputs, not a current binding.
+    provenance_split = {
+        "current_git_static": {
+            "status": "verified" if provenance_mode == "standalone" else "not_bound",
+            "build_sha": build_sha if provenance_mode == "standalone" else None,
+            "build_digest": build_digest if provenance_mode == "standalone" else None,
+        },
+        "historical_retained": {
+            "status": "anchored" if provenance_mode == "retained" else "not_bound",
+            "source": "committed_retained_evidence" if provenance_mode == "retained" else None,
+        },
+        "task_244_parity": {
+            "status": "historical_fixture_only",
+            "current_binding": "not_proven",
+        },
+    }
     manifest: dict[str, object] = {
+        "provenance": provenance_split,
         "schema": SCHEMA,
         "contract": "dashboard-v0.0.1",
         "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
@@ -1091,25 +1926,197 @@ def render_manifest(
     return manifest
 
 
-def _build_static_digest(site_root: Path) -> str:
-    """Hash a plain static tree without following links or special files."""
+def _effective_static_budget(primary: str, alias: str, default: int | float) -> int | float:
+    """Honor either public budget spelling without silently widening limits."""
 
-    root = Path(site_root)
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError("static build root is unavailable")
-    entries: list[bytes] = []
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError("static build must not contain symlinks")
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            raise ValueError("static build could not be read") from exc
-        entries.append(relative + b"\0" + str(len(content)).encode("ascii") + b"\0" + content)
-    return digest_bytes(b"".join(entries))
+    primary_value = globals()[primary]
+    alias_value = globals()[alias]
+    if primary_value != default:
+        return primary_value
+    return alias_value
+
+
+def _open_verified_directory_path(path: Path, *, label: str) -> tuple[int, Path]:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if candidate.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    try:
+        candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    parent_fd, name = _open_verified_parent(candidate, label=label)
+    try:
+        descriptor = _open_verified_directory_at(parent_fd, name, label=label)
+    finally:
+        os.close(parent_fd)
+    return descriptor, candidate
+
+
+def _build_static_digest(site_root: Path) -> str:
+    """Hash a bounded static tree through stable descriptor-relative reads."""
+
+    file_limit = int(_effective_static_budget("STATIC_BUILD_MAX_FILES", "STATIC_MAX_FILES", 4096))
+    per_file_limit = int(
+        _effective_static_budget(
+            "STATIC_BUILD_MAX_FILE_BYTES",
+            "STATIC_MAX_PER_FILE_BYTES",
+            8 * 1024 * 1024,
+        )
+    )
+    total_limit = int(
+        _effective_static_budget(
+            "STATIC_BUILD_MAX_TOTAL_BYTES",
+            "STATIC_MAX_TOTAL_BYTES",
+            64 * 1024 * 1024,
+        )
+    )
+    depth_limit = int(
+        _effective_static_budget("STATIC_BUILD_MAX_DEPTH", "STATIC_MAX_DEPTH", 32)
+    )
+    deadline_budget = float(
+        _effective_static_budget(
+            "STATIC_BUILD_MAX_DEADLINE_SECONDS",
+            "STATIC_DIGEST_DEADLINE_SECONDS",
+            10,
+        )
+    )
+    if STATIC_BUILD_DEADLINE_SECONDS != 10:
+        deadline_budget = float(STATIC_BUILD_DEADLINE_SECONDS)
+    if min(file_limit, per_file_limit, total_limit, depth_limit) <= 0 or deadline_budget <= 0:
+        raise ValueError("static build budgets must be positive")
+
+    raw_root = Path(site_root)
+    if not raw_root.is_absolute():
+        raw_root = Path.cwd() / raw_root
+    root_fd, canonical_root = _open_verified_directory_path(site_root, label="static build root")
+    deadline = time.monotonic() + deadline_budget
+    open_directories: list[int] = [root_fd]
+    stack: list[tuple[int, tuple[str, ...], int]] = [(root_fd, (), 0)]
+    files_seen = 0
+    total_bytes = 0
+    hasher = hashlib.sha256()
+
+    def check_deadline() -> None:
+        if time.monotonic() > deadline:
+            raise ValueError("static build digest deadline exceeded")
+
+    try:
+        while stack:
+            check_deadline()
+            directory_fd, prefix, depth = stack.pop()
+            try:
+                with os.scandir(directory_fd) as iterator:
+                    entries = []
+                    for entry in iterator:
+                        entries.append(entry)
+                        if len(entries) > file_limit:
+                            raise ValueError("static build exceeds file-count budget")
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                if isinstance(exc, ValueError):
+                    raise
+                raise ValueError("static build directory could not be scanned") from exc
+
+            entries.sort(key=lambda item: item.name)
+            for entry in reversed(entries):
+                check_deadline()
+                name = entry.name
+                if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
+                    raise ValueError("static build contains an invalid pathname entry")
+                display_path = raw_root.joinpath(*prefix, name)
+                try:
+                    # The absolute lstat is an additional race witness for
+                    # callers that replace an entry between enumeration and
+                    # open; the descriptor-relative stat remains authoritative.
+                    displayed = os.lstat(display_path)
+                    relative_metadata = os.stat(
+                        name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    raise ValueError("static build entry could not be inspected") from exc
+                if stat.S_ISLNK(displayed.st_mode):
+                    raise ValueError("static build must not contain symlinks")
+                if not (
+                    stat.S_ISDIR(displayed.st_mode)
+                    or stat.S_ISREG(displayed.st_mode)
+                ):
+                    raise ValueError("static build contains a non-regular special file")
+                if _metadata_identity(displayed) != _metadata_identity(relative_metadata):
+                    raise ValueError("static build entry changed during inspection")
+                if stat.S_ISDIR(displayed.st_mode):
+                    if depth + 1 > depth_limit:
+                        raise ValueError("static build exceeds depth budget")
+                    child_fd = _open_verified_directory_at(
+                        directory_fd,
+                        name,
+                        label="static build directory",
+                    )
+                    child_metadata = os.fstat(child_fd)
+                    if (child_metadata.st_dev, child_metadata.st_ino) != (
+                        relative_metadata.st_dev,
+                        relative_metadata.st_ino,
+                    ):
+                        os.close(child_fd)
+                        raise ValueError("static build directory changed during open")
+                    open_directories.append(child_fd)
+                    stack.append((child_fd, (*prefix, name), depth + 1))
+                    continue
+                if not stat.S_ISREG(displayed.st_mode):
+                    raise ValueError("static build contains a non-regular special file")
+                files_seen += 1
+                if files_seen > file_limit:
+                    raise ValueError("static build exceeds file-count budget")
+                descriptor, metadata = _open_verified_regular_file_at(
+                    directory_fd,
+                    name,
+                    limit=per_file_limit,
+                    label="static build file",
+                )
+                try:
+                    if _metadata_identity(metadata) != _metadata_identity(relative_metadata):
+                        raise ValueError("static build file changed during open")
+                    content = _read_bounded_fd(
+                        descriptor,
+                        per_file_limit,
+                        "static build file",
+                        deadline=deadline,
+                    )
+                    after_read = os.fstat(descriptor)
+                    if _metadata_identity(metadata) != _metadata_identity(after_read):
+                        raise ValueError("static build file changed during read")
+                    after_entry = os.stat(
+                        name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    _verify_regular_metadata(
+                        after_entry,
+                        limit=per_file_limit,
+                        label="static build file",
+                    )
+                    if _metadata_identity(metadata) != _metadata_identity(after_entry):
+                        raise ValueError("static build file changed after read")
+                finally:
+                    os.close(descriptor)
+                if total_bytes + len(content) > total_limit:
+                    raise ValueError("static build exceeds aggregate byte budget")
+                total_bytes += len(content)
+                relative = "/".join((*prefix, name)).encode("utf-8")
+                hasher.update(relative)
+                hasher.update(b"\0")
+                hasher.update(str(len(content)).encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(content)
+        return hasher.hexdigest()
+    finally:
+        for descriptor in reversed(open_directories):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _load_retained_input(path: Path) -> dict[str, object]:
@@ -1143,6 +2150,7 @@ def _load_retained_input(path: Path) -> dict[str, object]:
         "runtime_inputs": runtime_inputs,
         "browser_evidence": browser_evidence,
         "browser_journey": value.get("browser_journey"),
+        "retained_loader_token": _RETAINED_LOADER_TOKEN,
     }
 
 
@@ -1225,6 +2233,7 @@ def main(argv: list[str] | None = None) -> int:
                 browser_evidence=retained["browser_evidence"],  # type: ignore[arg-type]
                 runtime_inputs=retained["runtime_inputs"],  # type: ignore[arg-type]
                 provenance_mode="retained",
+                retained_loader_token=retained["retained_loader_token"],
             )
         else:
             if args.static_build_root is None:
@@ -1257,5 +2266,15 @@ def main(argv: list[str] | None = None) -> int:
     raise AssertionError("unreachable")
 
 
+def _cli_entrypoint(argv: list[str] | None = None) -> int:
+    """Return deterministic CLI failures without exposing tracebacks."""
+
+    try:
+        return main(argv)
+    except (ValueError, OSError, RuntimeError, TypeError, UnicodeError, RecursionError, MemoryError, subprocess.SubprocessError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_cli_entrypoint())
