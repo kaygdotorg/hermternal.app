@@ -137,7 +137,9 @@ list or history whose cap, identity, response shape, or pagination cannot prove
 completeness fails closed.
 
 The reconciler compares only the fixed proof prompt and the assistant marker
-using exact equality. It prints one fixed line with
+using exact equality. Any intervening user message fences that prompt from a
+later assistant marker; the pure and page-realm projections must keep this
+boundary identical. It prints one fixed line with
 `promptMatches=zero|one|multiple`, `completedPairs=zero|one|multiple`, and exactly
 one of `no-match-uncertain|match-unattributed|multiple-matches-ambiguous|
 reconciliation-failed-uncertain`. Zero history matches are still

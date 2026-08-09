@@ -148,7 +148,9 @@ export async function reconcileLiveHistory({
       let pair = false;
       for (let next = index + 1; next < messages.length; next += 1) {
         const candidate = messages[next];
-        if (candidate.role === 'user' && candidate.content === prompt) break;
+        // Any intervening user message fences the historical pair. A later
+        // assistant marker may belong to that unrelated turn, not this prompt.
+        if (candidate.role === 'user') break;
         if (
           candidate.role === 'assistant' &&
           candidate.content === assistantMarker
