@@ -1193,13 +1193,102 @@ def _parser_canonical_project_root(value: Path) -> Path:
 
 
 def _parser_prepare_git_pin(project_root: Path, budget: _ParserGitBudget) -> _ParserGitMetadataPin:
-    """Pin the root and marker before the first Git topology query."""
+    """Build the structural Git pin without trusting a Git pathname query.
+
+    The first ``rev-parse`` is itself fenced. The marker, common directory,
+    objects directory, config files, and forbidden indirection paths are bound
+    directly from the no-follow filesystem topology before Git can rediscover
+    any of them by pathname.
+    """
 
     pin = _ParserGitMetadataPin(project_root)
-    pin.watch(project_root, "parser project root", required=True)
-    pin.watch(project_root / ".git", "Git worktree marker", required=True)
-    budget.pin = pin
-    return pin
+    try:
+        pin.watch(project_root, "parser project root", required=True)
+        marker_path = project_root / ".git"
+        marker_watcher = pin.watch(marker_path, "Git worktree marker", required=True)
+        if marker_watcher.final_identity is None:
+            raise ValueError("parser provenance Git metadata marker is missing")
+        marker_type = marker_watcher.final_identity[2]
+        if marker_type == stat.S_IFDIR:
+            git_dir = marker_watcher.path
+            common_dir = git_dir
+        elif marker_type == stat.S_IFREG:
+            marker_watcher = pin.watch(marker_path, "Git worktree gitfile", required=True, byte_limit=4096)
+            marker_bytes = pin.read_bytes(marker_path, "Git worktree gitfile")
+            try:
+                lines = marker_bytes.decode("ascii").splitlines()
+            except UnicodeDecodeError as exc:
+                raise ValueError("parser provenance Git worktree gitfile is malformed") from exc
+            if len(lines) != 1 or not lines[0].startswith("gitdir:"):
+                raise ValueError("parser provenance Git worktree gitfile is malformed")
+            git_dir = _resolve_git_metadata_reference(project_root, lines[0][7:].strip(), "Git worktree gitfile")
+            pin.watch(git_dir, "Git directory", required=True)
+            commondir_file = git_dir / "commondir"
+            linked_file = git_dir / "gitdir"
+            try:
+                commondir_watcher = pin.watch(commondir_file, "Git commondir", required=True, byte_limit=4096)
+                linked_watcher = pin.watch(linked_file, "Git worktree link", required=True, byte_limit=4096)
+            except ValueError as exc:
+                raise ValueError("parser provenance standalone separate-git-dir checkout is unsupported") from exc
+            commondir_bytes = pin.read_bytes(commondir_file, "Git commondir")
+            linked_bytes = pin.read_bytes(linked_file, "Git worktree link")
+            try:
+                commondir_text = commondir_bytes.decode("ascii").strip()
+                linked_text = linked_bytes.decode("ascii").strip()
+            except UnicodeDecodeError as exc:
+                raise ValueError("parser provenance Git worktree metadata is malformed") from exc
+            linked_common = _parser_open_metadata_path(git_dir, commondir_text, "Git commondir reference")
+            linked_marker = _parser_open_metadata_path(git_dir, linked_text, "Git worktree link reference")
+            try:
+                if linked_marker.path != marker_path or linked_marker.final_identity != marker_watcher.final_identity:
+                    raise ValueError("parser provenance Git worktree link is not bidirectionally authenticated")
+                common_dir = linked_common.path
+            finally:
+                _parser_close_fds(linked_common.descriptors)
+                _parser_close_fds(linked_marker.descriptors)
+        else:
+            raise ValueError("parser provenance Git metadata has an invalid gitfile")
+
+        git_watcher = pin.watch(git_dir, "Git directory", required=True)
+        common_watcher = pin.watch(common_dir, "Git common directory", required=True)
+        objects_dir = common_dir / "objects"
+        objects_watcher = pin.watch(objects_dir, "Git objects directory", required=True)
+        anchor_watcher = pin.watch(common_dir.parent / ".git", "trusted repository metadata root", required=True)
+        if common_watcher.final_identity != anchor_watcher.final_identity:
+            raise ValueError("parser provenance Git common directory is not the trusted structural anchor")
+        if objects_watcher.final_identity is None:
+            raise ValueError("parser provenance Git objects directory is missing")
+        if git_watcher.final_identity is None or common_watcher.final_identity is None:
+            raise ValueError("parser provenance Git metadata is incomplete")
+
+        pin.watch(common_dir / "config", "Git common config", required=True, byte_limit=256 * 1024)
+        if git_dir != common_dir:
+            pin.watch(git_dir / "config", "Git worktree config", required=False, byte_limit=256 * 1024)
+            pin.watch(git_dir / "config.worktree", "Git worktree config.worktree", required=False, byte_limit=256 * 1024)
+
+        forbidden = {
+            git_dir / "shallow",
+            common_dir / "shallow",
+            git_dir / "info/grafts",
+            common_dir / "info/grafts",
+            git_dir / "objects/info/alternates",
+            common_dir / "objects/info/alternates",
+            git_dir / "objects/info/http-alternates",
+            common_dir / "objects/info/http-alternates",
+            git_dir / "refs/replace",
+            common_dir / "refs/replace",
+        }
+        for path in forbidden:
+            budget.check()
+            if pin.watch(path, "Git forbidden metadata", required=False).exists:
+                raise ValueError("parser provenance rejects shallow, alternate, graft, or replacement metadata")
+        budget.pin = pin
+        pin.assert_current(budget)
+        return pin
+    except Exception:
+        pin.close()
+        budget.pin = None
+        raise
 
 
 def _parser_pin_git_topology(
@@ -2742,7 +2831,10 @@ def _regular_stat(path: Path, label: str) -> os.stat_result:
     return metadata
 
 
-def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+_DigestIdentity = tuple[int, int, int, int, int]
+
+
+def _file_identity(metadata: os.stat_result) -> _DigestIdentity:
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -2752,6 +2844,184 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
+class _StaticDigestEntry(NamedTuple):
+    """One collected file plus the directory identities that anchor its path."""
+
+    path: Path
+    relative: str
+    metadata: os.stat_result
+    ancestor_identities: tuple[_DigestIdentity, ...]
+
+
+def _static_digest_components(relative: str) -> tuple[str, ...]:
+    """Validate a collected relative path before descriptor-relative traversal."""
+
+    if type(relative) is not str or not relative or relative.startswith("/") or "\\x00" in relative:
+        raise ValueError("static digest relative path is malformed")
+    components = tuple(relative.split("/"))
+    if any(not component or component in {".", ".."} for component in components):
+        raise ValueError("static digest relative path is malformed")
+    return components
+
+
+def _open_static_file_chain(
+    site_root: Path,
+    relative: str,
+    *,
+    expected_ancestors: tuple[_DigestIdentity, ...] | None = None,
+    expected_leaf: _DigestIdentity | None = None,
+) -> tuple[list[int], int, int, str, os.stat_result]:
+    """Open a collected static path through a no-follow directory-descriptor chain.
+
+    Pathname ``O_NOFOLLOW`` protects only the final component. Static files are
+    collected first and read later, so every directory between ``site_root`` and
+    the leaf is reopened relative to a retained parent descriptor and compared
+    with its collection-time identity before bytes can be hashed.
+    """
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("static digest requires O_NOFOLLOW ancestor traversal")
+    components = _static_digest_components(relative)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
+    leaf_flags = os.O_RDONLY | nofollow
+    descriptors: list[int] = []
+    try:
+        try:
+            root_before = os.lstat(site_root)
+        except OSError as exc:
+            raise ValueError("static digest site_root cannot be inspected safely") from exc
+        if stat.S_ISLNK(root_before.st_mode):
+            raise ValueError("static digest contains a symlinked path component")
+        if not stat.S_ISDIR(root_before.st_mode):
+            raise ValueError("static digest site_root must be a directory")
+        root_descriptor, root_opened = _open_directory(site_root)
+        descriptors.append(root_descriptor)
+        if _file_identity(root_before) != _file_identity(root_opened):
+            raise ValueError("static digest site_root changed between inspection and open")
+        chain = [_file_identity(root_opened)]
+        if expected_ancestors is not None:
+            if not expected_ancestors or chain[0] != expected_ancestors[0]:
+                raise ValueError("static digest site_root changed after collection")
+        current = root_descriptor
+        for index, component in enumerate(components[:-1], 1):
+            try:
+                before = os.stat(component, dir_fd=current, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("static digest ancestor cannot be inspected safely") from exc
+            if stat.S_ISLNK(before.st_mode):
+                raise ValueError("static digest contains a symlinked path component")
+            if not stat.S_ISDIR(before.st_mode):
+                raise ValueError("static digest ancestor is not a directory")
+            try:
+                child = os.open(component, directory_flags, dir_fd=current)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise ValueError("static digest contains a symlinked path component") from exc
+                raise ValueError("static digest ancestor cannot be opened safely") from exc
+            descriptors.append(child)
+            opened = os.fstat(child)
+            identity = _file_identity(opened)
+            if identity != _file_identity(before):
+                raise ValueError("static digest ancestor changed between inspection and open")
+            if expected_ancestors is not None:
+                if index >= len(expected_ancestors) or identity != expected_ancestors[index]:
+                    raise ValueError("static digest ancestor changed after collection")
+            chain.append(identity)
+            current = child
+
+        leaf_name = components[-1]
+        try:
+            before_leaf = os.stat(leaf_name, dir_fd=current, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("static digest input cannot be inspected safely") from exc
+        if stat.S_ISLNK(before_leaf.st_mode):
+            raise ValueError("static digest contains a symlinked path component")
+        if not stat.S_ISREG(before_leaf.st_mode):
+            raise ValueError("static digest input must be a regular file")
+        try:
+            leaf = os.open(leaf_name, leaf_flags, dir_fd=current)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError("static digest contains a symlinked path component") from exc
+            raise ValueError("static digest input cannot be opened safely") from exc
+        descriptors.append(leaf)
+        opened_leaf = os.fstat(leaf)
+        if _file_identity(opened_leaf) != _file_identity(before_leaf):
+            raise ValueError("static digest input changed between inspection and open")
+        if expected_leaf is not None and _file_identity(opened_leaf) != expected_leaf:
+            raise ValueError("static digest input changed after collection")
+        if expected_ancestors is not None and len(chain) != len(expected_ancestors):
+            raise ValueError("static digest ancestor chain is incomplete")
+        return descriptors, leaf, current, leaf_name, opened_leaf
+    except ValueError:
+        _parser_close_fds(descriptors)
+        raise
+    except (OSError, RuntimeError) as exc:
+        _parser_close_fds(descriptors)
+        raise ValueError("static digest path cannot be opened safely") from exc
+
+
+def _stream_static_file_relative(
+    site_root: Path,
+    relative: str,
+    *,
+    expected_ancestors: tuple[_DigestIdentity, ...],
+    expected_leaf: _DigestIdentity,
+    aggregate: object | None,
+    started: float,
+    file_count: int,
+    total_before: int,
+) -> tuple[str, int]:
+    """Read one collected file while binding every path ancestor to its identity."""
+
+    descriptors, leaf, parent, leaf_name, before = _open_static_file_chain(
+        site_root,
+        relative,
+        expected_ancestors=expected_ancestors,
+        expected_leaf=expected_leaf,
+    )
+    try:
+        hasher = hashlib.sha256()
+        total = 0
+        while True:
+            _check_digest_budget(started, files=file_count, total_bytes=total_before + total)
+            chunk = os.read(leaf, MAX_DIGEST_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_DIGEST_FILE_BYTES or total_before + total > MAX_DIGEST_TOTAL_BYTES:
+                raise ValueError("digest input exceeded its byte limit")
+            hasher.update(chunk)
+            if aggregate is not None:
+                aggregate.update(chunk)  # type: ignore[attr-defined]
+        after = os.fstat(leaf)
+        try:
+            current = os.stat(leaf_name, dir_fd=parent, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("digest input disappeared after reading") from exc
+        if (
+            _file_identity(after) != _file_identity(before)
+            or _file_identity(current) != expected_leaf
+            or total != before.st_size
+        ):
+            raise ValueError("digest input changed while reading")
+    finally:
+        _parser_close_fds(descriptors)
+
+    post_descriptors: list[int] = []
+    try:
+        post_descriptors, _post_leaf, _post_parent, _post_name, _post_metadata = _open_static_file_chain(
+            site_root,
+            relative,
+            expected_ancestors=expected_ancestors,
+            expected_leaf=expected_leaf,
+        )
+    finally:
+        _parser_close_fds(post_descriptors)
+    return hasher.hexdigest(), total
+
+
 def _stream_regular_file(
     path: Path,
     *,
@@ -2759,10 +3029,32 @@ def _stream_regular_file(
     started: float | None = None,
     file_count: int = 1,
     total_before: int = 0,
+    site_root: Path | None = None,
+    relative_path: str | None = None,
+    expected_ancestors: tuple[_DigestIdentity, ...] | None = None,
+    expected_leaf: _DigestIdentity | None = None,
 ) -> tuple[str, int]:
-    """Stream one bounded regular file into local and optional aggregate hashes."""
+    """Stream one bounded regular file into local and optional aggregate hashes.
+
+    ``site_root`` selects the collection-bound descriptor-relative path mode.
+    The path-only mode remains for standalone fixture hashing; the aggregate
+    static digest always supplies collected ancestor and leaf identities.
+    """
 
     started = time.monotonic() if started is None else started
+    if site_root is not None:
+        if relative_path is None or expected_ancestors is None or expected_leaf is None:
+            raise ValueError("static digest collection identity is incomplete")
+        return _stream_static_file_relative(
+            site_root,
+            relative_path,
+            expected_ancestors=expected_ancestors,
+            expected_leaf=expected_leaf,
+            aggregate=aggregate,
+            started=started,
+            file_count=file_count,
+            total_before=total_before,
+        )
     before = _regular_stat(path, "digest input")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -2894,7 +3186,7 @@ def _open_directory(path: Path, expected: os.stat_result | None = None) -> tuple
     return descriptor, opened
 
 
-def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
+def _collect_static_files(site_root: Path) -> list[_StaticDigestEntry]:
     started = time.monotonic()
     _check_digest_path(site_root, "site_root")
     try:
@@ -2903,8 +3195,11 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
         raise ValueError("site_root cannot be inspected") from exc
     if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("site_root must be a regular directory")
-    collected: list[tuple[Path, os.stat_result]] = []
-    stack: list[tuple[Path, int, os.stat_result]] = [(site_root, 0, root_metadata)]
+    collected: list[_StaticDigestEntry] = []
+    root_identity = _file_identity(root_metadata)
+    stack: list[tuple[Path, int, os.stat_result, tuple[_DigestIdentity, ...]]] = [
+        (site_root, 0, root_metadata, (root_identity,))
+    ]
     total_bytes = 0
     directory_count = 1
     entry_count = 0
@@ -2912,7 +3207,7 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
         _check_digest_budget(started, files=len(collected), total_bytes=total_bytes)
         if len(stack) > MAX_DIGEST_PENDING_DIRECTORIES:
             raise ValueError("static digest exceeded its pending-directory budget")
-        directory, depth, expected = stack.pop()
+        directory, depth, expected, ancestor_identities = stack.pop()
         if depth > MAX_DIGEST_DEPTH:
             raise ValueError("static digest exceeded its directory-depth budget")
         descriptor, opened = _open_directory(directory, expected)
@@ -2961,7 +3256,7 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
                 if depth + 1 > MAX_DIGEST_DEPTH:
                     raise ValueError("static digest exceeded its directory-depth budget")
                 directory_count += 1
-                stack.append((entry_path, depth + 1, metadata))
+                stack.append((entry_path, depth + 1, metadata, ancestor_identities + (_file_identity(metadata),)))
                 continue
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("static digest rejects special files")
@@ -2971,7 +3266,7 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
                 raise ValueError("static digest exceeded its file-count budget")
             if total_bytes + metadata.st_size > MAX_DIGEST_TOTAL_BYTES:
                 raise ValueError("static digest exceeded its byte budget")
-            collected.append((entry_path, metadata))
+            collected.append(_StaticDigestEntry(entry_path, relative, metadata, ancestor_identities))
             total_bytes += metadata.st_size
             _check_digest_budget(started, files=len(collected), total_bytes=total_bytes)
     try:
@@ -2980,7 +3275,7 @@ def _collect_static_files(site_root: Path) -> list[tuple[Path, os.stat_result]]:
         raise ValueError("site_root disappeared after traversal") from exc
     if _file_identity(final_root) != _file_identity(root_metadata):
         raise ValueError("site_root changed while traversing")
-    return sorted(collected, key=lambda item: item[0].relative_to(site_root).as_posix())
+    return sorted(collected, key=lambda item: item.relative)
 
 
 def _build_static_digest(site_root: Path) -> str:
@@ -2990,15 +3285,19 @@ def _build_static_digest(site_root: Path) -> str:
     files = _collect_static_files(site_root)
     hasher = hashlib.sha256()
     total_bytes = 0
-    for index, (path, metadata) in enumerate(files, 1):
-        relative = path.relative_to(site_root).as_posix().encode("utf-8")
-        hasher.update(relative + b"\0" + str(metadata.st_size).encode("ascii") + b"\0")
+    for index, entry in enumerate(files, 1):
+        relative = entry.relative.encode("utf-8")
+        hasher.update(relative + b"\0" + str(entry.metadata.st_size).encode("ascii") + b"\0")
         _, read_bytes = _stream_regular_file(
-            path,
+            entry.path,
             aggregate=hasher,
             started=started,
             file_count=index,
             total_before=total_bytes,
+            site_root=site_root,
+            relative_path=entry.relative,
+            expected_ancestors=entry.ancestor_identities,
+            expected_leaf=_file_identity(entry.metadata),
         )
         total_bytes += read_bytes
         _check_digest_budget(started, files=index, total_bytes=total_bytes)
