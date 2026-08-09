@@ -55,8 +55,15 @@ const STORAGE_EVIDENCE_KEYS = [
 ] as const;
 const STORAGE_TRUNCATION_KEYS = ['any', 'cookie', 'localStorage', 'sessionStorage', 'indexedDb'] as const;
 
+type CapturedDataDescriptorFlags = {
+  configurable: boolean;
+  enumerable: boolean;
+  writable: boolean;
+};
+
 type CapturedRecord = {
   values: Record<string, unknown>;
+  descriptorFlags: Record<string, CapturedDataDescriptorFlags>;
 };
 
 /**
@@ -1356,6 +1363,8 @@ type CapturedStorageEvidence = {
   kind: 'supported' | 'truncated' | 'unsupported';
   values: Record<string, unknown>;
   truncation: Record<string, unknown>;
+  descriptorFlags: Record<string, CapturedDataDescriptorFlags>;
+  truncationDescriptorFlags: Record<string, CapturedDataDescriptorFlags>;
 };
 
 function captureExactRecord(
@@ -1379,18 +1388,34 @@ function captureExactRecord(
       if (seenKeys[key] !== true) return undefined;
     }
 
-    const descriptors = CAPTURED_OBJECT_CREATE(null) as Record<string, PropertyDescriptor>;
+    const values = CAPTURED_OBJECT_CREATE(null) as Record<string, unknown>;
+    const descriptorFlags = CAPTURED_OBJECT_CREATE(null) as Record<string, CapturedDataDescriptorFlags>;
     for (const key of expectedKeys) {
       const descriptor = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
-      if (!descriptor || descriptor.enumerable !== true) return undefined;
+      if (
+        !descriptor ||
+        typeof descriptor.enumerable !== 'boolean' ||
+        typeof descriptor.configurable !== 'boolean' ||
+        typeof descriptor.writable !== 'boolean' ||
+        descriptor.enumerable !== true
+      ) {
+        return undefined;
+      }
       const valueMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'value');
       const getterMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'get');
       const setterMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'set');
       if (!valueMarker || getterMarker || setterMarker) return undefined;
-      descriptors[key] = descriptor;
+      values[key] = descriptor.value;
+      descriptorFlags[key] = {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        writable: descriptor.writable
+      };
     }
-    const values = CAPTURED_OBJECT_CREATE(null) as Record<string, unknown>;
-    for (const key of expectedKeys) values[key] = descriptors[key].value;
+
+    // Preserve descriptor flags without retaining descriptor objects. Exact
+    // equality must reject value-identical evidence whose writable or
+    // configurable shape changes, including nested truncation records.
 
     // structuredClone rejects Proxy objects in browser and Node runtimes. Run
     // it only after descriptor checks and value snapshotting so untrusted
@@ -1399,7 +1424,7 @@ function captureExactRecord(
       if (!CAPTURED_STRUCTURED_CLONE) return undefined;
       CAPTURED_STRUCTURED_CLONE(value);
     }
-    return { values };
+    return { values, descriptorFlags };
   } catch {
     return undefined;
   }
@@ -1448,7 +1473,15 @@ function captureStorageEvidence(value: unknown): CapturedStorageEvidence | undef
       allFalse() &&
       typeof fields.fingerprint === 'string' &&
       /^[0-9a-f]{64}$/.test(fields.fingerprint);
-    if (supported) return { kind: 'supported', values: fields, truncation: flags };
+    if (supported) {
+      return {
+        kind: 'supported',
+        values: fields,
+        truncation: flags,
+        descriptorFlags: top.descriptorFlags,
+        truncationDescriptorFlags: truncation.descriptorFlags
+      };
+    }
 
     const truncated =
       fields.cryptoSupported === true &&
@@ -1481,7 +1514,15 @@ function captureStorageEvidence(value: unknown): CapturedStorageEvidence | undef
       fields.sessionStorageTruncated === flags.sessionStorage &&
       fields.indexedDbTruncated === flags.indexedDb &&
       fields.fingerprint === null;
-    if (truncated) return { kind: 'truncated', values: fields, truncation: flags };
+    if (truncated) {
+      return {
+        kind: 'truncated',
+        values: fields,
+        truncation: flags,
+        descriptorFlags: top.descriptorFlags,
+        truncationDescriptorFlags: truncation.descriptorFlags
+      };
+    }
 
     const unsupported =
       fields.cryptoSupported === false &&
@@ -1511,10 +1552,36 @@ function captureStorageEvidence(value: unknown): CapturedStorageEvidence | undef
       flags.localStorage === null &&
       flags.sessionStorage === null &&
       flags.indexedDb === null;
-    return unsupported ? { kind: 'unsupported', values: fields, truncation: flags } : undefined;
+    return unsupported
+      ? {
+          kind: 'unsupported',
+          values: fields,
+          truncation: flags,
+          descriptorFlags: top.descriptorFlags,
+          truncationDescriptorFlags: truncation.descriptorFlags
+        }
+      : undefined;
   } catch {
     return undefined;
   }
+}
+
+function descriptorFlagsEqual(
+  keys: readonly string[],
+  left: Record<string, CapturedDataDescriptorFlags>,
+  right: Record<string, CapturedDataDescriptorFlags>
+): boolean {
+  return keys.every((key) => {
+    const leftFlags = left[key];
+    const rightFlags = right[key];
+    return (
+      leftFlags !== undefined &&
+      rightFlags !== undefined &&
+      leftFlags.configurable === rightFlags.configurable &&
+      leftFlags.enumerable === rightFlags.enumerable &&
+      leftFlags.writable === rightFlags.writable
+    );
+  });
 }
 
 export function storageEvidenceEqual(left: StorageEvidence, right: StorageEvidence): boolean {
@@ -1528,7 +1595,17 @@ export function storageEvidenceEqual(left: StorageEvidence, right: StorageEviden
     const rightRecord = rightEvidence.values;
     const leftTruncation = leftEvidence.truncation;
     const rightTruncation = rightEvidence.truncation;
+    const leftDescriptorFlags = leftEvidence.descriptorFlags;
+    const rightDescriptorFlags = rightEvidence.descriptorFlags;
+    const leftTruncationDescriptorFlags = leftEvidence.truncationDescriptorFlags;
+    const rightTruncationDescriptorFlags = rightEvidence.truncationDescriptorFlags;
     return (
+      descriptorFlagsEqual(STORAGE_EVIDENCE_KEYS, leftDescriptorFlags, rightDescriptorFlags) &&
+      descriptorFlagsEqual(
+        STORAGE_TRUNCATION_KEYS,
+        leftTruncationDescriptorFlags,
+        rightTruncationDescriptorFlags
+      ) &&
       leftRecord.recordCount === rightRecord.recordCount &&
       leftRecord.digestCount === rightRecord.digestCount &&
       leftRecord.recordLimit === rightRecord.recordLimit &&
