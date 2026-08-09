@@ -343,10 +343,12 @@ python3 -m py_compile \
 ```
 
 The CLI supports `render`, `digest`, `build-digest`, and `evidence`. The
-`evidence` command has two explicit workflows; neither workflow is a live
-Hermes or browser execution verifier.
+evidence command has two bounded JSON workflows; neither workflow is a browser
+execution attestation. JSON-only output is labeled
+`historical_non_execution`/`not_proven`, and a caller-authored event map cannot
+produce `browser_journey=passed`.
 
-For a standalone local Caddy run, keep the browser map outside the static
+For a new standalone observation, keep the browser map outside the static
 output directory because the static digest covers every file in that tree:
 
 ```sh
@@ -360,35 +362,35 @@ python3 scripts/caddy_proof.py evidence \
 `manifest.webmanifest`, and `service-worker.js` entry points. The command
 derives the checked-out Git `HEAD` and the digest of the actual static bytes;
 optional `--build-sha` and `--build-digest` values are compatibility
-assertions only and never establish trust. The browser map uses the fixed
-`hermternal.caddy-proof.browser-evidence.v1` schema and binds negative status
-to the derived build pair, Caddyfile digest, and runtime-input digest. Reads
-are bounded to 4096 bytes, require UTF-8 JSON, reject duplicate object keys
-and non-finite numbers at every nesting level, and fail on malformed Git
-output. A caller-authored complete event map, including `message.complete`, is
-not an execution receipt: `passed` is rejected rather than emitted. This
-standalone path can retain only synthetic/local Caddy results such as
-`blocked_provider` or `failed`; it cannot satisfy live Hermes release proof.
+assertions only and fail when they differ from those derived values. The
+browser map must use the fixed
+`hermternal.caddy-proof.browser-evidence.v1` schema and bind its status to the
+verified build pair, Caddyfile digest, and runtime-input digest. Reads are
+bounded to 4096 bytes, require UTF-8 JSON, reject duplicate object keys and
+non-finite numbers at every nesting level, and fail closed on malformed Git
+output or diagnostics. A complete `passed` map is rejected:
+release proof requires a verifier-controlled browser harness or separately
+trusted signed attestation, neither of which exists in this local lane. The
+required `message.complete` observation remains unproven in this JSON-only
+workflow.
 
 For the reviewed historical fixture, use the retained workflow explicitly and
-pass the canonical repository path:
+only with the canonical committed path:
 
 ```sh
 python3 scripts/caddy_proof.py evidence \
   --retained-input tests/integration/hermes-caddy/caddy-proof-evidence.json
 ```
 
-Retained mode requires that exact canonical committed path. Before consuming
-any JSON fields, it reads the bounded bytes, verifies the fixed
-`caddy-proof-evidence-sha256.txt` anchor, and rejects a temporary copy or any
-byte/hash mismatch. It then checks the historical Git build pair against that
-anchored file and uses the deterministic runtime-input map. It does not
-require a local static-build directory. Standalone assertion flags cannot be
-combined with retained input. Retained JSON-only evidence is historical and
-non-execution; it cannot satisfy passed release proof. The committed browser
-state is `blocked_provider` with only the semantic marker
-`provider_unavailable`; it contains no browser event payload, credential,
-cookie, ticket, ticket fragment, provider payload, or transcript. A Caddy
-binary version or image digest is not retained or validated by this local
-fixture. A separate signed attestation or verifier-generated execution receipt
-would be required before recording a real `passed` claim.
+Retained mode verifies the exact canonical file bytes against the fixed
+`caddy-proof-evidence-sha256.txt` anchor before consuming any fields, checks the
+historical build pair against that anchored file, and uses its deterministic
+runtime-input map. A copied or edited temporary manifest is rejected, and the
+workflow does not require a local static-build directory. Standalone assertion
+flags cannot be combined with retained input. The committed browser state is
+`blocked_provider` with only the semantic marker `provider_unavailable`; it
+contains no browser event payload, credential, cookie, ticket, ticket fragment,
+provider payload, or transcript. A Caddy binary version or image digest is not
+retained or validated by this local fixture. The local Caddy/mock-upstream suite
+proves only synthetic edge/upstream behavior, not live Hermes or browser
+execution.
