@@ -12,11 +12,12 @@ helper; it exists only in the child process environment as
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import NoReturn, Sequence
+from typing import Mapping, NoReturn, Sequence
 
 
 if str(Path(__file__).resolve().parent) not in sys.path:
@@ -46,6 +47,43 @@ def _marker_with_identity(
         return live_run_marker.load_marker_with_identity(path, selectable=True, parent_fd=parent_fd)
     except live_run_marker.MarkerError as error:
         raise LiveProofCredentialError(error.code) from None
+
+
+def _proof_identity(value: object) -> live_run_marker.CredentialIdentity:
+    try:
+        identity = live_run_marker.CredentialIdentity.from_document(value)
+    except live_run_marker.MarkerError:
+        raise LiveProofCredentialError("proof_invalid") from None
+    if not identity.generation:
+        raise LiveProofCredentialError("proof_invalid")
+    return identity
+
+
+def _validate_launcher_proof(
+    marker: live_run_marker.RunMarker,
+    *,
+    marker_path: Path,
+    run_id: str | None,
+    credential_file: str | Path | None,
+    credential_identity: Mapping[str, object] | live_run_marker.CredentialIdentity | None,
+) -> None:
+    """Require the exact metadata freshly emitted by the launcher endpoint gate."""
+
+    if run_id is None or credential_file is None or credential_identity is None:
+        raise LiveProofCredentialError("proof_required")
+    try:
+        expected_marker = live_run_marker.canonical_path(marker_path)
+        expected_credential = live_run_marker.canonical_path(credential_file, code="proof_invalid")
+    except live_run_marker.MarkerError:
+        raise LiveProofCredentialError("proof_invalid") from None
+    if expected_marker != marker.marker_path or run_id != marker.run_id or expected_credential != marker.credential_path:
+        raise LiveProofCredentialError("proof_mismatch")
+    if isinstance(credential_identity, live_run_marker.CredentialIdentity):
+        expected_identity = credential_identity
+    else:
+        expected_identity = _proof_identity(credential_identity)
+    if expected_identity != marker.credential_identity:
+        raise LiveProofCredentialError("proof_mismatch")
 
 
 def _marker(path: Path, *, parent_fd: int | None = None) -> live_run_marker.RunMarker:
@@ -114,7 +152,7 @@ def _read_pinned_credential(
             before_identity = _credential_identity(before)
         except OSError:
             raise LiveProofCredentialError("credential_file_invalid") from None
-        if before_identity != marker.credential_identity:
+        if before_identity.file_identity() != marker.credential_identity.file_identity():
             raise LiveProofCredentialError("credential_identity_mismatch")
 
         raw = bytearray()
@@ -131,10 +169,18 @@ def _read_pinned_credential(
             after_identity = _credential_identity(after)
         except LiveProofCredentialError:
             raise
-        if after_identity != before_identity or after_identity != marker.credential_identity:
+        if after_identity.file_identity() != before_identity.file_identity():
             raise LiveProofCredentialError("credential_identity_mismatch")
         if len(raw) > MAX_CREDENTIAL_BYTES:
             raise LiveProofCredentialError("credential_file_invalid")
+        try:
+            content_identity = live_run_marker.CredentialIdentity.from_stat_and_content(
+                after, bytes(raw)
+            )
+        except live_run_marker.MarkerError:
+            raise LiveProofCredentialError("credential_file_invalid") from None
+        if content_identity != marker.credential_identity:
+            raise LiveProofCredentialError("credential_identity_mismatch")
         if marker_identity is not None:
             if parent_fd is None:
                 raise LiveProofCredentialError("marker_identity_mismatch")
@@ -147,8 +193,14 @@ def _read_pinned_credential(
             pass
 
 
-def read_credential_file(marker_path: Path) -> str:
-    """Read the marker-pinned credential through one parent-directory lease."""
+def read_credential_file(
+    marker_path: Path,
+    *,
+    run_id: str | None = None,
+    credential_file: str | Path | None = None,
+    credential_identity: Mapping[str, object] | live_run_marker.CredentialIdentity | None = None,
+) -> str:
+    """Read one credential only after exact launcher proof is supplied."""
 
     parent_fd = -1
     expected: live_run_marker.ParentIdentity | None = None
@@ -164,6 +216,13 @@ def read_credential_file(marker_path: Path) -> str:
             code="runs_dir_invalid",
         )
         marker, marker_identity = _marker_with_identity(marker_path, parent_fd=parent_fd)
+        _validate_launcher_proof(
+            marker,
+            marker_path=marker_path,
+            run_id=run_id,
+            credential_file=credential_file,
+            credential_identity=credential_identity,
+        )
         raw = _read_pinned_credential(
             marker,
             marker_identity=marker_identity,
@@ -192,14 +251,26 @@ def read_credential_file(marker_path: Path) -> str:
                 pass
 
 
-def run_with_credential(marker_path: Path, command: Sequence[str]) -> NoReturn:
-    """Replace this process with the proof command and a transient password env."""
+def run_with_credential(
+    marker_path: Path,
+    *,
+    run_id: str | None,
+    credential_file: str | Path | None,
+    credential_identity: Mapping[str, object] | live_run_marker.CredentialIdentity | None,
+    command: Sequence[str],
+) -> NoReturn:
+    """Replace this process with a proof command and transient password env."""
 
     if not command:
         raise LiveProofCredentialError("command_missing")
     if os.environ.get(LIVE_RUNNER_DEBUG_ENV):
         raise LiveProofCredentialError("live_runner_debug_incompatible")
-    password = read_credential_file(marker_path)
+    password = read_credential_file(
+        marker_path,
+        run_id=run_id,
+        credential_file=credential_file,
+        credential_identity=credential_identity,
+    )
     environment = os.environ.copy()
     environment["HERMES_TEST_PASSWORD"] = password
     try:
@@ -209,14 +280,53 @@ def run_with_credential(marker_path: Path, command: Sequence[str]) -> NoReturn:
     raise AssertionError("os.execvpe returned")
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    if len(arguments) < 3 or arguments[1] != "--" or not arguments[2]:
-        print("usage_invalid", file=sys.stderr)
-        return 1
+def _parse_arguments(arguments: Sequence[str]) -> tuple[Path, str, str, Mapping[str, object], list[str]]:
+    """Parse only the explicit proof-bearing handoff form."""
 
     try:
-        run_with_credential(Path(arguments[0]), arguments[2:])
+        delimiter = list(arguments).index("--")
+    except ValueError:
+        raise LiveProofCredentialError("proof_required") from None
+    options = list(arguments[:delimiter])
+    command = list(arguments[delimiter + 1 :])
+    if not command or len(options) != 8:
+        raise LiveProofCredentialError("proof_required")
+    values: dict[str, str] = {}
+    for index in range(0, len(options), 2):
+        key, value = options[index : index + 2]
+        if key not in {"--marker", "--run-id", "--credential-file", "--credential-identity"}:
+            raise LiveProofCredentialError("proof_invalid")
+        if key in values or not value:
+            raise LiveProofCredentialError("proof_invalid")
+        values[key] = value
+    if set(values) != {"--marker", "--run-id", "--credential-file", "--credential-identity"}:
+        raise LiveProofCredentialError("proof_required")
+    try:
+        identity = json.loads(values["--credential-identity"])
+    except (TypeError, json.JSONDecodeError):
+        raise LiveProofCredentialError("proof_invalid") from None
+    if not isinstance(identity, dict):
+        raise LiveProofCredentialError("proof_invalid")
+    return (
+        Path(values["--marker"]),
+        values["--run-id"],
+        values["--credential-file"],
+        identity,
+        command,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        marker_path, run_id, credential_file, credential_identity, command = _parse_arguments(arguments)
+        run_with_credential(
+            marker_path,
+            run_id=run_id,
+            credential_file=credential_file,
+            credential_identity=credential_identity,
+            command=command,
+        )
     except LiveProofCredentialError as error:
         print(error.code, file=sys.stderr)
         return 1

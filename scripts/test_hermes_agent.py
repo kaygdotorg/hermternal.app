@@ -260,6 +260,26 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 launcher.clean_environment({name: "ssh://synthetic"})
             self.assertEqual(raised.exception.code, "remote_podman_rejected")
 
+    def test_malformed_runner_results_normalize_to_stable_launcher_errors(self) -> None:
+        malformed = (
+            object(),
+            launcher.CommandResult(True, ""),
+            launcher.CommandResult(256, ""),
+            launcher.CommandResult(0, "x" * (launcher.MAX_COMMAND_BYTES + 1)),
+            launcher.CommandResult(0, "", "x" * (launcher.MAX_COMMAND_BYTES + 1)),
+        )
+        for result in malformed:
+            with self.subTest(result=type(result).__name__):
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.invoke_runner(
+                        lambda command, environment, timeout, result=result: result,
+                        ("synthetic-runner",),
+                        {"PATH": "/usr/bin"},
+                        1,
+                        failure_code="runner_result_invalid",
+                    )
+                self.assertEqual(raised.exception.code, "runner_result_invalid")
+
     def test_new_run_creates_fresh_scoped_credential_state_and_marker_without_secret_or_run_id_output(self) -> None:
         spec = self.make_spec()
         result, created = self.start(spec)
@@ -290,27 +310,21 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
     def test_credential_replacement_before_marker_publication_is_not_adopted(self) -> None:
         spec = self.make_spec()
-        original_revalidate = launcher._revalidate_private_identity
+        original_revalidate = launcher._revalidate_credential_identity
         replaced = False
 
-        def race_credential(path, expected, *, code, replacement_code=None, parent_fd=None):
+        def race_credential(binding, *, parent_fd):
             nonlocal replaced
-            if path.name == "fixture.credential" and not replaced:
+            if binding.credential_path.name == "fixture.credential" and not replaced:
                 replaced = True
                 replacement = self.runs / "credential-prepublish-replacement"
                 replacement.write_bytes(b"replacement-credential")
                 replacement.chmod(0o600)
-                path.unlink()
-                replacement.rename(path)
-            return original_revalidate(
-                path,
-                expected,
-                code=code,
-                replacement_code=replacement_code,
-                parent_fd=parent_fd,
-            )
+                binding.credential_path.unlink()
+                replacement.rename(binding.credential_path)
+            return original_revalidate(binding, parent_fd=parent_fd)
 
-        with mock.patch.object(launcher, "_revalidate_private_identity", side_effect=race_credential):
+        with mock.patch.object(launcher, "_revalidate_credential_identity", side_effect=race_credential):
             with self.assertRaises(launcher.LauncherError) as raised:
                 self.start(spec)
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
@@ -518,7 +532,10 @@ class HermesAgentLauncherTests(unittest.TestCase):
             count, _ = launcher.live_run_marker.quarantine_usage(parent_fd)
         finally:
             os.close(parent_fd)
-        self.assertEqual(count, launcher.live_run_marker.QUARANTINE_SLOT_COUNT)
+        # The initial marker publication retains one replace-tmp staging slot;
+        # quota fallback rewrites in place and allocates no additional evidence.
+        self.assertEqual(count, launcher.live_run_marker.QUARANTINE_SLOT_COUNT + 1)
+        self.assertLessEqual(count, launcher.live_run_marker.QUARANTINE_MAX_ENTRIES)
 
     def test_marker_and_state_serialization_limits_apply_before_write(self) -> None:
         value = launcher.live_run_marker.new_marker(
@@ -772,10 +789,14 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 "status": "running",
                 "endpoint": spec.endpoint,
                 "marker_path": str(self.marker_path()),
+                "run_id": state.run_id,
                 "credential_file": str(self.runs / "fixture.credential"),
+                "credential_identity": state.marker.credential_identity.document(),
             },
         )
-        self.assertNotIn(state.run_id, json.dumps(result))
+        credential = state.marker.credential_path.read_text(encoding="ascii")
+        self.assertNotIn(credential.strip(), json.dumps(result))
+        self.assertIn(state.run_id, json.dumps(result))
         self.assertEqual(self.fake.calls[-1][0][1:3], ("container", "inspect"))
         self.assertEqual(self.fake.calls[-1][0][3], state.container_id)
 
@@ -821,6 +842,58 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.verify_handoff_endpoint(state, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+
+    def test_endpoint_rejects_same_inode_same_size_marker_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        document = json.loads(state.marker_path.read_text(encoding="utf-8"))
+        document["endpoint"] = document["endpoint"][:-1] + "0"
+        replacement = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        original = state.marker_path.read_bytes()
+        self.assertEqual(len(replacement), len(original))
+        descriptor = os.open(state.marker_path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_endpoint_rejects_same_inode_same_size_state_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        document = json.loads(state.marker.state_path.read_text(encoding="utf-8"))
+        document["username"] = document["username"][:-1] + "x"
+        replacement = (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        original = state.marker.state_path.read_bytes()
+        self.assertEqual(len(replacement), len(original))
+        descriptor = os.open(state.marker.state_path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "state_replaced")
+        self.assertEqual(self.fake.calls, [])
 
     def test_new_run_wildcard_mapping_is_cleaned_by_exact_marker(self) -> None:
         spec = self.make_spec()
@@ -1023,7 +1096,9 @@ class HermesAgentLauncherTests(unittest.TestCase):
             parent_fd: int | None = None,
         ) -> None:
             del current, expected
-            launcher.live_run_marker.replace_marker(raced, parent_fd=parent_fd)
+            assert parent_fd is not None
+            os.unlink(raced.marker_path.name, dir_fd=parent_fd)
+            launcher.live_run_marker.create_marker(raced, parent_fd=parent_fd)
             raise launcher.LauncherError("marker_replaced")
 
         with mock.patch.object(launcher, "_remove_marker_last", side_effect=replace_marker_then_fail):
@@ -1081,7 +1156,6 @@ class HermesAgentLauncherTests(unittest.TestCase):
         state = self.load()
         original_fd = os.open(state.marker.credential_path, os.O_RDONLY)
         replaced = False
-        original_rename = launcher._rename_noreplace
         replacement_bytes = b"replacement-credential"
 
         def race_credential(parent_fd, source_name, target_name):
@@ -1093,10 +1167,9 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 replacement.chmod(0o600)
                 state.marker.credential_path.unlink()
                 replacement.rename(state.marker.credential_path)
-            return original_rename(parent_fd, source_name, target_name)
 
         try:
-            with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_credential):
+            with mock.patch.object(launcher, "_before_rename_syscall", side_effect=race_credential):
                 with self.assertRaises(launcher.LauncherError) as raised:
                     launcher.stop_instance(
                         self.marker_path(),
@@ -1113,6 +1186,46 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertIn("credential_remove_failed_replaced", raised.exception.code)
         self.assertEqual(state.marker.credential_path.read_bytes(), replacement_bytes)
         self.assertEqual(self.fake.containers, {})
+
+    def test_same_inode_same_size_credential_mutation_is_rejected_before_erase(self) -> None:
+        path = self.runs / "claim.credential"
+        original = b"a" * 16
+        replacement = b"b" * len(original)
+        path.write_bytes(original)
+        path.chmod(0o600)
+        expected = launcher.live_run_marker.credential_snapshot(path)
+        mutated = False
+
+        def mutate_before_claim(parent_fd, source_name, target_name):
+            del target_name
+            nonlocal mutated
+            if source_name != path.name or mutated:
+                return
+            mutated = True
+            descriptor = os.open(source_name, os.O_RDWR, dir_fd=parent_fd)
+            try:
+                self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+        with mock.patch.object(launcher, "_before_rename_syscall", side_effect=mutate_before_claim):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher._remove_exact_file(
+                    path,
+                    code="credential_remove_failed",
+                    expected=expected,
+                    erase=True,
+                )
+        self.assertTrue(mutated)
+        self.assertIn("credential_remove_failed_replaced", raised.exception.code)
+        evidence = [
+            self.runs / name
+            for name in launcher.live_run_marker.quarantine_slot_names("cleanup")
+            if (self.runs / name).exists()
+        ]
+        self.assertTrue(any(candidate.read_bytes() == replacement for candidate in evidence))
+        self.assertFalse(any(candidate.read_bytes() == b"" for candidate in evidence))
 
     def test_credential_erasure_overwrites_held_descriptor_before_truncate(self) -> None:
         path = self.runs / "erase.credential"
@@ -1131,8 +1244,85 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 launcher._erase_credential_descriptor(descriptor)
         finally:
             os.close(descriptor)
-        self.assertEqual(observed, [b"\x00" * launcher.live_run_marker.MAX_CREDENTIAL_BYTES])
+        self.assertEqual(observed, [b"\x00" * len(b"synthetic-secret")])
         self.assertEqual(path.read_bytes(), b"")
+
+    def test_state_rewrite_rolls_back_after_write_sync_mode_and_parent_failures(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        tombstone = launcher.live_run_marker.cleanup_failed(state.marker)
+        self.assertIsNotNone(state.state_identity)
+        assert state.state_identity is not None
+        old_content = state.marker.state_path.read_bytes()
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            for failure in ("write", "fsync", "chmod", "parent-sync"):
+                with self.subTest(failure=failure):
+                    if failure == "write":
+                        real_write = os.write
+                        calls = 0
+
+                        def flaky_write(descriptor, content):
+                            nonlocal calls
+                            if calls == 0:
+                                calls += 1
+                                return real_write(descriptor, content[:1])
+                            if calls == 1:
+                                calls += 1
+                                raise OSError("synthetic partial write")
+                            return real_write(descriptor, content)
+
+                        patcher = mock.patch.object(launcher.os, "write", side_effect=flaky_write)
+                    elif failure == "fsync":
+                        real_fsync = os.fsync
+                        calls = 0
+
+                        def flaky_fsync(descriptor):
+                            nonlocal calls
+                            if calls == 0:
+                                calls += 1
+                                raise OSError("synthetic fsync failure")
+                            return real_fsync(descriptor)
+
+                        patcher = mock.patch.object(launcher.os, "fsync", side_effect=flaky_fsync)
+                    elif failure == "chmod":
+                        real_fchmod = os.fchmod
+                        calls = 0
+
+                        def flaky_fchmod(descriptor, mode):
+                            nonlocal calls
+                            if calls == 0:
+                                calls += 1
+                                raise OSError("synthetic chmod failure")
+                            return real_fchmod(descriptor, mode)
+
+                        patcher = mock.patch.object(launcher.os, "fchmod", side_effect=flaky_fchmod)
+                    else:
+                        real_fsync = os.fsync
+
+                        def flaky_parent_fsync(descriptor):
+                            if descriptor == parent_fd:
+                                raise OSError("synthetic parent sync failure")
+                            return real_fsync(descriptor)
+
+                        patcher = mock.patch.object(launcher.os, "fsync", side_effect=flaky_parent_fsync)
+                    with patcher:
+                        with self.assertRaises(launcher.LauncherError) as raised:
+                            launcher._rewrite_state_exact(
+                                spec,
+                                tombstone,
+                                state.state_identity,
+                                parent_fd=parent_fd,
+                            )
+                    self.assertEqual(
+                        raised.exception.code,
+                        "state_sync_failed" if failure == "parent-sync" else "state_rewrite_failed",
+                    )
+                    self.assertEqual(state.marker.state_path.read_bytes(), old_content)
+                    self.assertEqual(stat.S_IMODE(state.marker.state_path.stat().st_mode), 0o600)
+        finally:
+            os.close(parent_fd)
 
     def test_concurrent_state_replacement_is_preserved_without_marker_adoption(self) -> None:
         spec = self.make_spec()
@@ -1140,7 +1330,6 @@ class HermesAgentLauncherTests(unittest.TestCase):
         state = self.load()
         replacement_bytes = b"replacement-state"
         replaced = False
-        original_rename = launcher._rename_noreplace
 
         def race_state(parent_fd, source_name, target_name):
             nonlocal replaced
@@ -1151,9 +1340,8 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 replacement.chmod(0o600)
                 state.marker.state_path.unlink()
                 replacement.rename(state.marker.state_path)
-            return original_rename(parent_fd, source_name, target_name)
 
-        with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_state):
+        with mock.patch.object(launcher, "_before_rename_syscall", side_effect=race_state):
             with self.assertRaises(launcher.LauncherError) as raised:
                 launcher.stop_instance(
                     self.marker_path(),
@@ -1186,17 +1374,15 @@ class HermesAgentLauncherTests(unittest.TestCase):
             credential_identity=state.marker.credential_identity,
         )
         replaced = False
-        original_rename = launcher._rename_noreplace
 
         def race_marker(parent_fd, source_name, target_name):
             nonlocal replaced
             if source_name == state.marker.marker_path.name and not replaced:
                 replaced = True
                 state.marker.marker_path.unlink()
-                launcher.live_run_marker.create_marker(replacement)
-            return original_rename(parent_fd, source_name, target_name)
+                launcher.live_run_marker.create_marker(replacement, parent_fd=parent_fd)
 
-        with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_marker):
+        with mock.patch.object(launcher, "_before_rename_syscall", side_effect=race_marker):
             with self.assertRaises(launcher.LauncherError) as raised:
                 launcher.stop_instance(
                     self.marker_path(),

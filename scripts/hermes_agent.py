@@ -91,8 +91,9 @@ _ACTIVE_PARENT_LEASE: contextvars.ContextVar[ParentLease | None] = contextvars.C
 class LauncherError(Exception):
     """One stable failure code that contains no secret or raw engine output."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, secondary: "LauncherError | None" = None) -> None:
         self.code = code
+        self.secondary = secondary
         super().__init__(code)
 
 
@@ -109,6 +110,7 @@ class OwnedFileError(LauncherError):
 class CommandResult:
     returncode: int
     stdout: str = ""
+    stderr: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,8 @@ class LauncherState:
     marker: live_run_marker.RunMarker
     marker_identity: FileIdentity | None = None
     state_identity: FileIdentity | None = None
+    marker_generation: str | None = None
+    state_generation: str | None = None
 
     @property
     def container_id(self) -> str:
@@ -302,6 +306,24 @@ def run_command(command: Sequence[str], environment: Mapping[str, str], timeout:
     return CommandResult(completed.returncode, _bounded_text(completed.stdout))
 
 
+def _attach_secondary_failure(primary: BaseException, secondary: BaseException) -> None:
+    """Preserve cleanup/revalidation failures without replacing the primary error."""
+
+    if isinstance(secondary, live_run_marker.MarkerError):
+        normalized = LauncherError(secondary.code)
+    elif isinstance(secondary, LauncherError):
+        normalized = secondary
+    else:
+        normalized = LauncherError("runs_dir_replaced")
+    if isinstance(primary, LauncherError):
+        primary.secondary = normalized
+    else:
+        try:
+            setattr(primary, "secondary", normalized)
+        except Exception:
+            pass
+
+
 def _revalidate_active_parent() -> None:
     lease = _ACTIVE_PARENT_LEASE.get()
     if lease is not None:
@@ -311,6 +333,19 @@ def _revalidate_active_parent() -> None:
             expected=lease.identity,
             code="runs_dir",
         )
+
+
+def _validate_command_result(result: object, *, failure_code: str) -> CommandResult:
+    """Normalize every untrusted runner result before any caller reads it."""
+
+    if not isinstance(result, CommandResult):
+        raise LauncherError(failure_code)
+    if type(result.returncode) is not int or not -255 <= result.returncode <= 255:
+        raise LauncherError(failure_code)
+    for output in (result.stdout, result.stderr):
+        if type(output) is not str or len(output.encode("utf-8")) > MAX_COMMAND_BYTES:
+            raise LauncherError(failure_code)
+    return result
 
 
 def invoke_runner(
@@ -329,12 +364,15 @@ def invoke_runner(
     except BaseException:
         # Recheck even when the adapter raises: a runner can replace the
         # private parent after creating a resource and before reporting error.
-        _revalidate_active_parent()
+        try:
+            _revalidate_active_parent()
+        except BaseException as secondary:
+            primary = LauncherError(failure_code)
+            _attach_secondary_failure(primary, secondary)
+            raise primary from None
         raise LauncherError(failure_code) from None
     _revalidate_active_parent()
-    if not isinstance(result, CommandResult):
-        raise LauncherError(failure_code)
-    return result
+    return _validate_command_result(result, failure_code=failure_code)
 
 
 def podman_path() -> str:
@@ -439,7 +477,7 @@ STATE_KEYS = frozenset(
 
 def _marker_paths(marker_path: str | Path) -> live_run_marker.MarkerPaths:
     try:
-        return live_run_marker.marker_paths(marker_path)
+        return live_run_marker.marker_paths(marker_path, validate_parent=False)
     except live_run_marker.MarkerError as error:
         raise LauncherError(error.code) from None
 
@@ -483,6 +521,12 @@ def _best_effort_fd_identity(descriptor: int) -> FileIdentity | None:
         return None
 
 
+def _before_rename_syscall(parent_fd: int, source_name: str, target_name: str) -> None:
+    """Deterministic boundary immediately before quarantine rename."""
+
+    del parent_fd, source_name, target_name
+
+
 def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> None:
     """Atomically claim one directory entry without replacing its destination."""
 
@@ -513,6 +557,28 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
                         os.close(descriptor)
                     except OSError:
                         pass
+        _before_rename_syscall(parent_fd, source_name, target_name)
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                source_name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+            current = _validated_fd_identity(descriptor, code=expected_code)
+            if current != expected_identity:
+                raise LauncherError(f"{expected_code}_replaced")
+        except FileNotFoundError:
+            raise LauncherError(f"{expected_code}_replaced") from None
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
         operation = libc.renameatx_np
@@ -720,6 +786,7 @@ def create_run_credential(
         created_identity[2],
         created_identity[3],
         created_identity[4],
+        live_run_marker.content_generation((password + "\n").encode("ascii")),
     )
     return password, identity
 
@@ -800,6 +867,24 @@ def write_state(
     return _create_private_file(paths.state, content, code="state_write_failed", parent_fd=parent_fd)
 
 
+def _read_bounded_private_descriptor(descriptor: int, *, maximum: int, code: str) -> bytes:
+    """Read bounded rollback bytes from the held state inode."""
+
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(descriptor, maximum + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+    except OSError:
+        raise LauncherError(code) from None
+    if len(raw) > maximum:
+        raise LauncherError(f"{code}_oversized")
+    return bytes(raw)
+
+
 def _rewrite_state_exact(
     spec: InstanceSpec,
     binding: live_run_marker.RunMarker,
@@ -807,13 +892,15 @@ def _rewrite_state_exact(
     *,
     parent_fd: int,
 ) -> FileIdentity:
-    """Rewrite the exact state inode as a bounded tombstone fallback.
+    """Rewrite one owned state inode with descriptor-backed rollback.
 
     Quarantine is preferred because it gives publication atomicity. When the
     finite quarantine budget is exhausted, cleanup must not create another
     retained inode or leave a removed container represented as ``running``.
-    This descriptor-pinned rewrite changes only the already-owned state inode;
-    a replacement identity fails closed before any bytes are touched.
+    This fallback keeps the old bounded bytes on hand, gates the inode while it
+    is rewritten, and restores those bytes if writing, syncing, or pathname
+    validation fails. A replacement pathname is only detection evidence; it is
+    never overwritten by rollback.
     """
 
     paths = _marker_paths(binding.marker_path)
@@ -826,14 +913,46 @@ def _rewrite_state_exact(
         raise LauncherError("instance_state_too_large")
     _validate_private_parent_fd(parent_fd, code="state_rewrite_failed")
     descriptor = -1
+    pathname_fd = -1
+    old_content: bytes | None = None
+    before: FileIdentity | None = None
+
+    def restore() -> None:
+        if old_content is None:
+            return
+        try:
+            os.fchmod(descriptor, 0)
+            os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            _write_all(descriptor, old_content, "state_rollback_failed")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            restored = _validated_fd_identity(descriptor, code="state_rollback_failed")
+            if before is None or restored[:3] != before[:3] or restored[4] != before[4]:
+                raise LauncherError("state_rollback_failed")
+            if _read_bounded_private_descriptor(
+                descriptor,
+                maximum=MAX_STATE_BYTES,
+                code="state_rollback_failed",
+            ) != old_content:
+                raise LauncherError("state_rollback_failed")
+        except (LauncherError, OSError):
+            raise LauncherError("state_rollback_failed") from None
+
     try:
         descriptor = _open_private_entry(parent_fd, paths.state.name, writable=True, code="state_rewrite_failed")
         before = _validated_fd_identity(descriptor, code="state_rewrite_failed")
         if before != expected:
             raise LauncherError("state_replaced")
+        old_content = _read_bounded_private_descriptor(
+            descriptor,
+            maximum=MAX_STATE_BYTES,
+            code="state_rewrite_failed",
+        )
         try:
-            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.fchmod(descriptor, 0)
             os.ftruncate(descriptor, 0)
+            os.lseek(descriptor, 0, os.SEEK_SET)
             _write_all(descriptor, content, "state_rewrite_failed")
             os.fchmod(descriptor, 0o600)
             os.fsync(descriptor)
@@ -844,12 +963,32 @@ def _rewrite_state_exact(
         after = _validated_fd_identity(descriptor, code="state_rewrite_failed")
         if after[:3] != before[:3] or after[4] != before[4] or after[3] != len(content):
             raise LauncherError("state_replaced")
+        pathname_fd = _open_private_entry(parent_fd, paths.state.name, writable=False, code="state_rewrite_failed")
+        pathname_identity = _validated_fd_identity(pathname_fd, code="state_rewrite_failed")
+        if pathname_identity != after or _read_bounded_private_descriptor(
+            pathname_fd,
+            maximum=MAX_STATE_BYTES,
+            code="state_rewrite_failed",
+        ) != content:
+            raise LauncherError("state_replaced")
         try:
             os.fsync(parent_fd)
         except OSError:
             raise LauncherError("state_sync_failed") from None
         return after
+    except BaseException as error:
+        primary = error if isinstance(error, LauncherError) else LauncherError("state_rewrite_failed")
+        try:
+            restore()
+        except BaseException as rollback:
+            _attach_secondary_failure(primary, rollback)
+        raise primary from None
     finally:
+        if pathname_fd >= 0:
+            try:
+                os.close(pathname_fd)
+            except OSError:
+                pass
         if descriptor >= 0:
             try:
                 os.close(descriptor)
@@ -886,7 +1025,10 @@ def load_launcher_state(
     """Load one exact marker and its exact state file; never infer a run."""
 
     try:
-        marker, marker_identity = live_run_marker.load_marker_with_identity(marker_path, parent_fd=parent_fd)
+        marker, marker_identity, marker_generation = live_run_marker.load_marker_with_identity_and_generation(
+            marker_path,
+            parent_fd=parent_fd,
+        )
     except live_run_marker.MarkerError as error:
         raise LauncherError(error.code) from None
     state_raw, state_identity = _read_private_file_record(
@@ -895,6 +1037,14 @@ def load_launcher_state(
         code="instance_state_invalid",
         parent_fd=parent_fd,
     )
+    try:
+        state_generation = live_run_marker.content_generation(
+            state_raw,
+            maximum=MAX_STATE_BYTES,
+            code="instance_state_invalid",
+        )
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
     document = _state_document(state_raw)
     expected = {
         "schema": STATE_SCHEMA,
@@ -927,7 +1077,14 @@ def load_launcher_state(
     spec = make_spec(marker.instance, port, image=marker.image, username=username, roots=roots)
     if data_path != str(spec.data_dir) or marker.container_name != spec.container:
         raise LauncherError("instance_state_binding_mismatch")
-    return LauncherState(spec, marker, marker_identity=marker_identity, state_identity=state_identity)
+    return LauncherState(
+        spec,
+        marker,
+        marker_identity=marker_identity,
+        state_identity=state_identity,
+        marker_generation=marker_generation,
+        state_generation=state_generation,
+    )
 
 
 def load_state(instance: str, roots: Roots) -> InstanceSpec:
@@ -1128,22 +1285,7 @@ def verify_handoff_endpoint(
     """
 
     with _operation_lease(state.marker_path, code="marker_path_invalid") as lease:
-        if state.marker_identity is None or state.state_identity is None:
-            raise LauncherError("ownership_snapshot_missing")
-        _revalidate_private_identity(
-            state.marker_path,
-            state.marker_identity,
-            code="marker_identity",
-            replacement_code="marker_replaced",
-            parent_fd=lease.parent_fd,
-        )
-        _revalidate_private_identity(
-            state.marker.state_path,
-            state.state_identity,
-            code="state_identity",
-            replacement_code="state_replaced",
-            parent_fd=lease.parent_fd,
-        )
+        _revalidate_state_records(state, parent_fd=lease.parent_fd)
         if state.marker.status != live_run_marker.STATUS_RUNNING:
             raise LauncherError("marker_not_selectable")
         environment = clean_environment(source_environment)
@@ -1165,13 +1307,18 @@ def verify_handoff_endpoint(
         except live_run_marker.MarkerError as error:
             raise LauncherError(error.code) from None
         _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        _revalidate_state_records(state, parent_fd=lease.parent_fd)
+        _revalidate_credential_identity(state.marker, parent_fd=lease.parent_fd)
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
         # Keep the handoff result bounded. It is the only operation that releases
         # the exact marker and credential paths to a transient local helper.
         return {
             "status": "running",
             "endpoint": state.marker.endpoint,
             "marker_path": str(state.marker.marker_path),
+            "run_id": state.marker.run_id,
             "credential_file": str(state.marker.credential_path),
+            "credential_identity": state.marker.credential_identity.document(),
         }
 
 
@@ -1434,6 +1581,19 @@ def _inspect_bound_container(
     return document, snapshot
 
 
+def _require_running_container(
+    state: LauncherState,
+    runner: Runner,
+    environment: Mapping[str, str],
+    executable: str,
+) -> None:
+    """Refresh the immutable container projection immediately before return."""
+
+    _, snapshot = _inspect_bound_container(state, runner, environment, executable)
+    if snapshot.status != "running":
+        raise LauncherError("container_not_running")
+
+
 def _file_identity(
     path: Path,
     *,
@@ -1538,7 +1698,7 @@ def _open_private_parent(path: Path, *, code: str) -> int:
 
 @contextlib.contextmanager
 def _operation_lease(marker_path: str | Path, *, code: str = "marker_path_invalid"):
-    """Hold one runs-directory fd and identity across one public operation."""
+    """Hold one parent fd and an inter-process lifecycle lease across the operation."""
 
     paths = _marker_paths(marker_path)
     active = _ACTIVE_PARENT_LEASE.get()
@@ -1559,12 +1719,23 @@ def _operation_lease(marker_path: str | Path, *, code: str = "marker_path_invali
     lease = ParentLease(paths.marker, parent_fd, identity)
     active_token = _ACTIVE_PARENT_LEASE.set(lease)
     expected_token = live_run_marker._set_expected_parent_identity(identity)
+    primary_error: BaseException | None = None
     try:
         _revalidate_private_parent_path(paths.marker, parent_fd, expected=identity, code="runs_dir")
-        yield lease
+        with live_run_marker.exclusive_lifecycle_lease(parent_fd):
+            yield lease
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         try:
-            _revalidate_private_parent_path(paths.marker, parent_fd, expected=identity, code="runs_dir")
+            try:
+                _revalidate_private_parent_path(paths.marker, parent_fd, expected=identity, code="runs_dir")
+            except BaseException as secondary:
+                if primary_error is not None:
+                    _attach_secondary_failure(primary_error, secondary)
+                else:
+                    raise
         finally:
             live_run_marker._reset_expected_parent_identity(expected_token)
             _ACTIVE_PARENT_LEASE.reset(active_token)
@@ -1634,36 +1805,214 @@ def _revalidate_private_identity(
                 pass
 
 
-def _restore_claimed_entry(parent_fd: int, quarantine: str, original: str, *, code: str) -> None:
-    """Restore a raced replacement without ever overwriting its destination."""
+def _private_record_snapshot(
+    path: Path,
+    *,
+    maximum: int,
+    code: str,
+    parent_fd: int,
+) -> tuple[FileIdentity, str]:
+    """Capture identity plus a one-way hash from one exact descriptor read."""
+
+    raw, identity = _read_private_file_record(
+        path,
+        maximum=maximum,
+        code=code,
+        parent_fd=parent_fd,
+    )
+    try:
+        generation = live_run_marker.content_generation(
+            raw,
+            maximum=maximum,
+            code=code,
+        )
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+    return identity, generation
+
+
+def _revalidate_private_generation(
+    path: Path,
+    expected: FileIdentity,
+    expected_generation: str | None,
+    *,
+    maximum: int,
+    code: str,
+    replacement_code: str,
+    parent_fd: int,
+) -> None:
+    """Recheck exact file identity and bounded bytes through one descriptor.
+
+    Stat identity detects pathname replacement; the one-way generation closes
+    the same-inode, same-size mutation gap without retaining marker or state
+    contents in launcher state.
+    """
+
+    if expected_generation is None:
+        raise LauncherError("ownership_snapshot_missing")
+    try:
+        raw, current = _read_private_file_record(
+            path,
+            maximum=maximum,
+            code=code,
+            parent_fd=parent_fd,
+        )
+    except LauncherError as error:
+        if error.code == f"{code}_replaced":
+            raise LauncherError(replacement_code) from None
+        raise
+    if current != expected:
+        raise LauncherError(replacement_code)
+    try:
+        generation = live_run_marker.content_generation(
+            raw,
+            maximum=maximum,
+            code=code,
+        )
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+    if generation != expected_generation:
+        raise LauncherError(replacement_code)
+
+
+def _revalidate_state_records(state: LauncherState, *, parent_fd: int) -> None:
+    """Revalidate both published records before or after lifecycle actions."""
+
+    if state.marker_identity is None or state.state_identity is None:
+        raise LauncherError("ownership_snapshot_missing")
+    _revalidate_private_generation(
+        state.marker_path,
+        state.marker_identity,
+        state.marker_generation,
+        maximum=live_run_marker.MAX_MARKER_BYTES,
+        code="marker_identity",
+        replacement_code="marker_replaced",
+        parent_fd=parent_fd,
+    )
+    _revalidate_private_generation(
+        state.marker.state_path,
+        state.state_identity,
+        state.state_generation,
+        maximum=MAX_STATE_BYTES,
+        code="state_identity",
+        replacement_code="state_replaced",
+        parent_fd=parent_fd,
+    )
+
+
+def _revalidate_credential_identity(
+    marker: live_run_marker.RunMarker,
+    *,
+    parent_fd: int,
+) -> live_run_marker.CredentialIdentity:
+    """Recheck credential inode and content generation before exposure or cleanup."""
 
     try:
-        _rename_noreplace(parent_fd, quarantine, original)
+        return live_run_marker.verify_credential_identity(marker, parent_fd=parent_fd)
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+
+
+def _credential_descriptor_snapshot(descriptor: int) -> live_run_marker.CredentialIdentity:
+    """Hash one held credential inode without consulting a mutable pathname."""
+
+    def identity_from_stat(info: os.stat_result) -> FileIdentity:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size < 1
+            or info.st_size > live_run_marker.MAX_CREDENTIAL_BYTES
+            or info.st_nlink not in {0, 1}
+        ):
+            raise LauncherError("credential_identity_mismatch")
+        return (
+            info.st_dev,
+            info.st_ino,
+            stat.S_IMODE(info.st_mode),
+            info.st_size,
+            info.st_nlink,
+        )
+
+    try:
+        before = os.fstat(descriptor)
+        before_identity = identity_from_stat(before)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) <= live_run_marker.MAX_CREDENTIAL_BYTES:
+            chunk = os.read(descriptor, live_run_marker.MAX_CREDENTIAL_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        after_identity = identity_from_stat(after)
     except LauncherError:
-        # If the original name is occupied, leave the private quarantine in
-        # place. Overwriting either pathname would destroy an unowned inode.
-        raise LauncherError(f"{code}_replaced") from None
+        raise
+    except OSError:
+        raise LauncherError("credential_identity_mismatch") from None
+    if before_identity[:4] != after_identity[:4] or len(raw) != after_identity[3]:
+        raise LauncherError("credential_identity_mismatch")
+    generation = live_run_marker.content_generation(
+        bytes(raw),
+        maximum=live_run_marker.MAX_CREDENTIAL_BYTES,
+        code="credential_identity_mismatch",
+    )
+    return live_run_marker.CredentialIdentity(
+        after_identity[0],
+        after_identity[1],
+        after_identity[2],
+        after_identity[3],
+        after_identity[4],
+        generation,
+    )
+
+
+def _require_credential_descriptor_generation(
+    descriptor: int,
+    expected: live_run_marker.CredentialIdentity,
+    *,
+    replacement_code: str,
+) -> None:
+    """Require the expected generation immediately before credential erasure."""
+
+    if not expected.generation:
+        raise LauncherError(replacement_code)
+    try:
+        current = _credential_descriptor_snapshot(descriptor)
+    except LauncherError:
+        raise LauncherError(replacement_code) from None
+    if current.file_identity()[:4] != expected.file_identity()[:4] or current.generation != expected.generation:
+        raise LauncherError(replacement_code)
 
 
 def _erase_credential_descriptor(descriptor: int) -> None:
-    """Erase credential bytes while the validated original descriptor is held."""
+    """Finish verified zeroing, truncation, and sync on the held credential inode."""
 
-    try:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        remaining = live_run_marker.MAX_CREDENTIAL_BYTES
-        # Overwrite the whole bounded credential region through the held inode
-        # before truncating it, so the old bytes are not disposed by pathname.
-        zeros = b"\x00" * 64
-        while remaining:
-            chunk = zeros if remaining >= len(zeros) else zeros[:remaining]
-            written = os.write(descriptor, chunk)
-            if written <= 0:
-                raise OSError("credential erase made no progress")
-            remaining -= written
-        os.ftruncate(descriptor, 0)
-        os.fsync(descriptor)
-    except OSError:
-        raise LauncherError("credential_erase_failed") from None
+    last_error: OSError | None = None
+    for _ in range(4):
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise OSError("credential inode invalid")
+            target_size = min(live_run_marker.MAX_CREDENTIAL_BYTES, max(0, info.st_size))
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            zeros = b"\x00" * 64
+            written_total = 0
+            while written_total < target_size:
+                chunk = zeros[: min(len(zeros), target_size - written_total)]
+                written = os.write(descriptor, chunk)
+                if written <= 0:
+                    raise OSError("credential erase made no progress")
+                written_total += written
+            os.ftruncate(descriptor, 0)
+            os.fsync(descriptor)
+            verified = os.fstat(descriptor)
+            if verified.st_size != 0:
+                raise OSError("credential erase left readable bytes")
+            return
+        except OSError as error:
+            last_error = error
+    del last_error
+    raise LauncherError("credential_erase_failed") from None
 
 
 def _rename_exact_noreplace(
@@ -1691,101 +2040,149 @@ def _remove_exact_file(
     missing_ok: bool = False,
     erase: bool = False,
     parent_fd: int | None = None,
+    held_descriptor: int | None = None,
 ) -> None:
-    """Claim and remove one exact inode without pathname unlink races.
+    """Claim one exact inode into bounded no-replace quarantine evidence.
 
-    The source entry is first opened through a held private directory fd. An
-    atomic no-replace rename moves the current name to one fixed private
-    quarantine slot. The moved entry is then validated through a second
-    descriptor; a concurrent same-name replacement therefore remains preserved
-    rather than being deleted. Exhausted slots fail closed before claiming one.
+    The source descriptor is held before the quarantine claim and checked again
+    immediately before the pathname syscall. The moved destination is opened
+    and compared with that held identity before any erase. A foreign source or
+    destination is never erased or restored over; its pathname/evidence remains
+    private and the operation fails closed.
     """
 
-    expected_tuple: FileIdentity | None
-    if isinstance(expected, live_run_marker.CredentialIdentity):
-        expected_tuple = (expected.device, expected.inode, expected.mode, expected.size, expected.nlink)
+    expected_credential = expected if isinstance(expected, live_run_marker.CredentialIdentity) else None
+    if expected_credential is not None:
+        expected_tuple: FileIdentity | None = expected_credential.file_identity()
     else:
         expected_tuple = expected
 
     owns_parent = parent_fd is None
-    source_fd = -1
+    source_fd = held_descriptor if held_descriptor is not None else -1
+    source_owned = held_descriptor is None
     moved_fd = -1
     quarantine: str | None = None
+    erased = False
+    erase_attempted = False
     try:
         if parent_fd is None:
             parent_fd = _open_private_parent(path, code=code)
         else:
             _validate_private_parent_fd(parent_fd, code=code)
-        source_fd = _open_private_entry(parent_fd, path.name, writable=erase, code=code)
-        source_identity = _validated_fd_identity(source_fd, code=code)
-        if expected_tuple is not None and source_identity != expected_tuple:
-            raise LauncherError(f"{code}_replaced")
-        expected_tuple = source_identity
+        with live_run_marker.quarantine_exclusive(parent_fd):
+            if source_fd < 0:
+                source_fd = _open_private_entry(parent_fd, path.name, writable=erase, code=code)
+            source_identity = _validated_fd_identity(source_fd, code=code)
+            if expected_tuple is not None and source_identity != expected_tuple:
+                raise LauncherError(f"{code}_replaced")
+            expected_tuple = source_identity
+            if expected_credential is not None:
+                _require_credential_descriptor_generation(
+                    source_fd,
+                    expected_credential,
+                    replacement_code=f"{code}_replaced",
+                )
 
-        for _ in range(live_run_marker.QUARANTINE_SLOT_COUNT):
-            try:
-                candidate = live_run_marker.reserve_quarantine_slot(
-                    parent_fd,
-                    "cleanup",
-                    expected_tuple[3],
-                )
-            except live_run_marker.MarkerError as error:
-                raise LauncherError(error.code) from None
-            try:
-                _rename_exact_noreplace(
-                    parent_fd,
-                    path.name,
-                    candidate,
-                    expected_tuple,
-                    code=code,
-                )
-            except LauncherError as error:
-                if error.code == "quarantine_exists":
-                    continue
+            for _ in range(live_run_marker.QUARANTINE_SLOT_COUNT):
+                try:
+                    candidate = live_run_marker.reserve_quarantine_slot(
+                        parent_fd,
+                        "cleanup",
+                        expected_tuple[3],
+                    )
+                except live_run_marker.MarkerError as error:
+                    raise LauncherError(error.code) from None
+                try:
+                    _rename_exact_noreplace(
+                        parent_fd,
+                        path.name,
+                        candidate,
+                        expected_tuple,
+                        code=code,
+                    )
+                except LauncherError as error:
+                    if error.code == "quarantine_exists":
+                        continue
+                    if erase:
+                        try:
+                            if expected_credential is not None:
+                                _require_credential_descriptor_generation(
+                                    source_fd,
+                                    expected_credential,
+                                    replacement_code=f"{code}_replaced",
+                                )
+                            erase_attempted = True
+                            _erase_credential_descriptor(source_fd)
+                            erased = True
+                        except LauncherError as erase_error:
+                            error.secondary = erase_error
+                    raise
+                quarantine = candidate
+                break
+            if quarantine is None:
+                raise LauncherError("quarantine_quota_exceeded")
+            moved_fd = _open_private_entry(parent_fd, quarantine, writable=erase, code=code)
+            moved_identity = _validated_fd_identity(moved_fd, code=code)
+            if moved_identity != expected_tuple:
                 if erase:
                     try:
+                        if expected_credential is not None:
+                            _require_credential_descriptor_generation(
+                                source_fd,
+                                expected_credential,
+                                replacement_code=f"{code}_replaced",
+                            )
+                        erase_attempted = True
                         _erase_credential_descriptor(source_fd)
-                    except LauncherError:
-                        pass
-                raise
-            quarantine = candidate
-            break
-        if quarantine is None:
-            raise LauncherError("quarantine_quota_exceeded")
-        moved_fd = _open_private_entry(parent_fd, quarantine, writable=erase, code=code)
-        moved_identity = _validated_fd_identity(moved_fd, code=code)
-        if moved_identity != expected_tuple:
-            if erase:
-                try:
-                    _erase_credential_descriptor(source_fd)
-                except LauncherError:
-                    pass
-            # The held source descriptor remains attributable, but the
-            # quarantine pathname may now belong to a replacement. Do not move
-            # or unlink that name; preserving the replacement is safer than
-            # restoring by pathname.
-            raise LauncherError(f"{code}_replaced")
+                        erased = True
+                    except LauncherError as erase_error:
+                        raise erase_error from None
+                raise LauncherError(f"{code}_replaced")
 
-        if erase:
-            _erase_credential_descriptor(moved_fd)
-        # Keep the validated quarantine as a bounded private tombstone. POSIX
-        # has no portable unlink-by-inode primitive; name-unlinking here could
-        # delete a concurrent replacement after this descriptor check.
-        try:
-            os.fsync(parent_fd)
-        except OSError:
-            raise LauncherError(code.replace("remove", "sync")) from None
+            if erase:
+                if expected_credential is not None:
+                    _require_credential_descriptor_generation(
+                        moved_fd,
+                        expected_credential,
+                        replacement_code=f"{code}_replaced",
+                    )
+                erase_attempted = True
+                try:
+                    _erase_credential_descriptor(moved_fd)
+                except LauncherError:
+                    _erase_credential_descriptor(source_fd)
+                erased = True
+            try:
+                os.fsync(parent_fd)
+            except OSError:
+                raise LauncherError(code.replace("remove", "sync")) from None
     except LauncherError as error:
         if missing_ok and error.code == f"{code}_missing":
             return
+        if erase and source_fd >= 0 and not erased:
+            try:
+                if not erase_attempted and expected_credential is not None:
+                    _require_credential_descriptor_generation(
+                        source_fd,
+                        expected_credential,
+                        replacement_code=f"{code}_replaced",
+                    )
+                erase_attempted = True
+                _erase_credential_descriptor(source_fd)
+            except LauncherError as erase_error:
+                error.secondary = erase_error
         raise
     finally:
-        for descriptor in (moved_fd, source_fd):
-            if descriptor >= 0:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        if moved_fd >= 0:
+            try:
+                os.close(moved_fd)
+            except OSError:
+                pass
+        if source_owned and source_fd >= 0:
+            try:
+                os.close(source_fd)
+            except OSError:
+                pass
         if owns_parent and parent_fd is not None and parent_fd >= 0:
             try:
                 os.close(parent_fd)
@@ -2012,14 +2409,7 @@ def _cleanup_started_run(
 
     if cleanup_error is None:
         try:
-            identity = binding.credential_identity
-            _revalidate_private_identity(
-                binding.credential_path,
-                (identity.device, identity.inode, identity.mode, identity.size, identity.nlink),
-                code="credential_identity",
-                replacement_code="credential_identity_mismatch",
-                parent_fd=parent_fd,
-            )
+            _revalidate_credential_identity(binding, parent_fd=parent_fd)
         except BaseException as error:
             cleanup_error = LauncherError(
                 error.code if isinstance(error, LauncherError) else "credential_identity_mismatch"
@@ -2117,6 +2507,7 @@ def _start_instance_with_parent(
         state = None
 
     if state is not None:
+        _revalidate_state_records(state, parent_fd=runs_parent_fd)
         if (
             state.spec.instance != spec.instance
             or state.spec.port != spec.port
@@ -2127,22 +2518,50 @@ def _start_instance_with_parent(
         if state.marker.status != live_run_marker.STATUS_RUNNING:
             raise LauncherError("cleanup_incomplete")
         try:
-            identity = state.marker.credential_identity
-            _revalidate_private_identity(
-                state.marker.credential_path,
-                (identity.device, identity.inode, identity.mode, identity.size, identity.nlink),
-                code="credential_identity",
-                replacement_code="credential_identity_mismatch",
-                parent_fd=runs_parent_fd,
-            )
+            _revalidate_credential_identity(state.marker, parent_fd=runs_parent_fd)
         except LauncherError as error:
             raise LauncherError(error.code) from None
         document, current = _inspect_bound_container(state, runner, environment, podman)
         original_status = current.status
         if original_status == "running":
             readiness(state.marker.endpoint, attempts, interval)
+            _require_running_container(state, runner, environment, podman)
             _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
-            write_state(state.spec, state.marker, replace=True, expected=state.state_identity, parent_fd=runs_parent_fd)
+            published_state_identity = write_state(
+                state.spec,
+                state.marker,
+                replace=True,
+                expected=state.state_identity,
+                parent_fd=runs_parent_fd,
+            )
+            current_state_identity, current_state_generation = _private_record_snapshot(
+                state.marker.state_path,
+                maximum=MAX_STATE_BYTES,
+                code="state_identity",
+                parent_fd=runs_parent_fd,
+            )
+            if current_state_identity != published_state_identity:
+                raise LauncherError("state_replaced")
+            _revalidate_private_generation(
+                state.marker_path,
+                state.marker_identity,
+                state.marker_generation,
+                maximum=live_run_marker.MAX_MARKER_BYTES,
+                code="marker_identity",
+                replacement_code="marker_replaced",
+                parent_fd=runs_parent_fd,
+            )
+            _revalidate_private_generation(
+                state.marker.state_path,
+                current_state_identity,
+                current_state_generation,
+                maximum=MAX_STATE_BYTES,
+                code="state_identity",
+                replacement_code="state_replaced",
+                parent_fd=runs_parent_fd,
+            )
+            _revalidate_credential_identity(state.marker, parent_fd=runs_parent_fd)
+            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
             return _public_run_result(spec, state.marker, status="ready", created=False), False
         if original_status not in {"configured", "created", "stopped", "exited", "dead"}:
             raise LauncherError("container_state_unrecoverable")
@@ -2163,8 +2582,43 @@ def _start_instance_with_parent(
                 "container_start_failed",
             )
             readiness(state.marker.endpoint, attempts, interval)
+            _require_running_container(state, runner, environment, podman)
             _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
-            write_state(state.spec, state.marker, replace=True, expected=state.state_identity, parent_fd=runs_parent_fd)
+            published_state_identity = write_state(
+                state.spec,
+                state.marker,
+                replace=True,
+                expected=state.state_identity,
+                parent_fd=runs_parent_fd,
+            )
+            current_state_identity, current_state_generation = _private_record_snapshot(
+                state.marker.state_path,
+                maximum=MAX_STATE_BYTES,
+                code="state_identity",
+                parent_fd=runs_parent_fd,
+            )
+            if current_state_identity != published_state_identity:
+                raise LauncherError("state_replaced")
+            _revalidate_private_generation(
+                state.marker_path,
+                state.marker_identity,
+                state.marker_generation,
+                maximum=live_run_marker.MAX_MARKER_BYTES,
+                code="marker_identity",
+                replacement_code="marker_replaced",
+                parent_fd=runs_parent_fd,
+            )
+            _revalidate_private_generation(
+                state.marker.state_path,
+                current_state_identity,
+                current_state_generation,
+                maximum=MAX_STATE_BYTES,
+                code="state_identity",
+                replacement_code="state_replaced",
+                parent_fd=runs_parent_fd,
+            )
+            _revalidate_credential_identity(state.marker, parent_fd=runs_parent_fd)
+            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         except BaseException as exc:
             rollback_error: LauncherError | None = None
             if recovery_attempted:
@@ -2183,12 +2637,14 @@ def _start_instance_with_parent(
                         rollback_error = LauncherError("container_recovery_rollback_failed")
                 except LauncherError as rollback:
                     rollback_error = rollback
-            if rollback_error is not None and isinstance(exc, Exception):
-                raise rollback_error from None
             if isinstance(exc, LauncherError):
+                if rollback_error is not None:
+                    _attach_secondary_failure(exc, rollback_error)
                 raise
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
+            if rollback_error is not None:
+                raise LauncherError("container_recovery_failed", secondary=rollback_error) from None
             raise LauncherError("container_recovery_failed") from None
         return _public_run_result(spec, state.marker, status="ready", created=False), False
 
@@ -2209,6 +2665,8 @@ def _start_instance_with_parent(
     binding: live_run_marker.RunMarker | None = None
     marker_identity: FileIdentity | None = None
     state_identity: FileIdentity | None = None
+    marker_generation: str | None = None
+    state_generation: str | None = None
     run_container_id: str | None = None
     try:
         _require_absent_entry(runs_parent_fd, paths.cidfile.name, code="cidfile_path_invalid")
@@ -2290,22 +2748,20 @@ def _start_instance_with_parent(
 
         assert credential_identity is not None
         assert state_identity is not None
-        _revalidate_private_identity(
-            paths.credential,
-            (
-                credential_identity.device,
-                credential_identity.inode,
-                credential_identity.mode,
-                credential_identity.size,
-                credential_identity.nlink,
-            ),
-            code="credential_identity",
-            replacement_code="credential_identity_mismatch",
+        captured_state_identity, state_generation = _private_record_snapshot(
+            paths.state,
+            maximum=MAX_STATE_BYTES,
+            code="state_identity",
             parent_fd=runs_parent_fd,
         )
-        _revalidate_private_identity(
+        if captured_state_identity != state_identity:
+            raise LauncherError("state_replaced")
+        _revalidate_credential_identity(binding, parent_fd=runs_parent_fd)
+        _revalidate_private_generation(
             paths.state,
             state_identity,
+            state_generation,
+            maximum=MAX_STATE_BYTES,
             code="state_identity",
             replacement_code="state_replaced",
             parent_fd=runs_parent_fd,
@@ -2318,6 +2774,35 @@ def _start_instance_with_parent(
             raise LauncherError(error.code) from None
         except live_run_marker.MarkerError as error:
             raise LauncherError(error.code) from None
+        captured_marker_identity, marker_generation = _private_record_snapshot(
+            paths.marker,
+            maximum=live_run_marker.MAX_MARKER_BYTES,
+            code="marker_identity",
+            parent_fd=runs_parent_fd,
+        )
+        if captured_marker_identity != marker_identity:
+            raise LauncherError("marker_replaced")
+
+        _revalidate_private_generation(
+            paths.marker,
+            marker_identity,
+            marker_generation,
+            maximum=live_run_marker.MAX_MARKER_BYTES,
+            code="marker_identity",
+            replacement_code="marker_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_private_generation(
+            paths.state,
+            state_identity,
+            state_generation,
+            maximum=MAX_STATE_BYTES,
+            code="state_identity",
+            replacement_code="state_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_credential_identity(binding, parent_fd=runs_parent_fd)
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
 
         # Every post-run check targets the immutable ID emitted above. A
         # wildcard or otherwise mismatched mapping can therefore use the same
@@ -2330,6 +2815,33 @@ def _start_instance_with_parent(
             raise LauncherError("container_not_running")
         require_loopback_endpoint_mapping(spec, document)
         readiness(binding.endpoint, attempts, interval)
+        final_document = inspect_container(spec, runner, environment, podman, target=run_container_id)
+        final_snapshot = recovery_snapshot(spec, final_document, run_id=run_id)
+        if final_snapshot.container_id != run_container_id:
+            raise LauncherError("container_replaced")
+        if final_snapshot.status != "running":
+            raise LauncherError("container_not_running")
+        require_loopback_endpoint_mapping(spec, final_document)
+        _revalidate_private_generation(
+            paths.marker,
+            marker_identity,
+            marker_generation,
+            maximum=live_run_marker.MAX_MARKER_BYTES,
+            code="marker_identity",
+            replacement_code="marker_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_private_generation(
+            paths.state,
+            state_identity,
+            state_generation,
+            maximum=MAX_STATE_BYTES,
+            code="state_identity",
+            replacement_code="state_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_credential_identity(binding, parent_fd=runs_parent_fd)
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         if cidfile_identity is not None:
             _remove_exact_file(
                 paths.cidfile,
@@ -2338,6 +2850,26 @@ def _start_instance_with_parent(
                 parent_fd=runs_parent_fd,
             )
             cidfile_identity = None
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+        _revalidate_private_generation(
+            paths.marker,
+            marker_identity,
+            marker_generation,
+            maximum=live_run_marker.MAX_MARKER_BYTES,
+            code="marker_identity",
+            replacement_code="marker_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_private_generation(
+            paths.state,
+            state_identity,
+            state_generation,
+            maximum=MAX_STATE_BYTES,
+            code="state_identity",
+            replacement_code="state_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_credential_identity(binding, parent_fd=runs_parent_fd)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
     except BaseException:
         if credential_identity is not None and run_container_id is not None:
@@ -2502,12 +3034,15 @@ def status_instance(
     with _operation_lease(marker_path, code="marker_path_invalid") as lease:
         state = _load_bound_state(marker_path, roots or default_roots(), parent_fd=lease.parent_fd)
         _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        _revalidate_state_records(state, parent_fd=lease.parent_fd)
         if state.marker.status != live_run_marker.STATUS_RUNNING:
             return {"status": state.marker.status, "marker_path": str(state.marker.marker_path)}
         environment = clean_environment(source_environment)
         podman = executable or podman_path()
         podman_preflight(runner, environment, podman)
         _, snapshot = _inspect_bound_container(state, runner, environment, podman)
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        _revalidate_state_records(state, parent_fd=lease.parent_fd)
         _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
         return {
             "instance": state.spec.instance,
@@ -2555,6 +3090,7 @@ def stop_instance(
         if marker_identity is None or state_identity is None:
             raise LauncherError("ownership_snapshot_missing")
         _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        _revalidate_state_records(state, parent_fd=lease.parent_fd)
 
         try:
             environment = clean_environment(source_environment)

@@ -12,15 +12,23 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
 
-FIELDS = frozenset({"endpoint", "marker-path", "credential-file"})
+FIELDS = frozenset(
+    {"endpoint", "marker-path", "run-id", "credential-file", "credential-identity"}
+)
 MAX_RESULT_TEXT = 2048
+RUN_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+GENERATION_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+CREDENTIAL_IDENTITY_KEYS = frozenset(
+    {"device", "inode", "mode", "size", "nlink", "generation"}
+)
 VERIFIED_ENDPOINT_RESULT_KEYS = frozenset(
-    {"status", "endpoint", "marker_path", "credential_file"}
+    {"status", "endpoint", "marker_path", "run_id", "credential_file", "credential_identity"}
 )
 
 
@@ -45,6 +53,27 @@ def _path(value: object) -> str:
     if not os.path.isabs(path) or os.path.normpath(path) != path:
         raise LauncherResultError()
     return path
+
+
+def _run_id(value: object) -> str:
+    run_id = _metadata(value)
+    if RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise LauncherResultError()
+    return run_id
+
+
+def _credential_identity(value: object) -> str:
+    if not isinstance(value, dict) or set(value) != CREDENTIAL_IDENTITY_KEYS:
+        raise LauncherResultError()
+    numeric = [value[key] for key in ("device", "inode", "mode", "size", "nlink")]
+    if any(type(item) is not int or item < 0 for item in numeric):
+        raise LauncherResultError()
+    if value["mode"] != 0o600 or not 1 <= value["size"] <= 256 or value["nlink"] != 1:
+        raise LauncherResultError()
+    generation = value["generation"]
+    if not isinstance(generation, str) or GENERATION_PATTERN.fullmatch(generation) is None:
+        raise LauncherResultError()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _endpoint(value: object) -> str:
@@ -119,7 +148,9 @@ def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
     return {
         "endpoint": _endpoint(result.get("endpoint")),
         "marker-path": _path(result.get("marker_path")),
+        "run-id": _run_id(result.get("run_id")),
         "credential-file": _path(result.get("credential_file")),
+        "credential-identity": _credential_identity(result.get("credential_identity")),
     }
 
 

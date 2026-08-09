@@ -33,7 +33,16 @@ class LauncherResultTests(unittest.TestCase):
                 "status": "running",
                 "endpoint": "http://127.0.0.1:19124",
                 "marker_path": "/private/tmp/hermes/runs/issue118.json",
+                "run_id": "a" * 64,
                 "credential_file": "/private/tmp/hermes/runs/issue118.credential",
+                "credential_identity": {
+                    "device": 1,
+                    "inode": 2,
+                    "mode": 0o600,
+                    "size": 49,
+                    "nlink": 1,
+                    "generation": "b" * 64,
+                },
             },
         }
 
@@ -44,7 +53,9 @@ class LauncherResultTests(unittest.TestCase):
             {
                 "endpoint": "http://127.0.0.1:19124",
                 "marker-path": "/private/tmp/hermes/runs/issue118.json",
+                "run-id": "a" * 64,
                 "credential-file": "/private/tmp/hermes/runs/issue118.credential",
+                "credential-identity": '{"device":1,"generation":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","inode":2,"mode":384,"nlink":1,"size":49}',
             },
         )
 
@@ -84,7 +95,9 @@ class LauncherResultTests(unittest.TestCase):
         for field, expected in (
             ("endpoint", "http://127.0.0.1:19124"),
             ("marker-path", "/private/tmp/hermes/runs/issue118.json"),
+            ("run-id", "a" * 64),
             ("credential-file", "/private/tmp/hermes/runs/issue118.credential"),
+            ("credential-identity", '{"device":1,"generation":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","inode":2,"mode":384,"nlink":1,"size":49}'),
         ):
             with self.subTest(field=field), mock_stdin(raw), contextlib.redirect_stdout(io.StringIO()) as stdout:
                 status = parser.main([field])

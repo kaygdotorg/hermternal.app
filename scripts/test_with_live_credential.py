@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import io
 import os
 import shlex
@@ -53,13 +54,20 @@ def documented_bun_command(path: Path) -> list[str]:
     if marker_line not in {line.strip() for line in lines}:
         raise AssertionError(f"No exact marker handoff found in {path}")
     handoff_line = 'HERMES_LIVE_TARGET="$endpoint" \\'
-    helper_line = 'python3 scripts/with_live_credential.py "$marker_path" -- \\'
-    for index, line in enumerate(lines[:-2]):
+    expected_lines = [
+        'python3 scripts/with_live_credential.py \\',
+        '--marker "$marker_path" \\',
+        '--run-id "$run_id" \\',
+        '--credential-file "$credential_file" \\',
+        '--credential-identity "$credential_identity" \\',
+        '-- \\',
+    ]
+    for index, line in enumerate(lines[:-len(expected_lines) - 1]):
         if line.strip() != handoff_line:
             continue
-        if lines[index + 1].strip() != helper_line:
+        if [candidate.strip() for candidate in lines[index + 1 : index + 1 + len(expected_lines)]] != expected_lines:
             continue
-        return shlex.split(lines[index + 2].strip())
+        return shlex.split(lines[index + 1 + len(expected_lines)].strip())
     raise AssertionError(f"No documented live handoff found in {path}")
 
 
@@ -96,6 +104,33 @@ class LiveProofCredentialTests(unittest.TestCase):
             marker.replace_marker(binding)
         else:
             marker.create_marker(binding)
+        self.binding = marker.load_marker(self.marker_path)
+
+    def proof(self) -> dict[str, object]:
+        """Return the exact machine-readable proof required by the helper."""
+
+        return {
+            "run_id": self.binding.run_id,
+            "credential_file": str(self.binding.credential_path),
+            "credential_identity": self.binding.credential_identity.document(),
+        }
+
+    def cli_args(self, *command: str) -> list[str]:
+        """Build the proof-bearing helper CLI without selecting by pathname."""
+
+        proof = self.proof()
+        return [
+            "--marker",
+            str(self.marker_path),
+            "--run-id",
+            str(proof["run_id"]),
+            "--credential-file",
+            str(proof["credential_file"]),
+            "--credential-identity",
+            json.dumps(proof["credential_identity"], sort_keys=True, separators=(",", ":")),
+            "--",
+            *command,
+        ]
 
     def test_read_strips_only_terminal_crlf_and_preserves_file(self) -> None:
         for label, suffix in (
@@ -108,12 +143,12 @@ class LiveProofCredentialTests(unittest.TestCase):
             with self.subTest(label=label):
                 raw = self.value + suffix
                 self._write_credential(raw)
-                self.assertEqual(helper.read_credential_file(self.marker_path), self.value.decode("ascii"))
+                self.assertEqual(helper.read_credential_file(self.marker_path, **self.proof()), self.value.decode("ascii"))
                 self.assertEqual(self.credential_path.read_bytes(), raw)
 
     def test_identity_is_revalidated_before_reading_credential_value(self) -> None:
         with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("credential value read")):
-            self.assertEqual(helper.read_credential_file(self.marker_path), self.value.decode("ascii"))
+            self.assertEqual(helper.read_credential_file(self.marker_path, **self.proof()), self.value.decode("ascii"))
 
         replacement = self.runs / "replacement"
         replacement.write_bytes(self.value + b"\n")
@@ -126,9 +161,25 @@ class LiveProofCredentialTests(unittest.TestCase):
             side_effect=helper.live_run_marker.MarkerError("credential_identity_mismatch"),
         ) as verify:
             with self.assertRaises(helper.LiveProofCredentialError) as raised:
-                helper.read_credential_file(self.marker_path)
+                helper.read_credential_file(self.marker_path, **self.proof())
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
         verify.assert_called_once()
+
+    def test_same_inode_same_size_credential_mutation_fails_generation_proof(self) -> None:
+        original = self.credential_path.read_bytes()
+        replacement = b"b" * (len(original) - 1) + b"\n"
+        self.assertEqual(len(replacement), len(original))
+        descriptor = os.open(self.credential_path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        before = self.credential_path.stat()
+        self.assertEqual(before.st_size, len(original))
+        with self.assertRaises(helper.LiveProofCredentialError) as raised:
+            helper.read_credential_file(self.marker_path, **self.proof())
+        self.assertEqual(raised.exception.code, "credential_identity_mismatch")
 
     def test_parent_swap_during_descriptor_relative_credential_read_fails_closed(self) -> None:
         moved = self.root / "runs-credential-original"
@@ -151,7 +202,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             side_effect=swap_after_identity,
         ):
             with self.assertRaises(helper.LiveProofCredentialError) as raised:
-                helper.read_credential_file(self.marker_path)
+                helper.read_credential_file(self.marker_path, **self.proof())
         self.assertEqual(raised.exception.code, "runs_dir_replaced")
         self.assertTrue(swapped)
         self.assertTrue((moved / "fixture.json").exists())
@@ -183,7 +234,7 @@ class LiveProofCredentialTests(unittest.TestCase):
 
         with mock.patch.object(helper, "_read_pinned_credential", side_effect=replace_after_read):
             with self.assertRaises(helper.LiveProofCredentialError) as raised:
-                helper.read_credential_file(self.marker_path)
+                helper.read_credential_file(self.marker_path, **self.proof())
         self.assertEqual(raised.exception.code, "marker_identity_mismatch")
         self.assertTrue(replaced)
         self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
@@ -203,21 +254,21 @@ class LiveProofCredentialTests(unittest.TestCase):
             with self.subTest(label=label):
                 self._write_credential(raw)
                 with self.assertRaises(helper.LiveProofCredentialError) as raised:
-                    helper.read_credential_file(self.marker_path)
+                    helper.read_credential_file(self.marker_path, **self.proof())
                 self.assertEqual(raised.exception.code, "credential_file_invalid")
 
     def test_marker_status_and_credential_file_type_fail_before_child(self) -> None:
         tombstone = marker.cleanup_failed(marker.load_marker(self.marker_path))
         marker.replace_marker(tombstone)
         with self.assertRaises(helper.LiveProofCredentialError) as raised:
-            helper.read_credential_file(self.marker_path)
+            helper.read_credential_file(self.marker_path, **self.proof())
         self.assertEqual(raised.exception.code, "marker_not_selectable")
 
         marker.replace_marker(tombstone.with_status(marker.STATUS_RUNNING))
         self.credential_path.unlink()
         self.credential_path.mkdir(mode=marker.CREDENTIAL_MODE)
         with self.assertRaises(helper.LiveProofCredentialError) as raised:
-            helper.read_credential_file(self.marker_path)
+            helper.read_credential_file(self.marker_path, **self.proof())
         self.assertIn(raised.exception.code, {"credential_identity_invalid", "credential_file_invalid"})
 
     def test_bounded_invalid_value_fails_before_command_and_does_not_log_value(self) -> None:
@@ -225,7 +276,7 @@ class LiveProofCredentialTests(unittest.TestCase):
         self._write_credential(raw)
         stderr = io.StringIO()
         with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
-            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
+            status = helper.main(self.cli_args("synthetic-proof"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
@@ -240,7 +291,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             mock.patch.object(helper.os, "execvpe") as execvpe,
             contextlib.redirect_stderr(stderr),
         ):
-            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
+            status = helper.main(self.cli_args("synthetic-proof"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
@@ -258,7 +309,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            status = helper.main([str(self.marker_path), "--", "synthetic-proof", "--flag"])
+            status = helper.main(self.cli_args("synthetic-proof", "--flag"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stdout.getvalue(), "")
@@ -277,7 +328,7 @@ class LiveProofCredentialTests(unittest.TestCase):
         self._write_credential(self.value + b"\n ")
         stderr = io.StringIO()
         with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
-            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
+            status = helper.main(self.cli_args("synthetic-proof"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
@@ -311,7 +362,7 @@ class LiveProofCredentialTests(unittest.TestCase):
         environment["HANDOFF_CAPTURE"] = str(capture)
         environment["HERMES_LIVE_TARGET"] = "http://127.0.0.1:19124"
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.marker_path), "--", *EXPECTED_BUN_COMMAND],
+            [sys.executable, str(SCRIPT), *self.cli_args(*EXPECTED_BUN_COMMAND)],
             check=False,
             capture_output=True,
             text=True,

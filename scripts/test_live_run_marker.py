@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import multiprocessing
 import os
+import select
 import stat
 import sys
 import tempfile
@@ -26,6 +28,38 @@ if spec is None or spec.loader is None:
 marker = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = marker
 spec.loader.exec_module(marker)
+
+
+def _lifecycle_worker(runs_path: str, acquired_fd: int, release_fd: int) -> None:
+    parent_fd = -1
+    try:
+        parent_fd = marker.open_runs_parent(Path(runs_path))
+        with marker.exclusive_lifecycle_lease(parent_fd):
+            os.write(acquired_fd, b"acquired\n")
+            os.read(release_fd, 1)
+    except BaseException as error:
+        os.write(acquired_fd, f"error:{type(error).__name__}\n".encode("ascii"))
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        os.close(acquired_fd)
+        os.close(release_fd)
+
+
+def _quarantine_worker(runs_path: str, acquired_fd: int, release_fd: int) -> None:
+    parent_fd = -1
+    try:
+        parent_fd = marker.open_runs_parent(Path(runs_path))
+        with marker.quarantine_exclusive(parent_fd):
+            os.write(acquired_fd, b"acquired\n")
+            os.read(release_fd, 1)
+    except BaseException as error:
+        os.write(acquired_fd, f"error:{type(error).__name__}\n".encode("ascii"))
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        os.close(acquired_fd)
+        os.close(release_fd)
 
 
 class LiveRunMarkerTests(unittest.TestCase):
@@ -94,6 +128,50 @@ class LiveRunMarkerTests(unittest.TestCase):
             marker.load_marker(self.marker_path, selectable=True)
         self.assertEqual(raised.exception.code, "marker_not_selectable")
 
+    def test_normal_replace_publishes_new_inode_and_retains_old_evidence(self) -> None:
+        original = self.make_marker()
+        marker.create_marker(original)
+        _, old_identity = marker.load_marker_with_identity(self.marker_path)
+        old_content = self.marker_path.read_bytes()
+        replacement = original.with_status(marker.STATUS_CLEANUP_FAILED)
+        new_identity = marker.replace_marker(replacement, expected=old_identity)
+        self.assertNotEqual(new_identity[1], old_identity[1])
+        _, loaded_identity = marker.load_marker_with_identity(self.marker_path)
+        self.assertEqual(loaded_identity, new_identity)
+        old_evidence = [
+            self.runs / name
+            for name in marker.quarantine_slot_names("replace")
+            if (self.runs / name).exists()
+        ]
+        self.assertTrue(old_evidence)
+        self.assertTrue(any(path.read_bytes() == old_content for path in old_evidence))
+
+    def test_marker_rewrite_rolls_back_after_partial_write(self) -> None:
+        original = self.make_marker()
+        marker.create_marker(original)
+        _, expected = marker.load_marker_with_identity(self.marker_path)
+        old_content = self.marker_path.read_bytes()
+        replacement = original.with_status(marker.STATUS_CLEANUP_FAILED)
+        real_write = os.write
+        calls = 0
+
+        def flaky_write(descriptor, content):
+            nonlocal calls
+            if calls == 0:
+                calls += 1
+                return real_write(descriptor, content[:1])
+            if calls == 1:
+                calls += 1
+                raise OSError("synthetic partial write")
+            return real_write(descriptor, content)
+
+        with mock.patch.object(marker.os, "write", side_effect=flaky_write):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.rewrite_marker_exact(replacement, expected)
+        self.assertEqual(raised.exception.code, "marker_write_failed")
+        self.assertEqual(self.marker_path.read_bytes(), old_content)
+        self.assertEqual(stat.S_IMODE(self.marker_path.stat().st_mode), marker.MARKER_MODES)
+
     def test_marker_size_limit_fails_before_publication(self) -> None:
         value = self.make_marker()
         with mock.patch.object(marker, "MAX_MARKER_BYTES", 1):
@@ -148,6 +226,108 @@ class LiveRunMarkerTests(unittest.TestCase):
         finally:
             os.close(parent_fd)
 
+    def test_lifecycle_lease_serializes_separate_processes(self) -> None:
+        context = multiprocessing.get_context("fork")
+        first_ready, first_ready_write = os.pipe()
+        first_release_read, first_release_write = os.pipe()
+        second_ready, second_ready_write = os.pipe()
+        second_release_read, second_release_write = os.pipe()
+        first = context.Process(
+            target=_lifecycle_worker,
+            args=(str(self.runs), first_ready_write, first_release_read),
+        )
+        second = context.Process(
+            target=_lifecycle_worker,
+            args=(str(self.runs), second_ready_write, second_release_read),
+        )
+        try:
+            first.start()
+            os.close(first_ready_write)
+            os.close(first_release_read)
+            self.assertEqual(os.read(first_ready, 32), b"acquired\n")
+
+            second.start()
+            os.close(second_ready_write)
+            os.close(second_release_read)
+            readable, _, _ = select.select([second_ready], [], [], 0.1)
+            self.assertEqual(readable, [])
+
+            os.write(first_release_write, b"release")
+            self.assertEqual(os.read(second_ready, 32), b"acquired\n")
+            os.write(second_release_write, b"release")
+        finally:
+            for descriptor in (
+                first_ready,
+                first_release_write,
+                second_ready,
+                second_release_write,
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            first.join(timeout=2)
+            second.join(timeout=2)
+            if first.is_alive():
+                first.terminate()
+                first.join()
+            if second.is_alive():
+                second.terminate()
+                second.join()
+        self.assertEqual(first.exitcode, 0)
+        self.assertEqual(second.exitcode, 0)
+
+    def test_quarantine_lease_serializes_separate_processes(self) -> None:
+        context = multiprocessing.get_context("fork")
+        first_ready, first_ready_write = os.pipe()
+        first_release_read, first_release_write = os.pipe()
+        second_ready, second_ready_write = os.pipe()
+        second_release_read, second_release_write = os.pipe()
+        first = context.Process(
+            target=_quarantine_worker,
+            args=(str(self.runs), first_ready_write, first_release_read),
+        )
+        second = context.Process(
+            target=_quarantine_worker,
+            args=(str(self.runs), second_ready_write, second_release_read),
+        )
+        try:
+            first.start()
+            os.close(first_ready_write)
+            os.close(first_release_read)
+            self.assertEqual(os.read(first_ready, 32), b"acquired\n")
+
+            second.start()
+            os.close(second_ready_write)
+            os.close(second_release_read)
+            readable, _, _ = select.select([second_ready], [], [], 0.1)
+            self.assertEqual(readable, [])
+
+            os.write(first_release_write, b"release")
+            self.assertEqual(os.read(second_ready, 32), b"acquired\n")
+            os.write(second_release_write, b"release")
+        finally:
+            for descriptor in (
+                first_ready,
+                first_release_write,
+                second_ready,
+                second_release_write,
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            first.join(timeout=2)
+            second.join(timeout=2)
+            if first.is_alive():
+                first.terminate()
+                first.join()
+            if second.is_alive():
+                second.terminate()
+                second.join()
+        self.assertEqual(first.exitcode, 0)
+        self.assertEqual(second.exitcode, 0)
+
     def test_replace_marker_preserves_a_concurrent_same_name_replacement(self) -> None:
         value = self.make_marker()
         marker.create_marker(value)
@@ -161,54 +341,67 @@ class LiveRunMarkerTests(unittest.TestCase):
             endpoint=value.endpoint,
             credential_identity=value.credential_identity,
         )
-        original_rename = marker._rename_noreplace
         replaced = False
 
-        def race(parent_fd: int, source_name: str, target_name: str) -> None:
+        def race(parent_fd: int, source_name: str, source_fd: int) -> None:
+            del source_fd
             nonlocal replaced
             if source_name == self.marker_path.name and not replaced:
                 replaced = True
-                self.marker_path.unlink()
-                marker.create_marker(replacement)
-            original_rename(parent_fd, source_name, target_name)
+                os.unlink(source_name, dir_fd=parent_fd)
+                marker.create_marker(replacement, parent_fd=parent_fd)
 
-        with mock.patch.object(marker, "_rename_noreplace", side_effect=race):
+        with mock.patch.object(marker, "_before_marker_commit", side_effect=race):
             with self.assertRaises(marker.MarkerError) as raised:
                 marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
         self.assertEqual(raised.exception.code, "marker_replaced")
         self.assertTrue(replaced)
         self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
 
-    def test_replace_marker_rejects_a_replacement_after_final_publish(self) -> None:
+    def test_replace_marker_source_swap_between_validation_and_publication_does_not_publish_foreign(self) -> None:
         value = self.make_marker()
         marker.create_marker(value)
-        replacement = marker.new_marker(
-            self.marker_path,
-            run_id="f" * 64,
-            instance=value.instance,
-            container_id=value.container_id,
-            container_name=value.container_name,
-            image=value.image,
-            endpoint=value.endpoint,
-            credential_identity=value.credential_identity,
-        )
-        original_rename = marker._rename_noreplace
-        replaced = False
+        swapped = False
+        foreign = b"foreign source pathname"
 
-        def race(parent_fd: int, source_name: str, target_name: str) -> None:
-            nonlocal replaced
-            original_rename(parent_fd, source_name, target_name)
-            if target_name == self.marker_path.name and source_name.startswith(".replace-tmp-") and not replaced:
-                replaced = True
-                self.marker_path.unlink()
-                marker.create_marker(replacement)
+        def race(parent_fd: int, source_name: str, source_fd: int) -> None:
+            del source_fd
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                os.unlink(source_name, dir_fd=parent_fd)
+                replacement = self.runs / source_name
+                replacement.write_bytes(foreign)
+                replacement.chmod(marker.MARKER_MODES)
 
-        with mock.patch.object(marker, "_rename_noreplace", side_effect=race):
+        with mock.patch.object(marker, "_before_marker_commit", side_effect=race):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
+
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertTrue(swapped)
+        self.assertEqual(self.marker_path.read_bytes(), foreign)
+
+    def test_replace_marker_preserves_a_raced_foreign_target(self) -> None:
+        value = self.make_marker()
+        marker.create_marker(value)
+        foreign = value.with_status(marker.STATUS_CLEANUP_FAILED)
+        raced = False
+
+        def race(parent_fd: int, source_name: str, source_fd: int) -> None:
+            del source_fd
+            nonlocal raced
+            if not raced:
+                raced = True
+                os.unlink(source_name, dir_fd=parent_fd)
+                marker.create_marker(foreign, parent_fd=parent_fd)
+
+        with mock.patch.object(marker, "_before_marker_commit", side_effect=race):
             with self.assertRaises(marker.MarkerError) as raised:
                 marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
         self.assertEqual(raised.exception.code, "marker_replaced")
-        self.assertTrue(replaced)
-        self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
+        self.assertTrue(raced)
+        self.assertEqual(marker.load_marker(self.marker_path).run_id, foreign.run_id)
 
     def test_replace_marker_rejects_a_replacement_present_before_first_open(self) -> None:
         original = self.make_marker()

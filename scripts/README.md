@@ -161,11 +161,17 @@ profile or container socket, or apply custom capability, CPU, memory, PID,
 security, or log settings. The dedicated test VM may use its available
 resources.
 
+The marker, launcher-result, and credential-handoff correction suites are
+synthetic and mock-only. They use local private files, synthetic credential
+bytes, fake Podman responses, and mocked process boundaries; they do not start
+Hermes, contact a Dashboard, or read a real credential. The VM command below is
+an explicit opt-in lane and is not evidence produced by those offline fixtures.
+
 Run one instance from the repository root on the authorized VM. The caller
 must create one existing private `0700` runs directory and choose one exact
-absolute marker path inside it. The marker is the only lifecycle capability;
-do not enumerate the directory, copy a marker, infer recency, or reuse a port
-from an older proof:
+canonical absolute marker path inside it. The marker is the only lifecycle
+capability; do not enumerate the directory, copy a marker, infer recency, or
+reuse a port from an older proof:
 
 ```sh
 RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
@@ -184,15 +190,19 @@ launcher_output="$(
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 ```
 
 A successful `start` result has `.result.status` `ready`; it is not a handoff
 permit. Immediately before credential handoff, `endpoint` freshly pins the
 retained immutable container ID to a running launcher-owned container and its
-sole explicit `127.0.0.1:<requested-port>:9119` mapping. A stopped tombstone,
-missing/stale mapping, container replacement, ownership mismatch, rebound port,
-or non-loopback mapping aborts before credential-file use.
+sole explicit `127.0.0.1:<requested-port>:9119` mapping. It also revalidates the
+caller-selected marker, credential inode, mode, size, link count, and content
+generation. A stopped tombstone, missing/stale mapping, container replacement,
+ownership mismatch, rebound port, non-loopback mapping, or changed credential
+identity aborts before credential-file use.
 
 Run any requested count with unique names, consecutive loopback ports, and
 one caller-supplied marker per instance. Every marker path must be a distinct
@@ -216,7 +226,9 @@ instance name, port, recency, or directory contents:
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 python3 scripts/hermes_agent.py stop --marker "$MARKER_PATH"
 ```
 
@@ -226,8 +238,12 @@ strict ownership path; data is never removed by a broad prune or glob.
 
 Every result is one JSON object. Start, status, and stop output contain only
 bounded instance/status/marker metadata. A verified endpoint result contains
-only `status`, the exact loopback endpoint, the exact marker path, and the exact
-credential path. It never contains the generated run ID or password. Credentials
+exactly `status`, `endpoint`, `marker_path`, `run_id`, `credential_file`, and
+`credential_identity`; it never contains the password. `run_id` is 64 lowercase
+hexadecimal characters. `credential_identity` contains `device`, `inode`,
+`mode`, `size`, `nlink`, and a 64-character lowercase hexadecimal `generation`.
+The generation is a one-way SHA-256 of the bounded credential bytes, not the
+credential itself; it detects same-inode, same-size replacement. Credentials
 use mode `0600`. The live credential, state file, and cidfile paths are derived
 as siblings beside the exact caller-selected marker, under that marker's
 existing private `0700` runs directory. For example, a marker named
@@ -238,34 +254,75 @@ The container data directory defaults to
 the marker-bound live files.
 
 A successful `start` result is `ready`, not a handoff permit. The following
-`endpoint` command is the source of truth for the caller-selected marker: it
-freshly inspects the persisted immutable container ID, requires `running`, and
-requires exactly one `127.0.0.1:<requested-port>:9119` Dashboard mapping. It
+`endpoint` command is the source of truth for the exact caller-selected marker:
+it freshly inspects the persisted immutable container ID, requires `running`,
+and requires exactly one `127.0.0.1:<requested-port>:9119` Dashboard mapping. It
 rejects a stopped tombstone, absent or stale ID, replacement, label/image/mount
-mismatch, missing or rebound port, additional mapping, and non-loopback
-publication before any credential-file read. `read_launcher_result.py` accepts
-only the closed successful `endpoint` result with `status` `running`, its
-canonical loopback endpoint, and both exact ownership paths; it rejects `start`,
-`status`, `credential-file`, and retained metadata rather than inferring a port
-or substituting a remembered listener. Use the checked values immediately at
-the local live-proof handoff:
+mismatch, missing or rebound port, additional mapping, non-loopback publication,
+or changed credential identity before any credential-file read.
+`read_launcher_result.py` accepts only the closed successful `endpoint` result
+with `.result.status` `running` and exposes exactly five selectable fields:
+`endpoint`, `marker-path`, `run-id`, `credential-file`, and
+`credential-identity`. It never selects a run, reads a marker, infers a port,
+or substitutes a remembered listener. `credential-identity` is emitted as
+compact JSON and must be handed to the next command unchanged:
 
 ```sh
+run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 HERMES_LIVE_TARGET="$endpoint" \
-  python3 scripts/with_live_credential.py "$marker_path" -- \
-  bun run --cwd apps/web test:e2e:live
+  python3 scripts/with_live_credential.py \
+    --marker "$marker_path" \
+    --run-id "$run_id" \
+    --credential-file "$credential_file" \
+    --credential-identity "$credential_identity" \
+    -- \
+    bun run --cwd apps/web test:e2e:live
 ```
 
-The helper loads only the exact marker, requires a `running` marker, revalidates
-the credential lstat identity immediately before opening it, and reads through
-a pinned non-following descriptor. It removes only trailing CR/LF and requires
-exactly 48 lowercase hexadecimal characters. It then replaces itself with the
-child command and supplies `HERMES_TEST_PASSWORD` only in that child process
-environment. It never prints or writes the password; invalid or replaced input
-fails locally before the child starts. `PW_RUNNER_DEBUG` is also rejected before
-the marker or credential is read because Playwright's debug mode inherits worker
-stderr outside the redaction boundary. The launcher-generated `password\n` file
-format is unchanged.
+`with_live_credential.py` requires all four proof options before `--`: the
+exact marker path, the matching 64-character lowercase `run_id`, the matching
+credential path, and the generation-bearing `credential_identity` object. It
+loads only that marker, requires a `running` marker, revalidates the private
+parent and marker identity, then revalidates credential inode/mode/size/link
+count and generation immediately before opening a pinned non-following
+non-blocking descriptor. It removes only trailing CR/LF and requires exactly 48
+lowercase hexadecimal characters. It then replaces itself with the child
+command and supplies `HERMES_TEST_PASSWORD` only in that child process
+environment. It never prints or writes the password; invalid, legacy
+identity-without-generation, or replaced input fails locally before the child
+starts. `PW_RUNNER_DEBUG` is also rejected before the marker or credential is
+read because Playwright's debug mode inherits worker stderr outside the
+redaction boundary. The launcher-generated `password\n` file format is
+unchanged.
+
+Marker publication is a copy/evidence protocol, not a race-free publication
+claim. The writer stages bounded bytes on a held descriptor, then uses Darwin
+`fclonefileat` on APFS when available; the fallback uses a direct destination
+`O_EXCL` create and copy from that held descriptor. It syncs the complete bytes,
+uses a short mode-`000` gate, changes the destination to `0600`, syncs again,
+and reopens only for detection-only identity/content comparison. A destination
+pathname can still be raced by a non-cooperating process; held descriptors,
+exact identities, no-follow opens, and bounded quarantine preserve evidence or
+fail closed, but they do not make the pathname race-free.
+
+Normal launcher marker creation and cleanup publication use a new destination
+inode. Existing marker, state, and credential entries are claimed into fixed
+no-replace quarantine evidence; the launcher never unlinks a caller-selected
+name by pathname alone, overwrites a replacement, or adopts a raced inode. Only
+when the bounded quarantine quota is exhausted may cleanup use a held-descriptor
+same-inode rewrite for its already-owned marker/state fallback. That fallback
+also fails closed on replacement and never turns a foreign pathname into proof.
+
+The private `0700` runs directory is the cooperating-process boundary, not a
+privileged isolation boundary. It limits ordinary access by other users; it
+does not make a same-user or privileged pathname writer harmless. Readers that
+hit the transient mode-`000` marker, an incomplete copy, or a permission/open
+error fail closed as invalid (`marker_invalid` or the operation-specific
+credential/state error). They do not retry by scanning, infer a different run,
+or treat the transient entry as proof; rerun the exact caller-selected
+`endpoint` operation after publication settles.
 
 `start` first requires local rootless Podman and verifies the requested official
 repository digest. It then polls bounded `GET /api/auth/providers` responses.
@@ -335,17 +392,20 @@ python3 -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scrip
 python3 -O -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 15-test marker and 46-test launcher suites use local synthetic files and a
-fake Podman boundary. The 11-test credential handoff and 6-test launcher-result
-suites use only synthetic bytes and mocked local process boundaries (78 tests in
+The 20-test marker and 51-test launcher suites use local synthetic files and a
+fake Podman boundary. The 12-test credential handoff and 6-test launcher-result
+suites use only synthetic bytes and mocked local process boundaries (89 tests in
 this focused command). None of these suites starts Hermes, contacts an endpoint,
 or reads a real credential. The suites cover strict closed schemas, private
-atomic files, exact marker selection, run-ID/container binding, private cidfile
-provenance, runs-directory replacement around status/stop/endpoint windows,
-credential and state identity replacement, held-descriptor erasure, fixed-slot
-count/byte saturation, foreign quarantine preservation, oversized marker/state
-publication rejection, no-name-unlink quarantine retention, FIFO and symlink
-rejection, bounded handoff output, rootless checks, environment cleanup,
+mode-gated descriptor copies, exact caller-selected marker proof,
+run-ID/container binding, generation-bearing credential identity at handoff and
+cleanup claim, private cidfile provenance, runs-directory replacement around
+status/stop/endpoint windows, credential and state identity replacement,
+held-descriptor erasure, partial-write rollback, inter-process lifecycle and
+quarantine leases, fixed-slot count/byte saturation, foreign quarantine
+preservation, oversized marker/state publication rejection, no-name-unlink
+quarantine retention, FIFO and symlink rejection, bounded handoff output,
+malformed runner normalization, rootless checks, environment cleanup,
 stopped-container recovery, and exact-once cleanup. This command-line artifact
 has no UI, focus, screen-reader, browser-zoom, contrast, motion, or touch-target
 surface; accessibility checks are N/A.
