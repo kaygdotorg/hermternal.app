@@ -333,6 +333,44 @@ final class ParityTests: XCTestCase {
         XCTAssertFalse(result.passed)
         XCTAssertEqual(result.errorCode, "c19_validator_blocked")
     }
+    func testValidatorIsolationBlocksRepositoryPythonImports() throws {
+        let temporaryRoot = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let proofFiles = ["json.py", "sitecustomize.py", "usercustomize.py"].map {
+            temporaryRoot.appendingPathComponent("executed-\($0)")
+        }
+        for (index, moduleName) in ["json.py", "sitecustomize.py", "usercustomize.py"].enumerated() {
+            let proofLiteral = String(reflecting: proofFiles[index].path)
+            let module = "from pathlib import Path\nPath(\(proofLiteral)).write_text('executed')\n"
+            try Data(module.utf8).write(
+                to: temporaryRoot.appendingPathComponent(moduleName),
+                options: .atomic
+            )
+        }
+
+        let validator = """
+        import json
+        import sys
+        if __file__ != sys.argv[0]:
+            raise RuntimeError("validator bootstrap context mismatch")
+        print(json.dumps({
+            "ok": True,
+            "complete": False,
+            "evidence_status": "partial",
+            "compatible": False,
+            "live_claim": False,
+            "fixture_count": 0,
+            "coverage_count": 0,
+        }))
+        """
+        let result = try runValidatorSource(at: temporaryRoot, source: validator)
+        XCTAssertTrue(result.passed)
+        XCTAssertNil(result.errorCode)
+        for proofFile in proofFiles {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: proofFile.path))
+        }
+    }
+
     #endif
 
     func testStrictJSONRejectsDuplicateKeysAndBoundsErrors() throws {
@@ -584,6 +622,16 @@ final class ParityTests: XCTestCase {
             .appendingPathComponent("validator", isDirectory: true)
         try FileManager.default.createDirectory(at: validatorURL, withIntermediateDirectories: true)
         return validatorURL
+    }
+
+    private func runValidatorSource(
+        at root: URL,
+        source: String
+    ) throws -> (passed: Bool, errorCode: String?) {
+        let validatorURL = try makeValidatorDirectory(at: root)
+            .appendingPathComponent("validate.py")
+        try Data(source.utf8).write(to: validatorURL, options: .atomic)
+        return runC19ValidatorForTests(at: root) { _ in }
     }
 
     private func makeFIFO(at url: URL) throws {

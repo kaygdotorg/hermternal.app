@@ -1767,6 +1767,14 @@ private func runC19Validator(
 
         let scriptURL = root.appendingPathComponent(scriptRelativePath)
         try beforeLaunch?(scriptURL)
+        let executionDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermternal-c19-validator-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: executionDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: executionDirectory) }
         let bootstrap = """
         import sys
         reviewed_path = sys.argv[1]
@@ -1783,12 +1791,15 @@ private func runC19Validator(
         """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-B", "-c", bootstrap, scriptURL.path]
-        process.currentDirectoryURL = root
-        var environment = ProcessInfo.processInfo.environment
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        environment["PATH"] = "/usr/bin:/bin"
-        process.environment = environment
+        process.arguments = ["-I", "-B", "-c", bootstrap, scriptURL.path]
+        process.currentDirectoryURL = executionDirectory
+        // Isolated mode removes Python path and user-site imports. Keep the
+        // process environment minimal as a second boundary against host
+        // configuration changing which code the reviewed bytes import.
+        process.environment = [
+            "PATH": "/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        ]
 
         let stdin = Pipe()
         let stdout = Pipe()

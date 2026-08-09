@@ -46,10 +46,12 @@ set `validator` to JSON `null`.
 
 Before reading parity evidence, the public runner performs an authoritative
 C-19 preflight. On macOS it executes the checked-in validator's exact, bounded
-bytes with `/usr/bin/python3 -B -c` and a stdin pipe (the reviewed path is
-only the compile filename and `__file__` value, never a script reopen),
-`PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
-stdin/stdout/stderr, and one five-second deadline. A blocked,
+bytes with `/usr/bin/python3 -I -B -c` and a stdin pipe (the reviewed path is
+only the compile filename and `__file__` value, never a script reopen). The
+interpreter runs from a fresh private empty directory with a minimal environment;
+isolated mode excludes repository imports, `PYTHONPATH`, `PYTHONHOME`, and
+user-site customizations. `PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
+stdin/stdout/stderr, and one five-second deadline remain enforced. A blocked,
 unavailable, malformed, truncated, timed-out, failed, or live-claiming validator
 result returns a blocked report with a specific `errorCode`, zero proven cases,
 and `liveClaim: false`. On iOS and other non-host builds, the public runner
