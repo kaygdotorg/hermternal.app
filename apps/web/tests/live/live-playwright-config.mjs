@@ -68,6 +68,10 @@ export function createLivePlaywrightConfig({
   return {
     testDir: paths.liveTestsDirectory,
     fullyParallel: false,
+    // Both credential-gated live specs mutate one disposable Hermes account.
+    // A single worker is part of the proof contract; filename order alone does
+    // not serialize separate Playwright files.
+    workers: 1,
     forbidOnly: true,
     retries: 0,
     outputDir: join(outputDirectory, '.playwright-output'),

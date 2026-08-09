@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BrowserChatOptions } from '$lib/chat/browser-chat';
 import type {
+  JsonRpcChatEvent,
+  JsonRpcChatRequest,
   JsonRpcChatTransport,
+  JsonRpcCompletionEvent,
   JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
 import {
@@ -15,6 +18,7 @@ import type {
   CurrentSessionTerminalState
 } from '$lib/terminal/current-session-terminal';
 import type { LiveMessage, LiveRestTransport, LiveSession, SessionMessages } from '$lib/transport';
+import { mapLiveMessages } from './live-workspace';
 import { LiveWorkspaceSession } from './live-workspace-session';
 
 const SESSION: LiveSession = {
@@ -84,9 +88,30 @@ function createChatHarness(): {
   readonly createChat: ReturnType<typeof vi.fn<(options: BrowserChatOptions) => JsonRpcChatTransport>>;
   readonly transport: JsonRpcChatTransport;
   readonly optionsHistory: BrowserChatOptions[];
+  readonly sendPrompt: ReturnType<typeof vi.fn>;
+  emit(event: JsonRpcChatEvent): void;
+  complete(event: JsonRpcCompletionEvent, requestId?: string): void;
 } {
   const state: JsonRpcConnectionState = { status: 'ready', generation: 1 };
   const optionsHistory: BrowserChatOptions[] = [];
+  const pendingRequests = new Map<
+    string,
+    ReturnType<typeof deferred<JsonRpcCompletionEvent>>
+  >();
+  let requestNumber = 0;
+  let latestRequestId: string | undefined;
+  const sendPrompt = vi.fn((_text: string): JsonRpcChatRequest => {
+    const id = `terminal-proof-request-${++requestNumber}`;
+    const completion = deferred<JsonRpcCompletionEvent>();
+    latestRequestId = id;
+    pendingRequests.set(id, completion);
+    return {
+      id,
+      completion: completion.promise,
+      state: { id, status: 'submitting' },
+      abort: vi.fn()
+    };
+  });
   const transport: JsonRpcChatTransport = {
     get state() {
       return state;
@@ -102,7 +127,7 @@ function createChatHarness(): {
     promoteSession: vi.fn(),
     restore: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
-    sendPrompt: vi.fn(),
+    sendPrompt,
     interrupt: vi.fn().mockResolvedValue(undefined),
     respondToApproval: vi.fn().mockResolvedValue(undefined),
     answerClarification: vi.fn().mockResolvedValue(undefined),
@@ -113,7 +138,20 @@ function createChatHarness(): {
     optionsHistory.push(options);
     return transport;
   });
-  return { createChat, transport, optionsHistory };
+  return {
+    createChat,
+    transport,
+    optionsHistory,
+    sendPrompt,
+    emit(event: JsonRpcChatEvent) {
+      const options = optionsHistory[optionsHistory.length - 1];
+      options?.onEvent?.(event);
+    },
+    complete(event: JsonRpcCompletionEvent, requestId = latestRequestId) {
+      if (!requestId) return;
+      pendingRequests.get(requestId)?.resolve(event);
+    }
+  };
 }
 
 function createPtyHarness(): {
@@ -189,22 +227,23 @@ async function createInitializedWorkspace(
   chat = createChatHarness(),
   pty = createPtyHarness()
 ) {
+  const createTerminal = vi.fn(() => pty.pty);
   const session = new LiveWorkspaceSession({
     rest,
     createChat: chat.createChat,
-    createTerminal: () => pty.pty
+    createTerminal
   });
 
   // The live route creates these shared resources before REST initialization.
   const coordinator = session.coordinator;
   const terminal = session.terminal;
   await session.initialize();
-  return { session, coordinator: coordinator!, terminal: terminal!, chat, pty };
+  return { session, coordinator: coordinator!, terminal: terminal!, chat, pty, createTerminal };
 }
 
 describe('LiveWorkspaceSession current-session Terminal integration', () => {
   it('keeps Chat, the selected session, and one PTY owner continuous across mode switches', async () => {
-    const { session, coordinator, terminal, chat, pty } = await createInitializedWorkspace();
+    const { session, coordinator, terminal, chat, pty, createTerminal } = await createInitializedWorkspace();
     const createSession = vi.spyOn(session, 'createSession');
 
     await coordinator.activate('terminal');
@@ -215,12 +254,107 @@ describe('LiveWorkspaceSession current-session Terminal integration', () => {
     expect(chat.createChat).toHaveBeenCalledTimes(1);
     expect(chat.transport.connect).toHaveBeenCalledTimes(1);
     expect(chat.transport.restore).not.toHaveBeenCalled();
+    expect(createTerminal).toHaveBeenCalledTimes(1);
     expect(pty.connect).toHaveBeenCalledTimes(1);
     expect(coordinator.activeSessionId).toBe(SESSION.id);
     expect(coordinator.state.terminalSessionId).toBe(SESSION.id);
     expect(session.current.activeSessionId).toBe(SESSION.id);
     expect(session.current.mode).toBe('terminal');
     expect(terminal.state.sessionId).toBe(SESSION.id);
+  });
+
+  it('reconciles two Chat turns around one Terminal owner without mirroring transport state', async () => {
+    const historyA: LiveMessage[] = [
+      { role: 'user', content: 'shared-session marker A' },
+      { role: 'assistant', content: 'shared-session response A' }
+    ];
+    const historyB: LiveMessage[] = [
+      ...historyA,
+      { role: 'user', content: 'shared-session marker B' },
+      { role: 'assistant', content: 'shared-session response B' }
+    ];
+    const rest = createRest();
+    vi.mocked(rest.getSessionMessages)
+      .mockResolvedValueOnce(sessionMessages([]))
+      .mockResolvedValueOnce(sessionMessages(historyA))
+      .mockResolvedValueOnce(sessionMessages(historyB));
+    const { session, coordinator, terminal, chat, pty, createTerminal } =
+      await createInitializedWorkspace(rest);
+    const createSession = vi.spyOn(session, 'createSession');
+
+    session.sendPrompt('shared-session marker A');
+    const firstRequest = chat.sendPrompt.mock.results[0]?.value as JsonRpcChatRequest;
+    const firstCompletion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: firstRequest.id,
+      sessionId: SESSION.id,
+      payload: { status: 'ok', text: 'shared-session response A' }
+    };
+    chat.emit(firstCompletion);
+    chat.complete(firstCompletion, firstRequest.id);
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(2);
+    await coordinator.activate('terminal');
+    await coordinator.activate('chat');
+
+    session.sendPrompt('shared-session marker B');
+    const secondRequest = chat.sendPrompt.mock.results[1]?.value as JsonRpcChatRequest;
+    const secondCompletion: JsonRpcCompletionEvent = {
+      type: 'message.complete',
+      requestId: secondRequest.id,
+      sessionId: SESSION.id,
+      payload: { status: 'ok', text: 'shared-session response B' }
+    };
+    chat.emit(secondCompletion);
+    chat.complete(secondCompletion, secondRequest.id);
+    await flush();
+
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(3);
+    for (const call of vi.mocked(rest.getSessionMessages).mock.calls) {
+      expect(call).toEqual([SESSION.id, { limit: 500, offset: 0 }, expect.any(AbortSignal)]);
+    }
+    expect(session.current.timeline).toEqual(
+      mapLiveMessages(SESSION.id, historyB, SESSION.model ?? undefined)
+    );
+    expect(session.current.timeline).toHaveLength(historyB.length);
+    expect(session.current.timeline.some((item) => item.kind === 'streaming')).toBe(false);
+    expect(session.current).not.toHaveProperty('transcript');
+    expect(session.current).not.toHaveProperty('messages');
+
+    expect(createSession).not.toHaveBeenCalled();
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(chat.transport.connect).toHaveBeenCalledTimes(1);
+    expect(chat.transport.restore).not.toHaveBeenCalled();
+    expect(chat.transport.createSession).not.toHaveBeenCalled();
+    expect(chat.sendPrompt).toHaveBeenCalledTimes(2);
+    expect(createTerminal).toHaveBeenCalledTimes(1);
+    expect(pty.connect).toHaveBeenCalledTimes(1);
+    expect(pty.events).toEqual([`connect:${SESSION.id}`]);
+
+    expect(chat.transport.selectedSessionId).toBe(SESSION.id);
+    expect(coordinator.activeSessionId).toBe(SESSION.id);
+    expect(session.current.activeSessionId).toBe(SESSION.id);
+    expect(session.current.mode).toBe('chat');
+    expect(session.current.coordinator?.activeSessionId).toBe(SESSION.id);
+    expect(session.current.coordinator?.terminalSessionId).toBe(SESSION.id);
+    expect(terminal.state.sessionId).toBe(SESSION.id);
+    await expect(pty.pty.reconnect()).rejects.toMatchObject({
+      code: 'legacy-reattach-prohibited'
+    });
+
+    const beforeBytes = JSON.stringify(session.current);
+    pty.emit({
+      type: 'bytes',
+      generation: 1,
+      bytes: new Uint8Array([0xff, 0x00, 0x80]),
+      outputMayBeTruncated: false
+    });
+    expect(JSON.stringify(session.current)).toBe(beforeBytes);
+    expect(beforeBytes).not.toContain('"ticket"');
+    expect(beforeBytes).not.toContain('"attach"');
+    expect(beforeBytes).not.toContain('"processIdentity"');
+    expect(beforeBytes).not.toContain('"transport"');
   });
 
   it('detaches the old PTY before publishing a replacement session snapshot', async () => {

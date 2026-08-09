@@ -1781,6 +1781,7 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     });
     expect(config.testDir).toBe(paths.liveTestsDirectory);
     expect(config.outputDir).toBe(join(outputDirectory, '.playwright-output'));
+    expect(config.workers).toBe(1);
     expect(config.preserveOutput).toBe('never');
     expect(config.reporter).toEqual([[paths.safeReporterFile]]);
     expect(config.globalTeardown).toBe(paths.teardownFile);
