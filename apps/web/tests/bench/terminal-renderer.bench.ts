@@ -326,7 +326,10 @@ async function run(): Promise<Trace> {
       },
       redaction: {
         synthetic_only: true,
-        network_access: false,
+        // The page fetches only this harness's loopback HTTP assets; it never
+        // contacts an external origin or a model/provider service.
+        loopback_http_access: true,
+        external_network_access: false,
         provider_access: false,
         credentials: false,
         cookies: false,
