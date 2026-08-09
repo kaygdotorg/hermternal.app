@@ -68,6 +68,14 @@ GIT_OUTPUT_MAX_BYTES = 4096
 GIT_CONFIG_MAX_BYTES = 64 * 1024
 GIT_PACK_ENTRY_MAX = 4096
 GIT_METADATA_ENTRY_MAX = 65_536
+# Git object and pack trees are bound recursively. Keep the trust scan
+# deterministic and bounded even when a caller supplies a hostile repository;
+# ordinary loose objects and the reviewed local pack set remain below these
+# limits. A byte snapshot is retained for every regular entry so an in-place
+# same-inode mutation cannot pass on metadata alone.
+GIT_METADATA_FILE_MAX_BYTES = 64 * 1024 * 1024
+GIT_METADATA_TOTAL_CONTENT_MAX_BYTES = 64 * 1024 * 1024
+GIT_METADATA_MAX_DEPTH = 32
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 TRUSTED_HELPER_PATH = "/usr/bin:/bin"
 GIT_REDIRECT_ENV_VARS = (
@@ -90,18 +98,19 @@ GIT_FORBIDDEN_METADATA = (
     "shallow",
 )
 GIT_METADATA_PIN_FILES = (
+    "HEAD",
     "commondir",
     "config",
     "config.worktree",
     "packed-refs",
     *GIT_FORBIDDEN_METADATA,
 )
+# These are intentionally the two non-overlapping recursive security trees.
+# Their descendants cover loose objects, pack metadata, every nested ref, and
+# refs/replace without reading the same pack bytes repeatedly.
 GIT_METADATA_PIN_DIRECTORIES = (
     "objects",
-    "objects/info",
-    "objects/pack",
     "refs",
-    "refs/replace",
 )
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -914,10 +923,31 @@ def _metadata_identity(
 
 def _metadata_pin_identity(
     metadata: os.stat_result,
-) -> tuple[int, int, int]:
-    """Return the stable descriptor identity retained across Git commands."""
+) -> tuple[int, int, int, int]:
+    """Bind stable descriptor identity, including type and size."""
+
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_size,
+    )
+
+
+def _metadata_parent_pin_identity(metadata: os.stat_result) -> tuple[int, int, int]:
+    """Bind parent lookup identity without volatile directory size."""
 
     return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
+
+
+class _BoundGitCommand(list[str]):
+    """List-shaped Git argv carrying the descriptor-bound working directory."""
+
+    __slots__ = ("cwd_fd",)
+
+    def __init__(self, values: Iterable[str], *, cwd_fd: int | None = None) -> None:
+        super().__init__(values)
+        self.cwd_fd = cwd_fd
 
 
 class _GitMetadataPin:
@@ -943,9 +973,11 @@ class _GitMetadataPin:
         parent_identity: tuple[int, int, int],
         name: str,
         descriptor: int | None,
-        identity: tuple[int, int, int] | None,
+        identity: tuple[int, int, int, int] | None,
         content: bytes | None,
-        entries: tuple[tuple[str, tuple[int, int, int]], ...] | None,
+        entries: tuple[
+            tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
+        ] | None,
         label: str,
     ) -> None:
         self.path = path
@@ -981,6 +1013,7 @@ def _verify_regular_metadata(
     *,
     limit: int | None,
     label: str,
+    allow_hard_links: bool = False,
 ) -> None:
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"{label} is not a regular file")
@@ -990,7 +1023,7 @@ def _verify_regular_metadata(
         raise ValueError(f"{label} is writable by group or other users")
     if metadata.st_mode & (stat.S_ISUID | stat.S_ISGID):
         raise ValueError(f"{label} has unsafe mode bits")
-    if metadata.st_nlink != 1:
+    if not allow_hard_links and metadata.st_nlink != 1:
         raise ValueError(f"{label} has unexpected hard links")
     if limit is not None and metadata.st_size > limit:
         raise ValueError(f"{label} exceeds the bounded input size")
@@ -1002,6 +1035,7 @@ def _open_verified_regular_file_at(
     *,
     limit: int | None,
     label: str,
+    allow_hard_links: bool = False,
 ) -> tuple[int, os.stat_result]:
     """Open one directory entry with no-follow and race-checked identity."""
 
@@ -1009,12 +1043,22 @@ def _open_verified_regular_file_at(
         raise ValueError(f"{label} has an invalid pathname component")
     try:
         pre_open = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-        _verify_regular_metadata(pre_open, limit=limit, label=label)
+        _verify_regular_metadata(
+            pre_open,
+            limit=limit,
+            label=label,
+            allow_hard_links=allow_hard_links,
+        )
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
         descriptor = os.open(name, flags, dir_fd=parent_fd)
         try:
             post_open = os.fstat(descriptor)
-            _verify_regular_metadata(post_open, limit=limit, label=label)
+            _verify_regular_metadata(
+                post_open,
+                limit=limit,
+                label=label,
+                allow_hard_links=allow_hard_links,
+            )
             if _metadata_identity(pre_open) != _metadata_identity(post_open):
                 raise ValueError(f"{label} changed during open")
             return descriptor, post_open
@@ -1100,30 +1144,128 @@ def _open_verified_parent(
         raise
 
 
-def _snapshot_git_metadata_directory(
+def _snapshot_git_metadata_tree(
     descriptor: int,
     *,
     label: str,
-) -> tuple[tuple[str, tuple[int, int, int]], ...]:
-    """Retain bounded direct-child identities for a Git metadata directory."""
+    content_budget: list[int] | None = None,
+) -> tuple[
+    tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
+]:
+    """Snapshot a bounded metadata tree without following any nested link.
 
-    entries: list[tuple[str, tuple[int, int, int]]] = []
+    Git selects commits through ``HEAD`` and refs, then reads loose objects and
+    pack files. Pinning only the top-level directory entries leaves a same-name
+    nested ref, loose object, or pack sidecar free to change in place. This
+    descriptor-relative walk records every descendant's relative path, full
+    type/identity/size tuple, and SHA-256 digest of bounded content. Directory
+    entries retain ``None`` content; regular entries retain their content
+    digest. Any symlink or special file fails closed.
+    """
+
+    entries: list[
+        tuple[str, tuple[int, int, int, int, int, int, int, int], str | None]
+    ] = []
+    if content_budget is None:
+        content_budget = [0]
+
+    def read_children(directory_fd: int) -> list[Any]:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                children = list(iterator)
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ValueError(f"{label} could not be inspected") from exc
+        if len(children) > GIT_METADATA_ENTRY_MAX:
+            raise ValueError(f"{label} exceeds the bounded entry count")
+        children.sort(key=lambda item: item.name)
+        return children
+
+    # Keep only one descriptor per recursive level. Directory children are
+    # materialized as bounded names, then their descriptor is closed as soon as
+    # that frame is exhausted; a large refs tree cannot exhaust the fd table.
+    stack: list[tuple[int, tuple[str, ...], list[Any], int, bool]] = [
+        (descriptor, (), read_children(descriptor), 0, False)
+    ]
     try:
-        with os.scandir(descriptor) as iterator:
-            for entry in iterator:
-                name = entry.name
-                if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
-                    raise ValueError(f"{label} contains an invalid pathname entry")
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if stat.S_ISLNK(metadata.st_mode):
-                    raise ValueError(f"{label} contains a symlink: {name}")
-                entries.append((name, _metadata_pin_identity(metadata)))
+        while stack:
+            directory_fd, prefix, children, index, owned = stack[-1]
+            if index >= len(children):
+                stack.pop()
+                if owned:
+                    os.close(directory_fd)
+                continue
+            child = children[index]
+            stack[-1] = (directory_fd, prefix, children, index + 1, owned)
+            name = child.name
+            if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
+                raise ValueError(f"{label} contains an invalid pathname entry")
+            relative_parts = (*prefix, name)
+            if len(relative_parts) > GIT_METADATA_MAX_DEPTH:
+                raise ValueError(f"{label} exceeds the bounded depth")
+            relative = "/".join(relative_parts)
+            try:
+                metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise ValueError(f"{label} entry could not be inspected") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"{label} contains a symlink: {relative}")
+            if stat.S_ISDIR(metadata.st_mode):
+                child_fd = _open_verified_directory_at(
+                    directory_fd,
+                    name,
+                    label=f"{label} directory",
+                )
+                try:
+                    child_metadata = os.fstat(child_fd)
+                    if _metadata_identity(child_metadata) != _metadata_identity(metadata):
+                        raise ValueError(f"{label} directory changed during pinning")
+                    child_children = read_children(child_fd)
+                except BaseException:
+                    os.close(child_fd)
+                    raise
+                entries.append((relative, _metadata_identity(child_metadata), None))
                 if len(entries) > GIT_METADATA_ENTRY_MAX:
+                    os.close(child_fd)
                     raise ValueError(f"{label} exceeds the bounded entry count")
-    except ValueError:
-        raise
-    except (OSError, RuntimeError, TypeError) as exc:
-        raise ValueError(f"{label} could not be inspected") from exc
+                stack.append((child_fd, relative_parts, child_children, 0, True))
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(f"{label} contains a special file: {relative}")
+            descriptor_for_file, descriptor_metadata = _open_verified_regular_file_at(
+                directory_fd,
+                name,
+                limit=GIT_METADATA_FILE_MAX_BYTES,
+                label=f"{label} file",
+                allow_hard_links=True,
+            )
+            try:
+                if _metadata_identity(descriptor_metadata) != _metadata_identity(metadata):
+                    raise ValueError(f"{label} file changed during pinning")
+                content = _read_bounded_fd(
+                    descriptor_for_file,
+                    GIT_METADATA_FILE_MAX_BYTES,
+                    f"{label} file",
+                )
+                after_read = os.fstat(descriptor_for_file)
+                if _metadata_identity(after_read) != _metadata_identity(descriptor_metadata):
+                    raise ValueError(f"{label} file changed during pinning")
+                if len(content) != after_read.st_size:
+                    raise ValueError(f"{label} file changed during pinning")
+            finally:
+                os.close(descriptor_for_file)
+            content_budget[0] += len(content)
+            if content_budget[0] > GIT_METADATA_TOTAL_CONTENT_MAX_BYTES:
+                raise ValueError(f"{label} exceeds the bounded content size")
+            entries.append((relative, _metadata_identity(descriptor_metadata), digest_bytes(content)))
+            if len(entries) > GIT_METADATA_ENTRY_MAX:
+                raise ValueError(f"{label} exceeds the bounded entry count")
+    finally:
+        for directory_fd, _prefix, _children, _index, owned in reversed(stack):
+            if owned:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
     entries.sort(key=lambda item: item[0])
     return tuple(entries)
 
@@ -1174,13 +1316,14 @@ def _pin_git_metadata_path(
     label: str,
     pin_content: bool,
     pin_entries: bool,
+    content_budget: list[int] | None = None,
 ) -> _GitMetadataPin:
     """Retain descriptor, identity, and bounded bytes for one Git path."""
 
     parent_fd, name = _open_git_metadata_pin_parent(path, label=label)
     descriptor: int | None = None
     try:
-        parent_identity = _metadata_pin_identity(os.fstat(parent_fd))
+        parent_identity = _metadata_parent_pin_identity(os.fstat(parent_fd))
         try:
             entry_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -1213,14 +1356,24 @@ def _pin_git_metadata_path(
         if identity != _metadata_pin_identity(entry_metadata):
             raise ValueError(f"{label} changed during pinning")
         content: bytes | None = None
-        entries: tuple[tuple[str, tuple[int, int, int]], ...] | None = None
+        entries: tuple[
+            tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
+        ] | None = None
         if stat.S_ISDIR(descriptor_metadata.st_mode):
             if pin_entries:
-                entries = _snapshot_git_metadata_directory(descriptor, label=label)
+                entries = _snapshot_git_metadata_tree(
+                    descriptor,
+                    label=label,
+                    content_budget=content_budget,
+                )
         elif pin_content:
             content = _read_bounded_fd(descriptor, GIT_CONFIG_MAX_BYTES, label)
             if len(content) != descriptor_metadata.st_size:
                 raise ValueError(f"{label} changed during pinning")
+            if content_budget is not None:
+                content_budget[0] += len(content)
+                if content_budget[0] > GIT_METADATA_TOTAL_CONTENT_MAX_BYTES:
+                    raise ValueError(f"{label} exceeds the bounded content size")
         return _GitMetadataPin(
             path=path,
             parent_fd=parent_fd,
@@ -1252,7 +1405,7 @@ def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
         parent_metadata = os.fstat(pin.parent_fd)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError(f"Git metadata {pin.label} parent changed {phase}") from exc
-    if _metadata_pin_identity(parent_metadata) != pin.parent_identity:
+    if _metadata_parent_pin_identity(parent_metadata) != pin.parent_identity:
         raise ValueError(f"Git metadata {pin.label} parent changed {phase}")
     try:
         current = os.stat(pin.name, dir_fd=pin.parent_fd, follow_symlinks=False)
@@ -1277,7 +1430,7 @@ def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
         raise ValueError(f"Git metadata {pin.label} descriptor changed {phase}")
     if pin.entries is not None:
         try:
-            current_entries = _snapshot_git_metadata_directory(pin.descriptor, label=pin.label)
+            current_entries = _snapshot_git_metadata_tree(pin.descriptor, label=pin.label)
         except ValueError as exc:
             raise ValueError(f"Git metadata {pin.path} entries changed {phase}") from exc
         if current_entries != pin.entries:
@@ -1633,24 +1786,113 @@ def _terminate_and_drain_git(
             _close_git_stream(None, stream)
 
 
-def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[int, bytes, bytes]:
-    """Collect both pipes incrementally and terminate the full process group."""
+class _ForkedGitProcess:
+    """Small Popen-compatible wait wrapper for a descriptor-bound fork."""
 
-    process: subprocess.Popen[bytes] | None = None
+    __slots__ = ("pid", "stdout", "stderr", "_returncode")
+
+    def __init__(self, pid: int, stdout_fd: int, stderr_fd: int) -> None:
+        self.pid = pid
+        self.stdout = os.fdopen(stdout_fd, "rb", buffering=0)
+        self.stderr = os.fdopen(stderr_fd, "rb", buffering=0)
+        self._returncode: int | None = None
+
+    def poll(self) -> int | None:
+        if self._returncode is not None:
+            return self._returncode
+        waited, status = os.waitpid(self.pid, os.WNOHANG)
+        if waited == 0:
+            return None
+        self._returncode = os.waitstatus_to_exitcode(status)
+        return self._returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self._returncode is not None:
+            return self._returncode
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        while True:
+            returncode = self.poll()
+            if returncode is not None:
+                return returncode
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(["git"], timeout)
+                time.sleep(min(0.005, remaining))
+            else:
+                time.sleep(0.005)
+
+    def terminate(self) -> None:
+        os.kill(self.pid, signal.SIGTERM)
+
+    def kill(self) -> None:
+        os.kill(self.pid, signal.SIGKILL)
+
+
+def _fork_exec_git(command: list[str], environment: dict[str, str]) -> _ForkedGitProcess:
+    """Fork, fchdir, and exec without ever rediscovering the root pathname."""
+
+    cwd_fd = getattr(command, "cwd_fd", None)
+    if cwd_fd is not None:
+        if type(cwd_fd) is not int or cwd_fd < 0:
+            raise ValueError("Git working-directory descriptor is malformed")
+        try:
+            metadata = os.fstat(cwd_fd)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ValueError("Git working-directory descriptor is unavailable") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("Git working-directory descriptor is not a directory")
+    stdin_fd = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    try:
+        pid = os.fork()
+    except BaseException:
+        for descriptor in (stdin_fd, stdout_read, stdout_write, stderr_read, stderr_write):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    if pid == 0:
+        try:
+            os.setsid()
+            os.dup2(stdin_fd, 0)
+            os.dup2(stdout_write, 1)
+            os.dup2(stderr_write, 2)
+            if cwd_fd is not None:
+                os.fchdir(cwd_fd)
+            os.closerange(3, max(256, int(os.sysconf("SC_OPEN_MAX"))))
+            os.execve(command[0], command, environment)
+        except BaseException:
+            try:
+                os.write(2, b"Git child setup or exec failed\n")
+            except OSError:
+                pass
+            os._exit(127)
+    for descriptor in (stdin_fd, stdout_write, stderr_write):
+        os.close(descriptor)
+    return _ForkedGitProcess(pid, stdout_read, stderr_read)
+
+
+def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[int, bytes, bytes]:
+    """Collect both pipes and execute from a descriptor-bound checkout root.
+
+    ``git -C /path`` re-discovers the path in the child after the caller's
+    validation window. The explicit fork performs ``fchdir`` on the retained
+    root descriptor before ``execve``; no root pathname is passed to Git.
+    """
+
+    process: _ForkedGitProcess | None = None
     selector: selectors.BaseSelector | None = None
     streams: tuple[Any, ...] = ()
     deadline: float | None = None
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            start_new_session=True,
-            env=environment,
-        )
+        # The command budget includes fork/setup and descriptor-bound fchdir,
+        # not only pipe collection after exec.
+        deadline = time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+        process = _fork_exec_git(command, environment)
         streams = (process.stdout, process.stderr)
         selector = selectors.DefaultSelector()
         labeled_streams = ((process.stdout, "stdout"), (process.stderr, "stderr"))
@@ -1659,7 +1901,6 @@ def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[i
                 raise ValueError(f"Git {label} stream is malformed")
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, label)
-        deadline = time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1791,7 +2032,25 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
         )
         os.close(common_fd)
         roots.append(common_dir)
-    return tuple(dict.fromkeys(roots))
+
+    unique_roots: list[Path] = []
+    seen_identity: set[tuple[int, int]] = set()
+    for candidate in roots:
+        candidate_fd, _canonical = _open_verified_directory_path(
+            candidate,
+            label="Git metadata root",
+            resolve_parent_aliases=False,
+        )
+        try:
+            metadata = os.fstat(candidate_fd)
+            identity = (metadata.st_dev, metadata.st_ino)
+        finally:
+            os.close(candidate_fd)
+        if identity in seen_identity:
+            continue
+        seen_identity.add(identity)
+        unique_roots.append(candidate)
+    return tuple(unique_roots)
 
 
 def _reject_git_metadata_links(metadata_root: Path) -> None:
@@ -1985,9 +2244,20 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
         root = Path(root).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git repository root is unavailable") from exc
-    metadata_roots = _git_metadata_roots(root)
     pins: list[_GitMetadataPin] = []
+    metadata_content_budget = [0]
     try:
+        # Retain the checkout root itself. Git must later chdir through this
+        # descriptor; the pathname is only a diagnostic and race witness.
+        pins.append(
+            _pin_git_metadata_path(
+                root,
+                label="Git repository root",
+                pin_content=False,
+                pin_entries=False,
+            )
+        )
+        metadata_roots = _git_metadata_roots(root)
         for metadata_root in metadata_roots:
             _reject_git_metadata_links(metadata_root)
 
@@ -2012,6 +2282,7 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                     label=label,
                     pin_content=pin_content,
                     pin_entries=pin_entries,
+                    content_budget=metadata_content_budget,
                 )
             )
         retained = tuple(pins)
@@ -2048,10 +2319,10 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                     if len(fields) >= 2 and fields[1].startswith("refs/replace/"):
                         raise ValueError("Git metadata uses replacement refs")
 
-            pack_directory = require_pin(metadata_root / "objects" / "pack", "Git pack metadata")
-            if pack_directory is not None and pack_directory.entries is not None:
-                for name, _identity in pack_directory.entries:
-                    if name.endswith(".promisor"):
+            objects_directory = require_pin(metadata_root / "objects", "Git object metadata")
+            if objects_directory is not None and objects_directory.entries is not None:
+                for relative, _identity, _content in objects_directory.entries:
+                    if relative.startswith("pack/") and relative.endswith(".promisor"):
                         raise ValueError("Git metadata uses a promisor pack sidecar")
 
         worktree_config_active = False
@@ -2090,6 +2361,37 @@ def _validate_git_metadata(root: Path) -> None:
     _close_git_metadata_pins(pins)
 
 
+def _bound_git_command(
+    executable: Path,
+    root_fd: int,
+    *arguments: str,
+) -> _BoundGitCommand:
+    """Build Git argv with no pathname-based repository rediscovery."""
+
+    return _BoundGitCommand(
+        [
+            str(executable),
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--no-optional-locks",
+            *arguments,
+        ],
+        cwd_fd=root_fd,
+    )
+
+
+def _git_root_descriptor(pins: tuple[_GitMetadataPin, ...], root: Path) -> int:
+    """Return the retained checkout-root descriptor for one command."""
+
+    for pin in pins:
+        if pin.path == root and pin.label == "Git repository root":
+            descriptor = pin.descriptor
+            if descriptor is None:
+                break
+            return descriptor
+    raise ValueError("Git repository root descriptor is unavailable")
+
+
 def _verify_git_repository(repository_root: Path) -> None:
     """Reject shallow, redirected, replacement, and promisor repositories."""
 
@@ -2103,16 +2405,13 @@ def _verify_git_repository(repository_root: Path) -> None:
     try:
         executable = _trusted_git_path()
         environment = _strict_git_environment()
-        command = [
-            str(executable),
-            "--no-replace-objects",
-            "--no-lazy-fetch",
-            "--no-optional-locks",
-            "-C",
-            str(root),
+        root_fd = _git_root_descriptor(pins, root)
+        command = _bound_git_command(
+            executable,
+            root_fd,
             "rev-parse",
             "--is-shallow-repository",
-        ]
+        )
         returncode, stdout, stderr = _run_with_git_metadata_pins(
             pins,
             lambda: _run_bounded_git(command, environment),
@@ -2142,7 +2441,14 @@ def _validated_git_context(repository_root: Path) -> dict[str, object]:
     executable = _trusted_git_path()
     environment = _strict_git_environment()
     pins = _validated_git_metadata(root)
-    return {"root": root, "executable": executable, "environment": environment, "pins": pins}
+    root_fd = _git_root_descriptor(pins, root)
+    return {
+        "root": root,
+        "executable": executable,
+        "environment": environment,
+        "pins": pins,
+        "root_fd": root_fd,
+    }
 
 
 def _git(repo_root: Path, *arguments: str) -> bytes:
@@ -2153,23 +2459,17 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     executable = context["executable"]
     environment = context["environment"]
     pins = context["pins"]
+    root_fd = context["root_fd"]
     if (
         not isinstance(root, Path)
         or not isinstance(executable, Path)
         or not isinstance(environment, dict)
         or not isinstance(pins, tuple)
+        or type(root_fd) is not int
     ):
         raise ValueError("Git context is malformed")
     try:
-        command = [
-            str(executable),
-            "--no-replace-objects",
-            "--no-lazy-fetch",
-            "--no-optional-locks",
-            "-C",
-            str(root),
-            *arguments,
-        ]
+        command = _bound_git_command(executable, root_fd, *arguments)
         returncode, stdout, stderr = _run_with_git_metadata_pins(
             pins,
             lambda: _git_output_bounded(command, environment),
@@ -2190,7 +2490,7 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
 def _git_text(repository_root: Path, *arguments: str) -> str:
     """Read one bounded, exact ASCII Git value from the trust root.
 
-    The normal path is the streaming Popen collector. The small alternate
+    The normal path is the streaming fork/exec collector. The small alternate
     branch exists only for legacy tests that replace ``subprocess.run`` with a
     malformed ``CompletedProcess`` seam; it never runs in an unmodified
     process and still uses the trusted executable and sanitized environment.
@@ -2201,22 +2501,16 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
     executable = context["executable"]
     environment = context["environment"]
     pins = context["pins"]
+    root_fd = context["root_fd"]
     if (
         not isinstance(root, Path)
         or not isinstance(executable, Path)
         or not isinstance(environment, dict)
         or not isinstance(pins, tuple)
+        or type(root_fd) is not int
     ):
         raise ValueError("Git context is malformed")
-    command = (
-        str(executable),
-        "--no-replace-objects",
-        "--no-lazy-fetch",
-        "--no-optional-locks",
-        "-C",
-        str(root),
-        *arguments,
-    )
+    command = _bound_git_command(executable, root_fd, *arguments)
     try:
         if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
             def legacy_run() -> Any:
@@ -2259,7 +2553,7 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
         else:
             returncode, output, diagnostics = _run_with_git_metadata_pins(
                 pins,
-                lambda: _git_output_bounded(list(command), environment),
+                lambda: _git_output_bounded(command, environment),
             )
             if type(returncode) is not int or returncode != 0:
                 raise ValueError("Git provenance could not be checked")

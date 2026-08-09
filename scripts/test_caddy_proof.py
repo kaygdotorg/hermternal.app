@@ -1376,6 +1376,8 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
         self.assertIn("--no-replace-objects", command)
         self.assertIn("--no-lazy-fetch", command)
         self.assertIn("--no-optional-locks", command)
+        self.assertNotIn("-C", command)
+        self.assertIsInstance(getattr(command, "cwd_fd", None), int)
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
@@ -1427,6 +1429,92 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
         self.assertTrue((root / ".git").is_dir())
         return root
 
+    def _commit_fixture(self, repository: Path, name: str, content: str) -> str:
+        path = repository / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(repository), "add", name], check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                f"fixture {name}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _run_git_with_real_subprocess_mutation(
+        self,
+        repository: Path,
+        mutation_script: str,
+        mutation_args: tuple[Path, ...],
+        *git_arguments: str,
+    ) -> list[tuple[int, bytes, bytes]]:
+        """Mutate metadata in a child before the real Git subprocess starts."""
+
+        marker = repository.parent / f"mutation-{os.getpid()}-{time.monotonic_ns()}.ready"
+        mutation = [
+            sys.executable,
+            "-c",
+            mutation_script,
+            *(str(path) for path in mutation_args),
+            str(marker),
+        ]
+        observed: list[tuple[int, bytes, bytes]] = []
+        real_runner = caddy_proof._run_bounded_git
+
+        def run_after_mutation(command, environment):
+            child = subprocess.Popen(
+                mutation,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 3.0
+                while not marker.exists():
+                    if child.poll() is not None:
+                        stdout, stderr = child.communicate()
+                        self.fail(
+                            "metadata mutation subprocess failed: "
+                            + (stderr or stdout).decode("utf-8", "replace")
+                        )
+                    if time.monotonic() >= deadline:
+                        child.kill()
+                        child.communicate()
+                        self.fail("metadata mutation subprocess did not signal readiness")
+                    time.sleep(0.005)
+                result = real_runner(command, environment)
+                observed.append(result)
+                return result
+            finally:
+                try:
+                    child.communicate(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.communicate(timeout=3.0)
+                marker.unlink(missing_ok=True)
+
+        with mock.patch.object(caddy_proof, "_run_bounded_git", side_effect=run_after_mutation):
+            with self.assertRaisesRegex(ValueError, "metadata changed|changed|symlink|content|identity"):
+                caddy_proof._git_text(repository, *git_arguments)
+        return observed
+
     def test_promisor_and_partial_clone_config_are_rejected(self) -> None:
         verifier = caddy_proof._verify_git_repository
         for key in ("extensions.partialClone", "remote.origin.promisor"):
@@ -1470,6 +1558,254 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "promisor|partial|lazy|worktree"):
                 caddy_proof._verify_git_repository(repository)
+
+    def test_git_whole_root_replacement_is_descriptor_bound_and_rejected(self) -> None:
+        mutation = (
+            "from pathlib import Path; import sys; "
+            "root,moved,replacement,marker=map(Path,sys.argv[1:]); "
+            "root.rename(moved); replacement.rename(root); marker.write_text('ready')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            original_sha = self._commit_fixture(repository, "original.txt", "original\n")
+            replacement = self._init_repository(parent / "replacement")
+            replacement_sha = self._commit_fixture(replacement, "replacement.txt", "replacement\n")
+            moved = parent / "moved-original"
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (repository, moved, replacement),
+                "rev-parse",
+                "HEAD",
+            )
+            self.assertEqual(observed[0][1], f"{original_sha}\n".encode("ascii"))
+            self.assertNotEqual(observed[0][1], f"{replacement_sha}\n".encode("ascii"))
+
+    def test_git_nested_ref_regular_replacement_is_rejected(self) -> None:
+        mutation = (
+            "from pathlib import Path; import os,sys; "
+            "target,replacement,marker=map(Path,sys.argv[1:]); "
+            "os.replace(replacement,target); marker.write_text('ready')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            first_sha = self._commit_fixture(repository, "first.txt", "first\n")
+            nested_ref = repository / ".git" / "refs" / "heads" / "nested" / "topic"
+            nested_ref.parent.mkdir(parents=True)
+            nested_ref.write_text(f"{first_sha}\n", encoding="ascii")
+            second_sha = self._commit_fixture(repository, "second.txt", "second\n")
+            replacement = parent / "replacement-ref"
+            replacement.write_text(f"{second_sha}\n", encoding="ascii")
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (nested_ref, replacement),
+                "rev-parse",
+                "--verify",
+                "refs/heads/nested/topic^{commit}",
+            )
+            self.assertEqual(observed[0][1], f"{second_sha}\n".encode("ascii"))
+
+    def test_git_same_inode_head_rewrite_is_rejected(self) -> None:
+        mutation = """
+from pathlib import Path
+import os
+import sys
+
+target, replacement, marker = map(Path, sys.argv[1:])
+content = replacement.read_bytes()
+with target.open("r+b") as handle:
+    if handle.seek(0, os.SEEK_END) != len(content):
+        raise RuntimeError("same-inode mutation changed the target size")
+    handle.seek(0)
+    handle.write(content)
+    handle.flush()
+    os.fsync(handle.fileno())
+marker.write_text("ready")
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            head = self._commit_fixture(repository, "fixture.txt", "fixture\n")
+            subprocess.run(["git", "-C", str(repository), "branch", "-M", "topic-a"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repository), "branch", "topic-b"], check=True, capture_output=True)
+            replacement = parent / "replacement-head"
+            replacement.write_bytes(b"ref: refs/heads/topic-b\n")
+            target = repository / ".git" / "HEAD"
+            self.assertEqual(target.stat().st_size, replacement.stat().st_size)
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (target, replacement),
+                "rev-parse",
+                "HEAD",
+            )
+            self.assertEqual(observed[0][1], f"{head}\n".encode("ascii"))
+
+    def test_git_same_inode_nested_ref_rewrite_is_rejected(self) -> None:
+        mutation = """
+from pathlib import Path
+import os
+import sys
+
+target, replacement, marker = map(Path, sys.argv[1:])
+content = replacement.read_bytes()
+with target.open("r+b") as handle:
+    if handle.seek(0, os.SEEK_END) != len(content):
+        raise RuntimeError("same-inode mutation changed the target size")
+    handle.seek(0)
+    handle.write(content)
+    handle.flush()
+    os.fsync(handle.fileno())
+marker.write_text("ready")
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            first_sha = self._commit_fixture(repository, "first.txt", "first\n")
+            nested_ref = repository / ".git" / "refs" / "heads" / "nested" / "topic"
+            nested_ref.parent.mkdir(parents=True)
+            nested_ref.write_text(f"{first_sha}\n", encoding="ascii")
+            second_sha = self._commit_fixture(repository, "second.txt", "second\n")
+            replacement = parent / "replacement-ref"
+            replacement.write_text(f"{second_sha}\n", encoding="ascii")
+            self.assertEqual(nested_ref.stat().st_size, replacement.stat().st_size)
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (nested_ref, replacement),
+                "rev-parse",
+                "--verify",
+                "refs/heads/nested/topic^{commit}",
+            )
+            self.assertEqual(observed[0][1], f"{second_sha}\n".encode("ascii"))
+
+    def test_git_nested_ref_symlink_replacement_is_rejected(self) -> None:
+        mutation = (
+            "from pathlib import Path; import sys; "
+            "target,moved,marker=map(Path,sys.argv[1:]); "
+            "target.rename(moved); target.symlink_to(moved); marker.write_text('ready')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            head = self._commit_fixture(repository, "fixture.txt", "fixture\n")
+            nested_ref = repository / ".git" / "refs" / "heads" / "nested" / "topic"
+            nested_ref.parent.mkdir(parents=True)
+            nested_ref.write_text(f"{head}\n", encoding="ascii")
+            moved = parent / "moved-nested-ref"
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (nested_ref, moved),
+                "rev-parse",
+                "--verify",
+                "refs/heads/nested/topic^{commit}",
+            )
+            self.assertEqual(observed[0][1], f"{head}\n".encode("ascii"))
+
+    def test_git_pack_index_in_place_bytes_are_rejected(self) -> None:
+        mutation = """
+from pathlib import Path
+import os
+import sys
+
+target, replacement, marker = map(Path, sys.argv[1:])
+content = replacement.read_bytes()
+with target.open("r+b") as handle:
+    if handle.seek(0, os.SEEK_END) != len(content):
+        raise RuntimeError("same-inode mutation changed the target size")
+    handle.seek(0)
+    handle.write(content)
+    handle.flush()
+    os.fsync(handle.fileno())
+marker.write_text("ready")
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            head = self._commit_fixture(repository, "fixture.txt", "fixture\n")
+            subprocess.run(
+                ["git", "-C", str(repository), "repack", "-ad"],
+                check=True,
+                capture_output=True,
+            )
+            indexes = sorted((repository / ".git" / "objects" / "pack").glob("*.idx"))
+            self.assertTrue(indexes)
+            target = indexes[0]
+            target.chmod(0o600)
+            replacement = parent / "replacement-index"
+            original = target.read_bytes()
+            self.assertTrue(original)
+            mutated = bytes([original[0] ^ 1]) + original[1:]
+            replacement.write_bytes(mutated)
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (target, replacement),
+                "cat-file",
+                "-p",
+                head,
+            )
+            self.assertIsInstance(observed[0][0], int)
+
+    def test_git_metadata_depth_and_aggregate_caps_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            nested = repository / ".git" / "refs" / "heads"
+            for index in range(caddy_proof.GIT_METADATA_MAX_DEPTH):
+                nested = nested / f"d{index}"
+                nested.mkdir()
+            (nested / "topic").write_text(f"{'0' * 40}\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "depth"):
+                caddy_proof._validate_git_metadata(repository)
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            with mock.patch.object(caddy_proof, "GIT_METADATA_TOTAL_CONTENT_MAX_BYTES", 1):
+                with self.assertRaisesRegex(ValueError, "content size|bounded"):
+                    caddy_proof._validate_git_metadata(repository)
+
+    def test_git_loose_object_in_place_bytes_are_rejected(self) -> None:
+        mutation = """
+from pathlib import Path
+import os
+import sys
+
+target, marker = map(Path, sys.argv[1:])
+with target.open("r+b") as handle:
+    data = handle.read(1)
+    handle.seek(0)
+    handle.write(bytes([data[0] ^ 1]))
+    handle.flush()
+    os.fsync(handle.fileno())
+marker.write_text("ready")
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            repository = self._init_repository(parent / "repo")
+            self._commit_fixture(repository, "fixture.txt", "fixture\n")
+            blob = subprocess.run(
+                ["git", "-C", str(repository), "hash-object", "-w", "--stdin"],
+                input=b"loose-object-fixture\n",
+                check=True,
+                capture_output=True,
+            ).stdout.decode("ascii").strip()
+            loose_object = repository / ".git" / "objects" / blob[:2] / blob[2:]
+            self.assertTrue(loose_object.is_file())
+            loose_object.chmod(0o600)
+            observed = self._run_git_with_real_subprocess_mutation(
+                repository,
+                mutation,
+                (loose_object,),
+                "cat-file",
+                "-p",
+                blob,
+            )
+            self.assertIsInstance(observed[0][0], int)
 
     def test_git_config_swap_after_validation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1558,6 +1894,63 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
                 target.symlink_to(outside, target_is_directory=True)
                 with self.assertRaisesRegex(ValueError, "symlink|metadata|link"):
                     caddy_proof._verify_git_repository(repository)
+
+    def test_descriptor_bound_linked_worktree_root_and_relative_metadata_survive_root_swap(self) -> None:
+        mutation = (
+            "from pathlib import Path; import sys; "
+            "root,moved,replacement,marker=map(Path,sys.argv[1:]); "
+            "root.rename(moved); replacement.rename(root); marker.write_text('ready')"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = self._init_repository(parent / "repo")
+            first_sha = self._commit_fixture(root, "first.txt", "first\n")
+            second_sha = self._commit_fixture(root, "second.txt", "second\n")
+            subprocess.run(
+                ["git", "-C", str(root), "config", "extensions.worktreeConfig", "true"],
+                check=True,
+                capture_output=True,
+            )
+            linked = parent / "linked"
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "--detach", "--quiet", str(linked), "HEAD"],
+                check=True,
+                capture_output=True,
+            )
+            linked_git_pointer = linked / ".git"
+            metadata_root = Path(linked_git_pointer.read_text(encoding="ascii").split(": ", 1)[1].strip())
+            linked_git_pointer.write_text(
+                f"gitdir: {os.path.relpath(metadata_root, linked.resolve())}\n",
+                encoding="ascii",
+            )
+            (metadata_root / "commondir").write_text("../..\n", encoding="ascii")
+            (metadata_root / "config.worktree").write_text("[core]\n\tbare = false\n", encoding="ascii")
+            subprocess.run(
+                ["git", "-C", str(root), "repack", "-ad"],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "pack-refs", "--all", "--prune"],
+                check=True,
+                capture_output=True,
+            )
+            replacement = parent / "replacement-linked"
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "--detach", "--quiet", str(replacement), first_sha],
+                check=True,
+                capture_output=True,
+            )
+            moved = parent / "moved-linked"
+            observed = self._run_git_with_real_subprocess_mutation(
+                linked,
+                mutation,
+                (linked, moved, replacement),
+                "rev-parse",
+                "HEAD",
+            )
+            self.assertEqual(observed[0][1], f"{second_sha}\n".encode("ascii"))
+            self.assertNotEqual(observed[0][1], f"{first_sha}\n".encode("ascii"))
 
     def test_linked_worktree_metadata_topology_remains_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
