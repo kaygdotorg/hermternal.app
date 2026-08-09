@@ -1,6 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { PassThrough } from 'node:stream';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -428,8 +427,15 @@ const DEPENDENCY_CACHE_CLONE_TIMEOUT_MS = 90_000;
 const DEPENDENCY_ESCALATION_DELAY_MS = 250;
 const DEPENDENCY_KILL_GRACE_MS = 5_000;
 const BENCHMARK_SHORT_TOTAL_TIMEOUT_MS = DEPENDENCY_KILL_GRACE_MS + 2_000;
+const COMPATIBILITY_TARGET_TIMEOUT_MS = 1_000;
+const COMPATIBILITY_HOLDER_DURATION_MS = 20_000;
+// Keep the generated compatibility wrapper alive beyond the target's complete
+// work-plus-cleanup budget. The regression must fail from its own lifecycle
+// fence, not from a Vitest or child-process watchdog.
+const COMPATIBILITY_HARNESS_DEADLINE_MS =
+  COMPATIBILITY_TARGET_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS + 4_000;
 const EXACT_PARENT_DEADLINE_REGRESSION_SHA = '5559e9ad4cf78debc98e8935c47cdc956535f96c';
-const EXACT_PARENT_STREAM_CLEANUP_REGRESSION_SHA = '9512f7ca4a1c99fd1a87b947617a3a1744d8674a';
+const EXACT_PARENT_STREAM_CLEANUP_REGRESSION_SHA = '9d9756b2a0a20130258766ea3a532c067e2f13f6';
 const BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const BUN_REGISTRY_BLACKHOLE = 'http://127.0.0.1:1';
 const OWNED_PROCESS_SUPERVISOR_SCRIPT = String.raw`
@@ -600,50 +606,135 @@ async function waitForProcessGroupGone(
 }
 
 type OwnedProcessStream = NodeJS.ReadableStream | NodeJS.WritableStream;
+type OwnedProcessListenerCallback = (...argumentsList: unknown[]) => void;
+type OwnedProcessListenerTarget = Readonly<{
+  listeners: (event: string) => Function[];
+}>;
+type OwnedProcessListener = Readonly<{
+  target: OwnedProcessListenerTarget;
+  event: string;
+  listener: OwnedProcessListenerCallback;
+}>;
+type OwnedProcessWait = Readonly<{
+  completion: Promise<void>;
+  dispose: () => void;
+  listeners: ReadonlyArray<OwnedProcessListener>;
+}>;
 
 function waitForOwnedStreamEvent(
   stream: OwnedProcessStream | null,
   event: 'end' | 'close'
-): Promise<void> {
-  if (!stream) return Promise.resolve();
+): OwnedProcessWait {
+  if (!stream) return { completion: Promise.resolve(), dispose: () => undefined, listeners: [] };
   const state = stream as OwnedProcessStream & {
     destroyed?: boolean;
     readableEnded?: boolean;
   };
-  if (state.destroyed || (event === 'end' && state.readableEnded)) return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    let settled = false;
-    const observeError = (): void => {
-      if (event === 'end') settle();
-    };
-    const settle = (): void => {
-      if (settled) return;
-      settled = true;
-      stream.removeListener('end', settle);
-      stream.removeListener('close', settle);
-      stream.removeListener('error', observeError);
-      resolve();
-    };
-    stream.once(event, settle);
-    stream.once('error', observeError);
-    if (event === 'end') stream.once('close', settle);
+  if (state.destroyed || (event === 'end' && state.readableEnded)) {
+    return { completion: Promise.resolve(), dispose: () => undefined, listeners: [] };
+  }
+
+  let settled = false;
+  let listenersRemoved = false;
+  let resolveCompletion: () => void = () => undefined;
+  const completion = new Promise<void>((resolve) => {
+    resolveCompletion = resolve;
   });
+  const removeListeners = (): void => {
+    if (listenersRemoved) return;
+    listenersRemoved = true;
+    stream.removeListener('end', settle);
+    stream.removeListener('close', settle);
+    stream.removeListener('error', observeError);
+  };
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    removeListeners();
+    resolveCompletion();
+  };
+  const observeError = (): void => {
+    if (event === 'end') settle();
+  };
+  const dispose = (): void => {
+    if (listenersRemoved) return;
+    settled = true;
+    removeListeners();
+  };
+  stream.once(event, settle);
+  stream.once('error', observeError);
+  if (event === 'end') stream.once('close', settle);
+  const target = stream as unknown as OwnedProcessListenerTarget;
+  const listeners: OwnedProcessListener[] = [
+    { target, event, listener: settle },
+    { target, event: 'error', listener: observeError }
+  ];
+  if (event === 'end') listeners.push({ target, event: 'close', listener: settle });
+  return { completion, dispose, listeners };
 }
 
-function waitForOwnedChildClose(child: ChildProcess): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const settle = (): void => {
-      child.removeListener('close', settle);
-      child.removeListener('error', observeError);
-      resolve();
-    };
-    const observeError = (): void => undefined;
-    child.once('close', settle);
-    // A spawn error has no useful process to close, but still needs a listener
-    // so Node does not report the error as an unhandled event. The descriptor
-    // wait remains bounded until the corresponding close or total deadline.
-    child.once('error', observeError);
+function waitForOwnedChildClose(child: ChildProcess): OwnedProcessWait {
+  let settled = false;
+  let listenersRemoved = false;
+  let resolveCompletion: () => void = () => undefined;
+  const completion = new Promise<void>((resolve) => {
+    resolveCompletion = resolve;
   });
+  const removeListeners = (): void => {
+    if (listenersRemoved) return;
+    listenersRemoved = true;
+    child.removeListener('close', settle);
+    child.removeListener('error', observeError);
+  };
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    removeListeners();
+    resolveCompletion();
+  };
+  const observeError = (): void => undefined;
+  const dispose = (): void => {
+    if (listenersRemoved) return;
+    settled = true;
+    removeListeners();
+  };
+  child.once('close', settle);
+  // A spawn error has no useful process to close, but still needs a listener
+  // so Node does not report the error as an unhandled event. The descriptor
+  // wait remains bounded until the corresponding close or total deadline.
+  child.once('error', observeError);
+  const target = child as unknown as OwnedProcessListenerTarget;
+  return {
+    completion,
+    dispose,
+    listeners: [
+      { target, event: 'close', listener: settle },
+      { target, event: 'error', listener: observeError }
+    ]
+  };
+}
+
+function createOwnedProcessDescriptorWait(
+  child: ChildProcess,
+  statusStream: NodeJS.ReadableStream | null
+): OwnedProcessWait {
+  const waits = [
+    waitForOwnedChildClose(child),
+    waitForOwnedStreamEvent(child.stdin, 'close'),
+    waitForOwnedStreamEvent(child.stdout, 'end'),
+    waitForOwnedStreamEvent(child.stdout, 'close'),
+    waitForOwnedStreamEvent(child.stderr, 'end'),
+    waitForOwnedStreamEvent(child.stderr, 'close'),
+    waitForOwnedStreamEvent(statusStream, 'end'),
+    waitForOwnedStreamEvent(statusStream, 'close')
+  ];
+  return {
+    completion: Promise.all(waits.map((wait) => wait.completion)).then(() => undefined),
+    dispose: () => {
+      for (const wait of waits) wait.dispose();
+    },
+    listeners: waits.flatMap((wait) => wait.listeners)
+  };
 }
 
 function destroyOwnedProcessDescriptors(child: ChildProcess): void {
@@ -654,26 +745,42 @@ function destroyOwnedProcessDescriptors(child: ChildProcess): void {
 }
 
 async function waitForOwnedProcessDescriptors(
-  completion: Promise<void>,
+  descriptorWait: OwnedProcessWait,
   child: ChildProcess,
-  deadline: number
+  deadline: number,
+  cleanupBeforeDestroy: () => void = () => undefined
 ): Promise<boolean> {
   const remaining = deadline - Date.now();
   if (remaining <= 0) {
+    descriptorWait.dispose();
+    cleanupBeforeDestroy();
     destroyOwnedProcessDescriptors(child);
     return false;
   }
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const completed = await Promise.race([
-    completion.then(() => true),
+    descriptorWait.completion.then(() => true),
     new Promise<boolean>((resolve) => {
       timeoutHandle = setTimeout(() => resolve(false), remaining);
     })
   ]);
   if (timeoutHandle) clearTimeout(timeoutHandle);
-  if (!completed) destroyOwnedProcessDescriptors(child);
+  if (!completed) {
+    descriptorWait.dispose();
+    cleanupBeforeDestroy();
+    destroyOwnedProcessDescriptors(child);
+  }
   return completed;
 }
+
+type OwnedProcessLifecycleResources = Readonly<{
+  child: ChildProcess;
+  stdin: NodeJS.WritableStream | null;
+  stdout: NodeJS.ReadableStream | null;
+  stderr: NodeJS.ReadableStream | null;
+  status: NodeJS.ReadableStream | null;
+  ownedListeners: ReadonlyArray<OwnedProcessListener>;
+}>;
 
 type OwnedProcessOptions = Readonly<{
   command: string;
@@ -686,6 +793,11 @@ type OwnedProcessOptions = Readonly<{
   outputLimitBytes: number;
   outputLimitMessage: string;
   isProcessGroupAlive?: (groupId: number) => boolean;
+  /** Test-only process seam drives deterministic inherited-pipe lifecycle cases. */
+  spawnProcess?: typeof spawn;
+  /** Test-only lifecycle probes verify listener removal after every settlement path. */
+  onLifecycleReady?: (resources: OwnedProcessLifecycleResources) => void;
+  onLifecycleSettled?: (resources: OwnedProcessLifecycleResources) => void;
 }>;
 
 function byteLengthOfChunk(chunk: unknown): number {
@@ -705,26 +817,43 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
     let groupId: number | undefined;
     let statusBuffer = '';
     let outputBytes = 0;
+    let descriptorWait: OwnedProcessWait | undefined;
+    let cleanupLifecycleListeners: () => void = () => undefined;
+    let lifecycleResources: OwnedProcessLifecycleResources | undefined;
     const groupAlive = options.isProcessGroupAlive ?? isProcessGroupAlive;
 
     const finish = (error?: Error): void => {
       if (settled) return;
+      // Mark settled before removing handlers so a synchronous late event from
+      // descriptor destruction cannot begin a second cleanup or settlement.
       settled = true;
       if (processTimeoutHandle) clearTimeout(processTimeoutHandle);
       if (escalationHandle) clearTimeout(escalationHandle);
+      cleanupLifecycleListeners();
+      if (lifecycleResources) options.onLifecycleSettled?.(lifecycleResources);
       if (error) reject(error);
       else resolve();
     };
 
     let finishAfterDescriptorCleanup: (error?: Error) => void = (error) => finish(error);
     let beginCleanup: (error?: Error) => void = () => undefined;
+    const outputListenerCleanup: Array<() => void> = [];
+    const lifecycleOwnedListeners: OwnedProcessListener[] = [];
     const observeOutput = (stream: NodeJS.ReadableStream | null): void => {
-      stream?.on('data', (chunk: unknown) => {
+      if (!stream) return;
+      const onData = (chunk: unknown): void => {
         if (settled) return;
         outputBytes = Math.min(options.outputLimitBytes + 1, outputBytes + byteLengthOfChunk(chunk));
         if (outputBytes > options.outputLimitBytes) {
           beginCleanup(new Error(options.outputLimitMessage));
         }
+      };
+      stream.on('data', onData);
+      outputListenerCleanup.push(() => stream.removeListener('data', onData));
+      lifecycleOwnedListeners.push({
+        target: stream as unknown as OwnedProcessListenerTarget,
+        event: 'data',
+        listener: onData
       });
     };
 
@@ -732,7 +861,8 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
     // sandbox-exec as the supervised command; build callers rely on
     // --no-install and offline environment flags rather than claiming an OS
     // network boundary for Vite.
-    const child = spawn(process.execPath, [
+    const spawnProcess = options.spawnProcess ?? spawn;
+    const child = spawnProcess(process.execPath, [
       '-e',
       OWNED_PROCESS_SUPERVISOR_SCRIPT,
       '--',
@@ -745,30 +875,42 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe']
     });
     groupId = child.pid ?? undefined;
-    observeOutput(child.stdout);
-    observeOutput(child.stderr);
-
     const statusStream = child.stdio[3] as NodeJS.ReadableStream | null;
-    const processDescriptorsClosed = Promise.all([
-      waitForOwnedChildClose(child),
-      waitForOwnedStreamEvent(child.stdin, 'close'),
-      waitForOwnedStreamEvent(child.stdout, 'end'),
-      waitForOwnedStreamEvent(child.stdout, 'close'),
-      waitForOwnedStreamEvent(child.stderr, 'end'),
-      waitForOwnedStreamEvent(child.stderr, 'close'),
-      waitForOwnedStreamEvent(statusStream, 'end'),
-      waitForOwnedStreamEvent(statusStream, 'close')
-    ]).then(() => undefined);
+    descriptorWait = createOwnedProcessDescriptorWait(child, statusStream);
+
+    let onStatusData: ((chunk: unknown) => void) | undefined;
+    const onChildError = (): void => beginCleanup(new Error('benchmark subprocess could not start'));
+    const onChildExit = (): void => {
+      if (!cleanupStarted && !statusReceived) {
+        beginCleanup(new Error(options.failureMessage));
+      }
+    };
+    cleanupLifecycleListeners = (): void => {
+      for (const removeListener of outputListenerCleanup) removeListener();
+      if (statusStream && onStatusData) statusStream.removeListener('data', onStatusData);
+      child.removeListener('error', onChildError);
+      child.removeListener('exit', onChildExit);
+      descriptorWait?.dispose();
+    };
     finishAfterDescriptorCleanup = (error?: Error): void => {
+      const wait = descriptorWait;
+      if (!wait) {
+        finish(error);
+        return;
+      }
       void waitForOwnedProcessDescriptors(
-        processDescriptorsClosed,
+        wait,
         child,
-        totalDeadline
+        totalDeadline,
+        cleanupLifecycleListeners
       ).then((descriptorsClosed) => {
         finish(descriptorsClosed ? error : new Error('benchmark subprocess process-group cleanup timed out'));
       });
     };
-    statusStream?.on('data', (chunk: unknown) => {
+
+    observeOutput(child.stdout);
+    observeOutput(child.stderr);
+    onStatusData = (chunk: unknown): void => {
       statusBuffer += Buffer.isBuffer(chunk)
         ? chunk.toString('utf8')
         : chunk instanceof Uint8Array
@@ -793,7 +935,15 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
           beginCleanup(new Error(options.failureMessage));
         }
       }
-    });
+    };
+    statusStream?.on('data', onStatusData);
+    if (statusStream) {
+      lifecycleOwnedListeners.push({
+        target: statusStream as unknown as OwnedProcessListenerTarget,
+        event: 'data',
+        listener: onStatusData
+      });
+    }
 
     beginCleanup = (error?: Error): void => {
       if (cleanupStarted) return;
@@ -833,12 +983,32 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
       }, Math.min(DEPENDENCY_ESCALATION_DELAY_MS, remaining));
     };
 
-    child.once('error', () => beginCleanup(new Error('benchmark subprocess could not start')));
-    child.once('exit', () => {
-      if (!cleanupStarted && !statusReceived) {
-        beginCleanup(new Error(options.failureMessage));
+    child.once('error', onChildError);
+    child.once('exit', onChildExit);
+    lifecycleOwnedListeners.push(
+      {
+        target: child as unknown as OwnedProcessListenerTarget,
+        event: 'error',
+        listener: onChildError
+      },
+      {
+        target: child as unknown as OwnedProcessListenerTarget,
+        event: 'exit',
+        listener: onChildExit
       }
-    });
+    );
+    lifecycleResources = {
+      child,
+      stdin: child.stdin,
+      stdout: child.stdout,
+      stderr: child.stderr,
+      status: statusStream,
+      ownedListeners: [
+        ...lifecycleOwnedListeners,
+        ...(descriptorWait?.listeners ?? [])
+      ]
+    };
+    options.onLifecycleReady?.(lifecycleResources);
     processTimeoutHandle = setTimeout(() => {
       beginCleanup(new Error(options.timeoutMessage));
     }, options.timeoutMs);
@@ -2804,65 +2974,369 @@ setInterval(() => undefined, 1_000);
     }
   }, 30_000);
 
-  it('bounds inherited stream cleanup after the exact parent resolves on group disappearance', async () => {
+  it('removes owned listeners after normal settlement and ignores late events', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-listener-cleanup-'));
+    let readyResources: OwnedProcessLifecycleResources | undefined;
+    let readySnapshot: Record<string, number> | undefined;
+    let readyOwnedListenerCount = 0;
+    let settledResources: OwnedProcessLifecycleResources | undefined;
+    let settlementCount = 0;
+    const listenerCount = (target: unknown, event: string): number => {
+      if (!target) return 0;
+      return (target as { listenerCount: (event: string) => number }).listenerCount(event);
+    };
+    const snapshot = (resources: OwnedProcessLifecycleResources): Record<string, number> => {
+      const targets: ReadonlyArray<readonly [string, unknown]> = [
+        ['child', resources.child],
+        ['stdin', resources.stdin],
+        ['stdout', resources.stdout],
+        ['stderr', resources.stderr],
+        ['status', resources.status]
+      ];
+      return Object.fromEntries(
+        targets.flatMap(([name, target]) =>
+          ['data', 'end', 'close', 'error', 'exit'].map((event) => [
+            `${name}.${event}`,
+            listenerCount(target, event)
+          ] as const)
+        )
+      );
+    };
+    const emit = (target: unknown, event: string, ...argumentsList: unknown[]): void => {
+      if (!target) return;
+      (target as { emit: (event: string, ...argumentsList: unknown[]) => boolean }).emit(event, ...argumentsList);
+    };
+    const ownedListenerCount = (resources: OwnedProcessLifecycleResources): number =>
+      resources.ownedListeners.filter(({ target, event, listener }) => target.listeners(event).includes(listener)).length;
+    try {
+      const lifecycle = runOwnedProcess({
+        command: '/bin/sh',
+        argumentsList: ['-c', 'printf ready; sleep 1'],
+        cwd: root,
+        environment: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: root, TMPDIR: root },
+        timeoutMs: 2_000,
+        failureMessage: 'listener cleanup subprocess failed',
+        timeoutMessage: 'listener cleanup subprocess timed out',
+        outputLimitBytes: BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES,
+        outputLimitMessage: 'listener cleanup subprocess output exceeded its bounded capture limit',
+        onLifecycleReady: (resources) => {
+          readyResources = resources;
+          readySnapshot = snapshot(resources);
+          readyOwnedListenerCount = ownedListenerCount(resources);
+        },
+        onLifecycleSettled: (resources) => {
+          settlementCount += 1;
+          settledResources = resources;
+        }
+      });
+      await expect(lifecycle).resolves.toBeUndefined();
+      if (!readyResources || !readySnapshot || !settledResources) throw new Error('lifecycle probe did not capture resources');
+      const settledSnapshot = snapshot(settledResources);
+      expect(readySnapshot['child.error']).toBeGreaterThan(0);
+      expect(readySnapshot['child.exit']).toBeGreaterThan(0);
+      expect(readySnapshot['stdout.data']).toBeGreaterThan(0);
+      expect(readySnapshot['status.data']).toBeGreaterThan(0);
+      expect(readyOwnedListenerCount).toBeGreaterThan(0);
+      const attachedOwnedListeners = settledResources.ownedListeners
+        .filter(({ target, event, listener }) => target.listeners(event).includes(listener))
+        .map(({ event }) => event);
+      expect(ownedListenerCount(settledResources), attachedOwnedListeners.join(',')).toBe(0);
+      expect(settledSnapshot['child.exit']).toBe(0);
+      expect(settledSnapshot['child.close']).toBe(0);
+      expect(settledSnapshot['stdout.data']).toBe(0);
+      expect(settledSnapshot['stderr.data']).toBe(0);
+      expect(settledSnapshot['status.data']).toBe(0);
+      expect(settlementCount).toBe(1);
+
+      // All lifecycle callbacks are gone before these synthetic late events;
+      // they must not restart cleanup or produce another settlement.
+      for (const target of [
+        settledResources.child,
+        settledResources.stdin,
+        settledResources.stdout,
+        settledResources.stderr,
+        settledResources.status
+      ]) {
+        emit(target, 'data', 'late output');
+        emit(target, 'end');
+        emit(target, 'close');
+        emit(target, 'exit', 0, null);
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settlementCount).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('runs the exact parent and target cleanup paths against inherited pipes', async () => {
     const parentSource = execFileSync(
       'git',
       ['-C', resolve(process.cwd(), '../..'), 'show', `${EXACT_PARENT_STREAM_CLEANUP_REGRESSION_SHA}:apps/web/src/lib/terminal/renderer.test.ts`],
       { encoding: 'utf8' }
     );
-    expect(parentSource).toContain(
-      "finish(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));"
+    const ownedProcessStart = parentSource.indexOf('const DEPENDENCY_INSTALL_TIMEOUT_MS');
+    const ownedProcessEnd = parentSource.indexOf('async function runOfflineBunInstall', ownedProcessStart);
+    expect(ownedProcessStart).toBeGreaterThanOrEqual(0);
+    expect(ownedProcessEnd).toBeGreaterThan(ownedProcessStart);
+    const exactParentOwnedProcessSource = parentSource.slice(ownedProcessStart, ownedProcessEnd);
+    expect(exactParentOwnedProcessSource).toContain(
+      "finishAfterDescriptorCleanup(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));"
     );
-    expect(parentSource).not.toContain('waitForOwnedProcessDescriptors');
-
-    const stdin = new PassThrough();
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    const status = new PassThrough();
-    const fakeChild = new PassThrough() as unknown as ChildProcess;
-    Object.assign(fakeChild, {
-      stdin,
-      stdout,
-      stderr,
-      stdio: [stdin, stdout, stderr, status]
-    });
-    const childClosed = waitForOwnedChildClose(fakeChild);
-    const processDescriptorsClosed = Promise.all([
-      childClosed,
-      waitForOwnedStreamEvent(stdin, 'close'),
-      waitForOwnedStreamEvent(stdout, 'end'),
-      waitForOwnedStreamEvent(stdout, 'close'),
-      waitForOwnedStreamEvent(stderr, 'end'),
-      waitForOwnedStreamEvent(stderr, 'close'),
-      waitForOwnedStreamEvent(status, 'end'),
-      waitForOwnedStreamEvent(status, 'close')
-    ]).then(() => undefined);
-
-    // The exact parent can settle on its leader/group signal while these
-    // inherited stdout/stderr pipes still contain buffered data and remain
-    // open. Confirm that compatibility observation before exercising the child
-    // descriptor fence.
-    fakeChild.emit('close');
-    stdout.write('buffered stdout');
-    stderr.write('buffered stderr');
-    await childClosed;
-    expect(stdout.readableEnded).toBe(false);
-    expect(stderr.readableEnded).toBe(false);
-
-    const startedAt = Date.now();
-    const cleaned = await waitForOwnedProcessDescriptors(
-      processDescriptorsClosed,
-      fakeChild,
-      startedAt + 1_000
+    expect(exactParentOwnedProcessSource).not.toContain('cleanupLifecycleListeners');
+    expect(COMPATIBILITY_HARNESS_DEADLINE_MS).toBeGreaterThan(
+      COMPATIBILITY_TARGET_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS
     );
-    const elapsedMs = Date.now() - startedAt;
-    expect(cleaned).toBe(false);
-    expect(elapsedMs).toBeLessThanOrEqual(1_500);
-    expect(stdin.destroyed).toBe(true);
-    expect(stdout.destroyed).toBe(true);
-    expect(stderr.destroyed).toBe(true);
-    expect(status.destroyed).toBe(true);
+    expect(COMPATIBILITY_HOLDER_DURATION_MS).toBeGreaterThan(COMPATIBILITY_HARNESS_DEADLINE_MS);
+
+    const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-compatibility-'));
+    const parentRoot = join(root, 'parent');
+    const targetRoot = join(root, 'target');
+    const holderDurationSeconds = Math.ceil(COMPATIBILITY_HOLDER_DURATION_MS / 1_000);
+    const fixtureSource = `#!${process.execPath}
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const pidPath = process.argv[2];
+const holder = spawn('/bin/sh', ['-c', 'exec /bin/sleep ${holderDurationSeconds}'], { detached: true, stdio: ['ignore', 1, 2] });
+writeFileSync(pidPath, String(holder.pid));
+process.on('SIGTERM', () => undefined);
+setInterval(() => undefined, 1_000);
+`;
+    const parentFixturePath = join(parentRoot, 'fixture.ts');
+    const targetFixturePath = join(targetRoot, 'fixture.ts');
+    const parentPidPath = join(parentRoot, 'holder-pid');
+    const targetPidPath = join(targetRoot, 'holder-pid');
+    const targetOuterHolderPidPath = join(targetRoot, 'outer-holder-pid');
+    const parentResultPath = join(parentRoot, 'result.json');
+    const parentHarnessPath = join(root, 'exact-parent-harness.ts');
+    let parentHolderPid: number | undefined;
+    let targetHolderPid: number | undefined;
+    let targetOuterHolderPid: number | undefined;
+    let parentHarness: ChildProcess | undefined;
+    let targetReadyResources: OwnedProcessLifecycleResources | undefined;
+    let targetReadySnapshot: Record<string, number> | undefined;
+    let targetReadyOwnedListenerCount = 0;
+    let targetSettledResources: OwnedProcessLifecycleResources | undefined;
+    let targetSettlementCount = 0;
+    const listenerCount = (target: unknown, event: string): number => {
+      if (!target) return 0;
+      return (target as { listenerCount: (event: string) => number }).listenerCount(event);
+    };
+    const snapshot = (resources: OwnedProcessLifecycleResources): Record<string, number> => {
+      const targets: ReadonlyArray<readonly [string, unknown]> = [
+        ['child', resources.child],
+        ['stdin', resources.stdin],
+        ['stdout', resources.stdout],
+        ['stderr', resources.stderr],
+        ['status', resources.status]
+      ];
+      return Object.fromEntries(
+        targets.flatMap(([name, target]) =>
+          ['data', 'end', 'close', 'error', 'exit'].map((event) => [
+            `${name}.${event}`,
+            listenerCount(target, event)
+          ] as const)
+        )
+      );
+    };
+    const emit = (target: unknown, event: string, ...argumentsList: unknown[]): void => {
+      if (!target) return;
+      (target as { emit: (event: string, ...argumentsList: unknown[]) => boolean }).emit(event, ...argumentsList);
+    };
+    const ownedListenerCount = (resources: OwnedProcessLifecycleResources): number =>
+      resources.ownedListeners.filter(({ target, event, listener }) => target.listeners(event).includes(listener)).length;
+    try {
+      mkdirSync(parentRoot, { recursive: true });
+      mkdirSync(targetRoot, { recursive: true });
+      writeFileSync(parentFixturePath, fixtureSource);
+      writeFileSync(targetFixturePath, fixtureSource);
+      chmodSync(parentFixturePath, 0o755);
+      chmodSync(targetFixturePath, 0o755);
+      const parentHarnessSource = [
+        "import { spawn, type ChildProcess } from 'node:child_process';",
+        "import { accessSync, constants as fsConstants, lstatSync, writeFileSync, writeSync } from 'node:fs';",
+        exactParentOwnedProcessSource,
+        `
+const [root, fixturePath, pidPath, resultPath] = process.argv.slice(2);
+const startedAt = Date.now();
+const harnessDeadlineMs = ${COMPATIBILITY_HARNESS_DEADLINE_MS};
+let errorMessage;
+let wroteResult = false;
+const writeResult = (message) => {
+  if (wroteResult) return;
+  wroteResult = true;
+  writeFileSync(resultPath, JSON.stringify({ elapsedMs: Date.now() - startedAt, errorMessage: message }));
+};
+const watchdog = setTimeout(() => {
+  writeResult('compatibility harness deadline exceeded');
+  process.exit(2);
+}, harnessDeadlineMs);
+try {
+  await runOwnedProcess({
+    command: fixturePath,
+    argumentsList: [pidPath],
+    cwd: root,
+    environment: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: root, TMPDIR: root },
+    timeoutMs: ${COMPATIBILITY_TARGET_TIMEOUT_MS},
+    failureMessage: 'compatibility subprocess failed',
+    timeoutMessage: 'compatibility subprocess timed out',
+    outputLimitBytes: 64 * 1024,
+    outputLimitMessage: 'compatibility subprocess output exceeded its bounded capture limit'
   });
+} catch (failure) {
+  errorMessage = failure instanceof Error ? failure.message : String(failure);
+}
+clearTimeout(watchdog);
+writeResult(errorMessage);
+process.exit(0);
+`
+      ].join('\n');
+      writeFileSync(parentHarnessPath, parentHarnessSource);
+      parentHarness = spawn(process.execPath, [parentHarnessPath, parentRoot, parentFixturePath, parentPidPath, parentResultPath], {
+        stdio: 'ignore'
+      });
+
+      const targetSpawn = ((command: string, argumentsList: readonly string[], options: Parameters<typeof spawn>[2]): ChildProcess => {
+        // The production supervisor gives its command separate stdout/stderr
+        // pipes, so a descendant of that command cannot keep the outer pipes
+        // open after the supervisor dies. This test-only launcher is the
+        // inherited-pipe holder: it shares the runOwnedProcess descriptors with
+        // the exact supervisor while leaving the supervisor group killable.
+        const launcherSource = `
+const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const [holderPidPath, supervisedCommand, supervisedArgumentsJson] = process.argv.slice(1);
+process.on('SIGTERM', () => undefined);
+const holder = spawn('/bin/sh', ['-c', 'exec /bin/sleep ${holderDurationSeconds}'], { detached: true, stdio: ['ignore', 1, 2] });
+writeFileSync(holderPidPath, String(holder.pid));
+const supervised = spawn(supervisedCommand, JSON.parse(supervisedArgumentsJson), { stdio: [0, 1, 2, 3] });
+supervised.once('exit', () => process.exit(0));
+`;
+        return spawn(process.execPath, [
+          '-e',
+          launcherSource,
+          targetOuterHolderPidPath,
+          command,
+          JSON.stringify(Array.from(argumentsList))
+        ], options);
+      }) as typeof spawn;
+      const targetStartedAt = Date.now();
+      const targetLifecycle = runOwnedProcess({
+        command: targetFixturePath,
+        argumentsList: [targetPidPath],
+        cwd: targetRoot,
+        environment: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: targetRoot, TMPDIR: targetRoot },
+        timeoutMs: COMPATIBILITY_TARGET_TIMEOUT_MS,
+        failureMessage: 'compatibility subprocess failed',
+        timeoutMessage: 'compatibility subprocess timed out',
+        outputLimitBytes: BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES,
+        outputLimitMessage: 'compatibility subprocess output exceeded its bounded capture limit',
+        spawnProcess: targetSpawn,
+        onLifecycleReady: (resources) => {
+          targetReadyResources = resources;
+          targetReadySnapshot = snapshot(resources);
+          targetReadyOwnedListenerCount = ownedListenerCount(resources);
+        },
+        onLifecycleSettled: (resources) => {
+          targetSettlementCount += 1;
+          targetSettledResources = resources;
+        }
+      });
+
+      await Promise.all([
+        vi.waitFor(() => expect(existsSync(parentPidPath)).toBe(true), { timeout: COMPATIBILITY_HARNESS_DEADLINE_MS }),
+        vi.waitFor(() => expect(existsSync(targetPidPath)).toBe(true), { timeout: COMPATIBILITY_HARNESS_DEADLINE_MS }),
+        vi.waitFor(() => expect(existsSync(targetOuterHolderPidPath)).toBe(true), { timeout: COMPATIBILITY_HARNESS_DEADLINE_MS }),
+        vi.waitFor(() => expect(existsSync(parentResultPath)).toBe(true), { timeout: COMPATIBILITY_HARNESS_DEADLINE_MS })
+      ]);
+      parentHolderPid = Number.parseInt(readFileSync(parentPidPath, 'utf8').trim(), 10);
+      targetHolderPid = Number.parseInt(readFileSync(targetPidPath, 'utf8').trim(), 10);
+      targetOuterHolderPid = Number.parseInt(readFileSync(targetOuterHolderPidPath, 'utf8').trim(), 10);
+      expect(Number.isSafeInteger(parentHolderPid)).toBe(true);
+      expect(Number.isSafeInteger(targetHolderPid)).toBe(true);
+      expect(Number.isSafeInteger(targetOuterHolderPid)).toBe(true);
+
+      const targetError = await targetLifecycle.then(() => undefined, (failure: unknown) => failure);
+      const targetElapsedMs = Date.now() - targetStartedAt;
+      const parentResult = JSON.parse(readFileSync(parentResultPath, 'utf8')) as {
+        elapsedMs: number;
+        errorMessage?: string;
+      };
+      expect(parentResult.errorMessage).toBe('compatibility subprocess timed out');
+      expect(parentResult.elapsedMs).toBeGreaterThanOrEqual(DEPENDENCY_ESCALATION_DELAY_MS);
+      expect(parentResult.elapsedMs).toBeLessThan(
+        COMPATIBILITY_TARGET_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS - 500
+      );
+      expect(isProcessAlive(parentHolderPid)).toBe(true);
+      expect(targetError).toBeInstanceOf(Error);
+      expect((targetError as Error).message).toBe('benchmark subprocess process-group cleanup timed out');
+      expect(targetElapsedMs).toBeGreaterThanOrEqual(
+        COMPATIBILITY_TARGET_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS - 500
+      );
+      expect(targetElapsedMs).toBeLessThanOrEqual(
+        COMPATIBILITY_TARGET_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS + 2_000
+      );
+      expect(isProcessAlive(targetHolderPid)).toBe(true);
+      expect(isProcessAlive(targetOuterHolderPid)).toBe(true);
+      if (!targetReadyResources || !targetReadySnapshot || !targetSettledResources) throw new Error('target lifecycle probe did not capture resources');
+      const targetSettledSnapshot = snapshot(targetSettledResources);
+      expect(targetReadySnapshot['child.error']).toBeGreaterThan(0);
+      expect(targetReadySnapshot['child.exit']).toBeGreaterThan(0);
+      expect(targetReadySnapshot['stdout.data']).toBeGreaterThan(0);
+      expect(targetReadySnapshot['status.data']).toBeGreaterThan(0);
+      expect(targetReadyOwnedListenerCount).toBeGreaterThan(0);
+      expect(ownedListenerCount(targetSettledResources)).toBe(0);
+      expect(targetSettledSnapshot['child.exit']).toBe(0);
+      expect(targetSettledSnapshot['child.close']).toBe(0);
+      expect(targetSettledSnapshot['stdout.data']).toBe(0);
+      expect(targetSettledSnapshot['stderr.data']).toBe(0);
+      expect(targetSettledSnapshot['status.data']).toBe(0);
+      expect(targetSettlementCount).toBe(1);
+      for (const descriptor of [
+        targetSettledResources.stdin,
+        targetSettledResources.stdout,
+        targetSettledResources.stderr,
+        targetSettledResources.status
+      ]) {
+        expect((descriptor as { destroyed?: boolean } | null)?.destroyed).toBe(true);
+      }
+
+      // The target's cleanup fence has removed every handler before closing
+      // inherited descriptors, so delayed output/exit events remain inert.
+      for (const target of [
+        targetSettledResources.child,
+        targetSettledResources.stdin,
+        targetSettledResources.stdout,
+        targetSettledResources.stderr,
+        targetSettledResources.status
+      ]) {
+        emit(target, 'data', 'late output');
+        emit(target, 'end');
+        emit(target, 'close');
+        emit(target, 'exit', 0, null);
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(targetSettlementCount).toBe(1);
+    } finally {
+      if (parentHarness && !parentHarness.killed) {
+        try {
+          parentHarness.kill('SIGKILL');
+        } catch {
+          // The compatibility child is best-effort cleanup after assertions.
+        }
+      }
+      for (const holderPid of [parentHolderPid, targetHolderPid, targetOuterHolderPid]) {
+        if (holderPid !== undefined && isProcessAlive(holderPid)) {
+          try {
+            process.kill(holderPid, 'SIGKILL');
+          } catch {
+            // The detached pipe holder is best-effort cleanup after assertions.
+          }
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('bounds hostile benchmark recomputation and cleans its detached descendants', async () => {
     const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-build-descendant-'));
