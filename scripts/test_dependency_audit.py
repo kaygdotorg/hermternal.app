@@ -369,6 +369,23 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(result["status"], "fail", result)
         self.assertIn("dependency-edge-limit", self.finding_codes(result), result)
 
+    def test_broader_bun_json5_forms_fail_with_explicit_reason(self) -> None:
+        manifest = json.dumps({"name": "@fixture/web", "dependencies": {}, "devDependencies": {}}).encode("utf-8")
+        standard_lock = synthetic_lock({}, {}, {})
+        variants = (
+            standard_lock.replace(b'"lockfileVersion"', b"lockfileVersion", 1),
+            standard_lock.replace(b'"lockfileVersion"', b"'lockfileVersion'", 1),
+        )
+        for lockfile in variants:
+            result = audit.audit_bytes(
+                manifest,
+                lockfile,
+                manifest_label="fixture/package.json",
+                lockfile_label="fixture/bun.lock",
+            )
+            self.assertEqual(result["status"], "fail", result)
+            self.assertIn("lockfile-json5-unsupported", self.finding_codes(result), result)
+
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
         names = {item["name"] for item in result["inventory"]["transitive"]}

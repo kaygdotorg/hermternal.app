@@ -80,6 +80,8 @@ REASONS = {
     "lockfile-invalid-utf8": "The lockfile was not valid UTF-8.",
     "manifest-json-invalid": "The manifest was not valid JSON or supported Bun JSON5 syntax.",
     "lockfile-json-invalid": "The lockfile was not valid JSON or supported Bun JSON5 syntax.",
+    "manifest-json5-unsupported": "The manifest used valid Bun JSON5 syntax outside this bounded parser subset.",
+    "lockfile-json5-unsupported": "The lockfile used valid Bun JSON5 syntax outside this bounded parser subset.",
     "manifest-duplicate-key": "The manifest contained a duplicate object key.",
     "lockfile-duplicate-key": "The lockfile contained a duplicate object key.",
     "manifest-shape-invalid": "The manifest dependency sections had an invalid shape.",
@@ -177,11 +179,13 @@ def _object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _strip_bun_json5(text: str) -> str:
-    """Remove comments and trailing commas only outside JSON strings.
+    """Strip the supported Bun JSON5 subset without silently rewriting others.
 
-    Bun lockfiles use JSON with trailing commas. A string-aware pass avoids the
-    common unsafe regex mistake of changing a package name or integrity string
-    that happens to contain punctuation resembling a trailing comma.
+    Bun lockfiles use JSON with comments and trailing commas. A string-aware pass
+    avoids the common unsafe regex mistake of changing a package name or
+    integrity string that happens to contain punctuation resembling a trailing
+    comma. Other valid JSON5 forms are rejected explicitly rather than being
+    silently normalized into a different document.
     """
 
     output: list[str] = []
@@ -206,6 +210,32 @@ def _strip_bun_json5(text: str) -> str:
             output.append(char)
             index += 1
             continue
+        if char == "'":
+            raise ValueError("unsupported-json5")
+        if (
+            (char == "+" and not (index > 0 and text[index - 1] in "eE" and index + 1 < length and text[index + 1].isdigit()))
+            or (
+                char == "."
+                and index + 1 < length
+                and text[index + 1].isdigit()
+                and (index == 0 or not text[index - 1].isdigit())
+            )
+        ):
+            raise ValueError("unsupported-json5")
+        if char == "-" and index + 1 < length and text[index + 1] == ".":
+            raise ValueError("unsupported-json5")
+        if char == "0" and index + 1 < length and text[index + 1] in "xX":
+            raise ValueError("unsupported-json5")
+        if char.isalpha() or char in "_$":
+            token_end = index + 1
+            while token_end < length and (text[token_end].isalnum() or text[token_end] in "_$"):
+                token_end += 1
+            token = text[index:token_end]
+            lookahead = token_end
+            while lookahead < length and text[lookahead] in " \t\r\n":
+                lookahead += 1
+            if token in {"Infinity", "NaN"} or (lookahead < length and text[lookahead] == ":"):
+                raise ValueError("unsupported-json5")
         if char == "/" and index + 1 < length and text[index + 1] in ("/", "*"):
             if text[index + 1] == "/":
                 index += 2
@@ -247,7 +277,11 @@ def _parse_document(data: bytes, input_name: str) -> Mapping[str, Any]:
         )
     except DuplicateKeyError as error:
         raise AuditError(f"{input_name}-duplicate-key") from error
-    except (ValueError, TypeError, json.JSONDecodeError, RecursionError) as error:
+    except ValueError as error:
+        if str(error) == "unsupported-json5":
+            raise AuditError(f"{input_name}-json5-unsupported") from error
+        raise AuditError(f"{input_name}-json-invalid") from error
+    except (TypeError, RecursionError) as error:
         raise AuditError(f"{input_name}-json-invalid") from error
     if not isinstance(parsed, dict):
         raise AuditError(f"{input_name}-shape-invalid")
