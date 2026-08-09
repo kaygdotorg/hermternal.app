@@ -237,14 +237,16 @@ test('narrow production route keeps one current session across accessible Chat a
   await expect(terminalSurface).toHaveAttribute('data-terminal-state', 'open');
   await expect(terminalSelected).toBeVisible();
 
-  // Narrow uses the selector above Terminal. Desktop instead returns focus to a
-  // Chat control in the covered underlay, so assert hit-test visibility at the
-  // instant the real handoff calls focus rather than trusting a layout rect.
+  // At 1280px the approved intermediate layout keeps its compact mode
+  // selector above Terminal. The handoff must target its visible Chat control,
+  // not the hidden ConversationHeader copy in the underlay.
   await page.setViewportSize({ width: 1280, height: 800 });
-  // The inactive Desktop control is intentionally behind the Terminal-owned
-  // accessibility boundary. Use its stable DOM selector until the handoff flips
-  // it to the selected, released Chat control.
-  const desktopChat = underlay.locator('button[aria-label="Chat mode selected"]');
+  const intermediateModeSelector = page.getByTestId('mobile-mode-selector');
+  const intermediateChat = intermediateModeSelector.locator('button:first-child');
+  await expect(intermediateModeSelector).toBeVisible();
+  await expect(intermediateChat).toBeVisible();
+  await expect(intermediateChat).toHaveAttribute('aria-label', 'Open chat mode');
+  await expect(intermediateChat).toHaveAttribute('aria-pressed', 'false');
   const returnToChat = page.getByRole('button', { name: 'Return to Chat mode' });
   await expect(returnToChat).toBeVisible();
   await returnToChat.focus();
@@ -253,11 +255,11 @@ test('narrow production route keeps one current session across accessible Chat a
     const result = { focused: false, hitTestVisible: false, terminalHiddenAtFocus: false };
     const originalFocus = HTMLElement.prototype.focus;
     Object.assign(window, {
-      __e2eDesktopChatFocusHandoff: result,
-      __e2eRestoreDesktopFocus: () => { HTMLElement.prototype.focus = originalFocus; }
+      __e2eIntermediateChatFocusHandoff: result,
+      __e2eRestoreIntermediateFocus: () => { HTMLElement.prototype.focus = originalFocus; }
     });
     HTMLElement.prototype.focus = function (options?: FocusOptions): void {
-      if (this.matches('[data-testid="workspace-underlay"] button[aria-label="Chat mode selected"]')) {
+      if (this.matches('[data-testid="mobile-mode-selector"] button[aria-label="Chat mode selected"]')) {
         const rect = this.getBoundingClientRect();
         const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         result.focused = true;
@@ -269,17 +271,19 @@ test('narrow production route keeps one current session across accessible Chat a
   });
   await page.keyboard.press('Space');
   await expect(terminalSurface).toBeHidden();
-  await expect(desktopChat).toBeFocused();
+  await expect(intermediateChat).toHaveAttribute('aria-label', 'Chat mode selected');
+  await expect(intermediateChat).toHaveAttribute('aria-pressed', 'true');
+  await expect(intermediateChat).toBeFocused();
   await expect(underlay).not.toHaveAttribute('inert', '');
   expect(
     await page.evaluate(
       () => (window as typeof window & {
-        __e2eDesktopChatFocusHandoff?: { focused: boolean; hitTestVisible: boolean; terminalHiddenAtFocus: boolean };
-      }).__e2eDesktopChatFocusHandoff
+        __e2eIntermediateChatFocusHandoff?: { focused: boolean; hitTestVisible: boolean; terminalHiddenAtFocus: boolean };
+      }).__e2eIntermediateChatFocusHandoff
     )
   ).toEqual({ focused: true, hitTestVisible: true, terminalHiddenAtFocus: true });
   await page.evaluate(() => {
-    (window as typeof window & { __e2eRestoreDesktopFocus?: () => void }).__e2eRestoreDesktopFocus?.();
+    (window as typeof window & { __e2eRestoreIntermediateFocus?: () => void }).__e2eRestoreIntermediateFocus?.();
   });
 
   expect(createRequests).toBe(0);
