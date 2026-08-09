@@ -82,9 +82,16 @@ current product identity, and task-244 parity binding remains a blocker until
 an independent check verifies it; retaining their digests must not silently
 claim parity. Static-tree and Git trust boundaries have explicit resource and
 special-file limits: static provenance is bounded to regular-file data and
-rejects symlinks and other special files, while Git provenance uses timed
-commands with bounded output and diagnostics. Any limit, identity,
-malformed-output, or command failure fails closed.
+rejects symlinks and other special files, with one monotonic deadline covering
+root resolution through the final digest return. Git provenance uses timed
+commands with bounded output and diagnostics. Its bounded local metadata scan
+rejects nested symlink escapes, include/includeIf directives, and every
+promisor or partial-clone selector, including key-only booleans and active
+`config.worktree`; external Git configuration is disabled. If both Git pipes
+close while the process continues, the path still returns the bounded proof
+timeout after terminating and reaping the process group. Renderer path inputs
+are literal absolute filesystem paths; Caddy placeholders are rejected. Any
+limit, identity, malformed-output, or command failure fails closed.
 
 The retained workflow must use the complete evidence file at the canonical
 committed path `tests/integration/hermes-caddy/caddy-proof-evidence.json`.
