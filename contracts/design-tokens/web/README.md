@@ -6,8 +6,8 @@
 
 - Paper file: `01KZ6BB66KCWR2C4J2TSWQGDM7` (`Hermternal`)
 - Chat workspace page: `A-0`, `Chat workspace`, 34 artboards
-- Authentication page: `3-0`, `Web states — Authentication`, 48 artboards
-- Runtime page: `4-0`, `Web states — Runtime`, 68 artboards
+- Authentication page: `C-0`, `Authentication`, 48 artboards
+- Runtime page: `D-0`, `Runtime and recovery`, 40 artboards
 - Shared Chat–Terminal workspace page: `B-0`, 25 artboards
 - Terminal desktop lifecycle page: `E-0`, 22 artboards
 - Terminal narrow and mobile page: `F-0`, 28 artboards
@@ -20,7 +20,7 @@
 - Authentication and standalone Terminal desktop: `1440 × 900`
 - Narrow: `390 × 844`
 
-The generic inventory represents 120 artboards in 30 state records. The nested Terminal evidence inventory represents 78 artboards in 15 lifecycle, selector, accessibility, and continuity records. Every registered record is matched to the approved Paper snapshot; the manifest does not infer missing Paper evidence.
+The generic inventory represents 120 artboards in 30 state records. The nested Terminal evidence inventory represents 78 artboards in 15 lifecycle, selector, accessibility, and continuity records. Every registered record is matched to the approved Paper snapshot; the manifest does not infer missing Paper evidence. The legacy `3-0` (`Web states — Authentication`) and `4-0` (`Web states — Runtime`) pages are empty and are not claimed as populated evidence sources.
 
 ## Evidence status
 
