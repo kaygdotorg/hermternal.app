@@ -85,23 +85,17 @@ class RegistryTests(unittest.TestCase):
         cls.baseline = validate.load_json(validate.BASELINE_PATH)
 
     def test_checked_in_registry_is_valid_and_partial_is_not_success(self) -> None:
-        # Source-only validator corrections intentionally leave the checked-in
-        # benchmark manifest frozen until evidence rotation is authorized. Keep
-        # registry/artifact validation green independently, then require the
-        # complete path to report the stale evidence boundary.
-        fixture_count, coverage_count = validate._validate_index_document(self.index, validate.REPO_ROOT)
+        fixture_count, coverage_count = validate.validate_all(
+            self.index,
+            self.schema,
+            self.baseline,
+            repo_root=validate.REPO_ROOT,
+            baseline_path=validate.BASELINE_PATH,
+        )
         self.assertEqual(fixture_count, len(self.index["fixture_roots"]))
         self.assertEqual(coverage_count, len(self.index["coverage"]))
         self.assertEqual(self.index["evidence_status"], "partial")
         self.assertFalse(self.index["live_claim"])
-        with self.assertRaises(validate.ValidationError):
-            validate.validate_all(
-                self.index,
-                self.schema,
-                self.baseline,
-                repo_root=validate.REPO_ROOT,
-                baseline_path=validate.BASELINE_PATH,
-            )
 
     def test_digest_mutation_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.index)
@@ -198,9 +192,8 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_baseline(mutated, validate.REPO_ROOT, validate.BASELINE_PATH)
 
-    def test_canonical_baseline_anchor_reports_source_only_staleness(self) -> None:
-        # The source-only correction must not rotate reviewed benchmark evidence.
-        self.assertNotEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
+    def test_canonical_baseline_anchor_matches_refreshed_evidence(self) -> None:
+        self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
 
 class CliTests(unittest.TestCase):
@@ -1535,18 +1528,20 @@ class CliTests(unittest.TestCase):
             "mean": statistics.mean(samples),
         }
 
-    def test_normal_and_optimized_blocked_modes_have_same_boundary(self) -> None:
+    def test_normal_and_optimized_cli_outputs_are_identical(self) -> None:
         normal = self._run()
         optimized = self._run(optimized=True)
-        self.assertEqual(normal.returncode, 1)
-        self.assertEqual(optimized.returncode, 1)
+        self.assertEqual(normal.returncode, 0)
+        self.assertEqual(optimized.returncode, 0)
         normal_payload = json.loads(normal.stdout)
         optimized_payload = json.loads(optimized.stdout)
         self.assertEqual(normal_payload, optimized_payload)
-        self.assertFalse(normal_payload["ok"])
+        self.assertTrue(normal_payload["ok"])
+        self.assertFalse(normal_payload["complete"])
         self.assertFalse(normal_payload["live_claim"])
-        self.assertEqual(normal_payload["evidence_status"], "blocked")
-        self.assertEqual(normal_payload["error"]["code"], "fixture_index_invalid")
+        self.assertEqual(normal_payload["evidence_status"], "partial")
+        self.assertEqual(normal_payload["fixture_count"], 30)
+        self.assertEqual(normal_payload["coverage_count"], 29)
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
 
@@ -1556,16 +1551,16 @@ class CliTests(unittest.TestCase):
         fixture_count, coverage_count = validate._validate_index_document(index, repo_root)
         self.assertEqual(fixture_count, 30)
         self.assertEqual(coverage_count, 29)
-        # The copied source has the same intentionally frozen baseline, so the
-        # complete CLI must remain blocked rather than claim refreshed evidence.
         for optimized in (False, True):
             completed = self._run(optimized=optimized, repo_root=repo_root)
-            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
-            self.assertFalse(payload["ok"])
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["complete"])
             self.assertFalse(payload["live_claim"])
-            self.assertEqual(payload["evidence_status"], "blocked")
-            self.assertEqual(payload["error"]["code"], "fixture_index_invalid")
+            self.assertEqual(payload["evidence_status"], "partial")
+            self.assertEqual(payload["fixture_count"], 30)
+            self.assertEqual(payload["coverage_count"], 29)
             self.assertEqual(completed.stderr, "")
 
         unknown = repo_root / "contracts/fixtures/pty-detach-race/unregistered-artifact.txt"

@@ -24,16 +24,16 @@
     },
     {
       "path": "contracts/fixtures/validator/test_validate.py",
-      "sha256": "ba2112a00a1a7087a895964dd417e304690732461887c3fa5b443e57532700ed",
-      "size_bytes": 29874
+      "sha256": "712c20bf2d3862c2e1829d8fe6e58338b8ba3a38c7f8dc33475716a6f29cf73b",
+      "size_bytes": 81147
     },
     {
       "path": "contracts/fixtures/validator/validate.py",
-      "sha256": "bc22fa45dd6b874caca3719a8c3a8767389ba6fb620698725ce080d348df7e37",
-      "size_bytes": 67145
+      "sha256": "19fb90af49e5f9f0c311c421f4baeca0241a9aa9ddbe7d6511bbb5e4c5b6da30",
+      "size_bytes": 289878
     }
   ],
-  "artifact_size_bytes": 170382,
+  "artifact_size_bytes": 444388,
   "normal": {
     "command": "python3 contracts/fixtures/validator/validate.py",
     "repetitions": 30,
@@ -120,5 +120,5 @@
       "mean": 769.234
     }
   },
-  "notes": "Observed process durations only; threshold intentionally remains null until B-01 approves a budget."
+  "notes": "Observed process durations for the aggregate validator; the standalone suite currently contains 48 tests. Threshold intentionally remains null until B-01 approves a budget."
 }

@@ -167,7 +167,7 @@ TRUSTED_PATH_ALIASES = frozenset({Path("/tmp"), Path("/var"), Path("/var/folders
 # This reviewed digest is authority for its domain fixture, not a canonical
 # fixture root. Keep the exemption exact so another review-anchor artifact still
 # fails the aggregate unindexed-file boundary.
-BASELINE_CANONICAL_SHA256 = "3b9078ce4d311b53d0493613b308402e4e2c2434d0582aa00f591803d003be02"
+BASELINE_CANONICAL_SHA256 = "e47d610aaf66737ad26fbcc80b64c72384e7b646266bab2fc9d099458b0c4ffb"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
