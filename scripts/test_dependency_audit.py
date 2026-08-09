@@ -179,6 +179,19 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("missing-integrity", self.finding_codes(result), result)
         self.assertGreaterEqual(len(result["lockfile"]["integrity_missing"]), 1, result)
 
+    def test_config_version_is_shape_checked_before_output(self) -> None:
+        lock_document = json.loads(synthetic_lock({"alpha": "1.0.0"}, {}, {"alpha": package_record("alpha", "1.0.0")}))
+        lock_document["configVersion"] = {"unexpected": "object"}
+        result = audit.audit_bytes(
+            json.dumps({"name": "@fixture/web", "dependencies": {"alpha": "1.0.0"}, "devDependencies": {}}).encode("utf-8"),
+            json.dumps(lock_document).encode("utf-8"),
+            manifest_label="fixture/package.json",
+            lockfile_label="fixture/bun.lock",
+        )
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("invalid-config-version", self.finding_codes(result), result)
+        self.assertIsNone(result["lockfile"]["config_version"], result)
+
     def test_invalid_integrity_is_blocking_and_sanitized(self) -> None:
         mutated = re.sub(
             rb', "sha512-[^"]+"(?=\])',

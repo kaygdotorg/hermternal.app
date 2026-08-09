@@ -85,6 +85,7 @@ REASONS = {
     "manifest-shape-invalid": "The manifest dependency sections had an invalid shape.",
     "lockfile-shape-invalid": "The lockfile workspace or package records had an invalid shape.",
     "unsupported-lock-version": "The audit supports only Bun lockfile version 1.",
+    "invalid-config-version": "The Bun lockfile configVersion was not a bounded non-negative integer.",
     "manifest-lock-mismatch": "Manifest dependency declarations did not match the lockfile workspace root.",
     "manifest-unpinned": "A direct manifest dependency does not use an exact version or exact npm alias.",
     "lock-entry-unpinned": "A lockfile package record does not resolve to an exact semantic version.",
@@ -152,6 +153,7 @@ class LockPackage:
 class ParsedInputs:
     manifest: Mapping[str, Any]
     lockfile: Mapping[str, Any]
+    config_version: int
     packages: Mapping[str, LockPackage]
     manifest_dependencies: Mapping[str, str]
     manifest_dev_dependencies: Mapping[str, str]
@@ -284,6 +286,12 @@ def _valid_integrity(value: str) -> bool:
     return len(digest) == INTEGRITY_DIGEST_LENGTHS[algorithm]
 
 
+def _require_config_version(value: Any) -> int:
+    if type(value) is not int or value < 0 or value > (2**31 - 1):
+        raise AuditError("invalid-config-version")
+    return value
+
+
 def _require_dependency_map(value: Any) -> dict[str, str]:
     if value is None:
         return {}
@@ -380,6 +388,7 @@ def _parse_lock_packages(document: Mapping[str, Any]) -> dict[str, LockPackage]:
 
 def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mapping[str, Any]) -> ParsedInputs:
     manifest_dependencies, manifest_dev_dependencies = _parse_manifest(manifest_document)
+    config_version = _require_config_version(lockfile_document.get("configVersion"))
     packages = _parse_lock_packages(lockfile_document)
     workspaces = lockfile_document["workspaces"]
     root = workspaces[""]
@@ -390,6 +399,7 @@ def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mappi
     return ParsedInputs(
         manifest=manifest_document,
         lockfile=lockfile_document,
+        config_version=config_version,
         packages=packages,
         manifest_dependencies=manifest_dependencies,
         manifest_dev_dependencies=manifest_dev_dependencies,
@@ -904,7 +914,7 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     result["inventory"] = {"direct": direct_output, "transitive": transitive_output}
     result["lockfile"] = {
         "lockfile_version": inputs.lockfile.get("lockfileVersion"),
-        "config_version": inputs.lockfile.get("configVersion"),
+        "config_version": inputs.config_version,
         "package_count": len(inputs.packages),
         "integrity_present": len(inputs.packages) - len(integrity_missing) - len(integrity_invalid),
         "integrity_missing": integrity_missing,
