@@ -16,16 +16,16 @@
   let lastPublishedIdentity: AuthIdentity | undefined;
 
   $: authState = toViewState(snapshot);
+  $: keepAuthenticatedProjection =
+    snapshot.status === 'authenticated' || snapshot.status === 'logging_out' || snapshot.status === 'logout_failed';
   $: if (snapshot.status === 'authenticated' && snapshot.identity !== lastPublishedIdentity) {
     lastPublishedIdentity = snapshot.identity;
     if (snapshot.identity) onAuthenticated(snapshot.identity);
   }
 
   function handleAction(action: AuthAction): void {
-    if (action.type === 'retry-logout') {
-      if (snapshot.status === 'logout_failed') void session.logout();
-      return;
-    }
+    // Logout remains an internal lifecycle boundary until Paper approves a
+    // visible pending/recovery family. Generic auth controls cannot interrupt it.
     if (snapshot.status === 'logging_out' || snapshot.status === 'logout_failed') return;
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
@@ -86,15 +86,16 @@
     if (value.status === 'provider_unavailable') return 'provider-unavailable';
     if (value.status === 'password_submitting') return 'password-submitting';
     if (value.status === 'expired') return 'session-expired';
-    if (value.status === 'logging_out') return 'logout-pending';
-    if (value.status === 'logout_failed') return 'logout-failed';
     if (value.status === 'failed') return 'failure';
     if (value.selectedProviderId) return 'password';
     return 'provider-selection';
   }
 </script>
 
-{#if snapshot.status === 'authenticated'}
+{#if keepAuthenticatedProjection}
+  <!-- Logout pending/recovery is deliberately not a new Authentication
+       presentation state. The authenticated projection remains mounted until
+       the internal lifecycle proves signed-out or a reviewed Paper state exists. -->
   <slot />
 {:else}
   <AuthPreview
@@ -102,7 +103,7 @@
     discoveryMode="live"
     failureCode={snapshot.errorCode}
     failureMessage={snapshot.errorCode ? browserAuthErrorMessage(snapshot.errorCode) : undefined}
-    providers={snapshot.providers.filter((provider) => provider.kind === 'password')}
+    providers={snapshot.providers}
     state={authState}
     onAction={handleAction}
     onPasswordSubmit={handlePasswordSubmit}

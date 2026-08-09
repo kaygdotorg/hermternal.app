@@ -4,12 +4,26 @@ import { authStateForProviderKind } from '$lib/auth-ui/types';
 import PreviewPage from './+page.svelte';
 
 describe('ui preview route', () => {
-  it('provides local selectors for runtime and authentication state variants', async () => {
+  it('provides the seven Authentication families and runtime selectors', async () => {
     render(PreviewPage);
 
     const runtimeSelect = screen.getByRole('combobox', { name: 'Runtime state' });
     const authSelect = screen.getByRole('combobox', { name: 'Authentication state' });
     expect(screen.getByRole('heading', { name: 'Runtime and authentication states' })).toBeInTheDocument();
+    expect(Array.from(authSelect.querySelectorAll('option')).map((option) => option.value)).toEqual([
+      'provider-selection',
+      'password',
+      'password-submitting',
+      'callback',
+      'failure',
+      'session-expired',
+      'discovery-pending',
+      'discovery-retry',
+      'discovery-empty',
+      'discovery-malformed',
+      'discovery-aborted',
+      'provider-unavailable'
+    ]);
 
     fireEvent.change(runtimeSelect, { target: { value: 'offline' } });
     fireEvent.change(authSelect, { target: { value: 'failure' } });
@@ -20,21 +34,18 @@ describe('ui preview route', () => {
     });
   });
 
-  it.each([undefined, null, '', 'device-code', 'oauth-v2']) (
-    'fails closed for an unknown provider kind: %s',
-    (providerKind) => {
-      expect(authStateForProviderKind(providerKind)).toBe('provider-unavailable');
-    }
-  );
+  it.each([undefined, null, '', 'device-code', 'oauth-v2'])('fails closed for an unknown provider kind: %s', (providerKind) => {
+    expect(authStateForProviderKind(providerKind)).toBe('provider-unavailable');
+  });
 
-  it('routes provider choices deterministically without a network or credential payload', async () => {
+  it('routes provider choices with one credential-free action and exact provider labels', async () => {
     render(PreviewPage);
 
-    const oauth = screen.getByRole('button', { name: 'Nous' });
-    await fireEvent.pointerDown(oauth, { button: 0, pointerType: 'mouse' });
-    await fireEvent.click(oauth);
+    const oauth = screen.getByRole('button', { name: 'Continue with Nous' });
+    fireEvent.pointerDown(oauth, { button: 0, pointerType: 'mouse' });
+    fireEvent.click(oauth, { detail: 1 });
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback'));
-    expect(screen.getAllByText('choose-provider').length).toBeGreaterThan(0);
+    expect(screen.getByText('choose-provider', { exact: true })).toHaveAttribute('data-auth-action-count', '1');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Cancel and return to providers' }));
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection'));
@@ -66,6 +77,7 @@ describe('ui preview route', () => {
 
     await fireEvent.change(authSelect, { target: { value: 'session-expired' } });
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
+    expect(screen.getByText(/draft stays on this device/)).toBeInTheDocument();
     await fireEvent.click(screen.getByRole('button', { name: 'Discard draft' }));
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection'));
   });
@@ -96,7 +108,7 @@ describe('ui preview route', () => {
     expect(liveStateOutput).toBeDisabled();
     expect(screen.getByText('live-discovery-disabled')).toBeInTheDocument();
 
-    fireEvent.change(liveStateOutput, { target: { value: 'discovery-empty' } });
+    fireEvent.change(liveStateOutput, { target: { value: 'provider-selection' } });
     expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
 
     await fireEvent.click(screen.getByRole('button', { name: 'Retry discovery' }));

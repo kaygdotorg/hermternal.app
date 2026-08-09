@@ -73,9 +73,10 @@ describe('BrowserAuthView', () => {
       expect.any(AbortSignal)
     );
     expect(JSON.stringify(session.current)).not.toContain('transient-password');
-    await waitFor(() =>
-      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting')
-    );
+    await waitFor(() => {
+      expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
+      expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('aria-busy', 'true');
+    });
 
     pendingLogin.resolve({ identity, next: '/' });
     await waitFor(() => expect(screen.queryByTestId('auth-preview')).not.toBeInTheDocument());
@@ -174,7 +175,7 @@ describe('BrowserAuthView', () => {
     expect(discoverProviders).not.toHaveBeenCalled();
   });
 
-  it('does not expose retry discovery while logout verification is pending', async () => {
+  it('keeps internal logout pending and recovery out of the approved AuthPreview families', async () => {
     const pendingLogout = deferred<void>();
     const client: BrowserAuthClient = {
       verify: vi.fn(async () => identity),
@@ -190,41 +191,40 @@ describe('BrowserAuthView', () => {
     await waitFor(() => expect(session.current.status).toBe('authenticated'));
 
     const pending = session.logout();
-    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-pending'));
+    await waitFor(() => expect(session.current.status).toBe('logging_out'));
+    expect(screen.queryByTestId('auth-preview')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /retry discovery/i })).not.toBeInTheDocument();
 
     pendingLogout.resolve();
     await pending;
+    await waitFor(() => expect(session.current.status).toBe('signed_out'));
+    expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
   });
 
-  it('keeps logout recovery dedicated and retries only the logout operation', async () => {
+  it('does not turn logout recovery into generic sign-in UI', async () => {
     const logout = vi
       .fn<BrowserAuthClient['logout']>()
       .mockRejectedValueOnce(new BrowserAuthError('logout-failed'))
       .mockResolvedValueOnce(undefined);
-    const verify = vi.fn<BrowserAuthClient['verify']>(async () => identity);
-    const discoverProviders = vi.fn(async () => ({ providers: [] }));
     const session = new BrowserAuthSession({
       client: {
-        verify,
+        verify: vi.fn(async () => identity),
         loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
         logout
       },
-      discoverProviders,
+      discoverProviders: vi.fn(async () => ({ providers: [] })),
       invalidateLocalSession: vi.fn()
     });
     render(BrowserAuthView, { session });
     await waitFor(() => expect(session.current.status).toBe('authenticated'));
 
     await session.logout();
-    await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'logout-failed'));
-    expect(screen.getByRole('button', { name: 'Retry sign out' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Choose provider' })).not.toBeInTheDocument();
+    await waitFor(() => expect(session.current.status).toBe('logout_failed'));
+    expect(screen.queryByTestId('auth-preview')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry sign out' })).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole('button', { name: 'Retry sign out' }));
+    await session.logout();
     await waitFor(() => expect(session.current.status).toBe('signed_out'));
     expect(logout).toHaveBeenCalledTimes(2);
-    expect(discoverProviders).not.toHaveBeenCalled();
   });
 });

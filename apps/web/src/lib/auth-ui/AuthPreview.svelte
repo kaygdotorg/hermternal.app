@@ -7,6 +7,7 @@
   import type {
     AuthAction,
     AuthActionHandler,
+    AuthDiscoveryFailureVariant,
     AuthDiscoveryMode,
     AuthProvider,
     AuthViewState,
@@ -18,6 +19,7 @@
   export let state: AuthViewState = 'provider-selection';
   export let providers: AuthProvider[] = DEFAULT_PROVIDERS;
   export let discoveryMode: AuthDiscoveryMode = 'fixture';
+  export let passwordSubmitting = false;
   export let onAction: AuthActionHandler = () => {};
   export let onPasswordSubmit: PasswordSubmissionHandler | undefined = undefined;
   export let failureMessage: string | undefined = undefined;
@@ -25,11 +27,17 @@
 
   let passwordVisible = false;
   let previousState: AuthViewState = state;
+  let previousPasswordSubmitting = passwordSubmitting;
   $: validatedProviders = validateAuthProviders(providers);
   // A selectable registry must validate before actions are exposed. Discovery
   // status screens may intentionally carry no providers while pending or failed.
   $: effectiveState = state === 'provider-selection' && !validatedProviders ? 'provider-unavailable' : state;
   $: safeProviders = validatedProviders ?? [];
+  $: pendingProviders = safeProviders.length > 0 ? safeProviders : DEFAULT_PROVIDERS;
+  $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
+  $: isPasswordSubmitting = effectiveState === 'password-submitting' || (effectiveState === 'password' && passwordSubmitting);
+  $: activeDiscoveryFailure = discoveryFailureVariantForState(effectiveState);
+
   let submissionLocked = false;
   let formResetKey = 0;
   let stateHeading: HTMLElement | undefined;
@@ -42,24 +50,52 @@
   let focusGeneration = 0;
   let componentMounted = false;
 
-  $: if (effectiveState !== previousState) {
+  $: if (effectiveState !== previousState || isPasswordSubmitting !== previousPasswordSubmitting) {
     const enteredState = effectiveState;
     const exitedState = previousState;
+    const enteredSubmitting = isPasswordSubmitting;
     // Password submission starts on pointer down. Keep the owned form mounted
     // through the matching pointer up/click so replacing its reset button cannot
     // cancel the gesture before the credential-free action settles.
-    if (exitedState === 'password' && enteredState === 'password-submitting') {
+    if (exitedState === 'password' && enteredSubmitting) {
       passwordVisible = false;
       fieldOwnershipReady = false;
       focusGeneration += 1;
-    } else {
+    } else if (enteredState !== exitedState) {
       resetPasswordEntry();
     }
     previousState = enteredState;
+    previousPasswordSubmitting = enteredSubmitting;
     void focusEnteredState();
   }
-  $: isProviderState = isProviderPanelState(effectiveState);
-  $: isPasswordState = effectiveState === 'password' || effectiveState === 'password-submitting';
+
+  $: isProviderState =
+    effectiveState === 'provider-selection' ||
+    effectiveState === 'discovery-pending' ||
+    isDiscoveryFailureState(effectiveState);
+  $: panelClass = isProviderState
+    ? 'provider-panel'
+    : effectiveState === 'session-expired'
+      ? 'session-panel'
+      : 'narrow-panel';
+  $: politeAnnouncement =
+    isPasswordSubmitting
+      ? 'Signing in to Hermes. The form is disabled while this mocked state completes.'
+      : effectiveState === 'callback'
+        ? 'Completing sign-in. Checking the provider response and creating a protected browser session.'
+        : effectiveState === 'discovery-pending'
+          ? 'Discovering sign-in methods. Provider actions are unavailable while the result is pending.'
+          : isDiscoveryFailureState(effectiveState) && activeDiscoveryFailure === 'retry'
+            ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
+            : '';
+  $: assertiveAnnouncement =
+    effectiveState === 'failure'
+      ? 'Sign-in did not complete. Try again or choose another provider.'
+      : effectiveState === 'session-expired'
+        ? 'Session expired. Sign in again or discard the retained local draft.'
+        : isDiscoveryFailureState(effectiveState) && activeDiscoveryFailure !== 'retry'
+          ? 'Provider discovery stopped. No usable provider list was returned.'
+          : '';
 
   onMount(() => {
     componentMounted = true;
@@ -73,105 +109,48 @@
     };
   });
 
-  $: panelClass = isProviderState
-    ? 'provider-panel'
-    : effectiveState === 'session-expired' || effectiveState === 'logout-pending' || effectiveState === 'logout-failed'
-      ? 'session-panel'
-      : 'narrow-panel';
-  $: politeAnnouncement =
-    effectiveState === 'password-submitting'
-      ? 'Signing in. The synthetic form is disabled while the local state completes.'
-      : effectiveState === 'callback'
-        ? 'Completing sign-in in a mocked local callback state.'
-        : effectiveState === 'logout-pending'
-          ? 'Signing out. Provider discovery and retry actions are unavailable until logout is verified.'
-          : effectiveState === 'discovery-pending'
-            ? 'Discovering sign-in methods. Provider actions are unavailable while the request is pending.'
-            : effectiveState === 'discovery-retry'
-              ? 'Provider discovery can be retried. Choose Retry discovery or Back to sign-in.'
-              : '';
-  $: assertiveAnnouncement =
-    effectiveState === 'failure'
-      ? 'Sign-in did not complete. Try again or choose another provider.'
-      : effectiveState === 'logout-failed'
-        ? 'Sign-out could not be verified. Only Retry sign out is available.'
-        : effectiveState === 'session-expired'
-        ? 'Session expired. Sign in again or discard the local draft fixture.'
-        : effectiveState === 'discovery-empty'
-          ? 'Provider discovery returned an invalid empty registry. No sign-in method is available.'
-          : effectiveState === 'discovery-malformed'
-            ? 'Provider discovery returned incompatible data. No sign-in method is available.'
-            : effectiveState === 'discovery-aborted'
-              ? 'Provider discovery was cancelled. No sign-in method is available.'
-              : effectiveState === 'provider-unavailable'
-                ? 'Provider discovery stopped. No sign-in method is available.'
-                : '';
-
-  function isProviderPanelState(value: AuthViewState): boolean {
+  function isDiscoveryFailureState(value: AuthViewState): boolean {
     return (
-      value === 'provider-selection' ||
-      value === 'discovery-pending' ||
+      value === 'discovery-retry' ||
       value === 'discovery-empty' ||
       value === 'discovery-malformed' ||
       value === 'discovery-aborted' ||
-      value === 'discovery-retry' ||
       value === 'provider-unavailable'
     );
   }
 
-  function isDiscoveryFailureState(value: AuthViewState): boolean {
-    return (
-      value === 'failure' ||
-      value === 'discovery-retry' ||
-      value === 'discovery-malformed' ||
-      value === 'discovery-aborted' ||
-      value === 'provider-unavailable'
-    );
-  }
-
-  function discoveryFailureHeading(value: AuthViewState): string {
-    if (value === 'failure') return 'Sign-in did not complete';
-    if (value === 'discovery-retry') return 'Retry provider discovery';
-    if (value === 'discovery-malformed') return 'Provider discovery returned incompatible data';
-    if (value === 'discovery-aborted') return 'Provider discovery was cancelled';
-    return 'Provider discovery stopped';
-  }
-
-  function discoveryFailureCopy(value: AuthViewState): string {
-    if (value === 'failure')
-      return 'Synthetic failure state only. No request was made, no session was created, and no credential was retained.';
-    if (value === 'discovery-retry')
-      return 'A fresh same-origin provider discovery request is ready. Retry is safe because discovery is read-only.';
-    if (value === 'discovery-malformed')
-      return 'The provider response did not match the reviewed schema. The preview fails closed and exposes no invented sign-in method.';
-    if (value === 'discovery-aborted')
-      return 'The provider discovery request was cancelled before a usable registry was received. No provider action is available.';
-    return 'The provider registry is unavailable. The preview fails closed and exposes no invented sign-in method.';
-  }
-
-  function discoveryFailureDetail(value: AuthViewState): string {
-    if (value === 'failure') return 'Synthetic sign-in failure';
-    if (value === 'discovery-retry') return 'Ready to retry provider discovery';
-    if (value === 'discovery-malformed') return 'invalid_response';
+  function discoveryFailureVariantForState(value: AuthViewState): AuthDiscoveryFailureVariant {
+    if (value === 'discovery-retry') return 'retry';
+    if (value === 'discovery-empty') return 'empty';
+    if (value === 'discovery-malformed') return 'malformed';
     if (value === 'discovery-aborted') return 'aborted';
-    return 'provider_unavailable';
+    return 'unavailable';
   }
 
-  function discoveryFailureDetailCopy(value: AuthViewState): string {
-    if (value === 'failure') return 'Choose another local fixture state. Error details do not include credentials.';
-    if (value === 'discovery-retry') return 'Retry starts only the idempotent GET /api/auth/providers boundary.';
-    if (value === 'discovery-malformed')
-      return 'Unknown fields, malformed data, and unsafe values are rejected after bounded strict parsing.';
-    if (value === 'discovery-aborted') return 'Cancellation leaves no provider list and does not expose response data.';
-    return 'The endpoint did not provide a usable provider registry. No fallback provider is invented.';
+  function discoveryFailureHeading(value: AuthDiscoveryFailureVariant): string {
+    return value === 'retry' ? 'Retry provider discovery' : 'Provider discovery stopped';
   }
 
-  function discoveryFailureMetadata(value: AuthViewState): string {
-    if (value === 'failure') return 'Synthetic fixture · safe to retry';
-    if (value === 'discovery-retry') return 'Live boundary · user initiated · safe to retry';
-    if (value === 'discovery-malformed') return 'Live boundary · fail closed · no credentials';
-    if (value === 'discovery-aborted') return 'Live boundary · cancelled · no credentials';
-    return 'Live boundary · unavailable · no credentials';
+  function discoveryFailureCopy(value: AuthDiscoveryFailureVariant): string {
+    return value === 'retry'
+      ? 'The previous result was unknown. A fresh user action is required before another lookup.'
+      : 'No usable provider list was returned. The client fails closed and does not invent a fallback.';
+  }
+
+  function discoveryFailureDetail(value: AuthDiscoveryFailureVariant): string {
+    return value === 'retry' ? 'Ready to retry' : 'provider_unavailable';
+  }
+
+  function discoveryFailureDetailCopy(value: AuthDiscoveryFailureVariant): string {
+    return value === 'retry'
+      ? 'Retry is idempotent; duplicate submits stay blocked until the result returns.'
+      : 'Empty or malformed provider data was rejected before sign-in choices were shown.';
+  }
+
+  function discoveryFailureMetadata(value: AuthDiscoveryFailureVariant): string {
+    return value === 'retry'
+      ? 'Mocked fixture · user initiated · safe to cancel'
+      : 'Mocked fixture · empty + malformed · no credentials';
   }
 
   function resetPasswordEntry(): void {
@@ -195,7 +174,7 @@
     // transition can focus the new task before the browser restores focus to
     // the provider button that was just removed. The controls stay read-only until
     // this focus transfer completes, so rapid typing cannot cross-populate them.
-    if (effectiveState === 'password') {
+    if (effectiveState === 'password' && !isPasswordSubmitting) {
       if (!usernameInput) return;
       usernameInput.focus();
       if (document.activeElement !== usernameInput) return;
@@ -221,7 +200,7 @@
 
   function activatePasswordFixture(): void {
     if (
-      effectiveState === 'password-submitting' ||
+      isPasswordSubmitting ||
       submissionLocked ||
       !fieldOwnershipReady ||
       !passwordForm?.checkValidity()
@@ -244,7 +223,7 @@
     if (discoveryMode === 'live') {
       if (onPasswordSubmit && typeof username === 'string' && typeof password === 'string') {
         // The live callback receives transient values once. Auth actions and observable
-        // component state remain credential-free, and the keyed form is cleared now.
+        // component state remain credential-free, and the form is cleared now.
         onPasswordSubmit({ username, password });
       } else {
         submissionLocked = false;
@@ -270,6 +249,7 @@
   aria-label="Hermternal authentication preview"
   class="auth-preview"
   data-appearance={appearance}
+  data-discovery-failure={isDiscoveryFailureState(effectiveState) ? activeDiscoveryFailure : undefined}
   data-discovery-mode={discoveryMode}
   data-state={effectiveState}
   data-testid="auth-preview"
@@ -295,9 +275,8 @@
           <p class="eyebrow">HERMTERNAL</p>
           <h1 bind:this={stateHeading} tabindex="-1">Connect to Hermes</h1>
           <p>
-            {discoveryMode === 'live'
-              ? 'Choose a sign-in method reported by the same-origin Hermes boundary. This preview never stores reusable credentials or calls a provider.'
-              : 'Choose one synthetic sign-in method. This preview never stores reusable credentials or calls a provider.'}
+            <span class="desktop-copy">Choose one available sign-in method. Hermternal does not rank providers or retain reusable credentials.</span>
+            <span class="mobile-copy">Choose a method reported by this Hermes deployment.</span>
           </p>
         </header>
 
@@ -308,76 +287,35 @@
         </div>
 
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
-            ? 'Live same-origin discovery · provider choices came from GET /api/auth/providers; no credentials are stored.'
-            : 'Synthetic fixture only · provider choices are local presentation data; no discovery request is made.'}
+          <span aria-hidden="true" class="note-dot"></span>Connected to the configured HTTPS origin. Only providers reported by Hermes are shown.
         </p>
       {:else if effectiveState === 'discovery-pending'}
         <header class="panel-heading">
           <p class="eyebrow">PROVIDER DISCOVERY · PENDING</p>
           <h1 bind:this={stateHeading} tabindex="-1">Discovering sign-in methods</h1>
-          <p>
-            {discoveryMode === 'live'
-              ? 'A same-origin GET /api/auth/providers request is pending. Provider actions stay unavailable until bounded data is validated.'
-              : 'Static pending state only. No discovery request runs, and controls stay unavailable until the fixture state changes.'}
-          </p>
+          <p>Waiting for the configured Hermes deployment to report provider capabilities. No fallback is guessed.</p>
         </header>
 
         <div class="provider-list" aria-label="Provider discovery in progress" aria-busy="true">
-          {#each safeProviders as provider (provider.id)}
+          {#each pendingProviders as provider (provider.id)}
             <ProviderCard disabled pending {provider} onAction={handleAction} />
           {/each}
         </div>
 
         {#if discoveryMode === 'live'}
           <div class="failure-actions">
-            <Pill
-              label="Cancel discovery"
-              variant="ghost"
-              onActivate={() => handleAction({ type: 'cancel-discovery' })}
-            />
+            <Pill label="Cancel discovery" variant="ghost" onActivate={() => handleAction({ type: 'cancel-discovery' })} />
           </div>
         {/if}
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>{discoveryMode === 'live'
-            ? 'Live boundary · provider actions stay disabled while discovery is pending.'
-            : 'Prototype-only pending state · no sign-in action is available.'}
-        </p>
-      {:else if effectiveState === 'discovery-empty'}
-        <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
-        <div class="failure-heading">
-          <h1 bind:this={stateHeading} tabindex="-1">No sign-in methods available</h1>
-          <p>
-            A successful empty provider registry is outside the pinned response contract. The preview fails closed and
-            exposes no invented provider.
-          </p>
-        </div>
-        <div class="failure-detail">
-          <strong>invalid_empty_provider_registry</strong>
-          <p>Retry discovery after Hermes reports the reviewed provider registry or exact unavailable response.</p>
-        </div>
-        <div class="failure-actions">
-          <Pill
-            label="Retry discovery"
-            icon="refresh"
-            variant="action"
-            onActivate={() => handleAction({ type: 'retry-discovery' })}
-          />
-          <Pill label="Back to sign-in" variant="ghost" onActivate={() => handleAction({ type: 'back-to-sign-in' })} />
-        </div>
-        <p class="metadata">
-          {discoveryMode === 'live'
-            ? 'Live boundary · empty registry · no credentials'
-            : 'Synthetic fixture · empty registry · no credentials'}
+          <span aria-hidden="true" class="note-dot"></span>Mocked only · provider discovery is pending; controls stay unavailable until a valid list arrives.
         </p>
       {:else if isPasswordState}
         <header class="panel-heading">
-          <p class="eyebrow">BASIC AUTH PROVIDER{effectiveState === 'password-submitting' ? ' · SUBMITTING' : ''}</p>
-          <h1 bind:this={stateHeading} tabindex="-1">
-            {effectiveState === 'password-submitting' ? 'Signing in to Hermes' : 'Sign in to Hermes'}
-          </h1>
+          <p class="eyebrow">BASIC AUTH PROVIDER{isPasswordSubmitting ? ' · SUBMITTING' : ''}</p>
+          <h1 bind:this={stateHeading} tabindex="-1">{isPasswordSubmitting ? 'Signing in to Hermes' : 'Sign in to Hermes'}</h1>
           <p>
-            {effectiveState === 'password-submitting'
+            {isPasswordSubmitting
               ? discoveryMode === 'live'
                 ? 'Your password was cleared from the form and sent only to the configured Hermes origin for this sign-in attempt.'
                 : 'Static submitting state only · the synthetic values were cleared and no request was made.'
@@ -392,11 +330,10 @@
                reset-type primary action clears live values without script,
                while hydrated submit handling stays accessible. Synthetic
                fixtures suppress password managers; live controls intentionally
-               omit those markers so username/current-password semantics remain
-               discoverable while the hydration fence is still active. -->
+               omit those markers while the hydration fence is active. -->
           <form
             bind:this={passwordForm}
-            aria-busy={effectiveState === 'password-submitting'}
+            aria-busy={isPasswordSubmitting}
             aria-label="Hermes password sign in"
             autocomplete={discoveryMode === 'live' ? undefined : 'off'}
             class="password-form"
@@ -412,8 +349,8 @@
               data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
               data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
               data-fixture-field={discoveryMode === 'live' ? undefined : 'username'}
-              disabled={effectiveState === 'password-submitting'}
-              placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter username'}
+              disabled={isPasswordSubmitting}
+              placeholder={isPasswordSubmitting ? 'Cleared' : 'Enter username'}
               name={discoveryMode === 'live' ? 'username' : undefined}
               readonly={!fieldOwnershipReady}
               required
@@ -425,16 +362,12 @@
             <div class="password-label-row">
               <label class="field-label" for="auth-password">Password</label>
               <button
-                aria-label={effectiveState === 'password-submitting'
-                  ? 'Password hidden'
-                  : passwordVisible
-                    ? 'Hide password'
-                    : 'Show password'}
+                aria-label={isPasswordSubmitting ? 'Password hidden' : passwordVisible ? 'Hide password' : 'Show password'}
                 class="show-password"
-                disabled={effectiveState === 'password-submitting'}
+                disabled={isPasswordSubmitting}
                 type="button"
                 onclick={() => handleAction({ type: 'toggle-password-visibility' })}
-                >{effectiveState === 'password-submitting' ? 'Hidden' : passwordVisible ? 'Hide' : 'Show'}</button
+                >{isPasswordSubmitting ? 'Hidden' : passwordVisible ? 'Hide' : 'Show'}</button
               >
             </div>
             <input
@@ -443,9 +376,9 @@
               data-1p-ignore={discoveryMode === 'live' ? undefined : ''}
               data-lpignore={discoveryMode === 'live' ? undefined : 'true'}
               data-fixture-field={discoveryMode === 'live' ? undefined : 'password'}
-              disabled={effectiveState === 'password-submitting'}
+              disabled={isPasswordSubmitting}
               name={discoveryMode === 'live' ? 'password' : undefined}
-              placeholder={effectiveState === 'password-submitting' ? 'Cleared' : 'Enter password'}
+              placeholder={isPasswordSubmitting ? 'Cleared' : 'Enter password'}
               readonly={!fieldOwnershipReady}
               required
               onkeydown={handlePasswordKeydown}
@@ -456,124 +389,81 @@
 
             <div class="auth-action">
               <Pill
-                ariaLabel={effectiveState === 'password-submitting' ? 'Signing in' : 'Sign in'}
+                ariaLabel={isPasswordSubmitting ? 'Signing in' : 'Sign in'}
                 buttonType="reset"
-                disabled={effectiveState === 'password-submitting'}
-                label={effectiveState === 'password-submitting' ? 'Signing in…' : 'Sign in'}
+                disabled={isPasswordSubmitting}
+                label={isPasswordSubmitting ? 'Signing in…' : 'Sign in'}
                 variant="action"
                 onActivate={activatePasswordFixture}
               />
             </div>
             <Pill
-              label={effectiveState === 'password-submitting' ? 'Cancel sign-in' : 'Back to providers'}
+              label={isPasswordSubmitting ? 'Cancel sign-in' : 'Back to providers'}
               variant="ghost"
               onActivate={() => handleAction({ type: 'back-to-providers' })}
             />
           </form>
         {/key}
 
-        {#if effectiveState === 'password-submitting'}
+        {#if isPasswordSubmitting}
           <p class="interaction-note">Static mocked state · 44px targets · focus order is fields → sign in → cancel.</p>
         {/if}
       {:else if effectiveState === 'callback'}
         <div class="callback-progress" aria-hidden="true"><span></span></div>
         <div class="callback-message">
           <h1 bind:this={stateHeading} tabindex="-1">Completing sign-in</h1>
-          <p>Static callback state only. No provider response is read and no browser session is created.</p>
+          <p>Checking the provider response and creating a protected browser session.</p>
         </div>
         <div class="privacy-note">
           <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
-          <p>Prototype-only callback presentation. No callback parameters or transcript data are read.</p>
+          <p>Do not close this tab. Callback parameters are checked once and are never shown in the interface.</p>
         </div>
-        <Pill
-          label="Cancel and return to providers"
-          variant="ghost"
-          onActivate={() => handleAction({ type: 'cancel-callback' })}
-        />
+        <Pill label="Cancel and return to providers" variant="ghost" onActivate={() => handleAction({ type: 'cancel-callback' })} />
       {:else if effectiveState === 'session-expired'}
         <div class="session-icon" aria-hidden="true"><Icon name="refresh" size={20} /></div>
         <div class="session-copy">
           <h1 bind:this={stateHeading} tabindex="-1">Session expired</h1>
-          <p>
-            Static expiry state only. This preview does not persist a draft; choose how to represent the next local
-            state.
-          </p>
+          <p>Sign in again to continue. Your draft stays on this device until authentication completes.</p>
         </div>
         <div class="session-actions">
           <Pill label="Sign in again" variant="action" onActivate={() => handleAction({ type: 'sign-in-again' })} />
           <Pill label="Discard draft" variant="ghost" onActivate={() => handleAction({ type: 'discard-draft' })} />
         </div>
         <p class="provider-note">
-          <span aria-hidden="true" class="note-dot"></span>Prototype-only state · no draft or prompt was persisted after
-          expiry.
+          <span aria-hidden="true" class="note-dot"></span>Mocked session gate · draft retained locally. No prompt was sent after the session expired.
         </p>
-      {:else if effectiveState === 'logout-pending'}
-        <div class="callback-progress" aria-hidden="true"><span></span></div>
-        <div class="callback-message">
-          <h1 bind:this={stateHeading} tabindex="-1">Signing out</h1>
-          <p>Logout is being verified with the same-origin Hermes session boundary.</p>
-        </div>
-        <div class="privacy-note">
-          <span aria-hidden="true" class="info-icon"><Icon name="info" size={16} /></span>
-          <p>Retry and provider discovery stay unavailable until the server identity probe confirms logout.</p>
-        </div>
-      {:else if effectiveState === 'logout-failed'}
+      {:else if effectiveState === 'failure'}
         <div class="failure-icon" aria-hidden="true"><Icon name="warning" size={20} /></div>
         <div class="failure-heading">
-          <h1 bind:this={stateHeading} tabindex="-1">Sign-out could not be verified</h1>
-          <p>{failureMessage ?? 'The server session could not be confirmed as signed out.'}</p>
+          <h1 bind:this={stateHeading} tabindex="-1">Sign-in did not complete</h1>
+          <p>{discoveryMode === 'live' && failureMessage ? failureMessage : 'Hermes rejected this attempt. No session was created and no provider was tried automatically.'}</p>
         </div>
         <div class="failure-detail">
-          <strong>{failureCode ?? 'logout-unverified'}</strong>
-          <p>Retry sign out rechecks the same-origin session boundary. Provider discovery remains unavailable.</p>
+          <strong>{discoveryMode === 'live' && failureCode ? failureCode : 'The provider rejected this request'}</strong>
+          <p>{discoveryMode === 'live' && failureCode ? 'The fixed diagnostic contains no credential or callback parameter detail.' : 'Try again, or choose another provider. Error details do not include credentials or callback parameters.'}</p>
         </div>
         <div class="failure-actions">
-          <Pill
-            label="Retry sign out"
-            icon="refresh"
-            variant="action"
-            onActivate={() => handleAction({ type: 'retry-logout' })}
-          />
+          <Pill label="Try again" icon="refresh" variant="action" onActivate={() => handleAction({ type: 'retry-authentication' })} />
+          <Pill label="Choose provider" variant="ghost" onActivate={() => handleAction({ type: 'choose-provider-again' })} />
         </div>
-        <p class="metadata">Live boundary · logout recovery · no provider discovery</p>
+        <p class="metadata">Reference: AUTH-REJECTED · Safe to retry</p>
       {:else if isDiscoveryFailureState(effectiveState)}
         <div class="failure-icon" aria-hidden="true">
-          <Icon name={effectiveState === 'discovery-retry' ? 'refresh' : 'warning'} size={20} />
+          <Icon name={activeDiscoveryFailure === 'retry' ? 'refresh' : 'warning'} size={20} />
         </div>
         <div class="failure-heading">
-          <h1 bind:this={stateHeading} tabindex="-1">{discoveryFailureHeading(effectiveState)}</h1>
-          <p>
-            {effectiveState === 'failure' && discoveryMode === 'live' && failureMessage
-              ? failureMessage
-              : discoveryFailureCopy(effectiveState)}
-          </p>
+          <h1 bind:this={stateHeading} tabindex="-1">{discoveryFailureHeading(activeDiscoveryFailure)}</h1>
+          <p>{discoveryFailureCopy(activeDiscoveryFailure)}</p>
         </div>
         <div class="failure-detail">
-          <strong
-            >{effectiveState === 'failure' && discoveryMode === 'live' && failureCode
-              ? failureCode
-              : discoveryFailureDetail(effectiveState)}</strong
-          >
-          <p>
-            {effectiveState === 'failure' && discoveryMode === 'live'
-              ? 'The fixed diagnostic contains no credential or provider response detail.'
-              : discoveryFailureDetailCopy(effectiveState)}
-          </p>
+          <strong>{discoveryFailureDetail(activeDiscoveryFailure)}</strong>
+          <p>{discoveryFailureDetailCopy(activeDiscoveryFailure)}</p>
         </div>
         <div class="failure-actions">
-          <Pill
-            label={effectiveState === 'failure' ? 'Try again' : 'Retry discovery'}
-            icon="refresh"
-            variant="action"
-            onActivate={() => handleAction({ type: effectiveState === 'failure' ? 'retry-authentication' : 'retry-discovery' })}
-          />
-          <Pill
-            label={effectiveState === 'failure' ? 'Choose provider' : 'Back to sign-in'}
-            variant="ghost"
-            onActivate={() => handleAction({ type: effectiveState === 'failure' ? 'choose-provider-again' : 'back-to-sign-in' })}
-          />
+          <Pill label="Retry discovery" icon="refresh" variant="action" onActivate={() => handleAction({ type: 'retry-discovery' })} />
+          <Pill label="Back to sign-in" variant="ghost" onActivate={() => handleAction({ type: 'back-to-sign-in' })} />
         </div>
-        <p class="metadata">{discoveryFailureMetadata(effectiveState)}</p>
+        <p class="metadata">{discoveryFailureMetadata(activeDiscoveryFailure)}</p>
       {/if}
     </div>
   </div>
@@ -581,20 +471,20 @@
 
 <style>
   .auth-preview {
-    --canvas: #f3f5f8;
-    --surface: #ffffff;
-    --ink: #16181d;
-    --muted: #667080;
-    --line: #d8dde5;
+    --canvas: var(--color-canvas);
+    --surface: var(--color-paper);
+    --ink: var(--color-ink);
+    --muted: var(--color-muted);
+    --line: var(--color-line);
     --signal: var(--color-auth-signal);
-    --success: #2da568;
+    --success: var(--color-success);
     --danger: var(--color-auth-danger);
-    --danger-surface: #fff1f2;
-    --focus: #2348c7;
-    --action-ink: #ffffff;
-    --radius-pill: 999px;
-    --radius-input: 12px;
-    --radius-glass: 22px;
+    --danger-surface: var(--color-gate-light-error-surface);
+    --focus: var(--color-gate-light-focus);
+    --action-ink: var(--color-gate-light-action-ink);
+    --radius-pill: var(--radius-pill);
+    --radius-input: var(--radius-input);
+    --radius-structural: var(--radius-structural);
     position: relative;
     box-sizing: border-box;
     width: 100%;
@@ -603,9 +493,24 @@
     overflow: hidden;
     background: var(--canvas);
     color: var(--ink);
-    font-family: 'Instrument Sans', system-ui, sans-serif;
+    font-family: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
+  }
+
+  .auth-preview[data-appearance='dark'] {
+    --canvas: var(--color-dark-canvas);
+    --surface: var(--color-dark-paper);
+    --ink: var(--color-dark-ink);
+    --muted: var(--color-dark-muted);
+    --line: var(--color-dark-line);
+    --signal: var(--color-dark-signal);
+    --success: var(--color-dark-success);
+    --danger: var(--color-dark-danger);
+    --danger-surface: var(--color-gate-dark-error-surface);
+    --focus: var(--color-gate-dark-focus);
+    /* Dark action surfaces use canvas ink so the Paper signal remains readable. */
+    --action-ink: var(--color-dark-canvas);
   }
 
   .sr-only {
@@ -621,27 +526,13 @@
     outline: none;
   }
 
-  .auth-preview[data-appearance='dark'] {
-    --canvas: #0d1117;
-    --surface: #171c24;
-    --ink: #f4f6fa;
-    --muted: #a7b0bf;
-    --line: #343c49;
-    --signal: var(--color-auth-signal);
-    --success: #4cc989;
-    --danger: #f06a6a;
-    --danger-surface: #351f26;
-    --focus: #c2ccff;
-    --action-ink: var(--color-dark-ink);
-  }
-
   .auth-frame {
     box-sizing: border-box;
     display: flex;
     min-height: 900px;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: var(--space-6);
   }
 
   .auth-panel {
@@ -649,10 +540,10 @@
     display: flex;
     width: 440px;
     flex-direction: column;
-    gap: 24px;
-    padding: 32px;
+    gap: var(--space-6);
+    padding: var(--space-8);
     border: 1px solid var(--line);
-    border-radius: var(--radius-glass);
+    border-radius: var(--radius-structural);
     background: var(--surface);
     box-shadow: 0 18px 50px color-mix(in srgb, var(--ink) 10%, transparent);
   }
@@ -664,16 +555,16 @@
   .panel-heading {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .eyebrow {
     margin: 0;
     color: var(--signal);
-    font-size: 12px;
-    font-weight: 600;
+    font-size: var(--text-meta);
+    font-weight: var(--weight-semibold);
     letter-spacing: 0.08em;
-    line-height: 16px;
+    line-height: var(--leading-meta);
   }
 
   h1,
@@ -687,7 +578,7 @@
   .failure-heading h1 {
     color: var(--ink);
     font-size: 28px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     letter-spacing: -0.025em;
     line-height: 34px;
   }
@@ -700,23 +591,27 @@
   .privacy-note p,
   .interaction-note {
     color: var(--muted);
-    font-size: 15px;
-    line-height: 23px;
+    font-size: var(--text-body);
+    line-height: var(--leading-body);
+  }
+
+  .mobile-copy {
+    display: none;
   }
 
   .provider-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .provider-note {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: var(--space-2);
     padding-top: 2px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: var(--text-meta);
     line-height: 18px;
   }
 
@@ -738,9 +633,9 @@
 
   .field-label {
     color: var(--ink);
-    font-size: 14px;
-    font-weight: 500;
-    line-height: 18px;
+    font-size: var(--text-control);
+    font-weight: var(--weight-medium);
+    line-height: var(--leading-control);
   }
 
   .password-form input {
@@ -748,14 +643,14 @@
     width: 100%;
     min-height: 48px;
     margin: 0 0 7px;
-    padding: 12px 14px;
+    padding: var(--space-3) 14px;
     border: 1px solid var(--line);
     border-radius: var(--radius-input);
     outline: 0;
     background: var(--surface);
     color: var(--ink);
     font: inherit;
-    font-size: 15px;
+    font-size: var(--text-body);
     line-height: 20px;
   }
 
@@ -778,13 +673,13 @@
 
   .show-password {
     min-height: 44px;
-    padding: 8px 10px;
+    padding: var(--space-2) 10px;
     border: 0;
     border-radius: var(--radius-pill);
     background: transparent;
     color: var(--signal);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--text-meta);
     cursor: pointer;
   }
 
@@ -806,7 +701,7 @@
   .interaction-note,
   .metadata {
     color: var(--muted);
-    font-size: 12px;
+    font-size: var(--text-meta);
     line-height: 18px;
   }
 
@@ -835,20 +730,14 @@
   .failure-detail {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-  }
-
-  .callback-message h1,
-  .session-copy h1,
-  .failure-heading h1 {
-    font-size: 28px;
+    gap: var(--space-2);
   }
 
   .privacy-note {
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 12px;
+    padding: var(--space-3);
     border: 1px solid var(--line);
     border-radius: var(--radius-input);
     background: color-mix(in srgb, var(--signal) 6%, var(--surface));
@@ -886,7 +775,7 @@
   .failure-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-2);
   }
 
   .session-actions {
@@ -901,7 +790,7 @@
 
   .failure-detail {
     gap: 4px;
-    padding: 12px 14px;
+    padding: var(--space-3) 14px;
     border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
     border-radius: var(--radius-input);
     background: var(--danger-surface);
@@ -909,8 +798,8 @@
 
   .failure-detail strong {
     color: var(--danger);
-    font-size: 14px;
-    line-height: 18px;
+    font-size: var(--text-control);
+    line-height: var(--leading-control);
   }
 
   .failure-detail p {
@@ -1001,7 +890,7 @@
       padding: 0 20px;
       color: var(--ink);
       font-size: 15px;
-      font-weight: 600;
+      font-weight: var(--weight-semibold);
       line-height: 22px;
       pointer-events: none;
     }
@@ -1019,6 +908,14 @@
       box-shadow: none;
     }
 
+    .desktop-copy {
+      display: none;
+    }
+
+    .mobile-copy {
+      display: inline;
+    }
+
     .panel-heading h1,
     .callback-message h1,
     .session-copy h1,
@@ -1028,7 +925,7 @@
     }
 
     .provider-list {
-      gap: 12px;
+      gap: var(--space-3);
     }
 
     .provider-note {
@@ -1068,6 +965,48 @@
   @media (prefers-reduced-transparency: reduce) {
     .auth-panel {
       box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 10%, transparent);
+    }
+  }
+
+  @media (forced-colors: active) {
+    .auth-panel,
+    .provider-card :global(.pill),
+    .password-form input,
+    .privacy-note,
+    .failure-detail {
+      forced-color-adjust: none;
+      border-color: CanvasText;
+      background: Canvas;
+      color: CanvasText;
+      box-shadow: none;
+    }
+
+    .provider-card :global(.pill:disabled) {
+      border-color: GrayText;
+      color: GrayText;
+    }
+
+    .show-password,
+    .provider-note,
+    .metadata,
+    .panel-heading > p:last-child,
+    .callback-message p,
+    .session-copy p,
+    .failure-heading p,
+    .failure-detail p,
+    .privacy-note p,
+    .interaction-note {
+      color: CanvasText;
+    }
+
+    .password-form input:focus-visible,
+    .show-password:focus-visible {
+      outline: 3px solid Highlight;
+    }
+
+    .callback-progress span {
+      border-color: CanvasText;
+      border-top-color: Highlight;
     }
   }
 </style>

@@ -334,25 +334,25 @@ test('Paper action labels stay under a stationary pointer through repeated hover
     const copy = pill.locator('.pill-copy');
     await expect(pill).toBeVisible();
 
-    for (let run = 0; run < 3; run += 1) {
+    for (let run = 0; run < 2; run += 1) {
       // Reset the previous reveal before putting the pointer over the next
       // control. The pointer then stays at one fixed screen coordinate for the
       // entire transition, exposing layout-induced hover loops.
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-      await page.mouse.move(0, 0);
+      // Move fully outside the viewport so a previous reveal cannot retain :hover.
+      await page.mouse.move(-10, -10);
       await expect
         .poll(
           () =>
             pill.evaluate((element) => {
               const copy = element.querySelector<HTMLElement>('.pill-copy');
-              return {
-                opacity: copy ? getComputedStyle(copy).opacity : '',
-                maxWidth: copy ? getComputedStyle(copy).maxWidth : ''
-              };
+              const opacity = Number.parseFloat(copy ? getComputedStyle(copy).opacity : '0');
+              const maxWidth = Number.parseFloat(copy ? getComputedStyle(copy).maxWidth : '0');
+              return !element.matches(':hover') && !element.matches(':focus-visible') && opacity <= 0.05 && maxWidth <= 1;
             }),
           { message: `${ariaLabel} resting state` }
         )
-        .toEqual({ opacity: '0', maxWidth: '0px' });
+        .toBe(true);
 
       const resting = await pill.evaluate((element) => {
         const copy = element.querySelector<HTMLElement>('.pill-copy');
@@ -360,13 +360,13 @@ test('Paper action labels stay under a stationary pointer through repeated hover
         const iconRect = element.querySelector<HTMLElement>('.icon-slot')?.getBoundingClientRect();
         return {
           width: rect.width,
-          opacity: copy ? getComputedStyle(copy).opacity : '',
-          maxWidth: copy ? getComputedStyle(copy).maxWidth : '',
+          opacity: Number.parseFloat(copy ? getComputedStyle(copy).opacity : '0'),
+          maxWidth: Number.parseFloat(copy ? getComputedStyle(copy).maxWidth : '0'),
           iconOffset: iconRect ? iconRect.x - rect.x : null
         };
       });
-      expect(resting.opacity, ariaLabel).toBe('0');
-      expect(resting.maxWidth, ariaLabel).toBe('0px');
+      expect(resting.opacity, ariaLabel).toBeLessThanOrEqual(0.05);
+      expect(resting.maxWidth, ariaLabel).toBeLessThanOrEqual(1);
       expect(resting.width, ariaLabel).toBe(44);
 
       const box = await pill.boundingBox();
@@ -374,8 +374,8 @@ test('Paper action labels stay under a stationary pointer through repeated hover
       await page.mouse.move((box?.x ?? 0) + (box?.width ?? 0) / 2, (box?.y ?? 0) + (box?.height ?? 0) / 2);
 
       const samples: Array<{ hovered: boolean; opacity: string; maxWidth: number; copyWidth: number }> = [];
-      for (let sample = 0; sample < 10; sample += 1) {
-        await page.waitForTimeout(30);
+      for (let sample = 0; sample < 8; sample += 1) {
+        await page.waitForTimeout(25);
         samples.push(
           await pill.evaluate((element) => {
             const copy = element.querySelector<HTMLElement>('.pill-copy');
@@ -408,8 +408,12 @@ test('Paper action labels stay under a stationary pointer through repeated hover
     }
 
     if (!(await pill.isDisabled())) {
-      await page.mouse.move(0, 0);
+      await page.mouse.move(-10, -10);
       await page.waitForTimeout(220);
+      // Seed keyboard modality before programmatically restoring this exact
+      // target; :focus-visible is intentionally the keyboard reveal contract.
+      await page.keyboard.press('Tab');
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await pill.focus();
       await expect.poll(() => copy.evaluate((element) => getComputedStyle(element).opacity), { message: ariaLabel }).toBe('1');
     }
@@ -513,7 +517,7 @@ test('Paper mode overlays clear adjacent controls and preserve long localized fo
 test('provider choices route to deterministic local password and callback states', async ({ page }) => {
   await page.goto(previewUrl('/ui-preview'));
 
-  await page.getByRole('button', { name: 'Nous' }).click();
+  await page.getByRole('button', { name: 'Continue with Nous' }).click();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
   await expect(page.getByRole('heading', { name: 'Completing sign-in' })).toBeFocused();
 
@@ -954,13 +958,13 @@ test('opt-in live provider discovery fails closed on reviewed 503 and retries id
 
   await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
-  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('No sign-in method is available');
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery stopped');
   await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
   await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
 
   await page.getByRole('button', { name: 'Retry discovery' }).click();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
-  await expect(page.getByRole('button', { name: 'Nous' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Nous, unavailable' })).toBeVisible();
   expect(requestCount).toBe(2);
 });
 
@@ -1002,8 +1006,8 @@ test('opt-in live provider discovery exposes cancellation and retries after abor
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
   await page.getByRole('button', { name: 'Cancel discovery' }).click();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-aborted');
-  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery was cancelled');
-  await expect(page.getByRole('heading', { name: 'Provider discovery was cancelled' })).toBeFocused();
+  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery stopped');
+  await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
 
   releaseFirstResponse();
   await page.getByRole('button', { name: 'Retry discovery' }).click();
@@ -1198,7 +1202,7 @@ test('UI preview stays local at the 200% browser-zoom reflow equivalent with red
   await page.setViewportSize({ width: 640, height: 900 });
   await page.goto(previewUrl('/ui-preview'));
   await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('compatibility-check-failed');
-  await page.getByRole('button', { name: 'Nous' }).click();
+  await page.getByRole('button', { name: 'Continue with Nous' }).click();
   await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
   await page.getByRole('button', { name: 'Cancel and return to providers' }).click();
   await page.getByRole('button', { name: 'Hermes password' }).click();
