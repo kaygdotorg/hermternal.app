@@ -87,13 +87,13 @@ GIT_TIMEOUT_SECONDS = 30.0
 # packs plus metadata, so its separate 96 MiB aggregate cap preserves bounded
 # copy accounting while leaving file-count, output, and timeout limits intact.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
-# An exact remote single-branch clone packs the full rebased reachable history
-# differently from a local clone. Its measured 115,562,803-byte pack needs a
-# finite 128-MiB per-pack bound; local layout is never used as the authority.
-MAX_SNAPSHOT_PACK_FILE_BYTES = 128 * 1024 * 1024
-# The same remote clone seeded from the reviewed four-ref bundle measured
-# 170,075,017 bytes. Keep an independent finite 192-MiB aggregate cap.
-MAX_SNAPSHOT_TOTAL_BYTES = 192 * 1024 * 1024
+# The exact remote single-branch clone packs all reachable bundle rotations;
+# its reproducible pack grew to 173,803,336 bytes, unlike local clone layout.
+# Keep a finite 256-MiB per-pack bound derived from that remote topology.
+MAX_SNAPSHOT_PACK_FILE_BYTES = 256 * 1024 * 1024
+# Seeded remote snapshots retain both the remote pack and reviewed bundle roots.
+# Keep an independent finite 384-MiB aggregate cap.
+MAX_SNAPSHOT_TOTAL_BYTES = 384 * 1024 * 1024
 # Snapshot metadata is bounded separately from copied bytes. A repository with
 # unlimited empty entries could otherwise exhaust directory listings, retained
 # names, or descriptor stacks before any byte budget is reached.
