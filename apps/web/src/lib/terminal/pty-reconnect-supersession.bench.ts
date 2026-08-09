@@ -70,6 +70,30 @@ interface StaleCallbackDispatches {
   readonly onclose: number;
 }
 
+function dispatchCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
+  let onopen = 0;
+  let onmessage = 0;
+  let onerror = 0;
+  let onclose = 0;
+  if (callbacks.onopen) {
+    onopen = 1;
+    callbacks.onopen();
+  }
+  if (callbacks.onmessage) {
+    onmessage = 1;
+    callbacks.onmessage({ data: new Uint8Array([0x42]).buffer });
+  }
+  if (callbacks.onerror) {
+    onerror = 1;
+    callbacks.onerror();
+  }
+  if (callbacks.onclose) {
+    onclose = 1;
+    callbacks.onclose({ code: 1006 });
+  }
+  return { onopen, onmessage, onerror, onclose };
+}
+
 class BenchmarkSocket implements PtyWebSocket {
   readonly socketId: string;
   readonly ownerIdentity: BenchmarkOwnerIdentity;
@@ -81,6 +105,7 @@ class BenchmarkSocket implements PtyWebSocket {
   opened = false;
   closed = false;
   closeCalls = 0;
+  private lateCallbacks: CallbackSnapshot | null = null;
 
   constructor(socketId: string, ownerIdentity: BenchmarkOwnerIdentity) {
     this.socketId = socketId;
@@ -111,28 +136,22 @@ class BenchmarkSocket implements PtyWebSocket {
     };
   }
 
-  dispatchStaleCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
-    let onopen = 0;
-    let onmessage = 0;
-    let onerror = 0;
-    let onclose = 0;
-    if (callbacks.onopen) {
-      onopen = 1;
-      callbacks.onopen();
-    }
-    if (callbacks.onmessage) {
-      onmessage = 1;
-      callbacks.onmessage({ data: new Uint8Array([0x42]).buffer });
-    }
-    if (callbacks.onerror) {
-      onerror = 1;
-      callbacks.onerror();
-    }
-    if (callbacks.onclose) {
-      onclose = 1;
-      callbacks.onclose({ code: 1006 });
-    }
-    return { onopen, onmessage, onerror, onclose };
+  /**
+   * Keep the adapter's already-issued callback references so a late event can
+   * still invoke them after transport cleanup nulls the socket properties.
+   */
+  retainCallbacksForLateDispatch(): CallbackSnapshot {
+    this.lateCallbacks = this.captureCallbacks();
+    return this.lateCallbacks;
+  }
+
+  dispatchLateCallbacks(): StaleCallbackDispatches {
+    return dispatchCallbacks(this.lateCallbacks ?? {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+    });
   }
 }
 
@@ -147,6 +166,8 @@ function snapshotSocket(socket: BenchmarkSocket): SocketClosure {
 
 interface RunProof {
   readonly sampleMs: number;
+  /** Pre-connect timing control; never used as quarantine sample. */
+  readonly negativeControlSampleMs: number;
   readonly validatorCalls: number;
   readonly validatorCallsBeforeRecovery: number;
   readonly ticketRequests: number;
@@ -169,6 +190,8 @@ interface RunProof {
   readonly replacementSocketIdentity: BenchmarkOwnerIdentity;
   readonly replacementSocketCloseCalls: number;
   readonly socketClosures: readonly SocketClosure[];
+  readonly callbackProofApplicable: boolean;
+  readonly callbackBoundSocketCount: number;
   readonly staleCleanupCalls: number;
   readonly staleOpenCalls: number;
   readonly allCallbacksNullAfterClose: boolean;
@@ -279,13 +302,18 @@ async function runStage(stage: Stage): Promise<RunProof> {
     onEvent: (event) => events.push(event),
   });
 
-  const started = performance.now();
+  // This clock intentionally starts before connect. It is a negative control:
+  // validator and ticket setup must appear here, but not in the quarantine sample.
+  const connectStartedAt = performance.now();
   const cancelledAttempt = transport.connect(INPUT);
   await flush();
   if (stage === "validator" && !resolveValidation) throw new Error("validator stage did not start");
   if (stage === "ticket" && ticketRequests !== 1) throw new Error("ticket stage did not start");
   if (stage === "factory" && socketFactoryCalls !== 1) throw new Error("factory stage did not start");
 
+  // The declared metric is quarantine settlement. Start at the ordinary Detach
+  // lifecycle boundary, after setup/ticket/factory work has been staged.
+  const quarantineStartedAt = performance.now();
   transport.detach();
   await expectCode(cancelledAttempt, "aborted", `${stage} cancelled attempt`);
   await expectCode(transport.reconnect(), "aborted", `${stage} quarantined reconnect`);
@@ -297,7 +325,9 @@ async function runStage(stage: Stage): Promise<RunProof> {
     resolveFactory(staleSocket);
   }
   await flush();
-  const sampleMs = roundSample(performance.now() - started);
+  const sampleEndAt = performance.now();
+  const sampleMs = roundSample(sampleEndAt - quarantineStartedAt);
+  const negativeControlSampleMs = roundSample(sampleEndAt - connectStartedAt);
   const validatorCallsBeforeRecovery = validatorCalls;
   const ticketRequestsBeforeRecovery = ticketRequests;
   const socketFactoryCallsBeforeRecovery = socketFactoryCalls;
@@ -322,8 +352,17 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const activeOwnerCountBeforeCleanup = activeOwnerIdentities.length;
   const callbackSnapshots = sockets.map((socket) => ({
     socket,
-    callbacks: socket.captureCallbacks(),
+    callbacks: socket.retainCallbacksForLateDispatch(),
   }));
+  const callbackBoundSocketCount = callbackSnapshots.filter(
+    ({ callbacks }) =>
+      callbacks.onopen !== null &&
+      callbacks.onmessage !== null &&
+      callbacks.onerror !== null &&
+      callbacks.onclose !== null,
+  ).length;
+  const callbackProofApplicable =
+    callbackBoundSocketCount === 1 && activeOwnerCountBeforeCleanup === 1;
 
   // Close must detach every adapter callback before its safeClose call. Replay
   // each callback captured from the live socket after Close to prove stale
@@ -341,8 +380,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
   let staleOnerrorDispatches = 0;
   let staleOncloseDispatches = 0;
   const postCloseEventStart = events.length;
-  for (const { socket, callbacks } of callbackSnapshots) {
-    const dispatches = socket.dispatchStaleCallbacks(callbacks);
+  for (const { socket } of callbackSnapshots) {
+    const dispatches = socket.dispatchLateCallbacks();
     staleOnopenDispatches += dispatches.onopen;
     staleOnmessageDispatches += dispatches.onmessage;
     staleOnerrorDispatches += dispatches.onerror;
@@ -369,12 +408,22 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const staleCleanupCalls = staleSocketCloseCalls;
   const staleOpenCalls = staleSocket?.opened ? 1 : 0;
   const duplicateOwnerViolations = activeOwnerCountBeforeCleanup > 1 ? 1 : 0;
+  const expectedSocketCount = stage === "factory" ? 2 : 1;
   const assertions = {
     quarantineValidatorFence: validatorCallsBeforeRecovery === 1,
     quarantineTicketFence:
       validatorCallsBeforeRecovery === 1 &&
       ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1),
     quarantineFactoryFence: socketFactoryCallsBeforeRecovery === (stage === "factory" ? 1 : 0),
+    negativeControlUsesPreConnectClock:
+      negativeControlSampleMs >= sampleMs &&
+      validatorCallsBeforeRecovery === 1 &&
+      ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1),
+    negativeControlIncludesStagedWork:
+      negativeControlSampleMs >= sampleMs &&
+      validatorCallsBeforeRecovery === 1 &&
+      ticketRequestsBeforeRecovery === (stage === "validator" ? 0 : 1) &&
+      socketFactoryCallsBeforeRecovery === (stage === "factory" ? 1 : 0),
     expectedValidatorCount: validatorCalls === 2,
     expectedTicketCount: ticketRequests === (stage === "validator" ? 1 : 2),
     expectedFactoryCount: socketFactoryCalls === (stage === "factory" ? 2 : 1),
@@ -402,27 +451,64 @@ async function runStage(stage: Stage): Promise<RunProof> {
     activeSocketIsReplacement:
       activeSocketIds.length === 1 && activeSocketIds[0] === replacementSocketId,
     socketClosureLedgerExact:
-      socketClosures.length === (stage === "factory" ? 2 : 1) &&
+      socketClosures.length === expectedSocketCount &&
       socketClosures.every(
         (closure) =>
+          sameOwnerIdentity(closure.ownerIdentity, expectedOwnerIdentity) &&
           closure.closeCalls === 1 &&
           closure.opened === (closure.socketId === replacementSocketId),
       ),
+    ownerSocketClosureLedgerExact:
+      socketClosures.length === expectedSocketCount &&
+      socketClosures.some((closure) => closure.socketId === replacementSocketId) &&
+      (stage !== "factory" ||
+        (staleSocketId !== null &&
+          staleSocketId !== replacementSocketId &&
+          socketClosures.some(
+            (closure) => closure.socketId === staleSocketId && !closure.opened,
+          ))),
     noDuplicateOwners: duplicateOwnerViolations === 0,
+    callbackApplicabilityMatchesLedger:
+      callbackProofApplicable ===
+      (callbackBoundSocketCount === 1 && activeOwnerCountBeforeCleanup === 1),
+    replacementCallbacksBound:
+      callbackProofApplicable && callbackBoundSocketCount === 1,
     allCallbacksNullAfterClose,
     staleCallbacksExercised:
-      staleOnopenDispatches === activeOwnerCountBeforeCleanup &&
-      staleOnmessageDispatches === activeOwnerCountBeforeCleanup &&
-      staleOnerrorDispatches === activeOwnerCountBeforeCleanup &&
-      staleOncloseDispatches === activeOwnerCountBeforeCleanup,
-    staleOnopenIgnored: staleOnopenDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
-    staleOnmessageIgnored: staleOnmessageDispatches === activeOwnerCountBeforeCleanup && postCloseBytesEvents === 0,
-    staleOnerrorIgnored: staleOnerrorDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
-    staleOncloseIgnored: staleOncloseDispatches === activeOwnerCountBeforeCleanup && postCloseStateEvents === 0,
+      callbackProofApplicable &&
+      staleOnopenDispatches === callbackBoundSocketCount &&
+      staleOnmessageDispatches === callbackBoundSocketCount &&
+      staleOnerrorDispatches === callbackBoundSocketCount &&
+      staleOncloseDispatches === callbackBoundSocketCount,
+    staleOnopenIgnored:
+      callbackProofApplicable &&
+      staleOnopenDispatches === callbackBoundSocketCount &&
+      postCloseStateEvents === 0,
+    staleOnmessageIgnored:
+      callbackProofApplicable &&
+      staleOnmessageDispatches === callbackBoundSocketCount &&
+      postCloseBytesEvents === 0,
+    staleOnerrorIgnored:
+      callbackProofApplicable &&
+      staleOnerrorDispatches === callbackBoundSocketCount &&
+      postCloseStateEvents === 0,
+    staleOncloseIgnored:
+      callbackProofApplicable &&
+      staleOncloseDispatches === callbackBoundSocketCount &&
+      postCloseStateEvents === 0,
+    stalePublicationRejected:
+      callbackProofApplicable &&
+      staleOnopenDispatches === callbackBoundSocketCount &&
+      staleOnmessageDispatches === callbackBoundSocketCount &&
+      staleOnerrorDispatches === callbackBoundSocketCount &&
+      staleOncloseDispatches === callbackBoundSocketCount &&
+      postCloseStateEvents === 0 &&
+      postCloseBytesEvents === 0 &&
+      postCloseNoticeEvents === 0,
     noPostCloseStateEvents: postCloseStateEvents === 0,
     noPostCloseBytesEvents: postCloseBytesEvents === 0,
     noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
-    cleanupRecorded: cleanupCalls === (stage === "factory" ? 2 : 1),
+    cleanupRecorded: cleanupCalls === expectedSocketCount,
   };
   if (Object.values(assertions).some((value) => !value)) {
     throw new Error(`${stage} proof assertion failed: ${JSON.stringify(assertions)}`);
@@ -430,6 +516,7 @@ async function runStage(stage: Stage): Promise<RunProof> {
 
   return {
     sampleMs,
+    negativeControlSampleMs,
     validatorCalls,
     validatorCallsBeforeRecovery,
     ticketRequests,
@@ -452,6 +539,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
     replacementSocketIdentity,
     replacementSocketCloseCalls,
     socketClosures,
+    callbackProofApplicable,
+    callbackBoundSocketCount,
     staleCleanupCalls,
     staleOpenCalls,
     allCallbacksNullAfterClose,
@@ -509,7 +598,7 @@ const artifact = {
     name: "quarantine_settle_wall_time",
     unit: "ms",
     clock: "performance.now",
-    start: "connect attempt starts",
+    start: "performance.now immediately before ordinary detach begins quarantine settlement",
     end: "ignored adapter settles after detach and blocked reconnect",
   },
   method: "R-7 inclusive linear interpolation over rounded raw samples",

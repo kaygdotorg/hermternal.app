@@ -75,6 +75,30 @@ interface StaleCallbackDispatches {
   readonly onclose: number;
 }
 
+function dispatchCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
+  let onopen = 0;
+  let onmessage = 0;
+  let onerror = 0;
+  let onclose = 0;
+  if (callbacks.onopen) {
+    onopen = 1;
+    callbacks.onopen();
+  }
+  if (callbacks.onmessage) {
+    onmessage = 1;
+    callbacks.onmessage({ data: new Uint8Array([0x42]).buffer });
+  }
+  if (callbacks.onerror) {
+    onerror = 1;
+    callbacks.onerror();
+  }
+  if (callbacks.onclose) {
+    onclose = 1;
+    callbacks.onclose({ code: 1006 });
+  }
+  return { onopen, onmessage, onerror, onclose };
+}
+
 class BenchmarkSocket implements PtyWebSocket {
   readonly socketId: string;
   readonly ownerIdentity: BenchmarkOwnerIdentity;
@@ -86,6 +110,7 @@ class BenchmarkSocket implements PtyWebSocket {
   opened = false;
   closed = false;
   closeCalls = 0;
+  private lateCallbacks: CallbackSnapshot | null = null;
 
   constructor(socketId: string, ownerIdentity: BenchmarkOwnerIdentity) {
     this.socketId = socketId;
@@ -116,28 +141,22 @@ class BenchmarkSocket implements PtyWebSocket {
     };
   }
 
-  dispatchStaleCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
-    let onopen = 0;
-    let onmessage = 0;
-    let onerror = 0;
-    let onclose = 0;
-    if (callbacks.onopen) {
-      onopen = 1;
-      callbacks.onopen();
-    }
-    if (callbacks.onmessage) {
-      onmessage = 1;
-      callbacks.onmessage({ data: new Uint8Array([0x42]).buffer });
-    }
-    if (callbacks.onerror) {
-      onerror = 1;
-      callbacks.onerror();
-    }
-    if (callbacks.onclose) {
-      onclose = 1;
-      callbacks.onclose({ code: 1006 });
-    }
-    return { onopen, onmessage, onerror, onclose };
+  /**
+   * Keep the adapter's already-issued callback references so a late event can
+   * still invoke them after transport cleanup nulls the socket properties.
+   */
+  retainCallbacksForLateDispatch(): CallbackSnapshot {
+    this.lateCallbacks = this.captureCallbacks();
+    return this.lateCallbacks;
+  }
+
+  dispatchLateCallbacks(): StaleCallbackDispatches {
+    return dispatchCallbacks(this.lateCallbacks ?? {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      onclose: null,
+    });
   }
 }
 
@@ -152,6 +171,8 @@ function snapshotSocket(socket: BenchmarkSocket): SocketClosure {
 
 interface RunProof {
   readonly sampleMs: number;
+  /** Pre-connect timing control; never used as the ownership sample. */
+  readonly negativeControlSampleMs: number;
   readonly validatorCalls: number;
   readonly ticketRequests: number;
   readonly socketFactoryCalls: number;
@@ -226,6 +247,7 @@ async function runAction(action: Action): Promise<RunProof> {
   let replacementPromise: Promise<void> | undefined;
   let actionTaken = false;
   let actionStartedAt: number | undefined;
+  let connectStartedAt: number | undefined;
   let validatorCalls = 0;
   let ticketRequests = 0;
   let socketFactoryCalls = 0;
@@ -238,8 +260,9 @@ async function runAction(action: Action): Promise<RunProof> {
     events.push(event);
     if (actionTaken || event.type !== "state" || event.state.status !== "connecting") return;
     actionTaken = true;
-    // Start at the ownership decision itself, not at setup or ticket work. The
-    // measured interval ends when the cancelled owner rejects below.
+    // The declared lifecycle boundary is the observable `connecting` state.
+    // Setup and ticket work may precede it; the pre-connect clock below is kept
+    // only as a negative control to prove that work is not part of sampleMs.
     actionStartedAt = performance.now();
     if (action === "abort") controller.abort();
     if (action === "close") transport.close();
@@ -277,12 +300,21 @@ async function runAction(action: Action): Promise<RunProof> {
     onEvent,
   });
 
+  // This clock intentionally starts before connect. It is a negative control:
+  // validator and ticket setup are expected to appear here, but not in sampleMs.
+  connectStartedAt = performance.now();
   const cancelled = transport.connect(INPUT, controller.signal);
   await expectAborted(cancelled, `${action} cancelled operation`);
-  if (!actionTaken || actionStartedAt === undefined) {
+  if (
+    !actionTaken ||
+    actionStartedAt === undefined ||
+    connectStartedAt === undefined
+  ) {
     throw new Error(`${action} did not run a connecting observer action`);
   }
-  const sampleMs = roundSample(performance.now() - actionStartedAt);
+  const sampleEndAt = performance.now();
+  const sampleMs = roundSample(sampleEndAt - actionStartedAt);
+  const negativeControlSampleMs = roundSample(sampleEndAt - connectStartedAt);
   await flush();
 
   const replacementSocket = sockets.find((socket) =>
@@ -308,13 +340,21 @@ async function runAction(action: Action): Promise<RunProof> {
   const activeOwnerCount = activeOwnerIdentities.length;
   const duplicateOwnerViolations = activeOwnerCount > 1 ? 1 : 0;
   // The connecting guard intentionally allocates no socket for abort, Close, or
-  // detach. Their callback proof is therefore inapplicable, while replacement
-  // must bind and replay every callback on its allocated socket.
-  const callbackProofApplicable = action === "replace";
+  // detach. Their callback proof is inapplicable, while replacement must bind
+  // every callback on its allocated socket before cleanup.
   const callbackSnapshots = sockets.map((socket) => ({
     socket,
-    callbacks: socket.captureCallbacks(),
+    callbacks: socket.retainCallbacksForLateDispatch(),
   }));
+  const callbackBoundSocketCount = callbackSnapshots.filter(
+    ({ callbacks }) =>
+      callbacks.onopen !== null &&
+      callbacks.onmessage !== null &&
+      callbacks.onerror !== null &&
+      callbacks.onclose !== null,
+  ).length;
+  const callbackProofApplicable =
+    action === "replace" && callbackBoundSocketCount === 1;
 
   // Close must detach every adapter callback before its safeClose call. Replay
   // each callback captured from the live socket after Close to prove stale
@@ -337,8 +377,8 @@ async function runAction(action: Action): Promise<RunProof> {
   let staleOnerrorDispatches = 0;
   let staleOncloseDispatches = 0;
   const postCloseEventStart = events.length;
-  for (const { socket, callbacks } of callbackSnapshots) {
-    const dispatches = socket.dispatchStaleCallbacks(callbacks);
+  for (const { socket } of callbackSnapshots) {
+    const dispatches = socket.dispatchLateCallbacks();
     staleOnopenDispatches += dispatches.onopen;
     staleOnmessageDispatches += dispatches.onmessage;
     staleOnerrorDispatches += dispatches.onerror;
@@ -360,12 +400,20 @@ async function runAction(action: Action): Promise<RunProof> {
   const replacementSocketCloseCalls = replacementSocket?.closeCalls ?? 0;
   // Record the exact post-close state for every allocated physical socket.
   const socketClosures = sockets.map(snapshotSocket);
+  const expectedSocketCount = action === "replace" ? 1 : 0;
   const assertions = {
     connectingGuard: staleSockets.length === 0,
     staleSocketNeverOpened: staleOpenCalls === 0,
     expectedValidatorCount: validatorCalls === (action === "replace" ? 2 : 1),
     expectedFactoryCount: socketFactoryCalls === (action === "replace" ? 1 : 0),
     expectedTicketCount: ticketRequests === (action === "replace" ? 2 : 1),
+    negativeControlUsesPreConnectClock:
+      connectStartedAt !== undefined &&
+      actionStartedAt !== undefined &&
+      connectStartedAt <= actionStartedAt &&
+      negativeControlSampleMs >= sampleMs,
+    negativeControlIncludesSetupAndTicket:
+      negativeControlSampleMs >= sampleMs && validatorCalls >= 1 && ticketRequests >= 1,
     replacementOpenedExactlyOnce:
       action !== "replace" || (replacementSocket?.opened === true && openedSockets === 1),
     replacementAttached,
@@ -387,21 +435,28 @@ async function runAction(action: Action): Promise<RunProof> {
       action !== "replace" || replacementSocketId !== null && replacementSocketId !== staleSocketId,
     replacementClosedExactlyOnce: action !== "replace" || replacementSocketCloseCalls === 1,
     exactSocketCleanup:
-      action !== "replace" ||
-      (socketClosures.length === 1 &&
-        socketClosures.every((socket) => socket.closeCalls === 1 && socket.opened)),
+      socketClosures.length === expectedSocketCount &&
+      socketClosures.every(
+        (socket) =>
+          socket.closeCalls === 1 &&
+          socket.opened &&
+          (expectedOwnerIdentity === null ||
+            sameOwnerIdentity(socket.ownerIdentity, expectedOwnerIdentity)),
+      ),
+    ownerSocketClosureLedgerExact:
+      socketClosures.length === expectedSocketCount &&
+      (action !== "replace" ||
+        (replacementSocketId !== null &&
+          socketClosures[0]?.socketId === replacementSocketId &&
+          socketClosures[0]?.closeCalls === 1 &&
+          socketClosures[0]?.opened === true)),
+    callbackApplicabilityMatchesAction:
+      callbackProofApplicable === (action === "replace" && callbackBoundSocketCount === 1),
     allCallbacksNullAfterClose:
       !callbackProofApplicable || allCallbacksNullAfterClose,
     replacementCallbacksBound:
       !callbackProofApplicable ||
-      (callbackSnapshots.length === 1 &&
-        callbackSnapshots.every(
-          ({ callbacks }) =>
-            callbacks.onopen !== null &&
-            callbacks.onmessage !== null &&
-            callbacks.onerror !== null &&
-            callbacks.onclose !== null,
-        )),
+      (callbackSnapshots.length === 1 && callbackBoundSocketCount === 1),
     staleCallbacksExercised:
       !callbackProofApplicable ||
       (staleOnopenDispatches === 1 &&
@@ -416,10 +471,23 @@ async function runAction(action: Action): Promise<RunProof> {
       !callbackProofApplicable || staleOnerrorDispatches === 1 && postCloseStateEvents === 0,
     staleOncloseIgnored:
       !callbackProofApplicable || staleOncloseDispatches === 1 && postCloseStateEvents === 0,
+    stalePublicationRejected:
+      callbackProofApplicable
+        ? staleOnopenDispatches === 1 &&
+          staleOnmessageDispatches === 1 &&
+          staleOnerrorDispatches === 1 &&
+          staleOncloseDispatches === 1 &&
+          postCloseStateEvents === 0 &&
+          postCloseBytesEvents === 0 &&
+          postCloseNoticeEvents === 0
+        : sockets.length === 0 &&
+          postCloseStateEvents === 0 &&
+          postCloseBytesEvents === 0 &&
+          postCloseNoticeEvents === 0,
     noPostCloseStateEvents: postCloseStateEvents === 0,
     noPostCloseBytesEvents: postCloseBytesEvents === 0,
     noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
-    cleanupRecorded: action !== "replace" || cleanupCalls === 1,
+    cleanupRecorded: cleanupCalls === expectedSocketCount,
   };
   if (Object.values(assertions).some((value) => !value)) {
     throw new Error(`${action} proof assertion failed: ${JSON.stringify(assertions)}`);
@@ -427,6 +495,7 @@ async function runAction(action: Action): Promise<RunProof> {
 
   return {
     sampleMs,
+    negativeControlSampleMs,
     validatorCalls,
     ticketRequests,
     socketFactoryCalls,
@@ -503,7 +572,7 @@ const artifact = {
     name: "ownership_decision_settle_wall_time",
     unit: "ms",
     clock: "performance.now",
-    start: "performance.now immediately before connecting observer cancellation or replacement action",
+    start: "performance.now at the connecting state lifecycle event before observer cancellation or replacement action",
     end: "cancelled operation rejects",
   },
   method: "R-7 inclusive linear interpolation over rounded raw samples",
