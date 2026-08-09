@@ -18,6 +18,18 @@ function terminalManifest() {
   );
 }
 
+function assertRejectsInvalidTerminalIdentity(manifestKey) {
+  const manifestEntries = terminalManifest();
+  manifestEntries.set(manifestKey, { isDynamicEntry: false });
+
+  assert.throws(
+    () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
+    (error) =>
+      error instanceof Error &&
+      error.message === `Client manifest contains an invalid terminal dependency identity: ${manifestKey}`
+  );
+}
+
 test('canonicalizes workspace and external relative node_modules roots', () => {
   assert.equal(
     canonicalizeTerminalModuleKey('node_modules/@wterm/dom/dist/index.js'),
@@ -97,14 +109,54 @@ test('rejects traversal and encoded aliases at the manifest acceptance assertion
     `${externalRoot}/node_modules/@wterm/dom/dist/%2e%2e/index.js`,
     `${externalRoot}/node_modules/@wterm/dom/dist/%5cx%5c..%5cindex.js`
   ]) {
-    const manifestEntries = terminalManifest();
-    manifestEntries.set(alias, { isDynamicEntry: false });
+    assertRejectsInvalidTerminalIdentity(alias);
+  }
+});
 
-    assert.throws(
-      () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
-      /invalid terminal dependency identity/
+test('rejects package-boundary, separator, and bounded percent aliases', () => {
+  for (const alias of [
+    `${externalRoot}/node_modules/@wterm/dom/../dom/dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom/./dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom//dist/index.js`,
+    `${externalRoot}\\node_modules/@wterm\\dom/dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom%5c..%5cdom/dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom%255c..%255cdom/dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom/dist/%252e%252e/index.js`,
+    `${externalRoot}/node_modules/%40wterm/%64om/dist/index.js`,
+    `${externalRoot}/node_modules/%2540wterm/%2564om/dist/index.js`,
+    `${externalRoot}/node_modules/@Wterm/dom/dist/index.js`,
+    `${externalRoot}/node_modules/@wterm/DOM/dist/index.js`
+  ]) {
+    assertRejectsInvalidTerminalIdentity(alias);
+  }
+});
+
+test('keeps unrelated package boundaries distinct during terminal inspection', () => {
+  const manifestEntries = terminalManifest();
+  for (const packagePath of ['@wtermish/dom', '@wterm/domish']) {
+    manifestEntries.set(
+      `${externalRoot}/node_modules/${packagePath}/dist/index.js`,
+      { isDynamicEntry: false }
     );
   }
+
+  assert.doesNotThrow(() => assertTerminalOnlyModulesRemainDynamic(manifestEntries));
+  assert.equal(
+    canonicalizeTerminalModuleKey(`${externalRoot}/node_modules/@wterm/ghostty/dist/index.js`),
+    'node_modules/@wterm/ghostty/dist/index.js'
+  );
+
+  manifestEntries.set(
+    `${externalRoot}/node_modules/@wterm/ghostty/dist/index.js`,
+    { isDynamicEntry: false }
+  );
+  assert.throws(
+    () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
+    (error) =>
+      error instanceof Error &&
+      error.message ===
+        'Terminal-only dependency must remain dynamic: node_modules/@wterm/ghostty/dist/index.js'
+  );
 });
 
 test('does not substitute a non-node_modules path for a terminal dependency', () => {
