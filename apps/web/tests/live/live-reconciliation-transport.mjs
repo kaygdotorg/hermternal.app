@@ -137,10 +137,15 @@ export async function requestLiveReconciliationProjection(page, request) {
         const cancelReader = () => {
           if (cancelRequested) return;
           cancelRequested = true;
-          // Do not wait for a hostile or stalled cancel promise. The fixed
-          // timeout result must still reach cleanup, while this best-effort
-          // cancellation releases the browser stream when it cooperates.
-          void Promise.resolve(reader.cancel()).catch(() => undefined);
+          // Cancellation is best effort. Invoke it exactly once without
+          // allowing a synchronous throw or hostile thenable to delay the
+          // fixed transport failure and independent cleanup.
+          try {
+            const cancellation = reader.cancel();
+            void Promise.resolve(cancellation).catch(() => undefined);
+          } catch {
+            // A stream can throw before returning its cancellation promise.
+          }
         };
         const readNextChunk = async () => {
           const remaining = deadline - Date.now();
@@ -169,7 +174,7 @@ export async function requestLiveReconciliationProjection(page, request) {
             if (!next || next.done === true) break;
             const chunk = next.value;
             if (!(chunk instanceof Uint8Array)) {
-              await reader.cancel();
+              cancelReader();
               controller.abort();
               throw new Error('live reconciliation response chunk is invalid');
             }
@@ -178,7 +183,7 @@ export async function requestLiveReconciliationProjection(page, request) {
               chunkCount > MAX_CHUNKS ||
               chunk.byteLength > MAX_BYTES - bytes
             ) {
-              await reader.cancel();
+              cancelReader();
               controller.abort();
               throw new Error('live reconciliation response exceeded its bound');
             }
@@ -510,13 +515,26 @@ export async function readBoundedLiveReconciliationJson(response, controller) {
   const chunks = [];
   let bytes = 0;
   let chunkCount = 0;
+  let cancelRequested = false;
+  const cancelReader = () => {
+    if (cancelRequested) return;
+    cancelRequested = true;
+    // Cancellation is best effort. Invoke it exactly once without allowing a
+    // synchronous throw or hostile thenable to delay the fixed failure.
+    try {
+      const cancellation = reader.cancel();
+      void Promise.resolve(cancellation).catch(() => undefined);
+    } catch {
+      // A stream can throw before returning its cancellation promise.
+    }
+  };
   try {
     while (true) {
       const next = await reader.read();
       if (!next || next.done === true) break;
       const chunk = next.value;
       if (!(chunk instanceof Uint8Array)) {
-        await reader.cancel();
+        cancelReader();
         controller.abort();
         throw new Error('live reconciliation response chunk is invalid');
       }
@@ -525,7 +543,7 @@ export async function readBoundedLiveReconciliationJson(response, controller) {
         chunkCount > LIVE_RECONCILIATION_MAX_RESPONSE_CHUNKS ||
         chunk.byteLength > LIVE_RECONCILIATION_MAX_RESPONSE_BYTES - bytes
       ) {
-        await reader.cancel();
+        cancelReader();
         controller.abort();
         throw new Error('live reconciliation response exceeded its bound');
       }
@@ -533,11 +551,7 @@ export async function readBoundedLiveReconciliationJson(response, controller) {
       bytes += chunk.byteLength;
     }
   } catch (error) {
-    try {
-      await reader.cancel();
-    } catch {
-      // The transport is already failing closed; do not expose cancel errors.
-    }
+    cancelReader();
     controller.abort();
     if (error instanceof Error && error.message.startsWith('live reconciliation')) throw error;
     throw new Error('live reconciliation response body read failed');
