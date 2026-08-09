@@ -379,6 +379,7 @@ class DependencyAuditTests(unittest.TestCase):
         variants = (
             standard_lock.replace(b'"lockfileVersion"', b"lockfileVersion", 1),
             standard_lock.replace(b'"lockfileVersion"', b"'lockfileVersion'", 1),
+            standard_lock.replace(b'"configVersion": 1', b'"configVersion": 1.', 1),
         )
         for lockfile in variants:
             result = audit.audit_bytes(
@@ -387,8 +388,11 @@ class DependencyAuditTests(unittest.TestCase):
                 manifest_label="fixture/package.json",
                 lockfile_label="fixture/bun.lock",
             )
+            codes = self.finding_codes(result)
             self.assertEqual(result["status"], "fail", result)
-            self.assertIn("lockfile-json5-unsupported", self.finding_codes(result), result)
+            self.assertIn("lockfile-json5-unsupported", codes, result)
+            if b'"configVersion": 1.' in lockfile:
+                self.assertNotIn("lockfile-json-invalid", codes, result)
 
     def test_semver_ranges_are_strict_and_prerelease_safe(self) -> None:
         manifest = json.dumps(

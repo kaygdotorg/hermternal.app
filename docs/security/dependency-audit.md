@@ -191,9 +191,10 @@ and other special-file races fail without waiting for a writer. The reader takes
 at most one extra byte to detect an oversized file, rejects invalid UTF-8, rejects
 duplicate JSON keys, and accepts only Bun's bounded JSON5 comments/trailing-comma
 form. Bun's valid but broader JSON5 grammar—such as unquoted keys, single-quoted
-strings, hexadecimal/leading-dot numbers, and non-finite constants—is rejected
-with a deterministic `*-json5-unsupported` finding rather than silently
-rewritten. Unexpected failures map to stable codes without a traceback. No
+strings, hexadecimal/leading-dot/trailing-dot numbers, and non-finite
+constants—is rejected with a deterministic `*-json5-unsupported` finding
+rather than silently rewritten. Unexpected failures map to stable codes without
+a traceback. No
 subprocess, socket, HTTP client, package manager, registry, or vulnerability API
 is used.
 The report omits runtime duration so repeated runs remain byte-for-byte stable

@@ -236,6 +236,16 @@ def _strip_bun_json5(text: str) -> str:
                 and text[index + 1].isdigit()
                 and (index == 0 or not text[index - 1].isdigit())
             )
+            or (
+                char == "."
+                and index > 0
+                and text[index - 1].isdigit()
+                and (
+                    index + 1 == length
+                    or text[index + 1] in " \t\r\n,}]"
+                    or text[index + 1] in "eE"
+                )
+            )
         ):
             raise ValueError("unsupported-json5")
         if char == "-" and index + 1 < length and text[index + 1] == ".":
