@@ -87,11 +87,17 @@ root resolution through the final digest return. Git provenance uses timed
 commands with bounded output and diagnostics. Its bounded local metadata scan
 rejects nested symlink escapes, include/includeIf directives, and every
 promisor or partial-clone selector, including key-only booleans and active
-`config.worktree`; external Git configuration is disabled. If both Git pipes
+`config.worktree`; external Git configuration is disabled. Descriptor-backed
+identity and bounded-byte pins cover config, worktree/configuration pointers,
+packed refs, forbidden metadata, and objects/refs/pack directories, including
+explicit absence pins. Every provenance command asserts those pins immediately
+before and after execution and fails closed on any swap. If both Git pipes
 close while the process continues, the path still returns the bounded proof
-timeout after terminating and reaping the process group. Renderer path inputs
-are literal absolute filesystem paths; Caddy placeholders are rejected. Any
-limit, identity, malformed-output, or command failure fails closed.
+timeout after terminating and reaping the process group. A direct-child success
+with a live descendant group is rejected after bounded TERM/KILL cleanup and
+reaping. Renderer path inputs are literal absolute filesystem paths; Caddy
+placeholders are rejected. Any limit, identity, malformed-output, or command
+failure fails closed.
 
 The retained workflow must use the complete evidence file at the canonical
 committed path `tests/integration/hermes-caddy/caddy-proof-evidence.json`.

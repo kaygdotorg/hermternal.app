@@ -1471,6 +1471,81 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "promisor|partial|lazy|worktree"):
                 caddy_proof._verify_git_repository(repository)
 
+    def test_git_config_swap_after_validation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            config = repository / ".git" / "config"
+            replacement = Path(directory) / "replacement-config"
+            replacement.write_text(
+                config.read_text(encoding="utf-8") + '[remote "origin"]\n\tpromisor = true\n',
+                encoding="utf-8",
+            )
+            real_runner = caddy_proof._run_bounded_git
+            swapped = [False]
+
+            def swap_before_command(command, environment):
+                if not swapped[0]:
+                    os.replace(replacement, config)
+                    swapped[0] = True
+                return real_runner(command, environment)
+
+            with mock.patch.object(caddy_proof, "_run_bounded_git", side_effect=swap_before_command):
+                with self.assertRaisesRegex(ValueError, "metadata changed|promisor|lazy|partial"):
+                    caddy_proof._verify_git_repository(repository)
+            self.assertTrue(swapped[0])
+
+    def test_git_objects_swap_after_validation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            objects = repository / ".git" / "objects"
+            moved = Path(directory) / "moved-objects"
+            real_runner = caddy_proof._run_bounded_git
+            swapped = [False]
+
+            def swap_before_command(command, environment):
+                if not swapped[0]:
+                    objects.rename(moved)
+                    objects.symlink_to(moved, target_is_directory=True)
+                    swapped[0] = True
+                return real_runner(command, environment)
+
+            with mock.patch.object(caddy_proof, "_run_bounded_git", side_effect=swap_before_command):
+                with self.assertRaisesRegex(ValueError, "metadata changed|symlink|identity"):
+                    caddy_proof._verify_git_repository(repository)
+            self.assertTrue(swapped[0])
+
+    def test_git_rejects_installation_of_absent_metadata_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            target = repository / ".git" / "config.worktree"
+            self.assertFalse(target.exists())
+            real_runner = caddy_proof._run_bounded_git
+            installed = [False]
+
+            def install_before_command(command, environment):
+                if not installed[0]:
+                    target.write_text('[remote "origin"]\n\tpromisor = true\n', encoding="utf-8")
+                    installed[0] = True
+                return real_runner(command, environment)
+
+            with mock.patch.object(caddy_proof, "_run_bounded_git", side_effect=install_before_command):
+                with self.assertRaisesRegex(ValueError, "metadata changed|appeared|promisor|lazy|partial"):
+                    caddy_proof._verify_git_repository(repository)
+            self.assertTrue(installed[0])
+
+    def test_git_rejects_live_forked_descendant_after_parent_success(self) -> None:
+        script = (
+            "import os,time; "
+            "child=os.fork(); os.close(1); os.close(2); "
+            "(time.sleep(30) if child == 0 else os._exit(0))"
+        )
+        with mock.patch.object(caddy_proof, "GIT_COMMAND_TIMEOUT_SECONDS", 1.0):
+            with self.assertRaisesRegex(ValueError, "descendants|process group"):
+                caddy_proof._run_bounded_git(
+                    [sys.executable, "-c", script],
+                    caddy_proof._strict_git_environment(),
+                )
+
     def test_nested_git_metadata_links_are_rejected(self) -> None:
         for relative in (Path("objects"), Path("refs"), Path("objects") / "pack"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
