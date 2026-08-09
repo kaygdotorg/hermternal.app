@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for launcher endpoint and credential-file result parsing."""
+"""Offline tests for verified launcher handoff metadata parsing."""
 
 from __future__ import annotations
 
@@ -30,23 +30,21 @@ class LauncherResultTests(unittest.TestCase):
             "ok": True,
             "operation": "endpoint",
             "result": {
-                "instance": "issue118",
-                "container": "hermternal-hermes-agent-issue118",
-                "endpoint": "http://127.0.0.1:19124",
-                "image": "docker.io/nousresearch/hermes-agent@sha256:" + ("a" * 64),
-                "data_path": "/private/tmp/hermes/issue118/data",
-                "credential_file": "/private/tmp/hermes/issue118/password",
                 "status": "running",
+                "endpoint": "http://127.0.0.1:19124",
+                "marker_path": "/private/tmp/hermes/runs/issue118.json",
+                "credential_file": "/private/tmp/hermes/runs/issue118.credential",
             },
         }
 
-    def test_extracts_result_endpoint_and_credential_file(self) -> None:
+    def test_extracts_only_verified_endpoint_and_exact_ownership_paths(self) -> None:
         raw = json.dumps(self.document).encode("utf-8")
         self.assertEqual(
             parser.parse_launcher_result(raw),
             {
                 "endpoint": "http://127.0.0.1:19124",
-                "credential-file": "/private/tmp/hermes/issue118/password",
+                "marker-path": "/private/tmp/hermes/runs/issue118.json",
+                "credential-file": "/private/tmp/hermes/runs/issue118.credential",
             },
         )
 
@@ -58,6 +56,7 @@ class LauncherResultTests(unittest.TestCase):
             {"result": {**self.document["result"], "status": "ready"}},
             {"result": {key: value for key, value in self.document["result"].items() if key != "status"}},
             {"result": {**self.document["result"], "unexpected": "metadata"}},
+            {"result": {**self.document["result"], "marker_path": "relative-marker.json"}},
         )
         for replacement in bypasses:
             with self.subTest(replacement=replacement):
@@ -72,6 +71,8 @@ class LauncherResultTests(unittest.TestCase):
             "http://[::1]:19124",
             "http://0.0.0.0:19124",
             "http://127.0.0.1:19124/path",
+            "http://127.0.0.1:19124?query",
+            "http://127.0.0.1:19124#fragment",
         ):
             with self.subTest(endpoint=endpoint):
                 self.document["result"]["endpoint"] = endpoint
@@ -80,23 +81,25 @@ class LauncherResultTests(unittest.TestCase):
 
     def test_cli_emits_only_requested_metadata(self) -> None:
         raw = json.dumps(self.document).encode("utf-8")
-        with mock_stdin(raw), contextlib.redirect_stdout(io.StringIO()) as stdout:
-            status = parser.main(["endpoint"])
-        self.assertEqual(status, 0)
-        self.assertEqual(stdout.getvalue(), "http://127.0.0.1:19124\n")
-
-        with mock_stdin(raw), contextlib.redirect_stdout(io.StringIO()) as stdout:
-            status = parser.main(["credential-file"])
-        self.assertEqual(status, 0)
-        self.assertEqual(stdout.getvalue(), "/private/tmp/hermes/issue118/password\n")
+        for field, expected in (
+            ("endpoint", "http://127.0.0.1:19124"),
+            ("marker-path", "/private/tmp/hermes/runs/issue118.json"),
+            ("credential-file", "/private/tmp/hermes/runs/issue118.credential"),
+        ):
+            with self.subTest(field=field), mock_stdin(raw), contextlib.redirect_stdout(io.StringIO()) as stdout:
+                status = parser.main([field])
+            self.assertEqual(status, 0)
+            self.assertEqual(stdout.getvalue(), expected + "\n")
 
     def test_missing_or_malformed_result_fails_without_echoing_input(self) -> None:
         rejected = (
             b"not-json",
             json.dumps({"ok": False, "result": self.document["result"]}).encode("utf-8"),
-            json.dumps({"ok": True, "result": {"endpoint": self.document["result"]["endpoint"]}}).encode("utf-8"),
-            json.dumps({"ok": True, "result": {"endpoint": "", "credential_file": "path"}}).encode("utf-8"),
-            json.dumps({"ok": True, "result": {"endpoint": "http://127.0.0.1\n:19124", "credential_file": "path"}}).encode("utf-8"),
+            json.dumps({"ok": True, "operation": "endpoint", "result": {"endpoint": self.document["result"]["endpoint"]}}).encode("utf-8"),
+            json.dumps({"ok": True, "operation": "endpoint", "result": {"status": "running", "endpoint": "", "marker_path": "path", "credential_file": "path"}}).encode("utf-8"),
+            json.dumps({"ok": True, "operation": "endpoint", "result": {**self.document["result"], "endpoint": "http://127.0.0.1\n:19124"}}).encode("utf-8"),
+            b'{"ok":true,"operation":"endpoint","operation":"endpoint","result":{}}',
+            b'{"ok":true,"operation":"endpoint","result":{"status":"running","endpoint":NaN,"marker_path":"/tmp/m.json","credential_file":"/tmp/m.credential"}}',
         )
         for raw in rejected:
             with self.subTest(raw_label=len(raw)), mock_stdin(raw), contextlib.redirect_stderr(io.StringIO()) as stderr:

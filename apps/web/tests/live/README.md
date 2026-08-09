@@ -9,17 +9,21 @@ The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/
 The host is test-only. It is not a deployment server and does not add authentication, retries, transcript storage, or response logging. The live Playwright configuration creates one unique OS-temporary 0700 output root with an owner marker and token, sets `preserveOutput: 'never'`, disables traces, videos, automatic screenshots, and uses the safe status-only reporter. The only screenshot path is the explicit issue #353 capture helper after completion and REST reconciliation. It first writes raw pixels inside the owned temporary root, requires a separate scrub hook to create a new PNG, requires an independent human-visual review hook to approve that exact SHA-256, rejects ancillary PNG metadata, and only then publishes the approved 1440×960 and 390×844 files with their closed public manifest. `tests/live/live-ipc-guard.cjs` is preloaded through `NODE_OPTIONS --require` before worker fixtures or test bodies. `PW_RUNNER_DEBUG` is incompatible with this lane: the live config and credential launcher reject any truthy value before a worker can start because Playwright otherwise inherits worker stderr directly. The guard captures immutable credential variants once at preload and pins `process.send`, never mutates `Object.prototype`, `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including step, test-end, fatal, attachment, stdio, produced-environment, and response messages. The Node-side policy also captures every primordial it uses before test code runs—including object, reflection, array, string, regular-expression, Set/Map, and Buffer helpers—and invokes those references through captured `Reflect.apply`; the browser-realm DOM scrub remains a separate page-boundary operation. Playwright stdio buffers and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget values are replaced or not forwarded, preventing Playwright's JSON fallback from serializing an unsafe source graph. The configured Playwright project output is a disposable child below the immutable run root because Playwright clears that project directory before a run; each worker adopts the inherited root only after validating its marker and token, so retries and sequential workers cannot create a second root. Per-test finalization validates every lstat/realpath ancestor from that root to the requested output directory and fails closed on a replaceable symlink ancestor before quarantine. Per-test finalization only accepts strict descendants of the owned root and quarantines those child directories; it never removes or recreates the shared root, owner marker, or root-level artifacts. The config routes Playwright's post-teardown `LastRunReporter` to `/dev/null`, preventing it from recreating a markerless `.last-run.json` directory after teardown. Global teardown alone removes the complete root through atomic quarantine and bounded known-entry non-recursive `unlink`/`rmdir` operations. It rechecks device/inode identity and the owner marker at each handoff, preserves unrelated replacements and unknown/raced remnants, and never recursively deletes a replaceable pathname. Prefix-collision directories, descendants, unrelated output, and symlink roots are preserved. The live fixture scrubs input, textarea, select, and every editable DOM mode (`true`, empty, and `plaintext-only`) before page close. It builds detached, trusted plain snapshots for known synthetic credentials and serialized form values without mutating source diagnostics. Snapshot arrays retain normal Playwright push/map/iterator behavior and safe own serialization/species behavior. The bounded walk includes non-enumerable native Error message/stack/cause fields, the string `TestInfoError.errorContext`, matcher results, logs, and ARIA snapshots. Descriptor shape and observable read-back are checked, while incomplete, spoofed, stateful, or inconsistent properties, throwing accessors, own `toJSON` hooks, cycles, and over-budget values fail closed without retaining the source graph. Serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes are parsed structurally; malformed text, comments, nested or mismatched form markup, unclosed containers, unknown markup, duplicate or ambiguous attributes, unknown editable modes, unquoted `value` attributes, and encoded credentials fail closed instead of allowing a later editable element to be skipped. Attachment references and safe temporary output cleanup run in `finally` even when redaction fails. A scrub evaluator failure is suppressed only when `page.isClosed()` returns `true`; generic error text such as `page crashed` is never treated as proof of termination. These layers are deliberate: a failed live assertion must not leave a password in a trace, screenshot, report, error context, DOM dump, or the repository's retained `test-results` directory. The spec records only HTTP method/path pairs and JSON-RPC method or event names. It never records the WebSocket ticket, credential value, prompt response, cookie, or raw frame payload.
 
 Run the lane only against the authorized disposable VM. From the repository root,
-parse the selected launcher result before starting Playwright:
+create one existing private `0700` runs directory and provide one exact
+absolute marker path inside it. Parse that caller-selected marker result before
+starting Playwright; never enumerate runs, infer recency, or reuse a port:
 
 ```sh
+RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
+MARKER_PATH="${HERMES_MARKER_PATH:?set the exact absolute marker path under that directory}"
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 # This fail-closed selection gate freshly proves the immutable launcher
 # container ID is running and owns the one explicit loopback Dashboard port.
-launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
 HERMES_LIVE_TARGET="$endpoint" \
-  python3 scripts/with_live_credential.py "$credential_file" -- \
+  python3 scripts/with_live_credential.py "$marker_path" -- \
   bun run --cwd apps/web test:e2e:live
 ```
 
@@ -30,12 +34,14 @@ sole `127.0.0.1:<requested-port>:9119` mapping. A stopped tombstone, missing or
 stale mapping, replacement, launcher-ownership mismatch, rebound port, or
 non-loopback publication aborts before the credential file is read.
 `read_launcher_result.py` accepts only the closed successful `endpoint` result
-with `.result.status` `running`; it rejects `start`, `status`, and retained
-metadata before parsing `.result.endpoint` or `.result.credential_file`. The
-handoff strips only trailing CR/LF, validates exactly 48 lowercase hexadecimal
+with `.result.status` `running`, the canonical loopback endpoint, and both exact
+ownership paths; it rejects `start`, `status`, `credential-file`, and retained
+metadata before handoff. The helper loads only the exact marker, revalidates
+credential lstat identity immediately before opening a pinned descriptor,
+strips only trailing CR/LF, validates exactly 48 lowercase hexadecimal
 characters, and passes the value only as transient `HERMES_TEST_PASSWORD`
 child-process environment state. It never prints or writes the password, and
-invalid input fails before Playwright starts.
+invalid or replaced input fails before Playwright starts.
 If the browser runs outside the VM, set `HERMES_LIVE_TARGET` to the approved
 local tunnel URL selected from that endpoint; do not hard-code or infer a port.
 Do not place the password in a command argument, repository file, fixture,

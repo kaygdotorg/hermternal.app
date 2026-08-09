@@ -1,27 +1,26 @@
 #!/usr/bin/env python3
-"""Extract launcher result metadata without printing credential contents.
+"""Extract verified launcher handoff metadata without printing credentials.
 
-``hermes_agent.py`` returns public metadata under ``.result``. This helper reads
-that JSON from stdin and emits only the requested endpoint or credential-file
-path, so live-proof commands use the launcher-owned instance and its explicit
-port rather than a remembered or inferred port.
+``hermes_agent.py endpoint`` returns one bounded result only after it has
+revalidated the caller-selected marker, pinned container, loopback mapping, and
+credential identity. This helper accepts that exact closed result and emits
+only the requested endpoint or ownership path for the transient local handoff.
+It never selects a run, reads a marker, or infers a port.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
 
-FIELDS = frozenset({"endpoint", "credential-file"})
+FIELDS = frozenset({"endpoint", "marker-path", "credential-file"})
 MAX_RESULT_TEXT = 2048
-# The helper is only a bridge from the freshly verified ``endpoint`` operation
-# into the child-environment credential handoff. Keeping this shape closed
-# prevents a ready ``start`` response or retained metadata from bypassing it.
 VERIFIED_ENDPOINT_RESULT_KEYS = frozenset(
-    {"instance", "container", "endpoint", "image", "data_path", "credential_file", "status"}
+    {"status", "endpoint", "marker_path", "credential_file"}
 )
 
 
@@ -34,11 +33,18 @@ class LauncherResultError(Exception):
 
 
 def _metadata(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value) > MAX_RESULT_TEXT:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_RESULT_TEXT:
         raise LauncherResultError()
-    if any(ord(character) < 0x20 for character in value):
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise LauncherResultError()
     return value
+
+
+def _path(value: object) -> str:
+    path = _metadata(value)
+    if not os.path.isabs(path) or os.path.normpath(path) != path:
+        raise LauncherResultError()
+    return path
 
 
 def _endpoint(value: object) -> str:
@@ -56,7 +62,7 @@ def _endpoint(value: object) -> str:
         parsed.scheme != "http"
         or hostname != "127.0.0.1"
         or port is None
-        or port < 1
+        or not 1 <= port <= 65535
         or parsed.path not in ("", "/")
         or parsed.query
         or parsed.fragment
@@ -67,13 +73,35 @@ def _endpoint(value: object) -> str:
     return endpoint
 
 
-def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
-    """Return metadata only from the closed, freshly verified endpoint result."""
+def _json_load(raw: bytes | str) -> object:
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, value in pairs:
+            if key in document:
+                raise LauncherResultError()
+            document[key] = value
+        return document
+
+    def reject_constant(value: str) -> None:
+        del value
+        raise LauncherResultError()
 
     try:
-        document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        return json.loads(
+            raw.decode("utf-8") if isinstance(raw, bytes) else raw,
+            object_pairs_hook=reject_duplicate,
+            parse_constant=reject_constant,
+        )
+    except LauncherResultError:
+        raise
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
         raise LauncherResultError() from None
+
+
+def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
+    """Return only metadata from a closed, freshly verified endpoint result."""
+
+    document = _json_load(raw)
     if (
         not isinstance(document, dict)
         or set(document) != {"ok", "operation", "result"}
@@ -88,13 +116,10 @@ def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
         or result.get("status") != "running"
     ):
         raise LauncherResultError()
-    # Validate every public field in the closed response. This prevents callers
-    # from silently treating a partly retained or substituted result as proof.
-    for field in ("instance", "container", "image", "data_path"):
-        _metadata(result.get(field))
     return {
         "endpoint": _endpoint(result.get("endpoint")),
-        "credential-file": _metadata(result.get("credential_file")),
+        "marker-path": _path(result.get("marker_path")),
+        "credential-file": _path(result.get("credential_file")),
     }
 
 
