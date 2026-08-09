@@ -357,7 +357,10 @@ produce `browser_journey=passed`.
 Retained evidence uses a descriptor-verified canonical path and identity: the
 committed file and its fixed anchor are checked before any JSON field is
 consumed. Copies, aliases, replacements, symlinks, and anchor mismatches fail
-closed. This retained trust root is historical only.
+closed. This retained trust root is historical only. Direct library calls are
+explicitly untrusted by default; selecting retained mode requires the private
+canonical-loader token, so caller-supplied runtime inputs cannot appear as
+anchored historical provenance.
 
 For a new standalone observation, keep the browser map outside the static
 output directory because the static digest covers every file in that tree:
