@@ -166,3 +166,29 @@ test('authenticated Chat uses the bounded intermediate family without horizontal
     }))
   ).toEqual({ clientWidth: 1024, scrollWidth: 1024 });
 });
+
+for (const compactFixture of [
+  { name: 'narrow', viewport: { width: 390, height: 844 } },
+  { name: 'intermediate', viewport: { width: 1024, height: 900 } }
+]) {
+  test(`authenticated ${compactFixture.name} Chat exposes the labeled mock inspector drawer by keyboard`, async ({
+    page
+  }) => {
+    await page.setViewportSize(compactFixture.viewport);
+    await installSyntheticLiveBoundary(page);
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Edit conversation title' })).toContainText(session.title);
+
+    const openWorkspace = page.getByRole('button', { name: 'Open workspace' });
+    await expect(openWorkspace).toBeVisible();
+    await openWorkspace.focus();
+    await page.keyboard.press('Enter');
+
+    const drawer = page.getByRole('dialog', { name: 'Workspace' });
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByText('Generated · mock · just now')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(drawer).toBeHidden();
+    await expect(openWorkspace).toBeFocused();
+  });
+}

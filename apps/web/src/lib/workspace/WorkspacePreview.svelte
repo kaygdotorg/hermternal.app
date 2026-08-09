@@ -291,6 +291,8 @@
         onActivate={startMobileTitleEditing}
       />
     </div>
+    <!-- Live compact routes keep the approved workspace action because the
+         inspector remains available as an explicitly labeled local mock. -->
     <Pill
       ariaLabel="Open workspace"
       bind:element={mobileWorkspaceTrigger}
@@ -834,10 +836,6 @@
       background: var(--composer-surface);
       box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
       backdrop-filter: blur(18px) saturate(150%);
-    }
-
-    .workspace-preview[data-mode-source='live'] .mobile-toolbar > :global(.pill) {
-      display: none;
     }
 
     .mobile-mode-selector {
