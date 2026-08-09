@@ -233,6 +233,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
             launcher.start_many(specs, paths[:-1], runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
         self.assertEqual(raised.exception.code, "marker_count_invalid")
 
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_many(specs, [paths[0], paths[0], paths[2]], runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "marker_not_unique")
+        self.assertEqual(self.fake.calls, [])
+
     def test_environment_is_provider_free_and_remote_podman_is_rejected(self) -> None:
         cleaned = launcher.clean_environment(
             {

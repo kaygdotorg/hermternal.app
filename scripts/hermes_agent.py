@@ -1169,10 +1169,16 @@ def start_many(
         raise LauncherError("marker_count_invalid")
     if len({spec.instance for spec in specs}) != len(specs) or len({spec.port for spec in specs}) != len(specs):
         raise LauncherError("batch_not_unique")
+    try:
+        exact_marker_paths = tuple(_marker_paths(path).marker for path in marker_paths)
+    except LauncherError:
+        raise
+    if len(set(exact_marker_paths)) != len(exact_marker_paths):
+        raise LauncherError("marker_not_unique")
     results: list[dict[str, object]] = []
     created: list[tuple[InstanceSpec, str | Path]] = []
     try:
-        for spec, marker_path in zip(specs, marker_paths):
+        for spec, marker_path in zip(specs, exact_marker_paths):
             result, was_created = start_instance(spec, marker_path=marker_path, **kwargs)
             results.append(result)
             if was_created:
