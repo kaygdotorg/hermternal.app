@@ -112,7 +112,7 @@ class FakePodman:
                 },
                 "State": {"Status": "running"},
             }
-            return launcher.CommandResult(0, "synthetic-container-id\n")
+            return launcher.CommandResult(0, container_id + "\n")
         if args[:1] == ("start",):
             target = args[1]
             resolved = self._resolve(target)
@@ -283,6 +283,45 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertNotIn(password, run_command)
         self.assertIn(f"io.hermternal.run-id={bound.run_id}", run_command)
 
+    def test_new_run_never_adopts_same_name_replacement_after_run(self) -> None:
+        spec = self.make_spec()
+        original_id: str | None = None
+
+        def replace_after_run(command, environment, timeout):
+            nonlocal original_id
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                original = self.fake.containers[spec.container]
+                original_id = str(original["Id"])
+                original["Id"] = "d" * 64
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path(),
+                runner=replace_after_run,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "container_inspect_failed")
+        self.assertIsNotNone(original_id)
+        self.assertIn(spec.container, self.fake.containers)
+        self.assertEqual(self.fake.containers[spec.container]["Id"], "d" * 64)
+        inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
+        self.assertTrue(inspect_calls)
+        self.assertEqual(inspect_calls[0][3], original_id)
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertFalse(any(command[1] == "rm" for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1] == "start" for command, _ in self.fake.calls))
+        self.assertTrue(any(command[1:4] == ("container", "exists", original_id) for command, _ in self.fake.calls))
+
     def test_same_marker_reuses_one_running_instance_without_second_run_or_fresh_credential(self) -> None:
         spec = self.make_spec()
         self.start(spec)
@@ -392,6 +431,65 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.verify_handoff_endpoint(state, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+
+    def test_new_run_wildcard_mapping_is_cleaned_by_exact_marker(self) -> None:
+        spec = self.make_spec()
+
+        def wildcard_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+                assert isinstance(ports, dict)
+                ports["9119/tcp"][0]["HostIp"] = "0.0.0.0"
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path(),
+                runner=wildcard_after_run,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+        self.assertEqual(self.fake.containers, {})
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+
+    def test_new_run_mapping_failure_retains_tombstone_when_exact_cleanup_fails(self) -> None:
+        spec = self.make_spec()
+        self.fake.fail_rm_for.add(spec.container)
+
+        def wildcard_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+                assert isinstance(ports, dict)
+                ports["9119/tcp"][0]["HostIp"] = "0.0.0.0"
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path(),
+                runner=wildcard_after_run,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+        self.assertIn(spec.container, self.fake.containers)
+        self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
+        self.assertTrue((self.runs / "fixture.state.json").exists())
+        self.assertTrue((self.runs / "fixture.credential").exists())
 
     def test_container_label_run_id_mismatch_never_starts_or_contacts_endpoint(self) -> None:
         spec = self.make_spec()
@@ -612,6 +710,49 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 source_environment={"PATH": "/usr/bin"},
             )
         self.assertEqual(raised.exception.code, "rootless_podman_required")
+
+    def test_cli_rejects_unhashable_status_and_nul_state_path_without_traceback(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        original = json.loads(self.marker_path().read_text(encoding="utf-8"))
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "status",
+            "--marker",
+            str(self.marker_path()),
+            "--state-root",
+            str(self.roots.state),
+            "--data-root",
+            str(self.roots.data),
+            "--credential-root",
+            str(self.roots.credentials),
+        ]
+        for status in ([], {}):
+            with self.subTest(status=status):
+                document = {**original, "status": status}
+                self.marker_path().write_text(json.dumps(document), encoding="utf-8")
+                self.marker_path().chmod(0o600)
+                completed = subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True)
+                self.assertEqual(completed.returncode, 2)
+                self.assertEqual(completed.stderr, "")
+                self.assertEqual(
+                    json.loads(completed.stdout),
+                    {"error": {"code": "marker_status_invalid"}, "ok": False},
+                )
+                self.assertNotIn("Traceback", completed.stdout)
+
+        document = {**original, "state_path": str(self.runs / "bad\x00state.json")}
+        self.marker_path().write_text(json.dumps(document), encoding="utf-8")
+        self.marker_path().chmod(0o600)
+        completed = subprocess.run(command, cwd=ROOT, check=False, capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stderr, "")
+        self.assertEqual(
+            json.loads(completed.stdout),
+            {"error": {"code": "state_path_invalid"}, "ok": False},
+        )
+        self.assertNotIn("Traceback", completed.stdout)
 
     def test_cli_invalid_image_is_bounded_and_requires_exact_marker_without_traceback(self) -> None:
         completed = subprocess.run(

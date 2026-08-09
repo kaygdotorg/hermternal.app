@@ -493,6 +493,21 @@ def validate_container_id(value: object) -> str:
     return value
 
 
+def container_id_from_run_result(result: CommandResult) -> str:
+    """Parse only the one immutable ID emitted by this exact detached run."""
+
+    if result.returncode != 0:
+        raise LauncherError("container_start_failed")
+    raw = result.stdout
+    candidate = raw.rstrip("\r\n")
+    if not candidate or raw not in {candidate, candidate + "\n", candidate + "\r\n"}:
+        raise LauncherError("container_id_unproven")
+    try:
+        return validate_container_id(candidate)
+    except LauncherError:
+        raise LauncherError("container_id_unproven") from None
+
+
 def state_document(spec: InstanceSpec, binding: live_run_marker.RunMarker) -> dict[str, object]:
     return {
         "schema": STATE_SCHEMA,
@@ -1003,6 +1018,113 @@ def _marker_exists(marker_path: str | Path) -> bool:
     return True
 
 
+def _owned_marker_identity(binding: live_run_marker.RunMarker) -> tuple[int, int, int, int, int] | None:
+    """Return the identity only when the exact marker contains this binding."""
+
+    try:
+        loaded = live_run_marker.load_marker(binding.marker_path)
+    except live_run_marker.MarkerError:
+        return None
+    if loaded != binding:
+        return None
+    try:
+        return _file_identity(binding.marker_path, code="marker")
+    except LauncherError:
+        return None
+
+
+def _retain_unpublished_cleanup_failed(
+    state: LauncherState,
+    *,
+    expected_state: tuple[int, int, int, int, int] | None,
+) -> None:
+    """Create one private tombstone without overwriting raced files."""
+
+    tombstone = live_run_marker.cleanup_failed(state.marker)
+    try:
+        try:
+            current_state = _file_identity(state.marker.state_path, code="state")
+        except LauncherError as error:
+            if error.code != "state_missing":
+                return
+            write_state(state.spec, tombstone, replace=False)
+        else:
+            if expected_state is None or current_state != expected_state:
+                return
+            write_state(state.spec, tombstone, replace=True)
+
+        try:
+            current_marker = live_run_marker.load_marker(state.marker_path)
+        except live_run_marker.MarkerError as error:
+            if error.code != "marker_missing":
+                return
+            live_run_marker.create_marker(tombstone)
+            return
+        if current_marker != state.marker:
+            return
+        live_run_marker.replace_marker(tombstone)
+    except (LauncherError, live_run_marker.MarkerError):
+        pass
+
+
+def _cleanup_started_run(
+    spec: InstanceSpec,
+    binding: live_run_marker.RunMarker,
+    *,
+    state_identity: tuple[int, int, int, int, int] | None,
+    runner: Runner,
+    executable: str,
+    source_environment: Mapping[str, str] | None,
+) -> None:
+    """Clean a just-created run by exact identities, even before publication."""
+
+    owned_marker = _owned_marker_identity(binding)
+    if owned_marker is not None:
+        try:
+            load_launcher_state(binding.marker_path, spec.roots)
+        except LauncherError:
+            pass
+        else:
+            try:
+                stop_instance(
+                    binding.marker_path,
+                    roots=spec.roots,
+                    runner=runner,
+                    executable=executable,
+                    source_environment=source_environment,
+                )
+            except LauncherError:
+                pass
+            return
+
+    state = LauncherState(spec=spec, marker=binding)
+    environment = clean_environment(source_environment)
+    try:
+        _remove_bound_container(state, runner, environment, executable)
+        _remove_exact_file(
+            binding.credential_path,
+            code="credential_remove_failed",
+            expected=binding.credential_identity,
+        )
+        if state_identity is not None:
+            _remove_exact_file(
+                binding.state_path,
+                code="state_remove_failed",
+                expected=state_identity,
+            )
+        if owned_marker is not None and state_identity is not None:
+            _remove_marker_last(state, owned_marker)
+    except LauncherError:
+        if owned_marker is not None:
+            _retain_cleanup_failed(
+                state,
+                expected_marker=owned_marker,
+                expected_state=state_identity,
+            )
+        else:
+            _retain_unpublished_cleanup_failed(state, expected_state=state_identity)
+
+
 def start_instance(
     spec: InstanceSpec,
     *,
@@ -1119,42 +1241,64 @@ def start_instance(
         except LauncherError:
             pass
         raise LauncherError("container_start_failed")
-    document = inspect_container(spec, runner, environment, podman)
-    snapshot = recovery_snapshot(spec, document, run_id=run_id)
-    if snapshot.status != "running":
-        raise LauncherError("container_not_running")
-    require_loopback_endpoint_mapping(spec, document)
-    binding = live_run_marker.new_marker(
-        paths.marker,
-        run_id=run_id,
-        instance=spec.instance,
-        container_id=snapshot.container_id,
-        container_name=spec.container,
-        image=spec.image,
-        endpoint=spec.endpoint,
-        credential_identity=credential_identity,
-    )
-    write_state(spec, binding)
+
+    binding: live_run_marker.RunMarker | None = None
+    state_identity: tuple[int, int, int, int, int] | None = None
     try:
-        live_run_marker.create_marker(binding)
-    except live_run_marker.MarkerError as error:
-        raise LauncherError(error.code) from None
-    try:
+        # Podman emits the immutable ID for this exact detached invocation.
+        # Bind it before any name-based inspection can observe a replacement.
+        run_container_id = container_id_from_run_result(started)
+        binding = live_run_marker.new_marker(
+            paths.marker,
+            run_id=run_id,
+            instance=spec.instance,
+            container_id=run_container_id,
+            container_name=spec.container,
+            image=spec.image,
+            endpoint=spec.endpoint,
+            credential_identity=credential_identity,
+        )
+        write_state(spec, binding)
+        state_identity = _file_identity(binding.state_path, code="state")
+        try:
+            live_run_marker.create_marker(binding)
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+        # Every post-run check targets the immutable ID emitted above. A
+        # wildcard or otherwise mismatched mapping can therefore use the same
+        # exact cleanup path without adopting a replacement under the name.
+        document = inspect_container(spec, runner, environment, podman, target=run_container_id)
+        snapshot = recovery_snapshot(spec, document, run_id=run_id)
+        if snapshot.container_id != run_container_id:
+            raise LauncherError("container_replaced")
+        if snapshot.status != "running":
+            raise LauncherError("container_not_running")
+        require_loopback_endpoint_mapping(spec, document)
         readiness(binding.endpoint, attempts, interval)
     except BaseException:
-        # The marker now pins this exact container, so a failed startup can use
-        # the same bounded cleanup path instead of a name/glob/prune fallback.
-        try:
-            stop_instance(
-                binding.marker_path,
-                roots=spec.roots,
+        if binding is not None:
+            _cleanup_started_run(
+                spec,
+                binding,
+                state_identity=state_identity,
                 runner=runner,
                 executable=podman,
                 source_environment=source_environment,
             )
-        except LauncherError:
-            pass
+        else:
+            # No valid invocation ID exists yet, so never rediscover a
+            # container by name. The fresh credential is still ours by its
+            # pinned identity and can be removed without touching a resource.
+            try:
+                _remove_exact_file(
+                    paths.credential,
+                    code="credential_remove_failed",
+                    expected=credential_identity,
+                )
+            except LauncherError:
+                pass
         raise
+    assert binding is not None
     return _public_run_result(spec, binding, status="ready", created=True), True
 
 

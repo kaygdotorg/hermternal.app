@@ -267,24 +267,29 @@ format is unchanged.
 `start` first requires local rootless Podman and verifies the requested official
 repository digest. It then polls bounded `GET /api/auth/providers` responses.
 Readiness requires HTTP 200 and a `basic` provider with
-`supports_password: true`. A failed start removes only the container created by
-that invocation. Data and credentials remain for diagnosis or retry; this strict
-marker path does not expose a broad purge operation. Active rebind of an
-already-running container is intentionally unsupported; ordinary
-running-container reuse is non-destructive. Cleanup never runs a broad prune or
-glob and never removes data implicitly.
+`supports_password: true`. A failed start removes only the exact
+invocation-owned container, fresh credential, state, and marker after the
+immutable run binding is published. Data remains for diagnosis or retry; if
+exact cleanup fails, the private marker and state are retained as a bounded
+`cleanup_failed` tombstone. This strict marker path does not expose a broad
+purge operation. Active rebind of an already-running container is intentionally
+unsupported; ordinary running-container reuse is non-destructive. Cleanup
+never runs a broad prune or glob and never removes data implicitly.
 
 An existing container is reused only after its launcher labels prove the exact
 instance, loopback port, and immutable image identity. A stopped owned
 container is started only after the requested port is available, then readiness
-is checked. Lifecycle actions use the freshly inspected immutable container ID,
-not the mutable container name, and rollback re-inspects that same ID before
-stopping it. If start, readiness, or state persistence fails, the recovery
-transaction attempts one bounded exact-container stop, so an initially stopped
-container is not left running. An initially running container is never stopped
-by the ordinary reuse path. Foreign or mismatched containers fail closed before
-any lifecycle mutation. This is disposable proof tooling for the authorized
-Hermes test lane, not production infrastructure; it never prunes unrelated
+is checked. A new run accepts only the one validated immutable container ID
+emitted by that detached invocation; every first inspect, endpoint check, and
+cleanup targets that ID, never a replacement rediscovered by mutable name.
+Lifecycle actions use the freshly inspected immutable container ID, not the
+mutable container name, and rollback re-inspects that same ID before stopping
+it. If start, readiness, or state persistence fails, the recovery transaction
+attempts one bounded exact-container stop, so an initially stopped container is
+not left running. An initially running container is never stopped by the
+ordinary reuse path. Foreign or mismatched containers fail closed before any
+lifecycle mutation. This is disposable proof tooling for the authorized Hermes
+test lane, not production infrastructure; it never prunes unrelated
 containers, binds, sockets, listeners, or provider configuration.
 
 Launcher readiness proves only that the configured Dashboard boundary is
@@ -308,7 +313,7 @@ python3 -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scrip
 python3 -O -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 8-test marker and 20-test launcher suites use local synthetic files and a
+The 9-test marker and 26-test launcher suites use local synthetic files and a
 fake Podman boundary. The 9-test credential handoff and 6-test launcher-result
 suites use only synthetic bytes and mocked local process boundaries. None of
 these suites starts Hermes, contacts an endpoint, or reads a real credential.
