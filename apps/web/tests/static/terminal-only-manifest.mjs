@@ -65,21 +65,73 @@ export function canonicalizeTerminalModuleKey(manifestKey) {
   return canonicalKey && TERMINAL_ONLY_MODULE_IDENTITIES.includes(canonicalKey) ? canonicalKey : null;
 }
 
-function looksLikeTerminalModuleKey(manifestKey) {
-  if (typeof manifestKey !== 'string') return false;
+function containsTraversalAfterPathSegments(pathSegments, expectedSegments) {
+  return pathSegments.some((_, index) => {
+    if (!expectedSegments.every((segment, offset) => pathSegments[index + offset] === segment)) {
+      return false;
+    }
+    return pathSegments
+      .slice(index + expectedSegments.length)
+      .some((segment) => segment === '.' || segment === '..');
+  });
+}
+
+function terminalLookalikePath(manifestKey) {
   const slashSeparatedKey = manifestKey
     .replaceAll('\\', '/')
     .replace(/%2f/gi, '/')
     .replace(/%5c/gi, '/');
+  const decodedSegments = slashSeparatedKey
+    .split('/')
+    .map((segment) => segment.replace(/%2e/gi, '.'));
+  const normalizedSegments = [];
+
+  for (const segment of decodedSegments) {
+    if (segment.length === 0 || segment === '.') continue;
+    if (segment === '..') {
+      if (normalizedSegments.at(-1) && normalizedSegments.at(-1) !== '..') {
+        normalizedSegments.pop();
+      } else {
+        normalizedSegments.push(segment);
+      }
+      continue;
+    }
+    normalizedSegments.push(segment);
+  }
+
+  return {
+    decodedSegments,
+    normalizedPath: `${slashSeparatedKey.startsWith('/') ? '/' : ''}${normalizedSegments.join('/')}`,
+    normalizedSegments
+  };
+}
+
+function looksLikeTerminalModuleKey(manifestKey) {
+  if (typeof manifestKey !== 'string') return false;
+  const { decodedSegments, normalizedPath } = terminalLookalikePath(manifestKey);
+  const pathSegments = decodedSegments.filter(Boolean);
+
   return TERMINAL_ONLY_MODULE_IDENTITIES.some((identity) => {
+    const identitySegments = identity.split('/');
     const packagePath = identity.slice('node_modules/'.length);
+    const packageRootSegments = identitySegments.slice(0, 3);
+    const packageRootWithoutNodeModules = packageRootSegments.slice(1);
+    const hasTerminalPackageTraversal =
+      containsTraversalAfterPathSegments(pathSegments, packageRootSegments) ||
+      containsTraversalAfterPathSegments(pathSegments, packageRootWithoutNodeModules);
+
+    // Canonicalization stays strict. This lexical pass only identifies malformed
+    // keys that still target a terminal package, so traversal aliases are not
+    // silently ignored after canonicalization returns null.
+    if (hasTerminalPackageTraversal) return true;
+
     return (
-      slashSeparatedKey === identity ||
-      slashSeparatedKey.startsWith(identity) ||
-      slashSeparatedKey.includes(`/${identity}`) ||
-      slashSeparatedKey === packagePath ||
-      slashSeparatedKey.startsWith(packagePath) ||
-      slashSeparatedKey.includes(`/${packagePath}`)
+      normalizedPath === identity ||
+      normalizedPath.startsWith(identity) ||
+      normalizedPath.includes(`/${identity}`) ||
+      normalizedPath === packagePath ||
+      normalizedPath.startsWith(packagePath) ||
+      normalizedPath.includes(`/${packagePath}`)
     );
   });
 }
@@ -95,6 +147,8 @@ export function indexTerminalOnlyManifestEntries(manifestEntries) {
       continue;
     }
 
+    // Index every canonical identity before checking dynamic flags so a static
+    // alias cannot hide a duplicate behind the terminal-only requirement.
     const previous = indexedEntries.get(canonicalKey);
     if (previous) {
       throw new Error(

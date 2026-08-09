@@ -18,6 +18,18 @@ function terminalManifest() {
   );
 }
 
+function assertRejectsInvalidTerminalIdentity(manifestKey) {
+  const manifestEntries = terminalManifest();
+  manifestEntries.set(manifestKey, { isDynamicEntry: false });
+
+  assert.throws(
+    () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
+    (error) =>
+      error instanceof Error &&
+      error.message === `Client manifest contains an invalid terminal dependency identity: ${manifestKey}`
+  );
+}
+
 test('canonicalizes workspace and external relative node_modules roots', () => {
   assert.equal(
     canonicalizeTerminalModuleKey('node_modules/@wterm/dom/dist/index.js'),
@@ -87,6 +99,41 @@ test('rejects a malformed terminal lookalike even beside a valid dynamic entry',
   assert.throws(
     () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
     /invalid terminal dependency identity/
+  );
+});
+
+test('rejects a static terminal traversal alias with an intermediate segment', () => {
+  assertRejectsInvalidTerminalIdentity(
+    `${externalRoot}/node_modules/@wterm/dom/dist/x/../index.js`
+  );
+});
+
+test('rejects a static terminal traversal alias that backs out of dist', () => {
+  assertRejectsInvalidTerminalIdentity(
+    `${externalRoot}/node_modules/@wterm/dom/dist/../index.js`
+  );
+});
+
+test('rejects an encoded static terminal traversal alias', () => {
+  assertRejectsInvalidTerminalIdentity(
+    `${externalRoot}/node_modules/@wterm/dom/dist/%2e%2e/index.js`
+  );
+});
+
+test('rejects duplicate canonical identities even when both entries are static', () => {
+  const manifestEntries = terminalManifest();
+  const externalDomKey = `${externalRoot}/node_modules/@wterm/dom/dist/index.js`;
+  manifestEntries.set(externalDomKey, { isDynamicEntry: false });
+  manifestEntries.set('node_modules/@wterm/dom/dist/index.js', { isDynamicEntry: false });
+
+  assert.throws(
+    () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
+    (error) =>
+      error instanceof Error &&
+      error.message ===
+        'Client manifest contains duplicate terminal dependency identity: ' +
+        'node_modules/@wterm/dom/dist/index.js ' +
+        `(${externalDomKey}, node_modules/@wterm/dom/dist/index.js)`
   );
 });
 

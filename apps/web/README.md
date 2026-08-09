@@ -163,7 +163,9 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   rejection, the supported deep-link grammar, method denial, generic missing-asset 404s, and
   reserved-path denial without a server directory. The static manifest check compares terminal-only
   `@wterm` entries by canonical package identity, so workspace and external `node_modules` roots
-  cannot bypass the dynamic-only boundary or introduce ambiguous aliases.
+  cannot bypass the dynamic-only boundary or introduce ambiguous aliases. Malformed literal or
+  percent-encoded dot-segment aliases are rejected before indexing, and duplicate identities are
+  rejected before any `isDynamicEntry` flag is considered.
 - Semantic CSS tokens, reflow rules, focus styles, minimum action height, and reduced-motion rules
   provide the narrow/desktop, zoom, keyboard, and motion regression baseline.
 - `src/lib/service-worker-runtime.test.ts` directly proves foreign same-origin caches are not
