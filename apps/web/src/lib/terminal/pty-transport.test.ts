@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { WsTicketError } from "../chat/ws-ticket";
 import {
   PTY_DETACH_RETENTION_MS,
   PTY_REPLAY_CAPACITY_BYTES,
@@ -1135,6 +1136,77 @@ describe("PTY transport", () => {
     expect(harness.transport.state.status).toBe("detached");
   });
 
+  it("keeps public subscriber order when subscriber A closes on attached", async () => {
+    const harness = makeHarness();
+    const subscriberBStates: string[] = [];
+    let closed = false;
+
+    harness.transport.subscribe((event) => {
+      if (event.type === "state" && event.state.status === "attached" && !closed) {
+        closed = true;
+        harness.transport.close();
+      }
+    });
+    harness.transport.subscribe((event) => {
+      if (event.type === "state") {
+        subscriberBStates.push(`${event.state.status}:${event.state.generation}`);
+      }
+    });
+
+    const pending = harness.transport.connect(ATTACH_INPUT);
+    await flush();
+    harness.sockets[0]!.open();
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+
+    expect(subscriberBStates).toEqual([
+      "ticket_pending:1",
+      "connecting:1",
+      "starting:1",
+      "attached:1",
+      "closing:2",
+      "detached:2",
+    ]);
+    expect(harness.transport.state.status).toBe("detached");
+  });
+
+  it("preserves the authentication fence after a second auth-required recovery failure", async () => {
+    let ticketCalls = 0;
+    const ticketProvider = createFreshPtyTicketProvider(async () => {
+      ticketCalls += 1;
+      if (ticketCalls > 1) {
+        // The shared request boundary has already reduced the HTTP 401 to this
+        // closed error shape; the PTY adapter must retain the fence after it.
+        throw new WsTicketError("authentication-failed", 401);
+      }
+      return { ticket: `ticket-${ticketCalls}` };
+    });
+    const harness = makeHarness({ ticketProvider });
+
+    const socket = await open(harness);
+    socket.closeFromServer(4401);
+    expect(harness.transport.state).toMatchObject({
+      status: "failed",
+      closeClassification: "authentication-rejected",
+      reconnectSupported: false,
+    });
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(ticketCalls).toBe(1);
+
+    await expect(harness.transport.connect(ATTACH_INPUT)).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(ticketCalls).toBe(2);
+
+    await expect(harness.transport.reconnect()).rejects.toMatchObject({
+      code: "authentication-required",
+    });
+    expect(ticketCalls).toBe(2);
+    expect(harness.transport.state.reconnectSupported).toBe(false);
+  });
+
   it("does not publish truncation after a reattach observer aborts", async () => {
     let attachedCount = 0;
     let harness!: Harness;
@@ -1432,7 +1504,7 @@ describe("PTY transport", () => {
       expect(harness.transport.state).toMatchObject({
         status,
         closeClassification: classification,
-        reconnectSupported: code === 4401 || code === 1011
+        reconnectSupported: code === 1011
       });
       expect(harness.ticketProvider).toHaveBeenCalledTimes(1);
     }
