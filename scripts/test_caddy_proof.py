@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -338,7 +339,7 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         self.assertNotIn("caddy_version", deployment)
         self.assertNotIn("official_image_digest", deployment)
 
-    def test_render_manifest_rejects_missing_and_false_pass_evidence(self) -> None:
+    def test_render_manifest_rejects_missing_and_json_only_pass_evidence(self) -> None:
         with self.assertRaisesRegex(ValueError, "browser evidence is required"):
             caddy_proof.render_manifest(
                 build_sha=EXPECTED_BUILD_SHA,
@@ -346,25 +347,29 @@ class CaddyProofEvidenceTests(unittest.TestCase):
                 caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
                 browser_journey="passed",
             )
-        incomplete = self.browser_evidence("passed")
-        incomplete["observations"] = {"events": {"message.complete": "error"}}
-        with self.assertRaisesRegex(ValueError, "closed event set"):
-            self.render_manifest(browser_evidence=incomplete, browser_journey="passed")
-        incomplete = self.browser_evidence("passed")
-        incomplete["observations"]["events"]["message.complete"] = "error"  # type: ignore[index]
-        with self.assertRaisesRegex(ValueError, "complete journey"):
-            self.render_manifest(browser_evidence=incomplete, browser_journey="passed")
+        complete = self.browser_evidence("passed")
+        with self.assertRaisesRegex(ValueError, "trusted execution receipt"):
+            self.render_manifest(browser_evidence=complete, browser_journey="passed")
+        for observations in (
+            {"events": {"message.complete": "error"}},
+            {"events": {**caddy_proof.BROWSER_COMPLETION_EVIDENCE, "message.complete": "error"}},
+        ):
+            forged = self.browser_evidence("passed", observations=observations)
+            with self.subTest(observations=observations):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "closed event set|complete journey|trusted execution receipt",
+                ):
+                    self.render_manifest(browser_evidence=forged, browser_journey="passed")
 
-    def test_render_manifest_derives_pass_only_from_provenance_bound_evidence(self) -> None:
+    def test_render_manifest_labels_json_only_evidence_as_non_execution(self) -> None:
         manifest = self.render_manifest(
-            browser_evidence=self.browser_evidence("passed"),
-            browser_journey="passed",
+            browser_evidence=self.browser_evidence("blocked_provider"),
         )
-        self.assertEqual(manifest["browser_journey"], "passed")
-        self.assertEqual(manifest["browser_evidence"]["status"], "passed")
+        self.assertEqual(manifest["browser_journey"], "blocked_provider")
         self.assertEqual(
-            manifest["browser_evidence"]["observations"]["events"],
-            caddy_proof.BROWSER_COMPLETION_EVIDENCE,
+            manifest["browser_execution"],
+            {"mode": caddy_proof.BROWSER_NON_EXECUTION_MODE, "status": "not_proven"},
         )
 
     def test_render_manifest_requires_matching_blocked_and_failed_evidence(self) -> None:
@@ -386,9 +391,16 @@ class CaddyProofEvidenceTests(unittest.TestCase):
             )
 
     def test_render_manifest_rejects_stale_or_mismatched_evidence_maps(self) -> None:
-        stale = self.browser_evidence("passed", provenance={"build_sha": "0" * 40})
-        with self.assertRaisesRegex(ValueError, "stale or mismatched"):
-            self.render_manifest(browser_evidence=stale)
+        for key, value in {
+            "build_sha": "0" * 40,
+            "build_digest": "0" * 64,
+            "caddyfile_digest": "1" * 64,
+            "runtime_inputs_sha256": "2" * 64,
+        }.items():
+            stale = self.browser_evidence("passed", provenance={key: value})
+            with self.subTest(provenance=key):
+                with self.assertRaisesRegex(ValueError, "stale or mismatched"):
+                    self.render_manifest(browser_evidence=stale)
         mismatch = self.browser_evidence("blocked_provider")
         with self.assertRaisesRegex(ValueError, "does not match browser evidence"):
             self.render_manifest(browser_evidence=mismatch, browser_journey="failed")
@@ -396,6 +408,14 @@ class CaddyProofEvidenceTests(unittest.TestCase):
         malformed["unexpected"] = "rejected"
         with self.assertRaisesRegex(ValueError, "closed root key set"):
             self.render_manifest(browser_evidence=malformed)
+
+    def test_json_cannot_smuggle_harness_runtime_or_source_identity(self) -> None:
+        for field in ("harness_sha", "browser_version", "source_sha", "run_id"):
+            forged = self.browser_evidence("passed")
+            forged["provenance"][field] = "caller-controlled"  # type: ignore[index]
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "provenance keys are incomplete"):
+                    self.render_manifest(browser_evidence=forged, browser_journey="passed")
 
     def test_retained_evidence_schema_narrows_unverified_claims(self) -> None:
         self.assertEqual(
@@ -634,7 +654,27 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
             check=False,
         )
 
-    def test_cli_derives_standalone_git_and_static_build_provenance(self) -> None:
+    def test_git_provenance_rejects_nonzero_timeout_and_malformed_output(self) -> None:
+        cases = (
+            subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"git failure"),
+            subprocess.CompletedProcess([], 0, stdout=b"deadbeef\n", stderr=b"diagnostic"),
+            subprocess.CompletedProcess([], 0, stdout=b"deadbeef\nsecond\n", stderr=b""),
+            subprocess.CompletedProcess([], 0, stdout=b"\xff\n", stderr=b""),
+        )
+        for completed in cases:
+            with self.subTest(stdout=completed.stdout, returncode=completed.returncode):
+                with mock.patch.object(caddy_proof.subprocess, "run", return_value=completed):
+                    with self.assertRaisesRegex(ValueError, "Git provenance"):
+                        caddy_proof._git_text(ROOT, "rev-parse", "HEAD")
+        with mock.patch.object(
+            caddy_proof.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["git"], caddy_proof.GIT_COMMAND_TIMEOUT_SECONDS),
+        ):
+            with self.assertRaisesRegex(ValueError, "Git provenance"):
+                caddy_proof._git_text(ROOT, "rev-parse", "HEAD")
+
+    def test_cli_rejects_complete_hand_authored_events_from_arbitrary_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             static_root = self._static_root(Path(directory) / "build")
             provenance = caddy_proof._derive_git_static_build_provenance(static_root)
@@ -652,8 +692,47 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
                 "--browser-evidence",
                 str(evidence_path),
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout)["browser_journey"], "passed")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("trusted execution receipt", result.stderr)
+
+    def test_cli_rejects_browser_evidence_after_static_tree_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            provenance = caddy_proof._derive_git_static_build_provenance(static_root)
+            evidence_path = Path(directory) / "browser.json"
+            evidence_path.write_text(json.dumps(self._browser_evidence(static_root)), encoding="utf-8")
+            (static_root / "index.html").write_text("drifted\n", encoding="utf-8")
+            result = self._run_cli(
+                "--static-build-root",
+                str(static_root),
+                "--build-sha",
+                provenance["build_sha"],
+                "--build-digest",
+                provenance["build_digest"],
+                "--caddyfile-digest",
+                EXPECTED_CADDYFILE_DIGEST,
+                "--browser-evidence",
+                str(evidence_path),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match", result.stderr)
+
+    def test_cli_rejects_static_tree_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            target = Path(directory) / "outside.txt"
+            target.write_text("outside\n", encoding="utf-8")
+            (static_root / "extra.txt").symlink_to(target)
+            result = self._run_cli(
+                "--static-build-root",
+                str(static_root),
+                "--caddyfile-digest",
+                EXPECTED_CADDYFILE_DIGEST,
+                "--browser-evidence",
+                str(Path(directory) / "missing.json"),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlink", result.stderr)
 
     def test_cli_rejects_exact_zero_and_one_forged_build_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -725,6 +804,45 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("bounded input size", result.stderr)
 
+    def test_cli_accepts_exact_browser_json_size_boundary_for_blocked_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            evidence = self._browser_evidence(static_root)
+            evidence["status"] = "blocked_provider"
+            evidence["observations"] = {"blocker": "provider_unavailable"}
+            raw = json.dumps(evidence, separators=(",", ":")).encode("utf-8")
+            self.assertLessEqual(len(raw), caddy_proof.BROWSER_EVIDENCE_MAX_BYTES)
+            evidence_path = Path(directory) / "browser.json"
+            evidence_path.write_bytes(raw + b" " * (caddy_proof.BROWSER_EVIDENCE_MAX_BYTES - len(raw)))
+            result = self._run_cli(
+                "--static-build-root",
+                str(static_root),
+                "--caddyfile-digest",
+                EXPECTED_CADDYFILE_DIGEST,
+                "--browser-evidence",
+                str(evidence_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["browser_journey"], "blocked_provider")
+
+    def test_cli_rejects_malformed_utf8_and_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            static_root = self._static_root(Path(directory) / "build")
+            evidence_path = Path(directory) / "browser.json"
+            for payload, message in ((b"\xff", "valid UTF-8"), (b"{", "valid JSON")):
+                evidence_path.write_bytes(payload)
+                result = self._run_cli(
+                    "--static-build-root",
+                    str(static_root),
+                    "--caddyfile-digest",
+                    EXPECTED_CADDYFILE_DIGEST,
+                    "--browser-evidence",
+                    str(evidence_path),
+                )
+                with self.subTest(message=message):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+
     def test_cli_accepts_committed_retained_input_without_local_static_files(self) -> None:
         result = self._run_cli("--retained-input", str(EVIDENCE_PATH))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -732,6 +850,74 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
         self.assertEqual(retained["browser_journey"], "blocked_provider")
         self.assertEqual(retained["product"]["build_commit"], EXPECTED_BUILD_SHA)
         self.assertEqual(retained["deployment"]["runtime_inputs"], caddy_proof.reconstruction_inputs())
+        self.assertEqual(
+            retained["browser_execution"],
+            {"mode": caddy_proof.BROWSER_NON_EXECUTION_MODE, "status": "not_proven"},
+        )
+
+    def test_cli_rejects_changed_retained_copy_before_consuming_browser_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "caddy-proof-evidence.json"
+            copied.write_bytes(EVIDENCE_PATH.read_bytes().replace(b'"blocked_provider"', b'"passed________"', 1))
+            result = self._run_cli("--retained-input", str(copied))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical committed evidence path", result.stderr)
+
+    def test_cli_rejects_retained_copy_even_when_json_is_malformed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "caddy-proof-evidence.json"
+            copied.write_bytes(b"\xff")
+            result = self._run_cli("--retained-input", str(copied))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("canonical committed evidence path", result.stderr)
+
+    def test_retained_anchor_is_fixed_not_caller_supplied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            anchor = Path(directory) / "anchor.txt"
+            anchor.write_text("0" * 64 + "\n", encoding="ascii")
+            with mock.patch.object(caddy_proof, "RETAINED_EVIDENCE_ANCHOR_PATH", anchor):
+                with self.assertRaisesRegex(ValueError, "malformed or stale"):
+                    caddy_proof._read_verified_retained_bytes(EVIDENCE_PATH)
+
+
+class CaddyProofInputBoundaryTests(unittest.TestCase):
+    """Keep bounded JSON and Git trust-root helpers reject-by-default."""
+
+    def test_bounded_json_accepts_exact_limit_and_rejects_one_byte_over(self) -> None:
+        for limit, label in (
+            (caddy_proof.BROWSER_EVIDENCE_MAX_BYTES, "browser evidence"),
+            (caddy_proof.RETAINED_EVIDENCE_MAX_BYTES, "retained input"),
+        ):
+            with self.subTest(limit=limit):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "fixture.json"
+                    path.write_bytes(b"{}" + b" " * (limit - 2))
+                    self.assertEqual(
+                        caddy_proof._load_bounded_json(path, limit=limit, label=label),
+                        {},
+                    )
+                    path.write_bytes(b"{}" + b" " * (limit - 1))
+                    with self.assertRaisesRegex(ValueError, "bounded input size"):
+                        caddy_proof._load_bounded_json(path, limit=limit, label=label)
+
+    def test_bounded_json_rejects_duplicate_keys_nonfinite_malformed_input(self) -> None:
+        payloads = (
+            (b'{"x":1,"x":2}', "duplicate JSON object key"),
+            (b'{"x":NaN}', "non-finite JSON number"),
+            (b"\x80", "not valid UTF-8"),
+            (b"{", "not valid JSON"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            for payload, error_fragment in payloads:
+                with self.subTest(payload=payload):
+                    path.write_bytes(payload)
+                    with self.assertRaisesRegex(ValueError, error_fragment):
+                        caddy_proof._load_bounded_json(
+                            path,
+                            limit=caddy_proof.BROWSER_EVIDENCE_MAX_BYTES,
+                            label="browser evidence",
+                        )
 
 
 def _free_tcp_port() -> int:
