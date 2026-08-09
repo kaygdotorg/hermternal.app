@@ -2189,6 +2189,38 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "trusted repository metadata root|outside"):
                 traefik_proof._current_parser_provenance(linked)
 
+    def test_external_attacker_parent_git_worktree_is_rejected(self) -> None:
+        """Reciprocal metadata cannot make an external attacker parent trusted."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary) / "trusted-sandbox"
+            root = sandbox / "repo"
+            linked = sandbox / "linked"
+            attacker_parent = Path(temporary) / "attacker-parent"
+            sandbox.mkdir()
+            root.mkdir()
+            attacker_parent.mkdir()
+            _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "external-anchor", str(linked))
+            marker = linked / ".git"
+            original = marker.read_text(encoding="ascii").strip()
+            original_git_dir = Path(original.split(":", 1)[1].strip()).resolve()
+            attacker_common = attacker_parent / ".git"
+            shutil.copytree(root / ".git", attacker_common)
+            evil = attacker_common / "worktrees" / "evil"
+            shutil.copytree(original_git_dir, evil)
+            (evil / "commondir").write_text("../..\n", encoding="ascii")
+            (evil / "gitdir").write_text(os.path.relpath(marker, start=evil) + "\n", encoding="ascii")
+            marker.write_text(f"gitdir: {os.path.relpath(evil, start=marker.parent)}\n", encoding="ascii")
+
+            self.assertEqual(_run_git(linked, "rev-parse", "--show-toplevel"), str(linked.resolve()))
+            self.assertEqual(
+                Path(_run_git(linked, "rev-parse", "--git-common-dir")).resolve(),
+                attacker_common.resolve(),
+            )
+            with self.assertRaisesRegex(ValueError, "trusted repository metadata root|outside"):
+                traefik_proof._current_parser_provenance(linked)
+
     def test_relative_gitdir_symlink_escape_fails_closed(self) -> None:
         """Git metadata references cannot follow a relative symlink redirect."""
 
