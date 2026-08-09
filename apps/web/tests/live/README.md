@@ -38,6 +38,18 @@ helper requires that fixed-shape assertion result, rather than independent
 stable-state booleans; an incomplete official-Hermes chain fails before
 retention preflight, page mutation, capture, or publication.
 
+The credential-bearing worker uses a dynamic Playwright annotation channel with
+only the fixed semantic phases `not-started`, `authenticated`,
+`ready-no-submit`, `submitted`, `completed`, `history-reconciled`, `reconciled`,
+and `uncertain`, plus delivery states `not-submitted`, `submitted`, `completed`,
+`reconciled`, and `uncertain`. The phase is `ready-no-submit` immediately before
+prompt submission, then `submitted` after the click, and advances only after the
+completion and history assertions. The safe reporter emits this two-field
+projection only for a failed test. Unknown, duplicate, extra, or free-form
+status annotations are rejected and never reach reporter output; IDs, bodies,
+URLs, errors, DOM, credentials, and other diagnostics are not a reporter
+channel.
+
 All live proof assertions finish before the capture-only page transform. The
 transform replaces the live conversation timeline, session labels, conversation
 title, provider/model metadata (`.header-model`), session counts

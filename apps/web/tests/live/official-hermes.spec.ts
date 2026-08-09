@@ -7,13 +7,15 @@ import {
   matchLiveProofHistory,
   matchLiveProofLedger
 } from './live-proof-ledger.mjs';
+import { setLiveProofStatus } from './live-proof-status.mjs';
 
 const password = process.env.HERMES_TEST_PASSWORD;
 const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
 
 test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
 
-test('browser UI reaches official Hermes, reconciles exact history, and logs out', async ({ page, context }) => {
+test('browser UI reaches official Hermes, reconciles exact history, and logs out', async ({ page, context }, testInfo) => {
+  setLiveProofStatus(testInfo, { phase: 'not-started', delivery: 'not-submitted' });
   const ledger = createLiveProofLedger();
   const controlRequests = new Map<string, 'session.create' | 'session.resume'>();
   let expectedStoredSessionId: string | undefined;
@@ -199,6 +201,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   const workspace = page.getByTestId('runtime-preview');
   await expect(workspace).toBeVisible();
   await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
+  setLiveProofStatus(testInfo, { phase: 'authenticated', delivery: 'not-submitted' });
 
   const hasExistingSession = (await page.locator('.session-items button').count()) > 0;
   if (!hasExistingSession) {
@@ -214,10 +217,12 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   await expect.poll(() => hasEvent(ledger, 'gateway.ready')).toBe(true);
   expect(websocketUpgradeCount).toBe(1);
   expect(websocketQueryIsTicketOnly).toBe(true);
+  setLiveProofStatus(testInfo, { phase: 'ready-no-submit', delivery: 'not-submitted' });
 
   const initialMessageReadCount = countHttpRequests(ledger, 'GET', '/messages');
   await page.getByLabel('Message Hermes').fill(LIVE_PROOF_PROMPT);
   await page.getByRole('button', { name: 'Send message' }).click();
+  setLiveProofStatus(testInfo, { phase: 'submitted', delivery: 'submitted' });
   await expect.poll(() => countEvents(ledger, 'prompt.submit')).toBe(1);
   await expect.poll(
     () => countEvents(ledger, 'message.delta') + countEvents(ledger, 'message.complete') + countEvents(ledger, 'error'),
@@ -225,6 +230,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   ).toBeGreaterThan(0);
   expect(countEvents(ledger, 'error')).toBe(0);
   await expect.poll(() => countEvents(ledger, 'message.complete'), { timeout: 90_000 }).toBe(1);
+  setLiveProofStatus(testInfo, { phase: 'completed', delivery: 'completed' });
   await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
   await expect.poll(
     () => countHttpRequests(ledger, 'GET', '/messages'),
@@ -233,6 +239,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   await expect.poll(() => countEvents(ledger, 'history.response'), { timeout: 30_000 }).toBeGreaterThan(0);
   await latestHistoryProjection;
   expect(historyMatched).toBe(true);
+  setLiveProofStatus(testInfo, { phase: 'history-reconciled', delivery: 'completed' });
 
   const captureState = await workspace.getAttribute('data-state');
   if (captureState !== 'empty' && captureState !== 'ready') {
@@ -266,6 +273,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     promptCount: 1,
     completionCount: 1
   });
+  setLiveProofStatus(testInfo, { phase: 'reconciled', delivery: 'reconciled' });
   await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState, proof });
 
   const loginSequence = findEventSequence(

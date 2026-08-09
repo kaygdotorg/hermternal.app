@@ -160,7 +160,10 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   ordered auth/ticket/upgrade, server-first readiness, session, one-prompt acknowledgement, correlated
   delta/completion, and canonical REST history chain, then performs same-context logout and browser
   storage absence checks. The screenshot helper receives the exact complete ledger match only after
-  that assertion; an incomplete proof cannot enter capture or retention. Screenshot retention uses a
+  that assertion; an incomplete proof cannot enter capture or retention. Failed live tests expose only
+  the fixed semantic proof phase and delivery state through a dynamic Playwright annotation channel;
+  the allowlist rejects arbitrary, duplicate, or extra values, and the reporter never forwards IDs,
+  bodies, URLs, errors, DOM, credentials, or other diagnostics. Screenshot retention uses a
   trusted private staging parent anchored by
   device/inode, an absolute trusted Python child with `-I -S` and a credential-free environment, and
   exclusive no-overwrite publication. Source swaps, parent swaps, quarantine remnants, attachment
