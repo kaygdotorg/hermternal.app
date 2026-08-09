@@ -1119,6 +1119,20 @@ export function installLiveProofPageBridge(config) {
 
     const NativeWebSocket = globalThis.WebSocket;
     if (typeof NativeWebSocket !== 'function') fail('WebSocket is unavailable');
+
+    /** @param {any} socket */
+    const closeConstructedSocket = (socket) => {
+      try {
+        if (socket !== null && socket !== undefined && typeof socket.close === 'function') {
+          socket.close(1000, 'live proof observation setup failed');
+        } else if (socket !== null && socket !== undefined && typeof socket.cancel === 'function') {
+          void Promise.resolve(socket.cancel()).catch(() => undefined);
+        }
+      } catch {
+        // Native close/cancel diagnostics stay page-local and are never retained.
+      }
+    };
+
     const TrackedWebSocket = new Proxy(NativeWebSocket, {
       construct(target, argumentsList, newTarget) {
         // Prove the page origin, security mode, route, and opaque ticket before
@@ -1126,6 +1140,10 @@ export function installLiveProofPageBridge(config) {
         // queue, or close lifecycle, and the validator emits no raw URL text.
         const approvedHref = validateWebSocketUrl(argumentsList[0]);
         if (sockets.size >= MAX_SOCKETS) fail('WebSocket count exceeded its bound');
+        // This is a lifetime bound, not an active-socket bound. Check it before
+        // native construction so the 513th approved ticket is never sent to a
+        // real server when the observation budget is exhausted.
+        if (websocketOpenCount >= MAX_QUEUE_EVENTS) fail('WebSocket open count exceeded its bound');
         const constructorArguments = [approvedHref, ...argumentsList.slice(1)];
         let socket;
         try {
@@ -1135,43 +1153,56 @@ export function installLiveProofPageBridge(config) {
           // opaque ticket beyond the page realm.
           fail('WebSocket construction failed');
         }
-        if (websocketOpenCount >= MAX_QUEUE_EVENTS) fail('WebSocket open count exceeded its bound');
-        sockets.add(socket);
-        websocketOpenCount += 1;
-        push({
-          kind: 'ws.open',
-          route: '/api/ws',
-          ticketOnly: true,
-          originBound: true
-        });
 
-        const nativeSend = socket.send.bind(socket);
-        Object.defineProperty(socket, 'send', {
-          configurable: false,
-          enumerable: false,
-          writable: false,
-          /** @type {(payload: any) => any} */
-          value(payload) {
-            enqueue(() => inspectSentFrame(payload));
-            return nativeSend(payload);
-          }
-        });
-        socket.addEventListener('message', (/** @type {any} */ event) => {
-          enqueue(() => inspectReceivedFrame(event.data));
-        });
-        socket.addEventListener(
-          'close',
-          () => {
-            if (websocketCloseCount >= MAX_QUEUE_EVENTS) {
-              bridgeFailure = true;
-              return;
+        let registered = false;
+        try {
+          sockets.add(socket);
+          registered = true;
+          const nativeSend = socket.send.bind(socket);
+          Object.defineProperty(socket, 'send', {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            /** @type {(payload: any) => any} */
+            value(payload) {
+              enqueue(() => inspectSentFrame(payload));
+              return nativeSend(payload);
             }
-            websocketCloseCount += 1;
-            sockets.delete(socket);
-          },
-          { once: true }
-        );
-        return socket;
+          });
+          socket.addEventListener('message', (/** @type {any} */ event) => {
+            enqueue(() => inspectReceivedFrame(event.data));
+          });
+          socket.addEventListener(
+            'close',
+            () => {
+              if (websocketCloseCount >= MAX_QUEUE_EVENTS) {
+                bridgeFailure = true;
+                return;
+              }
+              websocketCloseCount += 1;
+              sockets.delete(socket);
+            },
+            { once: true }
+          );
+          push({
+            kind: 'ws.open',
+            route: '/api/ws',
+            ticketOnly: true,
+            originBound: true
+          });
+          websocketOpenCount += 1;
+          return socket;
+        } catch {
+          if (registered) {
+            try {
+              sockets.delete(socket);
+            } catch {
+              // Cleanup remains best effort and never exposes source diagnostics.
+            }
+          }
+          closeConstructedSocket(socket);
+          fail('WebSocket observation setup failed');
+        }
       }
     });
     Object.defineProperty(globalThis, 'WebSocket', {

@@ -84,8 +84,12 @@ same-origin `ws`/`wss` URL by mapping it to the page's `http`/`https` security
 scheme and matching the exact hostname and effective port. It rejects userinfo,
 fragments, malformed or encoded query grammar, wrong paths, duplicate or extra
 keys, empty tickets, and ticket values outside the bounded
-`^[A-Za-z0-9_-]+$` contract. The URL and ticket remain page-local and never enter
-Node projections or error text. A response projection also carries a fixed
+`^[A-Za-z0-9_-]+$` contract. The cumulative open bound is checked before native
+construction, so an exhausted observation budget never sends another ticket to
+an upstream socket. Any post-construction registration failure removes the
+socket and best-effort closes or cancels it before returning a fixed error. The
+URL and ticket remain page-local and never enter Node projections or error text.
+A response projection also carries a fixed
 successful-result boolean; JSON-RPC errors, resultless or malformed responses,
 and unstable or extra-field response objects cannot satisfy the prompt
 acknowledgement. The ledger requires that page-validated bit before delta,
@@ -104,13 +108,18 @@ Node-side parser from widening the page-produced canonical boundary.
 `live-proof-parent-compat.mjs` is intentionally a focused offline migration
 probe. It loads only the ledger from exact parent commit
 `a7d43f636424dcd02bf65743966db30e5aeb30f0` and the working-tree child, then
-proves that the parent accepts attacker-origin fixed projections and treats
-resultless, JSON-RPC error, and malformed-result same-ID responses as prompt
-acknowledgements, while the child requires the page-validated URL and
-successful-result acknowledgement projections. The parent and child retain the
-same strict history projection contract; this probe is limited to the changed
-origin and acknowledgement gates. It does not import the live host, reporter,
-capture, browser, or reconciliation surfaces. Run it directly with Node:
+loads the exact bridge parent `4c1cd74f6d703a99a29ef85a08142df45234e9f5` in an
+isolated fake browser realm. It proves that the ledger parent accepts
+attacker-origin fixed projections and treats resultless, JSON-RPC error, and
+malformed-result same-ID responses as prompt acknowledgements. It also proves
+that exact `4c1` constructs the 513th approved socket after 512 completed
+open/close cycles, while the child rejects before construction, and that the
+child closes a socket when registration fails. The child requires the
+page-validated URL and successful-result acknowledgement projections. The
+parent and child retain the same strict history projection contract; this probe
+is limited to the changed origin, acknowledgement, and socket-lifetime gates.
+It does not import the live host, reporter, capture, browser, or reconciliation
+surfaces. Run it directly with Node:
 
 ```sh
 node apps/web/tests/live/live-proof-parent-compat.mjs

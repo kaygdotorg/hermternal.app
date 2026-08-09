@@ -5,10 +5,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
 const PARENT_COMMIT = 'a7d43f636424dcd02bf65743966db30e5aeb30f0';
+const BRIDGE_PARENT_COMMIT = '4c1cd74f6d703a99a29ef85a08142df45234e9f5';
 const LEDGER_PATH = 'apps/web/tests/live/live-proof-ledger.mjs';
+const BRIDGE_PATH = 'apps/web/tests/live/live-proof-page-bridge.mjs';
 const probeDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(probeDirectory, '../../../..');
 const childLedgerPath = join(repositoryRoot, LEDGER_PATH);
+const childBridgePath = join(repositoryRoot, BRIDGE_PATH);
 const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
 
 /**
@@ -30,6 +33,112 @@ function loadChildLedger() {
   // source is moved outside the focused live-proof surface.
   readFileSync(childLedgerPath, 'utf8');
   return import(pathToFileURL(childLedgerPath).href);
+}
+
+/**
+ * Run an isolated browser-realm bridge probe in a child Node process. The exact
+ * 4c1 bridge is loaded from the local Git object database; the child bridge is
+ * loaded from this worktree. A fresh process is required because installation
+ * deliberately replaces page globals and creates a non-configurable bridge.
+ *
+ * @param {'parent'|'child'|'registration-child'} mode
+ */
+function runBridgeProbe(mode) {
+  const script = `
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+
+const mode = process.argv[2];
+const repositoryRoot = ${JSON.stringify(repositoryRoot)};
+const bridgePath = ${JSON.stringify(BRIDGE_PATH)};
+const childBridgePath = ${JSON.stringify(childBridgePath)};
+const parentCommit = ${JSON.stringify(BRIDGE_PARENT_COMMIT)};
+const source = mode === 'parent'
+  ? execFileSync('git', ['show', parentCommit + ':' + bridgePath], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  : readFileSync(childBridgePath, 'utf8');
+const bridge = await import(
+  mode === 'parent'
+    ? 'data:text/javascript;base64,' + Buffer.from(source, 'utf8').toString('base64')
+    : pathToFileURL(childBridgePath).href
+);
+if (globalThis.crypto === undefined) {
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: webcrypto
+  });
+}
+globalThis.location = { href: 'https://app.example.test/' };
+globalThis.fetch = async () => {
+  throw new Error('not used');
+};
+class FakeWebSocket {
+  static constructed = 0;
+  static closed = 0;
+  constructor() {
+    FakeWebSocket.constructed += 1;
+    this.listeners = new Map();
+    this.closed = false;
+  }
+  addEventListener(type, listener) {
+    if (mode === 'registration-child' && type === 'message') {
+      throw new Error('synthetic registration failure');
+    }
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+  send() {}
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    FakeWebSocket.closed += 1;
+    for (const listener of this.listeners.get('close') ?? []) listener();
+  }
+}
+globalThis.WebSocket = FakeWebSocket;
+bridge.installLiveProofPageBridge({ prompt: 'prompt', marker: 'marker' });
+const url = 'wss://app.example.test/api/ws?ticket=boundedTicket';
+let rejected = false;
+if (mode === 'registration-child') {
+  try {
+    new globalThis.WebSocket(url);
+  } catch (error) {
+    rejected = error instanceof Error && error.message === 'live proof page bridge WebSocket observation setup failed';
+  }
+} else {
+  for (let index = 0; index < 512; index += 1) {
+    const socket = new globalThis.WebSocket(url);
+    socket.close();
+    await bridge.drainLiveProofPageEvents();
+  }
+  try {
+    new globalThis.WebSocket(url);
+  } catch {
+    rejected = true;
+  }
+}
+console.log(JSON.stringify({
+  constructed: FakeWebSocket.constructed,
+  closed: FakeWebSocket.closed,
+  rejected,
+  state: bridge.readLiveProofPageState()
+}));
+`;
+  const output = execFileSync(process.execPath, ['--input-type=module', '-', mode], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    input: script,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  return JSON.parse(output.trim().split('\n').at(-1));
 }
 
 function expectAccepted(label, operation) {
@@ -205,6 +314,27 @@ expectRejected('child extra response projection', () => childTestLedger.recordWe
   extra: true
 }));
 
+const parentBridgeProbe = runBridgeProbe('parent');
+assert.equal(parentBridgeProbe.rejected, true);
+assert.equal(parentBridgeProbe.constructed, 513);
+assert.equal(parentBridgeProbe.closed, 512);
+assert.equal(parentBridgeProbe.state.websocketOpenCount, 512);
+assert.equal(parentBridgeProbe.state.websocketCloseCount, 512);
+
+const childBridgeProbe = runBridgeProbe('child');
+assert.equal(childBridgeProbe.rejected, true);
+assert.equal(childBridgeProbe.constructed, 512);
+assert.equal(childBridgeProbe.closed, 512);
+assert.equal(childBridgeProbe.state.websocketOpenCount, 512);
+assert.equal(childBridgeProbe.state.websocketCloseCount, 512);
+
+const registrationCleanupProbe = runBridgeProbe('registration-child');
+assert.equal(registrationCleanupProbe.rejected, true);
+assert.equal(registrationCleanupProbe.constructed, 1);
+assert.equal(registrationCleanupProbe.closed, 1);
+assert.equal(registrationCleanupProbe.state.websocketOpenCount, 0);
+assert.equal(registrationCleanupProbe.state.websocketCloseCount, 0);
+
 console.log(
-  `live-proof-parent-compat: ${PARENT_COMMIT.slice(0, 12)} parent accepts attacker-origin and resultless/error/malformed same-ID proofs; child requires page-bound origin and successful JSON-RPC result`
+  `live-proof-parent-compat: ${PARENT_COMMIT.slice(0, 12)} ledger gates and ${BRIDGE_PARENT_COMMIT.slice(0, 12)} bridge lifetime bound regressions pass; child rejects attacker-origin, unsafe acknowledgements, 513th construction, and registration leaks`
 );
