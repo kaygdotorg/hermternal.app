@@ -43,8 +43,20 @@ def _endpoint(value: object) -> str:
         port = parsed.port
     except ValueError:
         raise LauncherResultError() from None
-    # An endpoint without a port can silently fall back to an unrelated service.
-    if parsed.scheme != "http" or hostname is None or port is None or port < 1:
+    # This parser consumes launcher handoff output, not a general proxy target.
+    # Keep the selected endpoint on the exact IPv4 loopback form the launcher
+    # freshly proved; no alternate host can cross into credential handoff.
+    if (
+        parsed.scheme != "http"
+        or hostname != "127.0.0.1"
+        or port is None
+        or port < 1
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
         raise LauncherResultError()
     return endpoint
 

@@ -13,8 +13,8 @@ parse the selected launcher result before starting Playwright:
 
 ```sh
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
-# This separate status probe must report .result.status exactly "running".
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+# This fail-closed selection gate freshly proves the immutable launcher
+# container ID is running and owns the one explicit loopback Dashboard port.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
@@ -23,12 +23,12 @@ HERMES_LIVE_TARGET="$endpoint" \
   bun run --cwd apps/web test:e2e:live
 ```
 
-A successful `start` result has `.result.status` `ready`; the separate `status`
-probe must report `.result.status` exactly as `running` immediately before the
-endpoint and credential-file values are used. A stopped, removed, or absent
-instance must abort the handoff; retained endpoint metadata is not proof of a
-live listener. This status probe is an operator check only, not liveness
-enforcement. Issue #345 remains open.
+A successful `start` result has `.result.status` `ready`; it is not a handoff
+permit. Immediately before credential handoff, `endpoint` re-inspects the
+persisted immutable launcher container ID, requires `running`, and requires the
+sole `127.0.0.1:<requested-port>:9119` mapping. A stopped tombstone, missing or
+stale mapping, replacement, launcher-ownership mismatch, rebound port, or
+non-loopback publication aborts before the credential file is read.
 `read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`
 from the launcher output. The handoff strips only trailing CR/LF, validates
 exactly 48 lowercase hexadecimal characters, and passes the value only as
