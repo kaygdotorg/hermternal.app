@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import type { WorkspaceMode } from '$lib/session/coordinator';
   import ArtifactInspector from './ArtifactInspector.svelte';
   import Composer from './Composer.svelte';
   import ConversationHeader from './ConversationHeader.svelte';
@@ -25,6 +26,8 @@
   export let state: WorkspaceRuntimeState = 'stopped';
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
+  // The coordinator owns mode state; this preview only presents it and forwards selection actions.
+  export let mode: WorkspaceMode = 'chat';
   export let activeSessionId = 'quarterly-logistics';
   export let sessions: SessionSummary[] = DEFAULT_SESSIONS;
   export let timelineItems: TimelineItem[] | undefined = undefined;
@@ -33,6 +36,12 @@
   export let dataMode: 'fixture' | 'live' = 'fixture';
   export let interactionEnabled = true;
   export let artifactInspectorEnabled = true;
+  // The parent owns Terminal's sibling layer. Keep Chat inert until that painted
+  // layer is gone, rather than inferring safety from the mode snapshot alone.
+  export let terminalPresentationActive = false;
+  export let chatFocusHandoff = false;
+  export let terminalModeEnabled = true;
+  export let terminalModeDisabledReason = 'Terminal is available after the first message is saved.';
   export let onAction: WorkspaceActionHandler = () => {};
 
   let inspectorVisible = artifactInspectorEnabled;
@@ -51,6 +60,12 @@
   let localTitle = title;
   let localModel = model;
 
+  // REST restoration and session selection can replace these durable values after
+  // mount. Sync only when the authoritative prop changes so unrelated state
+  // updates do not overwrite an in-progress prototype-local edit.
+  $: localTitle = title;
+  $: localModel = model;
+
   // Explicit timeline input separates live server reads from deterministic fixtures.
   // Undefined preserves the Paper preview states; an empty array is a real empty session.
   $: timeline = timelineItems ?? timelineForState(state);
@@ -65,6 +80,12 @@
     state === 'compatibility-check-failed' ||
     state === 'unsupported-version';
   $: compatibilityBlocked = state === 'compatibility-check-failed' || state === 'unsupported-version';
+  // Terminal owns a separate top layer. Its Chat projection must leave both the
+  // sequential focus order and accessibility tree until that painted layer is
+  // removed, not merely until the logical mode snapshot flips to Chat.
+  $: terminalBlocked = (terminalPresentationActive || mode === 'terminal') && !chatFocusHandoff;
+  $: selectorBlocked = compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen;
+  $: underlayBlocked = selectorBlocked || terminalBlocked;
   $: if (compatibilityBlocked) {
     // A fail-closed gate dismisses transient drawers and editors before the
     // underlay becomes inert, leaving only the two recovery actions available.
@@ -235,14 +256,16 @@
     aria-label="Hermternal runtime workspace preview"
     class="workspace-preview"
     data-appearance={appearance}
+    data-mode-source={dataMode}
     data-state={state}
     data-testid="runtime-preview"
   >
   <div
-    aria-hidden={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen ? 'true' : undefined}
+    aria-hidden={underlayBlocked ? 'true' : undefined}
     class="workspace-underlay"
     data-testid="workspace-underlay"
-    inert={compatibilityBlocked || mobileTitleEditing || mobileSidebarOpen || mobileWorkspaceOpen}
+    inert={underlayBlocked}
+    tabindex="-1"
   >
     <div aria-hidden="true" class="workspace-mobile-status-bar">
       <span class="status-time">9:41</span>
@@ -287,7 +310,14 @@
       </aside>
 
       <div class="conversation-panel">
-        <ConversationHeader model={localModel} title={localTitle} onAction={handleAction} />
+        <ConversationHeader
+          model={localModel}
+          {mode}
+          {terminalModeDisabledReason}
+          {terminalModeEnabled}
+          title={localTitle}
+          onAction={handleAction}
+        />
 
         <div class="conversation-body">
           <Timeline {dataSource} emptyLabel={timelineEmptyLabel} items={timeline} runtimeState={state} onAction={handleAction} />
@@ -318,6 +348,45 @@
       {/if}
     </div>
   </div>
+
+  {#if dataMode === 'live'}
+    <div
+      aria-hidden={selectorBlocked ? 'true' : undefined}
+      aria-label="Workspace mode"
+      class="mobile-mode-selector"
+      data-testid="mobile-mode-selector"
+      inert={selectorBlocked}
+      role="group"
+    >
+      <Pill
+        ariaLabel={mode === 'chat' ? 'Chat mode selected' : 'Open chat mode'}
+        icon="conversation"
+        iconOnly
+        label="Chat"
+        selected={mode === 'chat'}
+        toggleable
+        variant="ghost"
+        onActivate={() => handleAction({ type: 'set-mode', mode: 'chat' })}
+      />
+      <Pill
+        ariaLabel={!terminalModeEnabled && mode !== 'terminal'
+          ? 'Terminal unavailable until the first message is saved'
+          : mode === 'terminal'
+            ? 'Terminal mode selected'
+            : 'Open terminal mode'}
+        disabled={!terminalModeEnabled && mode !== 'terminal'}
+        disabledReason={terminalModeDisabledReason}
+        title={!terminalModeEnabled && mode !== 'terminal' ? terminalModeDisabledReason : undefined}
+        icon="terminal"
+        iconOnly
+        label="Terminal"
+        selected={mode === 'terminal'}
+        toggleable
+        variant="ghost"
+        onActivate={() => handleAction({ type: 'set-mode', mode: 'terminal' })}
+      />
+    </div>
+  {/if}
 
   {#if mobileSidebarOpen || mobileWorkspaceOpen}
     <button
@@ -614,6 +683,7 @@
 
   .workspace-mobile-status-bar,
   .mobile-toolbar,
+  .mobile-mode-selector,
   .mobile-drawer-scrim,
   .mobile-session-drawer,
   .mobile-workspace-drawer,
@@ -764,6 +834,53 @@
       background: var(--composer-surface);
       box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
       backdrop-filter: blur(18px) saturate(150%);
+    }
+
+    .workspace-preview[data-mode-source='live'] .mobile-toolbar > :global(.pill) {
+      display: none;
+    }
+
+    .mobile-mode-selector {
+      position: absolute;
+      top: 72px;
+      right: 16px;
+      z-index: 14;
+      box-sizing: border-box;
+      display: flex;
+      width: 92px;
+      height: 44px;
+      align-items: center;
+      gap: 4px;
+      padding: 2px;
+      border: 1px solid var(--chrome-line);
+      border-radius: var(--radius-pill);
+      background: var(--composer-surface);
+      box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
+      backdrop-filter: blur(18px) saturate(150%);
+    }
+
+    .mobile-mode-selector :global(.pill) {
+      position: relative;
+      width: 40px;
+      height: 40px;
+      min-width: 40px;
+      min-height: 40px;
+      padding: 8px;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    /* Paper's visible 40px segments sit in a 44px toolbar row. Extend each
+       pointer box into the shell padding so each mode keeps a 44px target. */
+    .mobile-mode-selector :global(.pill::before) {
+      position: absolute;
+      inset: -2px;
+      content: '';
+    }
+
+    .mobile-mode-selector :global(.pill.selected) {
+      background: color-mix(in srgb, var(--signal) 12%, var(--surface));
     }
 
     .conversation-panel :global(.conversation-header) {
@@ -1016,6 +1133,7 @@
        swap: every frosted mobile surface becomes opaque and removes filtering. */
     .conversation-panel,
     .mobile-title-island,
+    .mobile-mode-selector,
     .mobile-toolbar > :global(.pill),
     .title-edit-dimmer,
     .state-layer.compatibility-layer {
@@ -1036,6 +1154,7 @@
     .workspace-preview :global(.composer),
     .mobile-toolbar,
     .mobile-title-island,
+    .mobile-mode-selector,
     .mobile-toolbar > :global(.pill),
     .title-edit-dimmer,
     .state-layer.compatibility-layer {
@@ -1063,6 +1182,7 @@
     .mobile-session-drawer,
     .mobile-workspace-drawer,
     .mobile-title-island,
+    .mobile-mode-selector,
     .mobile-toolbar > :global(.pill),
     .mobile-workspace-drawer,
     .title-edit-dimmer,

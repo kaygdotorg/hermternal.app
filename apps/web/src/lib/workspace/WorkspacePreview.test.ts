@@ -10,8 +10,7 @@ const deferredControls = [
   'Open settings',
   'Open utilities',
   'Context usage 62 percent',
-  'Record a voice message',
-  'Open terminal mode'
+  'Record a voice message'
 ];
 
 describe('WorkspacePreview', () => {
@@ -35,6 +34,37 @@ describe('WorkspacePreview', () => {
     fireEvent.keyDown(editor, { key: 'Enter' });
 
     expect(onAction).toHaveBeenCalledWith({ type: 'edit-title', title: 'Updated session' });
+  });
+
+  it('adopts restored durable title and model props without resetting an unrelated local edit', async () => {
+    const onAction = vi.fn();
+    const view = render(WorkspacePreview, {
+      state: 'loading',
+      title: 'Hermes',
+      model: 'Hermes',
+      onAction
+    });
+
+    await view.rerender({
+      state: 'empty',
+      title: 'E2E current session',
+      model: 'Hermes 4'
+    });
+    expect(screen.getByRole('button', { name: 'Edit conversation title' })).toHaveTextContent(
+      'E2E current session'
+    );
+    expect(screen.getByLabelText('Current model Hermes 4')).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Edit conversation title' }));
+    const editor = await waitFor(() => screen.getByRole('textbox', { name: 'Conversation title' }));
+    await fireEvent.input(editor, { target: { value: 'Local fixture title' } });
+    await fireEvent.keyDown(editor, { key: 'Enter' });
+    expect(onAction).toHaveBeenCalledWith({ type: 'edit-title', title: 'Local fixture title' });
+
+    await view.rerender({ state: 'ready' });
+    expect(screen.getByRole('button', { name: 'Edit conversation title' })).toHaveTextContent(
+      'Local fixture title'
+    );
   });
 
   it('sends a message with the command-enter keyboard contract', async () => {
@@ -102,6 +132,30 @@ describe('WorkspacePreview', () => {
     }
   });
 
+  it('disables both responsive Terminal controls while session promotion is pending', async () => {
+    const onAction = vi.fn();
+    render(WorkspacePreview, {
+      dataMode: 'live',
+      state: 'ready',
+      terminalModeEnabled: false,
+      onAction
+    });
+
+    const terminalControls = document.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Terminal unavailable until the first message is saved"]'
+    );
+    expect(terminalControls).toHaveLength(2);
+    for (const control of terminalControls) {
+      expect(control).toBeDisabled();
+      expect(control).toHaveAttribute(
+        'title',
+        'Terminal is available after the first message is saved.'
+      );
+      await fireEvent.click(control);
+    }
+    expect(onAction).not.toHaveBeenCalledWith({ type: 'set-mode', mode: 'terminal' });
+  });
+
   it('native-disables every visible no-handler control while retaining functional controls', () => {
     const onAction = vi.fn();
     render(WorkspacePreview, { state: 'ready', onAction });
@@ -120,7 +174,11 @@ describe('WorkspacePreview', () => {
     expect(screen.getByRole('button', { name: 'Start a new chat' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Add an attachment' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Open security policy' })).toBeEnabled();
-    expect(onAction).not.toHaveBeenCalled();
+
+    const terminalMode = screen.getByRole('button', { name: 'Open terminal mode' });
+    expect(terminalMode).toBeEnabled();
+    fireEvent.click(terminalMode);
+    expect(onAction).toHaveBeenCalledWith({ type: 'set-mode', mode: 'terminal' });
   });
 
   it('makes the complete workspace underlay inert and emits only compatibility recovery actions', async () => {
@@ -219,6 +277,33 @@ describe('WorkspacePreview', () => {
     expect(editor.querySelector('.title-edit-dimmer')).toBeInTheDocument();
     expect(screen.getByTestId('represented-mobile-keyboard')).toBeInTheDocument();
     await waitFor(() => expect(editor.querySelector('[aria-label="Conversation title"]')).toHaveFocus());
+  });
+
+  it('keeps narrow Chat and Terminal access outside the inert Chat underlay without creating sessions', async () => {
+    const onAction = vi.fn();
+    render(WorkspacePreview, { state: 'ready', dataMode: 'live', mode: 'terminal', onAction });
+
+    const underlay = screen.getByTestId('workspace-underlay');
+    const selector = screen.getByTestId('mobile-mode-selector');
+    const controls = selector.querySelectorAll('button');
+    expect((underlay as HTMLElement & { inert: boolean }).inert).toBe(true);
+    expect(underlay).toHaveAttribute('aria-hidden', 'true');
+    expect(underlay).not.toContainElement(selector);
+    expect(controls).toHaveLength(2);
+    expect(controls[0]).toHaveAccessibleName('Open chat mode');
+    expect(controls[1]).toHaveAccessibleName('Terminal mode selected');
+    expect(controls[0]).toHaveAttribute('aria-pressed', 'false');
+    expect(controls[1]).toHaveAttribute('aria-pressed', 'true');
+
+    await fireEvent.click(controls[0]);
+    await fireEvent.click(controls[1]);
+    expect(onAction).toHaveBeenNthCalledWith(1, { type: 'set-mode', mode: 'chat' });
+    expect(onAction).toHaveBeenNthCalledWith(2, { type: 'set-mode', mode: 'terminal' });
+    expect(onAction).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'new-session' }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open conversations', hidden: true }));
+    expect((selector as HTMLElement & { inert: boolean }).inert).toBe(true);
+    expect(selector).toHaveAttribute('aria-hidden', 'true');
   });
 
   it('treats mobile drawers as modal surfaces and restores focus after Escape', async () => {

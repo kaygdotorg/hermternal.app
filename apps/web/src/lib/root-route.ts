@@ -1,6 +1,10 @@
 import { createBrowserChatTransport } from '$lib/chat/browser-chat';
 import type { BrowserWebSocketFactory } from '$lib/chat/browser-chat';
 import { createBrowserAuthClient } from '$lib/auth-ui/browser-auth';
+import {
+  createBrowserPtyTransport,
+  type BrowserPtyWebSocketFactory
+} from '$lib/terminal/current-session-terminal';
 import { BrowserAuthSession } from '$lib/auth-ui/browser-auth-session';
 import { discoverProviders } from '$lib/auth-ui/provider-discovery';
 import { createLiveRestTransport, type LiveRestFetch } from '$lib/transport';
@@ -24,6 +28,8 @@ export interface LiveRootContext {
 export interface LiveRootDependencies {
   readonly fetch?: LiveRestFetch;
   readonly createSocket?: BrowserWebSocketFactory;
+  /** Binary PTY socket seam; production otherwise uses the same-origin browser adapter. */
+  readonly createPtySocket?: BrowserPtyWebSocketFactory;
 }
 
 /**
@@ -56,6 +62,13 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
         ...options,
         fetch: dependencies.fetch,
         createSocket: dependencies.createSocket
+      }),
+    // Construction validates the current browser origin before a ticket can be
+    // minted. Missing or malformed browser authority therefore fails closed.
+    createTerminal: () =>
+      createBrowserPtyTransport({
+        fetch: dependencies.fetch,
+        createSocket: dependencies.createPtySocket
       })
   });
   const auth = new BrowserAuthSession({

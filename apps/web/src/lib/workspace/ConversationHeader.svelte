@@ -1,11 +1,15 @@
 <script lang="ts">
   import { tick } from 'svelte';
+  import type { WorkspaceMode } from '$lib/session/coordinator';
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
   import type { WorkspaceActionHandler } from './types';
 
   export let title = 'Quarterly analysis';
   export let model = 'Atlas · balanced';
+  export let mode: WorkspaceMode = 'chat';
+  export let terminalModeEnabled = true;
+  export let terminalModeDisabledReason = 'Terminal is available after the first message is saved.';
   export let onAction: WorkspaceActionHandler = () => {};
 
   let editing = false;
@@ -79,24 +83,38 @@
 
   <div aria-label="Workspace mode" class="mode-controls">
     <Pill
-      ariaLabel="Chat mode selected"
+      ariaLabel={mode === 'chat' ? 'Chat mode selected' : 'Open chat mode'}
       icon="conversation"
       iconOnly
       label="Chat"
       revealLabel
-      selected
-      title="Chat mode is current in this preview"
+      selected={mode === 'chat'}
+      title={mode === 'chat' ? 'Chat mode is current' : 'Open chat mode'}
       toggleable
-      variant="selected"
+      variant={mode === 'chat' ? 'selected' : 'ghost'}
+      onActivate={() => onAction({ type: 'set-mode', mode: 'chat' })}
     />
     <Pill
-      ariaLabel="Open terminal mode"
+      ariaLabel={!terminalModeEnabled && mode !== 'terminal'
+        ? 'Terminal unavailable until the first message is saved'
+        : mode === 'terminal'
+          ? 'Terminal mode selected'
+          : 'Open terminal mode'}
+      disabled={!terminalModeEnabled && mode !== 'terminal'}
+      disabledReason={terminalModeDisabledReason}
       icon="terminal"
       iconOnly
       label="Terminal"
       revealLabel
-      title="Terminal mode is deferred in this preview"
-      variant="ghost"
+      selected={mode === 'terminal'}
+      title={!terminalModeEnabled && mode !== 'terminal'
+        ? terminalModeDisabledReason
+        : mode === 'terminal'
+          ? 'Terminal mode is current'
+          : 'Open terminal mode'}
+      toggleable
+      variant={mode === 'terminal' ? 'selected' : 'ghost'}
+      onActivate={() => onAction({ type: 'set-mode', mode: 'terminal' })}
     />
   </div>
 

@@ -1,3 +1,5 @@
+import type { WorkspaceMode } from '$lib/session/coordinator';
+
 export type Appearance = 'light' | 'dark';
 
 /** Presentation copy must name synthetic playback unless a future runtime explicitly opts into live status semantics. */
@@ -128,6 +130,10 @@ export type ApprovalScope = 'once' | 'session' | 'always';
 
 export type WorkspaceAction =
   | { type: 'new-session' }
+  | { type: 'set-mode'; mode: WorkspaceMode }
+  | { type: 'terminal-reconnect' }
+  | { type: 'terminal-detach' }
+  | { type: 'terminal-close' }
   | { type: 'select-session'; sessionId: string }
   | { type: 'edit-title'; title: string }
   | { type: 'toggle-inspector' }
