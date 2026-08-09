@@ -241,13 +241,15 @@ initial pin is built directly from the no-follow marker and reciprocal
 `commondir`/`gitdir` metadata before the first topology-discovery `rev-parse`;
 common config, worktree config, objects, forbidden indirection paths, and the
 per-worktree `HEAD` file are already retained at that point. A symbolic
-`HEAD` also pins its bounded `refs/heads/<branch>` loose ref and the bounded
-`packed-refs` database; detached `HEAD` is pinned by its bounded OID file.
-The first and every later Git command rechecks the pin before and after
-execution, so a config, objects, HEAD, ref, or packed-refs replacement cannot
-slip through the initial discovery fence. The preflight returns a bounded
-topology snapshot and repeats it after traversal so forbidden metadata or
-same-path swaps cannot authorize a result.
+`HEAD` also pins the bounded `packed-refs` database and follows every loose
+`refs/heads/*` symbolic hop through a strictly bounded, no-follow chain until a
+canonical SHA-1 or SHA-256 OID-bearing file is retained; malformed, looping,
+or over-depth chains fail closed. Detached `HEAD` is pinned by its bounded OID
+file. The first and every later Git command rechecks the complete pin before
+and after execution, so a config, objects, HEAD, chained ref, or packed-refs
+replacement cannot slip through the initial discovery fence. The preflight
+returns a bounded topology snapshot and repeats it after traversal so
+forbidden metadata or same-path swaps cannot authorize a result.
 
 It treats the implementation/test blob pair as the source identity, ignores
 mode-only commits (`100644` versus `100755`) and descendants that do not change
