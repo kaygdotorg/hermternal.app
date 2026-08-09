@@ -128,6 +128,14 @@ class RecoverySnapshot:
     status: str
 
 
+@dataclass(frozen=True)
+class LauncherState:
+    """Persisted public metadata plus the immutable container identity it created."""
+
+    spec: InstanceSpec
+    container_id: str
+
+
 def default_roots() -> Roots:
     home = Path.home()
     return Roots(
@@ -326,17 +334,27 @@ def read_or_create_password(spec: InstanceSpec) -> str:
     return password
 
 
-def state_document(spec: InstanceSpec) -> dict[str, object]:
+def validate_container_id(value: object) -> str:
+    """Accept only Podman's immutable hexadecimal container identity."""
+
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{12,64}", value) is None:
+        raise LauncherError("instance_state_invalid")
+    return value
+
+
+def state_document(spec: InstanceSpec, container_id: str) -> dict[str, object]:
     return {
         "schema": "hermternal.hermes-agent-launcher.v1",
         **spec.public(),
         "username": spec.username,
+        # The retained ID lets the handoff reject a name/label replacement.
+        "container_id": validate_container_id(container_id),
     }
 
 
-def write_state(spec: InstanceSpec) -> None:
+def write_state(spec: InstanceSpec, container_id: str) -> None:
     _ensure_private_directory(spec.roots.state)
-    content = (json.dumps(state_document(spec), sort_keys=True) + "\n").encode("utf-8")
+    content = (json.dumps(state_document(spec, container_id), sort_keys=True) + "\n").encode("utf-8")
     temporary = spec.state_file.with_suffix(".json.tmp")
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -352,7 +370,13 @@ def write_state(spec: InstanceSpec) -> None:
     spec.state_file.chmod(0o600)
 
 
-def load_state(instance: str, roots: Roots) -> InstanceSpec:
+def load_launcher_state(instance: str, roots: Roots) -> LauncherState:
+    """Load public launcher metadata and its immutable container identity.
+
+    Legacy state without the ID is deliberately not upgraded during handoff: a
+    caller must run ``start`` again, which freshly records the owned container.
+    """
+
     validate_instance(instance)
     path = roots.state / f"{instance}.json"
     try:
@@ -374,6 +398,7 @@ def load_state(instance: str, roots: Roots) -> InstanceSpec:
         "data_path",
         "credential_file",
         "username",
+        "container_id",
     }
     if not isinstance(document, dict) or set(document) != expected_keys:
         raise LauncherError("instance_state_invalid")
@@ -401,7 +426,13 @@ def load_state(instance: str, roots: Roots) -> InstanceSpec:
     )
     if document["data_path"] != str(spec.data_dir) or document["credential_file"] != str(spec.credential_file):
         raise LauncherError("instance_state_invalid")
-    return spec
+    return LauncherState(spec, validate_container_id(document["container_id"]))
+
+
+def load_state(instance: str, roots: Roots) -> InstanceSpec:
+    """Compatibility helper for lifecycle callers that need only the spec."""
+
+    return load_launcher_state(instance, roots).spec
 
 
 def container_exists(
@@ -538,6 +569,53 @@ def require_same_recovery_snapshot(
     ):
         raise LauncherError("container_recovery_race")
     return current
+
+
+def require_loopback_endpoint_mapping(spec: InstanceSpec, document: dict[str, object]) -> None:
+    """Require the selected port to be this container's sole Dashboard mapping."""
+
+    network = document.get("NetworkSettings")
+    ports = network.get("Ports") if isinstance(network, dict) else None
+    expected_key = f"{DASHBOARD_PORT}/tcp"
+    if not isinstance(ports, dict) or set(ports) != {expected_key}:
+        raise LauncherError("container_endpoint_unproven")
+    binding = ports.get(expected_key)
+    if not isinstance(binding, list) or len(binding) != 1 or not isinstance(binding[0], dict):
+        raise LauncherError("container_endpoint_unproven")
+    host_ip = binding[0].get("HostIp")
+    host_port = binding[0].get("HostPort")
+    # Accept only the launcher-created IPv4 loopback binding. A wildcard, IPv6,
+    # extra mapping, missing mapping, or substituted port fails before the
+    # credential file is read by the live-proof handoff.
+    if host_ip != "127.0.0.1" or host_port != str(spec.port):
+        raise LauncherError("container_endpoint_unproven")
+
+
+def verify_handoff_endpoint(
+    state: LauncherState,
+    *,
+    runner: Runner = run_command,
+    executable: str | None = None,
+    source_environment: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Freshly prove the running launcher container owns its exact endpoint.
+
+    This is intentionally invoked by ``endpoint`` immediately before the
+    credential handoff. It inspects the persisted immutable ID, never a mutable
+    name, and exposes only public metadata on success.
+    """
+
+    environment = clean_environment(source_environment)
+    podman = executable or podman_path()
+    podman_preflight(runner, environment, podman)
+    document = inspect_container(state.spec, runner, environment, podman, target=state.container_id)
+    snapshot = recovery_snapshot(state.spec, document)
+    if snapshot.container_id != state.container_id:
+        raise LauncherError("container_replaced")
+    if snapshot.status != "running":
+        raise LauncherError("container_not_running")
+    require_loopback_endpoint_mapping(state.spec, document)
+    return {**state.spec.public(), "status": "running"}
 
 
 def _run_container_action(
@@ -677,7 +755,7 @@ def start_instance(
         original_status = container_status(document)
         if original_status == "running":
             readiness(spec.endpoint, attempts, interval)
-            write_state(spec)
+            write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
             return {**spec.public(), "status": "ready", "created": False}, False
         if original_status not in {"configured", "created", "stopped", "exited", "dead"}:
             raise LauncherError("container_state_unrecoverable")
@@ -753,7 +831,7 @@ def start_instance(
                 "container_start_failed",
             )
             readiness(spec.endpoint, attempts, interval)
-            write_state(spec)
+            write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
         except BaseException as exc:
             failed_rollback = rollback_once()
             if failed_rollback is not None and isinstance(exc, Exception):
@@ -781,7 +859,7 @@ def start_instance(
         raise LauncherError("container_start_failed")
     try:
         readiness(spec.endpoint, attempts, interval)
-        write_state(spec)
+        write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
     except BaseException:
         try:
             remove_container(spec, runner, environment, podman)
@@ -900,10 +978,11 @@ def stop_instance(
     environment = clean_environment(source_environment)
     podman = executable or podman_path()
     podman_preflight(runner, environment, podman)
+    # Retain the original immutable ID in the tombstone. Endpoint handoff will
+    # reject it after removal instead of trusting the retained port metadata.
+    container_id = load_launcher_state(spec.instance, spec.roots).container_id
     removed = remove_container(spec, runner, environment, podman)
-    # Keep the non-secret state as an idempotency tombstone. A repeated stop can
-    # still prove the exact instance identity without scanning or pruning Podman.
-    write_state(spec)
+    write_state(spec, container_id)
     if purge_data:
         _remove_container_owned_data(spec, runner, environment, podman)
         _remove_owned_path(spec.credential_dir)
@@ -1026,9 +1105,17 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
         )
         return {"ok": True, "operation": "start-many", "results": results}
     if args.operation in {"endpoint", "credential-file", "status", "stop"}:
-        spec = load_state(args.instance, roots)
+        state = load_launcher_state(args.instance, roots)
+        spec = state.spec
         if args.operation == "endpoint":
-            return {"ok": True, "operation": "endpoint", "result": spec.public()}
+            # This is the selection gate immediately before handoff. Do not turn
+            # it into a metadata lookup: verification pins the stored immutable
+            # ID to the running container and its one explicit loopback mapping.
+            return {
+                "ok": True,
+                "operation": "endpoint",
+                "result": verify_handoff_endpoint(state),
+            }
         if args.operation == "credential-file":
             return {
                 "ok": True,

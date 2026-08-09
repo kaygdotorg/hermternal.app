@@ -173,19 +173,20 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
-# The start result must report .result.status exactly "ready"; it is not the
-# liveness probe. Separately, continue only when the status result is exactly
-# "running".
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+# `endpoint` is the fail-closed handoff gate. It re-inspects the exact
+# persisted container ID and accepts only a running, launcher-owned container
+# with one 127.0.0.1:<requested-port>:9119 mapping.
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
-A successful `start` result has `.result.status` `ready`; the separate `status`
-probe must report `running` immediately before the parsed endpoint and credential
-file are used. A stopped, removed, or absent instance must abort the handoff;
-retained endpoint metadata is not proof of a live listener. The status probe is
-an operator check only, not liveness enforcement. Issue #345 remains open.
+A successful `start` result has `.result.status` `ready`; it is not a handoff
+permit. Immediately before credential handoff, `endpoint` freshly pins the
+retained immutable container ID to a running launcher-owned container and its
+sole explicit `127.0.0.1:<requested-port>:9119` mapping. A stopped tombstone,
+missing/stale mapping, container replacement, ownership mismatch, rebound port,
+or non-loopback mapping aborts before credential-file use.
 
 Run any requested count with unique names and consecutive loopback ports:
 
@@ -199,8 +200,7 @@ python3 scripts/hermes_agent.py start-many \
 Other operations are:
 
 ```sh
-# Continue only when this separate status probe reports .result.status == "running".
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+# This verifies the immutable container ID, running state, and exact loopback mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
@@ -221,15 +221,17 @@ default. Data defaults to `~/.local/share/hermternal-tests/hermes-agent/` and
 non-secret launcher state defaults to
 `~/.local/state/hermternal/hermes-agent/`. Tests may override all three roots.
 
-The preceding `status` command must report `.result.status` as `running`
-immediately before the endpoint and credential-file values are used. A successful
-`start` result is `ready`, not `running`; the following `endpoint` command is the
-source of truth for the selected instance only after the separate status probe.
-`read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`;
-it never infers a port or substitutes a remembered listener. Retained metadata
-after a stop is not proof of a live listener. This status probe is an operator
-check only, not liveness enforcement. Issue #345 remains open. Use the checked
-values at the local live-proof handoff:
+A successful `start` result is `ready`, not a handoff permit. The following
+`endpoint` command is the source of truth for the selected instance: it freshly
+inspects the persisted immutable container ID, requires `running`, and requires
+exactly one `127.0.0.1:<requested-port>:9119` Dashboard mapping. It rejects a
+stopped tombstone, absent or stale ID, replacement, label/image/mount mismatch,
+missing or rebound port, additional mapping, and non-loopback publication before
+any credential-file read. `read_launcher_result.py` accepts only the closed
+successful `endpoint` result with `status` `running`, its canonical loopback
+endpoint, and matching credential-file metadata; it rejects `start`, `status`,
+and retained metadata rather than inferring a port or substituting a remembered
+listener. Use the checked values immediately at the local live-proof handoff:
 
 ```sh
 HERMES_LIVE_TARGET="$endpoint" \
@@ -288,8 +290,8 @@ python3 -m unittest scripts.test_hermes_agent scripts.test_with_live_credential 
 python3 -O -m unittest scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 29-test launcher suite uses a fake Podman boundary and local synthetic HTTP
-server. The 6-test credential handoff and 6-test launcher-result suites use only
+The 34-test launcher suite uses a fake Podman boundary and local synthetic HTTP
+server. The 7-test credential handoff and 6-test launcher-result suites use only
 synthetic bytes and mocked local process boundaries. None of these suites starts
 Hermes or reads a real credential. The launcher suite covers immutable image
 binding, rootless checks, environment cleanup, deterministic scaling, upstream

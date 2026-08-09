@@ -92,8 +92,12 @@ class FakePodman:
                     labels[key] = label_value
             volume = args[args.index("--volume") + 1]
             image = args[-3]
+            published = args[args.index("--publish") + 1].split(":")
+            host_ip, host_port, container_port = published
             self.containers[name] = {
-                "Id": f"synthetic-{name}",
+                # The launcher persists Podman's immutable hexadecimal ID, never
+                # a mutable container name, for endpoint-handoff verification.
+                "Id": (f"{len(self.containers) + 1:012x}" + ("a" * 52)),
                 "Name": f"/{name}",
                 "ImageName": image,
                 "Config": {"Labels": labels},
@@ -104,6 +108,11 @@ class FakePodman:
                         "Destination": "/opt/data",
                     }
                 ],
+                "NetworkSettings": {
+                    "Ports": {
+                        f"{container_port}/tcp": [{"HostIp": host_ip, "HostPort": host_port}]
+                    }
+                },
                 "State": {"Status": "running"},
             }
             return launcher.CommandResult(0, "synthetic-container-id\n")
@@ -370,6 +379,116 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertIn(("pull", spec.image), commands)
         self.assertIn(("image", "inspect", spec.image, "--format", "json"), commands)
 
+    def test_verified_endpoint_requires_the_running_owned_loopback_mapping(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = launcher.load_launcher_state(spec.instance, self.roots)
+        self.fake.calls.clear()
+
+        result = launcher.verify_handoff_endpoint(
+            state,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+
+        self.assertEqual(result, {**spec.public(), "status": "running"})
+        self.assertEqual(self.fake.calls[-1][0][1:3], ("container", "inspect"))
+        self.assertEqual(self.fake.calls[-1][0][3], state.container_id)
+
+    def test_verified_endpoint_rejects_stopped_tombstone_before_handoff(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        original_id = launcher.load_launcher_state(spec.instance, self.roots).container_id
+        launcher.stop_instance(
+            spec,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        state = launcher.load_launcher_state(spec.instance, self.roots)
+        self.assertEqual(state.container_id, original_id)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+
+        self.assertEqual(raised.exception.code, "container_inspect_failed")
+
+    def test_verified_endpoint_rejects_missing_or_rebound_port_mapping(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = launcher.load_launcher_state(spec.instance, self.roots)
+        ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+        self.assertIsInstance(ports, dict)
+        ports.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+
+        ports["9119/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "19120"}]
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+
+    def test_verified_endpoint_rejects_container_replacement_and_ownership_mismatch(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = launcher.load_launcher_state(spec.instance, self.roots)
+        self.fake.containers[spec.container]["Id"] = "b" * 64
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_inspect_failed")
+
+        self.fake.containers[spec.container]["Id"] = state.container_id
+        self.fake.containers[spec.container]["Config"] = {"Labels": {}}
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_not_launcher_owned")
+
+    def test_verified_endpoint_rejects_non_loopback_mapping(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = launcher.load_launcher_state(spec.instance, self.roots)
+        ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+        self.assertIsInstance(ports, dict)
+        ports["9119/tcp"] = [{"HostIp": "0.0.0.0", "HostPort": str(spec.port)}]
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(
+                state,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+
     def test_existing_exact_container_is_reused_but_mismatch_is_rejected(self) -> None:
         spec = self.make_spec()
         self.start(spec)
@@ -399,7 +518,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(result["status"], "ready")
         self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [("start", f"synthetic-{spec.container}")])
+        self.assertEqual(lifecycle, [("start", self.fake.containers[spec.container]["Id"])])
 
     def test_existing_stopped_container_failure_before_start_preserves_stopped_state(self) -> None:
         spec = self.make_spec()
@@ -442,7 +561,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
         self.assertEqual(
             lifecycle,
-            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
         )
 
     def test_existing_stopped_container_start_failure_is_bounded_and_redacted(self) -> None:
@@ -459,7 +578,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertNotIn("synthetic-start-output-secret", str(raised.exception))
         self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [("start", f"synthetic-{spec.container}")])
+        self.assertEqual(lifecycle, [("start", self.fake.containers[spec.container]["Id"])])
 
     def test_existing_stopped_container_rollback_failure_fails_closed(self) -> None:
         spec = self.make_spec()
@@ -480,7 +599,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
         self.assertEqual(
             lifecycle,
-            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
         )
 
     def test_existing_stopped_container_cancellation_rolls_back_once(self) -> None:
@@ -500,7 +619,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
         self.assertEqual(
             lifecycle,
-            [("start", f"synthetic-{spec.container}"), ("stop", f"synthetic-{spec.container}")],
+            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
         )
 
     def test_existing_foreign_container_is_rejected_before_recovery_mutation(self) -> None:
@@ -565,7 +684,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
             if tuple(command[1:3]) == ("container", "inspect"):
                 inspect_count += 1
                 if inspect_count == 2:
-                    self.fake.containers[spec.container]["Id"] = "synthetic-replacement"
+                    self.fake.containers[spec.container]["Id"] = "b" * 64
             return self.fake(command, environment, timeout)
 
         with self.assertRaises(launcher.LauncherError) as raised:

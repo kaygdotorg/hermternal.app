@@ -46,22 +46,25 @@ launcher_output="$(
     --instance "$INSTANCE" \
     --port "$PORT"
 )"
-# The start result must report .result.status exactly "ready"; it is not the
-# liveness probe. Separately, continue only when the status result is exactly
-# "running".
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+# `endpoint` is the fail-closed selection gate immediately before credential
+# handoff. It pins the immutable launcher container ID to running state and the
+# sole explicit 127.0.0.1:<requested-port>:9119 mapping.
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
 The launcher emits public metadata under `.result`. A successful `start` result
-has `.result.status` `ready`; the separate `status` probe must report `running`
-before the endpoint and credential file are used. `read_launcher_result.py`
-parses `.result.endpoint` and `.result.credential_file`; it never prints the
-password or infers a port. Do not hand a retained endpoint or credential file to
-a proof command when status is `stopped`, `removed`, or `absent`. The status
-probe is an operator check only, not liveness enforcement. Issue #345 remains
-open.
+has `.result.status` `ready`, not a credential-handoff permit. Immediately
+before handoff, `endpoint` re-inspects the stored immutable container ID and
+requires the launcher-owned container to be `running` with exactly one
+`127.0.0.1:<requested-port>:9119` mapping. It rejects stopped tombstones,
+missing/stale IDs, replacements, ownership mismatches, rebound or extra ports,
+and non-loopback mappings before any credential-file read.
+`read_launcher_result.py` accepts only the closed successful `endpoint` result
+with `status` `running`, its canonical launcher loopback endpoint, and matching
+credential-file metadata; it rejects `start`, `status`, and retained metadata.
+It never prints the password or infers a port.
 
 Do not print the credential file. A local test process may read it through the
 repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
@@ -99,21 +102,19 @@ prefix, count, or remembered deployment.
 
 ```sh
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
-# Continue only when the separate status result is exactly "running".
-python3 scripts/hermes_agent.py status --instance "$INSTANCE"
+# This freshly verifies the immutable container ID, running state, and loopback mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
 endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
-The status check must report `.result.status` exactly as `running` immediately
-before the endpoint and credential-file values are used. A successful `start`
-result is `ready`, not `running`; the endpoint command is the source of truth
-only after the separate status probe. If a browser runs outside the VM, use the
-approved tunnel with the endpoint selected from that output; do not replace it
-with a sample port or an unrelated listener. Retained state after a stop is not
-proof of a live listener. This status probe is an operator check only, not
-liveness enforcement. Issue #345 remains open.
+A successful `start` result is `ready`, not a handoff permit. The `endpoint`
+command freshly proves the retained immutable ID still belongs to a running,
+launcher-owned container with its exact single loopback Dashboard mapping before
+returning selection metadata. If a browser runs outside the VM, use the approved
+tunnel with the endpoint selected from that verified output; do not replace it
+with a sample port or an unrelated listener. Retained stop metadata is never a
+live endpoint permit.
 
 ## Stop and clean up
 
