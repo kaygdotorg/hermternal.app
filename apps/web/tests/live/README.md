@@ -153,11 +153,14 @@ never prints IDs, timestamps, bodies, prompt/response text, endpoints, headers,
 raw errors, or artifacts.
 
 Finally it verifies logout and clears cookies, Web Storage, IndexedDB, Cache
-Storage, and service workers. Cleanup failure fails closed. The live config keeps
-`preserveOutput: 'never'`, trace/video/screenshot output disabled, and the
-reconciliation mode mutually exclusive with screenshot capture. Do not run live
-reconciliation as part of this correction; unit tests use synthetic bounded
-histories only.
+Storage, and service workers. The login-request risk is marked before the
+password-login transport begins, so malformed, oversized, or body-read failures
+still trigger a server logout attempt; cookie and browser-state cleanup run as
+independent attempts even when logout fails. Cleanup failure fails closed. The
+live config keeps `preserveOutput: 'never'`, trace/video/screenshot output
+disabled, and the reconciliation mode mutually exclusive with screenshot
+capture. Do not run live reconciliation as part of this correction; unit tests
+use synthetic bounded histories only.
 
 This lane serves the production static build and proxies only `/api/*`, `/auth/*`, `/api/ws`, and the exact `/api/pty` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 

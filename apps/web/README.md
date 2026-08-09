@@ -183,9 +183,12 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   attribution requires a future independently reviewed pre-send session correlation and history
   boundary, so this reconciliation cannot clear uncertain delivery. It requires exact assistant marker
   equality, fails closed on malformed or incomplete pagination and cleanup failure, then verifies logout
-  and clears cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The mode never retains
-  IDs, timestamps, bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is
-  mutually exclusive with screenshot capture. No live reconciliation was run for this correction.
+  and clears cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The login-request risk
+  is marked before password-login transport starts, so malformed, oversized, or body-read failures still
+  trigger a server logout attempt; cookie and browser-state cleanup are independent attempts and any
+  logout or cleanup failure remains observable and fails closed. The mode never retains IDs, timestamps,
+  bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is mutually
+  exclusive with screenshot capture. No live reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

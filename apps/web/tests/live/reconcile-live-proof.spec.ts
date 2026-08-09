@@ -8,6 +8,7 @@ import {
   reconcileLiveHistory
 } from './live-reconciliation.mjs';
 import { isLiveReconciliationEnabled } from './live-playwright-config.mjs';
+import { runLiveReconciliationAttempt } from './live-reconciliation-auth.mjs';
 import { setLiveProofStatus } from './live-proof-status.mjs';
 
 const test = base;
@@ -35,56 +36,53 @@ test('read-only reconciliation checks the current account without submitting', a
   const passwordValue = password;
   if (!passwordValue) throw new Error('live reconciliation password is unavailable');
 
-  let authenticated = false;
   let result = {
     promptMatches: 'zero',
     completedPairs: 'zero',
     status: 'reconciliation-failed-uncertain'
   };
-  let operationFailed = false;
-  let cleanupFailed = false;
+  const attempt = await runLiveReconciliationAttempt({
+    operation: async (markLoginRequest) => {
+      const provider = parsePasswordProvider(await requestJson(context, baseURL, '/api/auth/providers'));
+      // Mark the request before transport starts: a malformed, oversized, or
+      // unreadable login response may still have issued the session cookie.
+      markLoginRequest();
+      const login = await requestJson(context, baseURL, '/auth/password-login', {
+        method: 'POST',
+        data: { provider, username, password: passwordValue, next: '/' }
+      });
+      assertPasswordLogin(login);
+      await assertAuthenticated(context, baseURL);
+      setLiveProofStatus(testInfo, { phase: 'authenticated', delivery: 'not-submitted' });
 
-  try {
-    const provider = parsePasswordProvider(await requestJson(context, baseURL, '/api/auth/providers'));
-    const login = await requestJson(context, baseURL, '/auth/password-login', {
-      method: 'POST',
-      data: { provider, username, password: passwordValue, next: '/' }
-    });
-    assertPasswordLogin(login);
-    await assertAuthenticated(context, baseURL);
-    authenticated = true;
-    setLiveProofStatus(testInfo, { phase: 'authenticated', delivery: 'not-submitted' });
-
-    const sessions = parseReconciliationSessionList(
-      await requestJson(context, baseURL, '/api/sessions?limit=100&offset=0')
-    );
-    setLiveProofStatus(testInfo, { phase: 'ready-no-submit', delivery: 'not-submitted' });
-    result = await reconcileLiveHistory({
-      sessions,
-      getMessages: async (sessionId, messageCount) =>
-        parseReconciliationSessionMessages(
-          await requestJson(
-            context,
-            baseURL,
-            `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&offset=0`
-          ),
-          sessionId,
-          messageCount
-        )
-    });
-    setLiveProofStatus(testInfo, { phase: 'history-reconciled', delivery: 'uncertain' });
-  } catch {
-    operationFailed = true;
-  } finally {
-    try {
-      if (authenticated) await logoutAndVerify(context, baseURL);
+      const sessions = parseReconciliationSessionList(
+        await requestJson(context, baseURL, '/api/sessions?limit=100&offset=0')
+      );
+      setLiveProofStatus(testInfo, { phase: 'ready-no-submit', delivery: 'not-submitted' });
+      result = await reconcileLiveHistory({
+        sessions,
+        getMessages: async (sessionId, messageCount) =>
+          parseReconciliationSessionMessages(
+            await requestJson(
+              context,
+              baseURL,
+              `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&offset=0`
+            ),
+            sessionId,
+            messageCount
+          )
+      });
+      setLiveProofStatus(testInfo, { phase: 'history-reconciled', delivery: 'uncertain' });
+    },
+    logout: () => logoutAndVerify(context, baseURL),
+    clearCookies: async () => {
       await context.clearCookies();
       if ((await context.cookies(baseURL)).length !== 0) throw new Error('cookie cleanup failed');
-      await clearBrowserState(context, baseURL);
-    } catch {
-      cleanupFailed = true;
-    }
-  }
+    },
+    clearBrowserState: () => clearBrowserState(context, baseURL)
+  });
+  const operationFailed = attempt.operationFailed;
+  const cleanupFailed = attempt.cleanupFailed;
 
   if (operationFailed || cleanupFailed) {
     result = {
