@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -21,6 +21,8 @@ import {
   assertBenchmarkSampleCounts,
   assertBenchmarkTrace,
   assertCleanExecutionInputs,
+  assertLiveBenchmarkTrace,
+  assertRetainedBenchmarkTrace,
   assertCommitMatchesHead,
   assertNoDisallowedNetworkRequests,
   BENCHMARK_EXECUTION_INPUT_PATHS,
@@ -312,7 +314,7 @@ function benchmarkFiles(root: string, relativePath = ''): string[] {
   return files;
 }
 
-async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild> {
+async function recomputeBenchmarkBuild(repoRoot: string, environment: NodeJS.ProcessEnv): Promise<BenchmarkBuild> {
   const webRoot = resolve(repoRoot, 'apps/web');
   const outputDirectory = resolve(repoRoot, '.terminal-renderer-test-build');
   rmSync(outputDirectory, { recursive: true, force: true });
@@ -341,10 +343,10 @@ async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild
         }
       });
     `;
-    const buildEnv = { ...process.env };
+    const buildEnv = { ...environment };
     delete buildEnv.NODE_ENV;
     delete buildEnv.VITEST;
-    execFileSync('bun', ['-e', buildScript], {
+    execFileSync('bun', ['--no-install', '-e', buildScript], {
       cwd: webRoot,
       env: buildEnv,
       maxBuffer: 64 * 1024 * 1024
@@ -368,7 +370,250 @@ async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild
   }
 }
 
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 20_000;
+const DEPENDENCY_CACHE_CLONE_TIMEOUT_MS = 90_000;
+const DEPENDENCY_KILL_GRACE_MS = 250;
+const BUN_REGISTRY_BLACKHOLE = 'http://127.0.0.1:1';
+const GENERATED_SVELTEKIT_TSCONFIG = `{
+  "compilerOptions": {
+    "paths": {
+      "$lib": ["../src/lib"],
+      "$lib/*": ["../src/lib/*"],
+      "$app/types": ["./types/index.d.ts"]
+    },
+    "rootDirs": ["..", "./types"],
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "lib": ["esnext", "DOM", "DOM.Iterable"],
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "noEmit": true,
+    "target": "esnext"
+  },
+  "include": [
+    "ambient.d.ts",
+    "env.d.ts",
+    "non-ambient.d.ts",
+    "./types/**/$types.d.ts",
+    "../vite.config.js",
+    "../vite.config.ts",
+    "../src/**/*.js",
+    "../src/**/*.ts",
+    "../src/**/*.svelte",
+    "../test/**/*.js",
+    "../test/**/*.ts",
+    "../test/**/*.svelte",
+    "../tests/**/*.js",
+    "../tests/**/*.ts",
+    "../tests/**/*.svelte"
+  ],
+  "exclude": [
+    "../node_modules/**",
+    "../src/service-worker.js",
+    "../src/service-worker/**/*.js",
+    "../src/service-worker.ts",
+    "../src/service-worker/**/*.ts",
+    "../src/service-worker.d.ts",
+    "../src/service-worker/**/*.d.ts"
+  ]
+}\n`;
+const MACOS_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+const MACOS_NO_NETWORK_PROFILE = '(version 1) (allow default) (deny network*)';
 const BENCHMARK_EVIDENCE_PATH = 'apps/web/tests/bench/terminal-renderer.evidence.json';
+
+function hasMacNetworkSandbox(): boolean {
+  if (process.platform !== 'darwin') return false;
+  try {
+    accessSync(MACOS_SANDBOX_EXEC, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requireDirectory(path: string, diagnostic: string): void {
+  try {
+    const identity = lstatSync(path);
+    if (!identity.isDirectory() || identity.isSymbolicLink()) throw new Error(diagnostic);
+  } catch {
+    throw new Error(diagnostic);
+  }
+}
+
+function createSanitizedDependencyEnvironment(homeDirectory: string, tempDirectory: string): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: homeDirectory,
+    TMPDIR: tempDirectory
+  };
+  for (const key of ['LANG', 'LC_ALL', 'TZ', 'TERM', 'CI'] as const) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return environment;
+}
+
+function terminateDependencyProcess(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (typeof child.pid === 'number') {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall through to the direct child handle when a process group is gone.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may have exited between the timeout and the kill attempt.
+  }
+}
+
+async function runOfflineBunInstall(
+  cwd: string,
+  options: Readonly<{
+    cacheDirectory: string;
+    homeDirectory: string;
+    tempDirectory: string;
+    timeoutMs?: number;
+    bunExecutable?: string;
+  }>
+): Promise<NodeJS.ProcessEnv> {
+  requireDirectory(options.cacheDirectory, 'benchmark dependency cache was unavailable');
+  requireDirectory(options.homeDirectory, 'benchmark dependency home was unavailable');
+  requireDirectory(options.tempDirectory, 'benchmark dependency temp directory was unavailable');
+  const timeoutMs = options.timeoutMs ?? DEPENDENCY_INSTALL_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error('benchmark dependency preparation timeout was invalid');
+  }
+  const bunExecutable = options.bunExecutable ?? 'bun';
+  const installArguments = [
+    'install',
+    '--frozen-lockfile',
+    '--ignore-scripts',
+    '--prefer-offline',
+    `--cache-dir=${options.cacheDirectory}`,
+    `--registry=${BUN_REGISTRY_BLACKHOLE}`,
+    '--no-progress',
+    '--no-summary'
+  ];
+  const environment = createSanitizedDependencyEnvironment(options.homeDirectory, options.tempDirectory);
+  const sandboxed = hasMacNetworkSandbox();
+  const command = sandboxed ? MACOS_SANDBOX_EXEC : bunExecutable;
+  const argumentsList = sandboxed
+    ? ['-p', MACOS_NO_NETWORK_PROFILE, bunExecutable, ...installArguments]
+    : installArguments;
+
+  await new Promise<void>((resolve, reject) => {
+    let timedOut = false;
+    let settled = false;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    let killHandle: ReturnType<typeof setTimeout> | undefined;
+    const child = spawn(command, argumentsList, {
+      cwd,
+      detached: true,
+      env: environment,
+      stdio: 'ignore'
+    });
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (killHandle) clearTimeout(killHandle);
+      if (error) reject(error);
+      else resolve();
+    };
+    child.once('error', () => finish(new Error('benchmark dependency preparation could not start Bun')));
+    child.once('exit', (code) => {
+      if (timedOut) {
+        finish(new Error('benchmark dependency preparation timed out'));
+      } else if (code !== 0) {
+        finish(new Error('benchmark dependency preparation failed'));
+      } else {
+        finish();
+      }
+    });
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      terminateDependencyProcess(child, 'SIGTERM');
+      killHandle = setTimeout(() => terminateDependencyProcess(child, 'SIGKILL'), DEPENDENCY_KILL_GRACE_MS);
+    }, timeoutMs);
+  });
+  return environment;
+}
+
+function resolveBunCacheSource(): string {
+  const bootstrapEnvironment: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin',
+    HOME: process.env.HOME ?? tmpdir(),
+    NPM_CONFIG_USERCONFIG: '/dev/null',
+    npm_config_userconfig: '/dev/null'
+  };
+  let cachePath: string;
+  try {
+    cachePath = execFileSync('bun', ['pm', 'cache'], {
+      encoding: 'utf8',
+      env: bootstrapEnvironment,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000
+    }).trim();
+  } catch {
+    throw new Error('benchmark dependency cache was unavailable');
+  }
+  requireDirectory(cachePath, 'benchmark dependency cache was unavailable');
+  return cachePath;
+}
+
+function cloneBunCache(source: string, destination: string): void {
+  requireDirectory(source, 'benchmark dependency cache was unavailable');
+  try {
+    if (process.platform === 'darwin') {
+      execFileSync('ditto', ['--clone', source, destination], {
+        stdio: 'ignore',
+        timeout: DEPENDENCY_CACHE_CLONE_TIMEOUT_MS
+      });
+    } else {
+      execFileSync('cp', ['-R', source, destination], {
+        stdio: 'ignore',
+        timeout: DEPENDENCY_CACHE_CLONE_TIMEOUT_MS
+      });
+    }
+  } catch {
+    throw new Error('benchmark dependency cache could not be isolated');
+  }
+  requireDirectory(destination, 'benchmark dependency cache could not be isolated');
+}
+
+/**
+ * `--ignore-scripts` skips SvelteKit's package `prepare`; write only the
+ * reviewed generated config needed by the isolated Vite build instead of
+ * executing an unbounded lifecycle hook from the archived source.
+ */
+function writeGeneratedSvelteKitConfig(webRoot: string): void {
+  const generatedRoot = join(webRoot, '.svelte-kit');
+  mkdirSync(generatedRoot, { recursive: true });
+  writeFileSync(join(generatedRoot, 'tsconfig.json'), GENERATED_SVELTEKIT_TSCONFIG);
+}
+
+function createPrivateDependencyWorkspace(): Readonly<{
+  root: string;
+  homeDirectory: string;
+  tempDirectory: string;
+  cacheDirectory: string;
+}> {
+  const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-dependencies-'));
+  try {
+    const homeDirectory = mkdtempSync(join(root, 'home-'));
+    const tempDirectory = mkdtempSync(join(root, 'tmp-'));
+    const cacheDirectory = join(root, 'cache');
+    cloneBunCache(resolveBunCacheSource(), cacheDirectory);
+    return { root, homeDirectory, tempDirectory, cacheDirectory };
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    if (error instanceof Error && error.message.startsWith('benchmark dependency')) throw error;
+    throw new Error('benchmark dependency preparation workspace was unavailable');
+  }
+}
 
 type EvidenceHistory = Readonly<{
   evidenceHead: string;
@@ -478,15 +723,19 @@ async function recomputeBenchmarkCheckout(commit: string, evidenceBytes: Buffer)
   // artifact hashes tied to the declared immutable source while the validator
   // itself evolves after the evidence anchor.
   const sourceRoot = mkdtempSync(join(tmpdir(), 'hermternal-renderer-source-'));
+  let dependencyWorkspace: ReturnType<typeof createPrivateDependencyWorkspace> | undefined;
   let build: BenchmarkBuild;
   try {
     const archive = execFileSync('git', ['-C', repoRoot, 'archive', commit], { maxBuffer: 64 * 1024 * 1024 });
     execFileSync('tar', ['-x', '-C', sourceRoot], { input: archive });
     const sourceWebRoot = join(sourceRoot, 'apps/web');
-    execFileSync('bun', ['install', '--frozen-lockfile'], { cwd: sourceWebRoot, maxBuffer: 64 * 1024 * 1024 });
-    build = await recomputeBenchmarkBuild(sourceRoot);
+    dependencyWorkspace = createPrivateDependencyWorkspace();
+    const buildEnvironment = await runOfflineBunInstall(sourceWebRoot, dependencyWorkspace);
+    writeGeneratedSvelteKitConfig(sourceWebRoot);
+    build = await recomputeBenchmarkBuild(sourceRoot, buildEnvironment);
   } finally {
     rmSync(sourceRoot, { recursive: true, force: true });
+    if (dependencyWorkspace) rmSync(dependencyWorkspace.root, { recursive: true, force: true });
   }
   return {
     head: commit,
@@ -1893,6 +2142,156 @@ describe('TerminalRenderer', () => {
     }
   });
 
+  it('keeps parent live benchmark compatibility while retaining strict evidence validation', () => {
+    const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
+      revision: {
+        source_commit: string;
+        execution_inputs: BenchmarkCheckout['execution_inputs'];
+      };
+      build: BenchmarkBuild;
+    };
+    const benchmarkStyleCheckout: BenchmarkCheckout = {
+      head: evidence.revision.source_commit,
+      clean: true,
+      execution_inputs: evidence.revision.execution_inputs,
+      build: evidence.build
+    };
+
+    // 48739cde and origin/dev 729f2613 accepted this live benchmark shape:
+    // a newly generated trace has no retained evidence child yet. The strict
+    // 013ea2ef entry point rejected it at the new evidence-only assertion.
+    expect(() => assertLiveBenchmarkTrace(evidence, benchmarkStyleCheckout)).not.toThrow();
+    expect(() => assertBenchmarkTrace(evidence, benchmarkStyleCheckout)).toThrow(
+      'checked-in benchmark evidence source relationship was not evidence-only'
+    );
+
+    // The corrected benchmark callsite uses the explicit live entry point, not
+    // retained artifact fields, while retained callers cannot omit the proof.
+    expect(() => assertRetainedBenchmarkTrace(evidence, benchmarkStyleCheckout)).toThrow(
+      'checked-in benchmark evidence source relationship was not evidence-only'
+    );
+    const forgedRelationship = {
+      ...benchmarkStyleCheckout,
+      evidence_head: benchmarkStyleCheckout.head,
+      evidence_changed_paths: [BENCHMARK_EVIDENCE_PATH],
+      evidence_source_is_strict_ancestor: true,
+      evidence_blob_matches: true,
+      evidence_anchor_count: 1
+    };
+    expect(() => assertRetainedBenchmarkTrace(evidence, forgedRelationship)).toThrow(
+      'checked-in benchmark evidence source relationship was not evidence-only'
+    );
+  });
+
+  it('prepares benchmark dependencies offline with a private environment and bounded Bun process', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'hermternal-offline-bun-'));
+    const bin = join(root, 'bin');
+    const workspace = join(root, 'workspace');
+    const cacheDirectory = join(root, 'cache');
+    const homeDirectory = join(root, 'home');
+    const tempDirectory = join(root, 'tmp');
+    const argsPath = join(root, 'args');
+    const environmentPath = join(root, 'environment');
+    const scriptMarkerPath = join(root, 'script-invoked');
+    const timeoutMarkerPath = join(root, 'timeout-completed');
+    const fakeBunPath = join(bin, 'bun');
+    const originalEnvironment = new Map(
+      ['PATH', 'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN', 'NPM_TOKEN', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY']
+        .map((key) => [key, process.env[key]])
+    );
+    try {
+      mkdirSync(bin, { recursive: true });
+      mkdirSync(workspace, { recursive: true });
+      mkdirSync(cacheDirectory, { recursive: true });
+      mkdirSync(homeDirectory, { recursive: true });
+      mkdirSync(tempDirectory, { recursive: true });
+      writeFileSync(join(cacheDirectory, 'cached-package'), 'cache present');
+      const inheritedPath = process.env.PATH ?? '/usr/bin:/bin';
+      process.env.PATH = `${bin}:${inheritedPath}`;
+      process.env.AWS_SECRET_ACCESS_KEY = 'must-not-cross-boundary';
+      process.env.GITHUB_TOKEN = 'must-not-cross-boundary';
+      process.env.NPM_TOKEN = 'must-not-cross-boundary';
+      process.env.HTTP_PROXY = 'http://proxy.invalid:8080';
+      process.env.HTTPS_PROXY = 'https://proxy.invalid:8443';
+      process.env.ALL_PROXY = 'socks5://proxy.invalid:1080';
+      process.env.NO_PROXY = 'proxy.invalid';
+
+      writeFileSync(
+        fakeBunPath,
+        `#!/bin/sh
+set -eu
+printf '%s\\n' "$@" > ${JSON.stringify(argsPath)}
+env > ${JSON.stringify(environmentPath)}
+found=0
+for argument in "$@"; do
+  if [ "$argument" = "--ignore-scripts" ]; then found=1; fi
+done
+if [ "$found" -ne 1 ]; then touch ${JSON.stringify(scriptMarkerPath)}; fi
+`
+      );
+      chmodSync(fakeBunPath, 0o755);
+
+      await expect(runOfflineBunInstall(workspace, {
+        cacheDirectory: join(root, 'missing-cache'),
+        homeDirectory,
+        tempDirectory,
+        timeoutMs: 1_000
+      })).rejects.toThrow('benchmark dependency cache was unavailable');
+
+      const environment = await runOfflineBunInstall(workspace, {
+        cacheDirectory,
+        homeDirectory,
+        tempDirectory,
+        timeoutMs: 1_000
+      });
+      const argumentsText = readFileSync(argsPath, 'utf8');
+      const childEnvironment = readFileSync(environmentPath, 'utf8');
+      expect(argumentsText).toContain('install\n');
+      expect(argumentsText).toContain('--frozen-lockfile\n');
+      expect(argumentsText).toContain('--ignore-scripts\n');
+      expect(argumentsText).toContain('--prefer-offline\n');
+      expect(argumentsText).toContain(`--cache-dir=${cacheDirectory}\n`);
+      expect(argumentsText).toContain(`--registry=${BUN_REGISTRY_BLACKHOLE}\n`);
+      expect(environment.HOME).toBe(homeDirectory);
+      expect(environment.TMPDIR).toBe(tempDirectory);
+      expect(childEnvironment).not.toContain('AWS_SECRET_ACCESS_KEY=');
+      expect(childEnvironment).not.toContain('GITHUB_TOKEN=');
+      expect(childEnvironment).not.toContain('NPM_TOKEN=');
+      expect(childEnvironment).not.toContain('HTTP_PROXY=');
+      expect(childEnvironment).not.toContain('HTTPS_PROXY=');
+      expect(childEnvironment).not.toContain('ALL_PROXY=');
+      expect(childEnvironment).not.toContain('NO_PROXY=');
+      expect(childEnvironment).not.toContain('npm_config_userconfig=');
+      expect(childEnvironment).not.toContain('NPM_CONFIG_USERCONFIG=');
+      expect(existsSync(scriptMarkerPath)).toBe(false);
+
+      writeFileSync(
+        fakeBunPath,
+        `#!/bin/sh
+set -eu
+sleep 10
+touch ${JSON.stringify(timeoutMarkerPath)}
+`
+      );
+      chmodSync(fakeBunPath, 0o755);
+      await expect(runOfflineBunInstall(workspace, {
+        cacheDirectory,
+        homeDirectory,
+        tempDirectory,
+        timeoutMs: 50
+      })).rejects.toThrow('benchmark dependency preparation timed out');
+      await new Promise((resolve) => setTimeout(resolve, DEPENDENCY_KILL_GRACE_MS + 100));
+      expect(existsSync(timeoutMarkerPath)).toBe(false);
+    } finally {
+      for (const [key, value] of originalEnvironment) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('independently validates and binds the checked-in benchmark evidence trace', async () => {
     const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
     const evidenceBytes = readFileSync(evidencePath);
@@ -2056,7 +2455,7 @@ describe('TerminalRenderer', () => {
     const currentHead = execFileSync('git', ['-C', resolve(process.cwd(), '../..'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     expect(checkout.evidence_head).not.toBe(currentHead);
     expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
-  }, 30_000);
+  }, 180_000);
 
   it('allows only the exact benchmark origin and browser-internal resources', () => {
     const benchmarkOrigin = 'http://127.0.0.1:4173';

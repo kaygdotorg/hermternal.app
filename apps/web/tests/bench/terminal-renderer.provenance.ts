@@ -366,8 +366,8 @@ function assertWorkloadMetadata(value: unknown): void {
   }
 }
 
-/** Validate the checked-in trace against a clean, recomputed source checkout. */
-export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
+/** Validate a generated or retained trace against a clean, recomputed source checkout. */
+function assertBenchmarkTraceBase(value: unknown, checkout: BenchmarkCheckout): void {
   if (!isRecord(value) || value.schema !== 'hermternal.web-terminal-renderer-benchmark.v1') {
     throw new Error('checked-in benchmark evidence schema was invalid');
   }
@@ -392,23 +392,6 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   }
   if (String(revision.source_commit).toLowerCase() !== checkout.head.toLowerCase()) {
     throw new Error('checked-in benchmark evidence source commit did not match the reviewed checkout HEAD');
-  }
-  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
-  if (
-    typeof checkout.evidence_head !== 'string' ||
-    !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
-    checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
-    checkout.evidence_source_is_strict_ancestor !== true ||
-    checkout.evidence_blob_matches !== true ||
-    checkout.evidence_anchor_count !== 1 ||
-    !Array.isArray(checkout.evidence_changed_paths) ||
-    checkout.evidence_changed_paths.length !== 1 ||
-    checkout.evidence_changed_paths[0] !== evidencePath
-  ) {
-    // An empty range would let one commit attest itself; any other path would
-    // make an old source appear authorized by unrelated later changes. Git
-    // topology validation supplies the immediate-parent and per-commit proof.
-    throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
   }
   if (
     checkout.execution_inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length ||
@@ -538,6 +521,48 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   ) {
     throw new Error('checked-in benchmark evidence redaction metadata was invalid');
   }
+}
+
+function assertRetainedEvidenceRelationship(checkout: BenchmarkCheckout): void {
+  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
+  if (
+    typeof checkout.evidence_head !== 'string' ||
+    !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
+    checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
+    checkout.evidence_source_is_strict_ancestor !== true ||
+    checkout.evidence_blob_matches !== true ||
+    checkout.evidence_anchor_count !== 1 ||
+    !Array.isArray(checkout.evidence_changed_paths) ||
+    checkout.evidence_changed_paths.length !== 1 ||
+    checkout.evidence_changed_paths[0] !== evidencePath
+  ) {
+    // An empty range would let one commit attest itself; any other path would
+    // make an old source appear authorized by unrelated later changes. Git
+    // topology validation supplies the immediate-parent and per-commit proof.
+    throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
+  }
+}
+
+/**
+ * Validate a newly generated live trace. It has no retained evidence child yet,
+ * so this entry point intentionally does not accept or infer relationship data.
+ */
+export function assertLiveBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
+  assertBenchmarkTraceBase(value, checkout);
+}
+
+/**
+ * Validate retained evidence. This path always applies the evidence-only
+ * relationship check; callers cannot select it from fields inside the trace.
+ */
+export function assertRetainedBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
+  assertBenchmarkTraceBase(value, checkout);
+  assertRetainedEvidenceRelationship(checkout);
+}
+
+/** Backward-compatible strict entry point for checked-in evidence callers. */
+export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout): void {
+  assertRetainedBenchmarkTrace(value, checkout);
 }
 
 /**

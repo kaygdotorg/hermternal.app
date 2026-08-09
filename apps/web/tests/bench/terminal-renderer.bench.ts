@@ -8,7 +8,7 @@ import { chromium, type Browser, type Page } from '@playwright/test';
 import { build } from 'vite';
 import {
   assertBenchmarkSampleCounts,
-  assertBenchmarkTrace,
+  assertLiveBenchmarkTrace,
   assertCleanExecutionInputs,
   assertCommitMatchesHead,
   assertNoDisallowedNetworkRequests,
@@ -340,7 +340,10 @@ async function run(): Promise<Trace> {
       threshold: null,
       budget: null
     };
-    assertBenchmarkTrace(trace, {
+    // A fresh run validates the generated trace only. The retained evidence
+    // child does not exist until this trace is reviewed and committed, so the
+    // strict relationship path is reserved for checked-in evidence tests.
+    assertLiveBenchmarkTrace(trace, {
       head: sourceCommit,
       clean: true,
       execution_inputs: inputs,
