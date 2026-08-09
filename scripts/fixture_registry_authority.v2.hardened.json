@@ -1,7 +1,7 @@
 {
   "schema": "hermternal.fixture-registry-authority.v2",
   "role": "aggregate_predecessor",
-  "source_commit": "8775f56230f733adbed7c3f42ff8fb5bae4c0001",
+  "source_commit": "f70cda22143279cb6a3fb8e9a31564ff3e9f25cd",
   "artifact_manifest": [
     {
       "path": "contracts/fixtures/index.json",
@@ -17,14 +17,14 @@
     },
     {
       "path": "contracts/fixtures/validator/validate.py",
-      "blob_oid": "ba6bf335f05238ac7756815b4491ee305110f7ce",
-      "sha256": "2e75eaa9982e340d77f4b922f11ea8e285687167773876681ae9f15ea80471e3",
+      "blob_oid": "5e324f112a4f4024381b1df8a2d5afd6c6c5b1b8",
+      "sha256": "b1b596b2b60c4b5d892104577e04ab414bde99d0097202fa4579f2d196bf7895",
       "size_bytes": 175291
     },
     {
       "path": "contracts/fixtures/validator/validation-baseline.json",
-      "blob_oid": "b10f8c24cbc79bf614063fcfc4b39b5e055a3cef",
-      "sha256": "ebc91722721154c66d7095b2184eb2c25c3c4ca1e4a9ef1ffb600b1abe95e7f9",
+      "blob_oid": "724d8610056caa3f4aa81020c69aa69113c334f0",
+      "sha256": "a914b648f003b15c64afcdfed12d85469920aa0a360e9b73bb277464f245ff57",
       "size_bytes": 2802
     }
   ],
