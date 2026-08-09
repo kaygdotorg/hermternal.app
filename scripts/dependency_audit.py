@@ -1051,12 +1051,16 @@ def audit_files(manifest_path: Path = DEFAULT_MANIFEST, lockfile_path: Path = DE
     return audit_bytes(manifest_bytes, lockfile_bytes, manifest_label=manifest_label, lockfile_label=lock_label)
 
 
-def _serialise(result: Mapping[str, Any]) -> str:
+def _serialise_with_limit(result: Mapping[str, Any]) -> tuple[str, bool]:
     text = json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    if len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
-        fallback = _fallback_failure("output-too-large")
-        text = json.dumps(fallback, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return text
+    if len(text.encode("utf-8")) <= MAX_OUTPUT_BYTES:
+        return text, False
+    fallback = _fallback_failure("output-too-large")
+    return json.dumps(fallback, ensure_ascii=True, sort_keys=True, separators=(",", ":")), True
+
+
+def _serialise(result: Mapping[str, Any]) -> str:
+    return _serialise_with_limit(result)[0]
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -1091,8 +1095,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = _fallback_failure(error.code)
     except (OSError, ValueError, TypeError, RecursionError):
         result = _fallback_failure("internal-error")
-    print(_serialise(result))
-    return 1 if result.get("status") == "fail" else 0
+    text, output_limited = _serialise_with_limit(result)
+    print(text)
+    return 1 if output_limited or result.get("status") == "fail" else 0
 
 
 if __name__ == "__main__":

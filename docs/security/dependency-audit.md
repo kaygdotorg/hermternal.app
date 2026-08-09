@@ -34,7 +34,10 @@ The status values are:
 expected to return exit code `0` with status `review`: the command is a completed
 inventory, not a claim that every legal, privacy, or runtime review has already
 been completed. A mutation that creates a blocking finding returns exit code
-`1` while still emitting the structured report.
+`1` while still emitting the structured report. If serialization itself exceeds
+the output bound, the CLI emits one fixed sanitized `output-too-large` failure
+report and returns exit code `1`; it never reports success for a truncated or
+replaced result.
 
 The report always states:
 

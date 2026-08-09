@@ -9,7 +9,9 @@ package registry, vulnerability service, Hermes, Paper, or a live proxy.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -20,6 +22,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +131,22 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(encoded, audit._serialise(second))
         self.assertLessEqual(len(encoded.encode("utf-8")), audit.MAX_OUTPUT_BYTES)
         self.assertEqual(first["inventory"]["transitive"], sorted(first["inventory"]["transitive"], key=lambda item: item["name"]))
+
+    def test_output_limit_is_nonzero_and_deterministic(self) -> None:
+        result = self.real_result()
+        outputs: list[str] = []
+        statuses: list[int] = []
+        with patch.object(audit, "MAX_OUTPUT_BYTES", 1), patch.object(audit, "audit_files", return_value=result):
+            for _ in range(2):
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    statuses.append(audit.main([]))
+                outputs.append(stream.getvalue())
+        self.assertEqual(statuses, [1, 1], outputs)
+        self.assertEqual(outputs[0], outputs[1], outputs)
+        report = json.loads(outputs[0])
+        self.assertEqual(report["status"], "fail", report)
+        self.assertEqual(report["findings"][0]["code"], "output-too-large", report)
 
     def test_cli_emits_one_sanitized_json_object(self) -> None:
         completed = subprocess.run(
