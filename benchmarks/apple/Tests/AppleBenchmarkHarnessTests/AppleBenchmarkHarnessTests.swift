@@ -502,6 +502,53 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         }
     }
 
+    func testThresholdAndBudgetAreNotSilentlyDiscarded() throws {
+        let loaded = try WorkloadFixtureLoader.load()
+        let clock = TestClock()
+        let result = try AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() }).run(
+            workload: loaded.fixture,
+            workloadBytes: loaded.bytes,
+            sourceCommitSHA: "not_collected",
+            build: ReleaseBuildMetadata(
+                mode: "release",
+                optimization: "swiftc -O",
+                compiler: "swiftc",
+                sdk: "not_recorded",
+                target: "apple-synthetic",
+                metadataStatus: "scaffold_only"
+            )
+        )
+        let document = AppleEvidenceDocument(
+            schema: result.evidence.schema,
+            protocolSchema: result.evidence.protocolSchema,
+            evidenceID: result.evidence.evidenceID,
+            revision: result.evidence.revision,
+            metric: result.evidence.metric,
+            method: result.evidence.method,
+            build: result.evidence.build,
+            runs: result.evidence.runs,
+            artifacts: result.evidence.artifacts,
+            artifactManifestSHA256: result.evidence.artifactManifestSHA256,
+            redaction: result.evidence.redaction,
+            threshold: 12.5,
+            budget: 20.0
+        )
+
+        let encoded = try BenchmarkJSON.encode(document)
+        let decoded = try BenchmarkJSON.decode(AppleEvidenceDocument.self, from: encoded)
+        XCTAssertEqual(decoded.threshold, 12.5)
+        XCTAssertEqual(decoded.budget, 20.0)
+        XCTAssertThrowsError(
+            try EvidenceValidator.validate(
+                document,
+                workload: loaded.fixture,
+                fixtureSHA256: BenchmarkHash.sha256(loaded.bytes),
+                workloadBytes: loaded.bytes,
+                traceBytes: result.traceBytes
+            )
+        )
+    }
+
     func testEvidenceRoundTripsWithClosedSchema() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()
