@@ -205,7 +205,10 @@ def canonical_path(value: str | Path, *, code: str = "marker_path_invalid") -> P
         _fail(code)
     try:
         resolved = os.path.realpath(raw)
-    except OSError:
+    except (OSError, ValueError):
+        # ``realpath`` rejects embedded NULs with ``ValueError`` on some
+        # platforms. Convert hostile path bytes into the same bounded marker
+        # error as every other canonical-path failure.
         _fail(code)
     if resolved != raw:
         _fail(code)
@@ -281,7 +284,7 @@ def _validate_marker_document(document: object, requested_path: Path) -> RunMark
     if document.get("schema") != SCHEMA:
         _fail("marker_schema_invalid")
     status = document.get("status")
-    if status not in {STATUS_RUNNING, STATUS_CLEANUP_FAILED}:
+    if type(status) is not str or status not in {STATUS_RUNNING, STATUS_CLEANUP_FAILED}:
         _fail("marker_status_invalid")
     marker = canonical_path(document.get("marker_path"), code="marker_path_invalid")
     if marker != requested_path:
@@ -308,6 +311,12 @@ def _validate_marker_document(document: object, requested_path: Path) -> RunMark
         _fail("marker_path_invalid")
     if state_path in {requested_path, credential_path} or credential_path == requested_path:
         _fail("marker_path_invalid")
+    expected_state_path = requested_path.with_name(f"{requested_path.stem}.state.json")
+    expected_credential_path = requested_path.with_name(f"{requested_path.stem}.credential")
+    if state_path != expected_state_path or credential_path != expected_credential_path:
+        # Sibling paths are derived from the one caller-selected marker. A
+        # same-directory alternate cannot become a second run-scoped resource.
+        _fail("marker_path_mismatch")
     identity = CredentialIdentity.from_document(document.get("credential_identity"))
     return RunMarker(
         marker_path=marker,

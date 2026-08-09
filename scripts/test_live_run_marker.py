@@ -115,6 +115,19 @@ class LiveRunMarkerTests(unittest.TestCase):
             marker.load_marker(self.marker_path)
         self.assertEqual(raised.exception.code, "marker_duplicate_key")
 
+    def test_unhashable_status_values_fail_closed_without_type_error(self) -> None:
+        value = self.make_marker()
+        marker.create_marker(value)
+        original = json.loads(self.marker_path.read_text(encoding="utf-8"))
+        for status in ([], {}):
+            with self.subTest(status=status):
+                document = {**original, "status": status}
+                self.marker_path.write_text(json.dumps(document), encoding="utf-8")
+                self.marker_path.chmod(marker.MARKER_MODES)
+                with self.assertRaises(marker.MarkerError) as raised:
+                    marker.load_marker(self.marker_path)
+                self.assertEqual(raised.exception.code, "marker_status_invalid")
+
     def test_copied_hardlinked_symlink_and_nonregular_markers_fail_closed(self) -> None:
         value = self.make_marker()
         marker.create_marker(value)
@@ -167,6 +180,19 @@ class LiveRunMarkerTests(unittest.TestCase):
 
     def test_marker_copy_cannot_change_pinned_state_or_credential_paths(self) -> None:
         value = self.make_marker()
+        for field, alternate in (
+            ("state_path", self.runs / "alternate.state.json"),
+            ("credential_path", self.runs / "alternate.credential"),
+        ):
+            with self.subTest(field=field):
+                document = value.document()
+                document[field] = str(alternate)
+                self.marker_path.write_text(json.dumps(document), encoding="utf-8")
+                self.marker_path.chmod(marker.MARKER_MODES)
+                with self.assertRaises(marker.MarkerError) as raised:
+                    marker.load_marker(self.marker_path)
+                self.assertEqual(raised.exception.code, "marker_path_mismatch")
+
         document = value.document()
         document["state_path"] = str(self.root / "other.state.json")
         self.marker_path.write_text(json.dumps(document), encoding="utf-8")
