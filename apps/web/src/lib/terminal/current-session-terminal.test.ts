@@ -817,6 +817,23 @@ describe("CurrentSessionTerminalBridge", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["null", "file://", "ws://reviewed.example", "https://reviewed.example/path"])(
+    "fails closed before default socket construction for unsupported browser origin %s",
+    (origin) => {
+      vi.stubGlobal("location", { origin });
+      const nativeSocket = vi.fn();
+      vi.stubGlobal("WebSocket", nativeSocket);
+      const fetcher = vi.fn();
+
+      expect(() => createBrowserPtyTransport({ fetch: fetcher })).toThrowError(
+        expect.objectContaining({ code: "invalid-options" }),
+      );
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(nativeSocket).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    },
+  );
+
   it("keeps browser attach mode closed without an issuance validator", async () => {
     vi.stubGlobal("location", { origin: "https://reviewed.example" });
     const fetcher = vi.fn();
@@ -894,25 +911,25 @@ describe("CurrentSessionTerminalBridge", () => {
     "maps the browser origin %s to a %s PTY upgrade",
     async (origin, protocol) => {
       vi.stubGlobal("location", { origin });
-      let readyState = 0;
-      const socket: PtyWebSocket = {
-        onopen: null,
-        onmessage: null,
-        onerror: null,
-        onclose: null,
-        get readyState() {
-          return readyState;
-        },
-        send: vi.fn(),
-        close: vi.fn(),
-      };
-      const urls: string[] = [];
-      const signals: AbortSignal[] = [];
-      const createSocket: BrowserPtyWebSocketFactory = vi.fn((url, signal) => {
-        urls.push(url);
-        signals.push(signal);
-        return socket;
-      });
+      class NativeSocket {
+        static latest: NativeSocket | undefined;
+        readonly url: string;
+        binaryType = "";
+        readyState = 0;
+        onopen: ((event?: unknown) => void) | null = null;
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        onerror: ((event?: unknown) => void) | null = null;
+        onclose: ((event: CloseEvent) => void) | null = null;
+
+        constructor(url: string) {
+          this.url = url;
+          NativeSocket.latest = this;
+        }
+
+        send(_data: unknown): void {}
+        close(): void {}
+      }
+      vi.stubGlobal("WebSocket", NativeSocket);
       const transport = createBrowserPtyTransport({
         fetch: vi.fn(
           async () =>
@@ -923,19 +940,29 @@ describe("CurrentSessionTerminalBridge", () => {
               },
             ),
         ),
-        createSocket,
+        validateAttachment: () => true,
       });
 
-      const pending = transport.connect({ sessionId: "session-one" });
+      const pending = transport.connect({
+        sessionId: "session-one",
+        attach: "attach-one",
+        processIdentity: "process-one",
+      });
       await flush();
-      expect(createSocket).toHaveBeenCalledTimes(1);
-      expect(signals[0]).toEqual(expect.any(AbortSignal));
-      const upgrade = new URL(urls[0] ?? "http://invalid");
+      const nativeSocket = NativeSocket.latest;
+      expect(nativeSocket).toBeDefined();
+      const upgrade = new URL(nativeSocket?.url ?? "http://invalid");
       expect(upgrade.protocol).toBe(protocol);
       expect(upgrade.pathname).toBe("/api/pty");
+      expect([...upgrade.searchParams.entries()].sort()).toEqual([
+        ["attach", "attach-one"],
+        ["resume", "session-one"],
+        ["ticket", "pty-ticket"],
+      ]);
 
-      readyState = 1;
-      socket.onopen?.();
+      if (!nativeSocket) throw new Error("missing native PTY socket");
+      nativeSocket.readyState = 1;
+      nativeSocket.onopen?.();
       await pending;
       expect(transport.state.status).toBe("attached");
       vi.unstubAllGlobals();

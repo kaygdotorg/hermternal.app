@@ -34,9 +34,13 @@ and byte frames.
   and adapter exceptions never cross this boundary.
 - Browser composition captures a valid `http(s)` browser origin before ticket
   minting, so SSR or missing/opaque origin evidence fails closed rather than
-  routing a ticket to a fallback authority. Attach mode remains fail-closed
-  unless the caller supplies the issuance-owned `validateAttachment` seam;
-  omitted validation is intentionally legacy-only.
+  routing a ticket to a fallback authority. It constructs the default browser
+  upgrade as `ws:` for `http:` and `wss:` for `https:`, preserving only the
+  reviewed `/api/pty` path and bounded ticket, resume, and optional attach query
+  values. The ticket-bearing URL is handed once to the native `WebSocket` and is
+  not retained in bridge state, listeners, diagnostics, or storage. Attach mode
+  remains fail-closed unless the caller supplies the issuance-owned
+  `validateAttachment` seam; omitted validation is intentionally legacy-only.
 
 `renderer.ts` owns the browser-only Terminal boundary for W-22. It does not import Chat, PTY transport, session coordination, credentials, or live Hermes code.
 
