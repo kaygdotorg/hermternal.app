@@ -7,6 +7,7 @@ import {
   parseReconciliationSessionMessages,
   reconcileLiveHistory
 } from './live-reconciliation.mjs';
+import { isLiveReconciliationEnabled } from './live-playwright-config.mjs';
 import { setLiveProofStatus } from './live-proof-status.mjs';
 
 const test = base;
@@ -15,10 +16,11 @@ const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_PROVIDER_COUNT = 32;
 const SAFE_PROVIDER_NAME = /^[a-z0-9][a-z0-9._-]{0,95}$/u;
+const reconciliationOnly = isLiveReconciliationEnabled();
 
 test.skip(
-  process.env[LIVE_RECONCILIATION_ENV] !== '1',
-  'HERMTERNAL_LIVE_RECONCILIATION=1 is required; this mode is opt-in and never submits'
+  !reconciliationOnly,
+  `${LIVE_RECONCILIATION_ENV}=1 is required; this mode is opt-in and never submits`
 );
 test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
 

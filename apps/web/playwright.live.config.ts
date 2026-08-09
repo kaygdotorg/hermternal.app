@@ -1,6 +1,10 @@
 import { defineConfig, devices } from '@playwright/test';
 import { devNull } from 'node:os';
-import { getLivePlaywrightPaths, createLivePlaywrightConfig } from './tests/live/live-playwright-config.mjs';
+import {
+  getLivePlaywrightPaths,
+  createLivePlaywrightConfig,
+  isLiveReconciliationEnabled
+} from './tests/live/live-playwright-config.mjs';
 import { getLiveScreenshotChromiumLaunchOptions } from './tests/live/live-screenshot-capture.mjs';
 import {
   assertLiveRunnerDebugDisabled,
@@ -13,10 +17,8 @@ import {
 // credential-bearing worker or switch the browser to a headed/UI mode.
 assertLiveRunnerDebugDisabled();
 
-if (
-  process.env.HERMTERNAL_LIVE_RECONCILIATION === '1' &&
-  process.env.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE === '1'
-) {
+const reconciliationOnly = isLiveReconciliationEnabled();
+if (reconciliationOnly && process.env.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE === '1') {
   throw new Error('live reconciliation mode cannot be combined with screenshot capture');
 }
 
@@ -58,6 +60,7 @@ export default defineConfig(
     port,
     outputDirectory: liveOutputDirectory,
     launchOptions: liveCaptureLaunchOptions,
-    desktopChrome: devices['Desktop Chrome']
+    desktopChrome: devices['Desktop Chrome'],
+    reconciliationOnly
   })
 );

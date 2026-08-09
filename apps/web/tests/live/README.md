@@ -124,12 +124,17 @@ not required for the regression suite.
 
 A separate opt-in `reconcile-live-proof.spec.ts` resolves uncertain delivery without
 submitting a prompt. Run it only with `HERMTERNAL_LIVE_RECONCILIATION=1` in the
-authorized disposable lane; it performs a fresh password login, then reads one
+authorized disposable lane; any other present value is rejected before Playwright
+starts. The real `playwright.live.config.ts` then sets an exact `testMatch` for this
+no-submit spec and ignores the official, shared, and capture prompt lanes. The
+official spec also defensively skips itself whenever the exact reconciliation opt-in
+is present. The selected lane performs a fresh password login, then reads one
 bounded authoritative `/api/sessions?limit=100&offset=0` page and complete
 `/messages?limit=500&offset=0` histories in memory. It never creates or resumes a
 fallback session, selects a most-recent session, acquires a ticket, opens a
-WebSocket, or sends a prompt. A list or history whose cap, identity, response
-shape, or pagination cannot prove completeness fails closed.
+WebSocket, or sends a prompt; its live-proof ledger prompt count remains zero. A
+list or history whose cap, identity, response shape, or pagination cannot prove
+completeness fails closed.
 
 The reconciler compares only the fixed proof prompt and assistant marker. It
 prints one fixed line with `promptMatches=zero|one|multiple`,

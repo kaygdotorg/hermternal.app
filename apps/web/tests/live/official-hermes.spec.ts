@@ -8,10 +8,16 @@ import {
   matchLiveProofLedger
 } from './live-proof-ledger.mjs';
 import { setLiveProofStatus } from './live-proof-status.mjs';
+import { isLiveReconciliationEnabled } from './live-playwright-config.mjs';
 
 const password = process.env.HERMES_TEST_PASSWORD;
 const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
+const reconciliationOnly = isLiveReconciliationEnabled();
 
+test.skip(
+  reconciliationOnly,
+  'official Hermes prompt lane is disabled during read-only reconciliation'
+);
 test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
 
 test('browser UI reaches official Hermes, reconciles exact history, and logs out', async ({ page, context }, testInfo) => {

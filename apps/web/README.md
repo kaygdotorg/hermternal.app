@@ -171,13 +171,17 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   retainable live screenshot was performed for this correction. The separate opt-in
   `HERMTERNAL_LIVE_RECONCILIATION=1` mode performs a fresh password login and bounded read-only
   session/history enumeration without creating or resuming a session, acquiring a ticket, opening a
-  WebSocket, or submitting a prompt. It reports only zero/one/multiple fixed prompt matches, zero/one/
-  multiple ordered completion pairs, and `no-match-uncertain`, `delivery-observed`,
-  `completion-observed`, or `ambiguous`; zero history matches remain uncertain, not absent. It fails
-  closed on malformed or incomplete pagination and cleanup failure, then verifies logout and clears
-  cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The mode never retains IDs,
-  timestamps, bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is
-  mutually exclusive with screenshot capture. No live reconciliation was run for this correction.
+  WebSocket, or submitting a prompt. The exact value `1` is required; ambiguous truthy values fail
+  before Playwright starts. The real live config selects exactly `reconcile-live-proof.spec.ts` and
+  excludes the official, shared, and capture prompt lanes, while the official spec has a defensive
+  reconciliation-mode skip. The no-submit lane keeps its live-proof ledger `promptCount` at zero.
+  It reports only zero/one/multiple fixed prompt matches, zero/one/multiple bounded completion pairs,
+  and `no-match-uncertain`, `delivery-observed`, `completion-observed`, or `ambiguous`; zero history
+  matches remain uncertain, not absent. It fails closed on malformed or incomplete pagination and
+  cleanup failure, then verifies logout and clears cookies, Web Storage, IndexedDB, Cache Storage, and
+  service workers. The mode never retains IDs, timestamps, bodies, prompt/response text, endpoints,
+  headers, raw errors, or artifacts, and it is mutually exclusive with screenshot capture. No live
+  reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

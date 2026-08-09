@@ -10,8 +10,10 @@ import { basename, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createLivePlaywrightConfig,
-  getLivePlaywrightPaths
+  getLivePlaywrightPaths,
+  isLiveReconciliationEnabled
 } from '../../tests/live/live-playwright-config.mjs';
+import { createLiveProofLedger, matchLiveProofLedger } from '../../tests/live/live-proof-ledger.mjs';
 import {
   LIVE_ARTIFACT_REDACTION,
   assertLiveRunnerDebugDisabled,
@@ -1624,6 +1626,64 @@ test('sequential test sees the same root', async ({}, testInfo) => {
       video: 'off',
       screenshot: 'off',
       launchOptions: { headless: true }
+    });
+  });
+
+  it('selects exactly the no-submit reconciliation lane and keeps its prompt ledger empty', async () => {
+    expect(() => isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: 'true' })).toThrow(
+      'must equal exactly 1'
+    );
+    expect(() => isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: 'yes' })).toThrow(
+      'must equal exactly 1'
+    );
+
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      HERMTERNAL_LIVE_RECONCILIATION: '1'
+    };
+    delete childEnvironment.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE;
+    delete childEnvironment.HERMES_TEST_PASSWORD;
+    delete childEnvironment.PW_RUNNER_DEBUG;
+    delete childEnvironment.PWDEBUG;
+    const configUrl = pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href;
+    const policyUrl = pathToFileURL(policyPath).href;
+    const probe = `
+      import { removeLiveArtifacts } from ${JSON.stringify(policyUrl)};
+      let root;
+      try {
+        const loaded = await import(${JSON.stringify(configUrl)} + '?selection=' + Date.now());
+        root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+        const config = loaded.default;
+        if (config.testMatch !== '**/reconcile-live-proof.spec.ts') throw new Error('wrong reconciliation test match');
+        const ignored = config.testIgnore;
+        if (!Array.isArray(ignored) || !ignored.includes('**/official-hermes.spec.ts') || !ignored.includes('**/*capture*.spec.ts'))
+          throw new Error('wrong reconciliation test ignore set');
+        process.stdout.write('CONFIG_SELECTION_OK');
+      } finally {
+        if (root) await removeLiveArtifacts(root);
+      }
+    `;
+    const result = await execFileAsync(process.execPath, ['-e', probe], {
+      cwd: appRoot,
+      env: childEnvironment,
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 30_000,
+      encoding: 'utf8'
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('CONFIG_SELECTION_OK');
+    expect(await exists(resolve(appRoot, 'tests/live/reconcile-live-proof.spec.ts'))).toBe(true);
+    const reconciliationSource = await readFile(
+      resolve(appRoot, 'tests/live/reconcile-live-proof.spec.ts'),
+      'utf8'
+    );
+    expect(reconciliationSource).not.toContain("prompt.submit");
+    expect(reconciliationSource).not.toContain("Message Hermes");
+
+    const emptyLedger = createLiveProofLedger();
+    expect(matchLiveProofLedger(emptyLedger.snapshot(), { sessionId: 'unattributed' })).toMatchObject({
+      promptCount: 0,
+      completionCount: 0
     });
   });
 
