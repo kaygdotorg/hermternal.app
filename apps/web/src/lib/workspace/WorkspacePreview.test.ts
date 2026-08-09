@@ -225,6 +225,8 @@ describe('WorkspacePreview', () => {
     const frames: FrameRequestCallback[] = [];
     const oldView = render(SessionList, { accountMenuId: 'old-account-menu' });
     const oldTrigger = within(oldView.container).getByRole('button', { name: 'Open account menu' });
+    const oldTriggerFocus = vi.fn();
+    oldTrigger.addEventListener('focus', oldTriggerFocus);
     let newView: ReturnType<typeof render> | undefined;
 
     try {
@@ -243,9 +245,10 @@ describe('WorkspacePreview', () => {
       await waitFor(() => expect(frames).toHaveLength(1));
       expect(document.activeElement).toBe(document.body);
 
-      const oldSessionList = oldTrigger.closest('.session-list') as HTMLElement;
-      expect(oldSessionList).toBeInTheDocument();
-      oldSessionList.style.display = 'none';
+      // Keep the former instance connected and visible. The lease, not the
+      // visibility guard, must fence its stale restore after replacement
+      // ownership is claimed and then released.
+      expect(oldTrigger.closest('.session-list')).toBeInTheDocument();
 
       newView = render(SessionList, { accountMenuId: 'new-account-menu' });
       const newTrigger = within(newView.container).getByRole('button', { name: 'Open account menu' });
@@ -266,12 +269,15 @@ describe('WorkspacePreview', () => {
       expect(staleClose).toBeDefined();
       staleClose?.(0);
       await Promise.resolve();
+      expect(oldTriggerFocus).not.toHaveBeenCalled();
       expect(oldTrigger).not.toHaveFocus();
       expect(newTrigger).not.toHaveFocus();
 
       for (const callback of frames.splice(0)) callback(0);
       // The replacement close is legitimate and must restore its own trigger.
       await waitFor(() => expect(newTrigger).toHaveFocus());
+      expect(oldTriggerFocus).not.toHaveBeenCalled();
+      expect(oldTrigger).not.toHaveFocus();
     } finally {
       newView?.unmount();
       oldView.unmount();
