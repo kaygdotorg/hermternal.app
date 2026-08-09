@@ -11,6 +11,8 @@ public enum AppleBenchmarkError: Error, Equatable, Sendable {
     case clockNotMonotonic
     case insufficientSamples
     case outputWriteFailed
+    case traceOutputRequired
+    case outputPathCollision
     case unsupportedArgument
 
     public var code: String {
@@ -24,6 +26,8 @@ public enum AppleBenchmarkError: Error, Equatable, Sendable {
         case .clockNotMonotonic: return "clock_not_monotonic"
         case .insufficientSamples: return "insufficient_samples"
         case .outputWriteFailed: return "output_write_failed"
+        case .traceOutputRequired: return "trace_output_required"
+        case .outputPathCollision: return "output_path_collision"
         case .unsupportedArgument: return "unsupported_argument"
         }
     }
@@ -59,6 +63,36 @@ func isStrictLowerHexASCII(_ value: String, length: Int) -> Bool {
     return bytes.allSatisfy { byte in
         (byte >= 0x30 && byte <= 0x39) ||
         (byte >= 0x61 && byte <= 0x66)
+    }
+}
+
+public enum CLIOutputPolicy {
+    public struct Destinations: Equatable, Sendable {
+        public let evidence: URL?
+        public let trace: URL
+
+        public init(evidence: URL?, trace: URL) {
+            self.evidence = evidence
+            self.trace = trace
+        }
+    }
+
+    /// Canonicalize both destinations before any write so an evidence file can
+    /// never be replaced by its raw trace or attest to a path that was not
+    /// actually emitted.
+    public static func canonicalize(
+        evidencePath: URL?,
+        tracePath: URL?
+    ) throws -> Destinations {
+        guard let tracePath else {
+            throw AppleBenchmarkError.traceOutputRequired
+        }
+        let canonicalTrace = tracePath.standardizedFileURL.resolvingSymlinksInPath()
+        let canonicalEvidence = evidencePath?.standardizedFileURL.resolvingSymlinksInPath()
+        if let canonicalEvidence, canonicalEvidence == canonicalTrace {
+            throw AppleBenchmarkError.outputPathCollision
+        }
+        return Destinations(evidence: canonicalEvidence, trace: canonicalTrace)
     }
 }
 
