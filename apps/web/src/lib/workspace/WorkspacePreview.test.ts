@@ -340,18 +340,45 @@ describe('WorkspacePreview', () => {
     expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
   });
 
-  it('renders explicit live timeline data without synthetic artifacts', () => {
+  it('renders live timeline data beside the visibly mocked inspector', () => {
     render(WorkspacePreview, {
       state: 'ready',
-      artifactInspectorEnabled: false,
+      dataMode: 'live',
       timelineEmptyLabel: 'No messages in this chat yet.',
       timelineItems: [{ kind: 'user-message', id: 'live-1', text: 'Live server message' }]
     });
 
+    const preview = screen.getByTestId('runtime-preview');
+    expect(preview).toHaveAttribute('data-mode-source', 'live');
     expect(screen.getByText('Live server message')).toBeInTheDocument();
     expect(screen.queryByText('Quarterly inventory movement')).not.toBeInTheDocument();
-    expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('runtime-preview').querySelector('.workspace-grid')).toHaveClass('inspector-hidden');
+    expect(screen.getByRole('complementary', { name: 'Workspace inspector' })).toBeInTheDocument();
+    expect(screen.getByText('Generated · mock · just now')).toBeInTheDocument();
+    expect(screen.getByText('Delay signal · 12% · synthetic fixture')).toBeInTheDocument();
+    expect(preview.querySelector('.workspace-grid')).not.toHaveClass('inspector-hidden');
+  });
+
+  it('keeps live Chat mode controls separate from the inert workspace underlay', async () => {
+    const onAction = vi.fn();
+    render(WorkspacePreview, { dataMode: 'live', mode: 'terminal', state: 'ready', onAction });
+
+    const underlay = screen.getByTestId('workspace-underlay');
+    const selector = screen.getByTestId('mobile-mode-selector');
+    const controls = Array.from(selector.querySelectorAll<HTMLButtonElement>('button'));
+
+    expect(selector).toHaveAttribute('role', 'group');
+    expect((underlay as HTMLElement & { inert: boolean }).inert).toBe(true);
+    expect(underlay).toHaveAttribute('aria-hidden', 'true');
+    expect(underlay).not.toContainElement(selector);
+    expect(controls).toHaveLength(2);
+    expect(controls.map((control) => control.type)).toEqual(['button', 'button']);
+    expect(controls.map((control) => control.getAttribute('aria-pressed'))).toEqual(['false', 'true']);
+    expect(controls[0]).toHaveAccessibleName('Open chat mode');
+    expect(controls[1]).toHaveAccessibleName('Terminal mode selected');
+
+    await fireEvent.click(controls[0]);
+    expect(onAction).toHaveBeenCalledWith({ type: 'set-mode', mode: 'chat' });
+    expect(onAction).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'new-session' }));
   });
 
   it('distinguishes a real empty live session from fixture timelines and copy', () => {
