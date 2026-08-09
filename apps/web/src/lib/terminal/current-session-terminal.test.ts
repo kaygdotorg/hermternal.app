@@ -1197,6 +1197,65 @@ describe("CurrentSessionTerminalBridge", () => {
     expect(bridge.state.sessionId).toBe("session-two");
   });
 
+  it("bounds replacement when a cancelled adapter never settles and cleans late A once", async () => {
+    vi.useFakeTimers();
+    try {
+      const oldFake = createFakePty();
+      const replacementFake = createFakePty();
+      const firstGate = deferred<void>();
+      const oldConnect = oldFake.connect.getMockImplementation();
+      if (!oldConnect) throw new Error("PTY connect implementation is missing");
+      oldFake.connect.mockImplementation(async (input, signal) => {
+        await firstGate.promise;
+        return oldConnect(input, signal);
+      });
+      const bridge = new CurrentSessionTerminalBridge({
+        createTransport: vi
+          .fn()
+          .mockReturnValueOnce(oldFake.pty)
+          .mockReturnValueOnce(replacementFake.pty),
+        replacementQuarantineTimeoutMs: 25,
+      });
+      const events: CurrentSessionTerminalEvent[] = [];
+      bridge.subscribe((event) => events.push(event));
+
+      const first = bridge.attach("session-one", new AbortController().signal);
+      await flush();
+      bridge.invalidateBindingForSession("session-one", bridge.lifecycleIdentity);
+      const replacement = bridge.attach(
+        "session-two",
+        new AbortController().signal,
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      const recovered = await replacement;
+      expect(isValid(recovered)).toBe(true);
+      expect(bridge.state).toMatchObject({
+        status: "attached",
+        sessionId: "session-two",
+      });
+      expect(replacementFake.connect).toHaveBeenCalledTimes(1);
+      expect(oldFake.detach).not.toHaveBeenCalled();
+
+      // A no longer has a subscribed bridge listener. Its late attached state
+      // and bytes cannot cross B's ownership boundary, then A gets one cleanup.
+      oldFake.emit({
+        type: "bytes",
+        generation: 1,
+        bytes: new Uint8Array([0xff, 0x00]),
+        outputMayBeTruncated: false,
+      });
+      firstGate.resolve(undefined);
+      await expect(first).rejects.toMatchObject({ code: "aborted" });
+      expect(oldFake.detach).toHaveBeenCalledTimes(1);
+      expect(replacementFake.detach).not.toHaveBeenCalled();
+      expect(events.filter((event) => event.type === "bytes")).toEqual([]);
+      expect(bridge.state.sessionId).toBe("session-two");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("quarantines delayed A terminal publication until B has its own generation", async () => {
     const fake = createFakePty();
     const firstGate = deferred<void>();
