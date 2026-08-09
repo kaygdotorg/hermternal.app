@@ -1647,10 +1647,13 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         self.assertEqual(self.evidence["browser_evidence"]["provenance"]["build_digest"], EXPECTED_BUILD_DIGEST)
         self.assertEqual(self.evidence["browser_evidence"]["provenance"]["traefik_config_digest"], EXPECTED_CONFIG_DIGEST)
         self.assertEqual(self.evidence["browser_evidence"]["provenance"]["runtime_inputs_sha256"], RETAINED_RUNTIME_INPUTS_SHA256)
+        self.assertEqual(self.evidence["deployment"]["runtime_inputs_sha256"], RETAINED_RUNTIME_INPUTS_SHA256)
         self.assertEqual(parser["implementation_commit"], RETAINED_PARSER_COMMIT)
         self.assertEqual(parser["implementation_blob"], RETAINED_PARSER_BLOB)
         self.assertEqual(parser["implementation_sha256"], RETAINED_PARSER_SOURCE_SHA256)
         self.assertEqual(parser["test_source_sha256"], RETAINED_PARSER_TEST_SHA256)
+        self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["static_route_grammar"]["path"], traefik_proof.PARITY_FIXTURE_PATHS["static_route_grammar"])
+        self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["deep_link_cases"]["path"], traefik_proof.PARITY_FIXTURE_PATHS["deep_link_cases"])
         self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["static_route_grammar"]["sha256"], RETAINED_STATIC_ROUTE_SHA256)
         self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["deep_link_cases"]["sha256"], RETAINED_DEEP_LINK_SHA256)
         self.assertEqual(
