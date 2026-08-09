@@ -76,6 +76,51 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testDescriptorReadsRejectSymlinkFallbackAndBindArtifactIdentity() throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermternal-swift-c21-descriptor-\(UUID().uuidString)", isDirectory: true)
+        let fixturesURL = temporaryRoot
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixturesURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+        try FileManager.default.createSymbolicLink(
+            atPath: fixturesURL.appendingPathComponent("index.json").path,
+            withDestinationPath: repoRoot.appendingPathComponent("contracts/fixtures/index.json").path
+        )
+        assertInputCode(.missingArtifact) {
+            _ = try loadRegistry(at: temporaryRoot)
+        }
+
+        try FileManager.default.removeItem(at: fixturesURL.appendingPathComponent("index.json"))
+        try FileManager.default.copyItem(
+            at: repoRoot.appendingPathComponent("contracts/fixtures/index.json"),
+            to: fixturesURL.appendingPathComponent("index.json")
+        )
+        let artifactURL = fixturesURL.appendingPathComponent(
+            "deployment-security/browser-auth/cases.json"
+        )
+        try FileManager.default.createDirectory(
+            at: artifactURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        var artifactData = try Data(contentsOf: repoRoot.appendingPathComponent(
+            "contracts/fixtures/deployment-security/browser-auth/cases.json"
+        ))
+        artifactData[artifactData.startIndex] = artifactData[artifactData.startIndex] == 0x7B ? 0x5B : 0x7B
+        try artifactData.write(to: artifactURL)
+        let registry = try loadRegistry(at: temporaryRoot)
+        assertInputCode(.artifactIntegrity) {
+            _ = try loadCase(
+                at: temporaryRoot,
+                registry: registry,
+                rootID: "deployment-security-browser-auth",
+                caseID: "login-success"
+            )
+        }
+    }
+
     func testRejectsMalformedIncompatibleAndUnsupportedRegistryInputs() throws {
         try withTemporaryIndex(Data("{\n".utf8)) { temporaryRoot in
             assertInputCode(.malformedJSON) {

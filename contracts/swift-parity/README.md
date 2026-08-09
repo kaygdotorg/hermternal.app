@@ -27,6 +27,11 @@ The result compares semantic `expected` outcomes, not platform-specific wire
 bytes. The registry's `pending` rows become `blocked` results and can never be
 promoted to proof. Unknown fixture roots, case selectors, platform values,
 statuses, unsafe paths, and unregistered representative artifacts fail closed.
+Every read is rooted at a held repository descriptor. Directory and regular-file
+components use no-follow opens; regular-file metadata is checked before and
+after bounded reads, and the path is reopened from the held parent descriptor to
+detect replacement. Selected JSON artifacts must match the registry's exact
+size and SHA-256 binding. There is no pathname or glob fallback.
 
 ## Commands
 
@@ -49,7 +54,9 @@ coverage. `networkCalls` is always zero and `liveClaim` is always false.
   intentionally leaves source-defined.
 - It selects only the approved JSON artifacts used by the parity contract. It
   does not scan every registered artifact or treat an unindexed artifact as
-  eligible evidence.
+  eligible evidence. The selected inventory is bounded and every selected
+  manifest record is checked against descriptor metadata, byte count, and
+  SHA-256 before decode.
 - The C-19 aggregate validator remains authoritative for duplicate-key checks,
   full registry schema validation, artifact digests, redaction scanning, and
   the complete unindexed-artifact inventory. This package independently checks
