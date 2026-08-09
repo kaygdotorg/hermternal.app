@@ -97,10 +97,14 @@ Bun v1 virtual keys such as
 When several local versions satisfy a range, a parent-scoped virtual key wins;
 otherwise the highest locally resolved semantic version is selected. The matcher
 never falls back to an unmatched local version: unsupported, malformed, or
-unsatisfied transitive and peer specifications fail closed. An `npm:` alias
-must match both the dependency-name lock key and the descriptor's target package
-name, then match its exact target version. Unsupported or ambiguous shapes fail
-closed rather than inventing a network resolution.
+unsatisfied transitive and peer specifications fail closed. Its bounded npm
+subset requires canonical numeric components, rejects leading-zero and repeated
+`v` forms, validates every union arm, and excludes prerelease candidates from
+caret, tilde, comparator, and wildcard ranges unless the range arm explicitly
+admits a prerelease. The same rules apply to required peer ranges. An `npm:`
+alias must match both the dependency-name lock key and the descriptor's target
+package name, then match its exact target version. Unsupported or ambiguous
+shapes fail closed rather than inventing a network resolution.
 
 ## Current origin/dev baseline
 

@@ -50,11 +50,8 @@ LIMITS = {
     "max_seconds": MAX_SECONDS,
 }
 
-SEMVER = re.compile(
-    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
-    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
-)
+SEMVER_NUMERIC = re.compile(r"^(?:0|[1-9][0-9]*)$")
+SEMVER_IDENTIFIER = re.compile(r"^[0-9A-Za-z-]+$")
 PACKAGE_NAME = re.compile(r"^@?[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)?$")
 # Bun v1 uses virtual locator keys such as
 # ``@testing-library/dom/aria-query`` when two versions coexist. Those keys
@@ -149,6 +146,25 @@ class LockPackage:
     integrity_valid: bool
     dependencies: Mapping[str, Mapping[str, str]]
     optional_peers: frozenset[str]
+
+
+@dataclass(frozen=True)
+class SemVer:
+    major: int
+    minor: int
+    patch: int
+    prerelease: tuple[str, ...] = ()
+
+    @property
+    def core(self) -> tuple[int, int, int]:
+        return (self.major, self.minor, self.patch)
+
+
+@dataclass(frozen=True)
+class RangeTerm:
+    operator: str
+    version: SemVer
+    wildcards: tuple[bool, bool, bool] = (False, False, False)
 
 
 @dataclass(frozen=True)
@@ -450,14 +466,46 @@ def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mappi
     )
 
 
+def _parse_semver(value: str, *, allow_v: bool = False) -> Optional[SemVer]:
+    if not isinstance(value, str) or not value:
+        return None
+    token = value
+    if token.startswith("v"):
+        if not allow_v or token.startswith("vv"):
+            return None
+        token = token[1:]
+    if "+" in token:
+        if token.count("+") != 1:
+            return None
+        token, build = token.split("+", 1)
+        if not build or any(not SEMVER_IDENTIFIER.fullmatch(part) for part in build.split(".")):
+            return None
+    if "-" in token:
+        core, prerelease_text = token.split("-", 1)
+        prerelease = tuple(prerelease_text.split("."))
+        if not prerelease_text or any(
+            not SEMVER_IDENTIFIER.fullmatch(part)
+            or (part.isdigit() and not SEMVER_NUMERIC.fullmatch(part))
+            for part in prerelease
+        ):
+            return None
+    else:
+        core = token
+        prerelease = ()
+    parts = core.split(".")
+    if len(parts) != 3 or any(not SEMVER_NUMERIC.fullmatch(part) for part in parts):
+        return None
+    return SemVer(*(int(part) for part in parts), prerelease=prerelease)
+
+
 def _is_pinned_spec(spec: str) -> bool:
-    if SEMVER.fullmatch(spec):
+    if _parse_semver(spec) is not None:
         return True
     if not spec.startswith("npm:"):
         return False
     alias = spec[4:]
     separator = alias.rfind("@")
-    return separator > 0 and bool(SEMVER.fullmatch(alias[separator + 1 :]))
+    return separator > 0 and _parse_semver(alias[separator + 1 :]) is not None
 
 
 def _expected_alias_target(spec: str) -> Optional[str]:
@@ -478,37 +526,51 @@ def _expected_alias_version(spec: str) -> Optional[str]:
     if separator <= 4:
         return None
     version = spec[separator + 1 :]
-    return version if SEMVER.fullmatch(version) else None
+    return version if _parse_semver(version) is not None else None
 
 
 def _expected_exact_version(spec: str) -> Optional[str]:
-    return spec if SEMVER.fullmatch(spec) else _expected_alias_version(spec)
+    return spec if _parse_semver(spec) is not None else _expected_alias_version(spec)
 
 
 def _numeric_version(value: str) -> Optional[tuple[int, int, int]]:
-    """Return the numeric semver core used by the bounded local range matcher."""
+    """Return the numeric semver core used by bounded local resolution."""
 
-    core = value.split("-", 1)[0].split("+", 1)[0]
-    parts = core.split(".")
-    if len(parts) > 3 or any(not part.isdigit() for part in parts):
-        return None
-    numbers = [int(part) for part in parts]
-    numbers.extend([0] * (3 - len(numbers)))
-    return tuple(numbers[:3])  # type: ignore[return-value]
+    parsed = _parse_semver(value)
+    return parsed.core if parsed is not None else None
 
 
-def _range_version(value: str) -> tuple[Optional[tuple[int, int, int]], tuple[bool, bool, bool]]:
-    token = value.strip().lstrip("v").split("-", 1)[0].split("+", 1)[0]
+def _parse_range_version(value: str) -> tuple[SemVer, tuple[bool, bool, bool]]:
+    token = value.strip()
+    if not token:
+        raise ValueError("range-version")
+    if token.startswith("v"):
+        if token.startswith("vv"):
+            raise ValueError("range-version")
+        token = token[1:]
+    if "+" in token:
+        if token.count("+") != 1:
+            raise ValueError("range-version")
+        token, _build = token.split("+", 1)
+        if not _build:
+            raise ValueError("range-version")
+    if "-" in token:
+        parsed = _parse_semver(token)
+        if parsed is None:
+            raise ValueError("range-version")
+        return parsed, (False, False, False)
     parts = token.split(".")
-    if len(parts) > 3:
+    if not 1 <= len(parts) <= 3:
         raise ValueError("range-version")
     numbers: list[int] = []
     wildcards: list[bool] = []
+    wildcard_seen = False
     for part in parts:
         if part.lower() in {"x", "*"}:
+            wildcard_seen = True
             numbers.append(0)
             wildcards.append(True)
-        elif part.isdigit():
+        elif SEMVER_NUMERIC.fullmatch(part) and not wildcard_seen:
             numbers.append(int(part))
             wildcards.append(False)
         else:
@@ -516,75 +578,137 @@ def _range_version(value: str) -> tuple[Optional[tuple[int, int, int]], tuple[bo
     while len(numbers) < 3:
         numbers.append(0)
         wildcards.append(True)
-    return tuple(numbers), tuple(wildcards)  # type: ignore[return-value]
+    return SemVer(*numbers), tuple(wildcards)  # type: ignore[return-value]
+
+
+def _compare_semver(left: SemVer, right: SemVer) -> int:
+    if left.core != right.core:
+        return (left.core > right.core) - (left.core < right.core)
+    if not left.prerelease and not right.prerelease:
+        return 0
+    if not left.prerelease:
+        return 1
+    if not right.prerelease:
+        return -1
+    for left_part, right_part in zip(left.prerelease, right.prerelease):
+        if left_part == right_part:
+            continue
+        left_numeric = left_part.isdigit()
+        right_numeric = right_part.isdigit()
+        if left_numeric and right_numeric:
+            return (int(left_part) > int(right_part)) - (int(left_part) < int(right_part))
+        if left_numeric != right_numeric:
+            return -1 if left_numeric else 1
+        return (left_part > right_part) - (left_part < right_part)
+    return (len(left.prerelease) > len(right.prerelease)) - (len(left.prerelease) < len(right.prerelease))
+
+
+def _parse_range_alternative(expression: str) -> list[RangeTerm]:
+    expression = expression.strip()
+    if not expression:
+        raise ValueError("range-alternative")
+    if expression.startswith("^") or expression.startswith("~"):
+        if len(expression) == 1 or any(char.isspace() for char in expression[1:]):
+            raise ValueError("range-alternative")
+        version, wildcards = _parse_range_version(expression[1:])
+        return [RangeTerm(expression[0], version, wildcards)]
+    tokens = expression.split()
+    if not tokens:
+        raise ValueError("range-alternative")
+    terms: list[RangeTerm] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        operator = "="
+        if token in {">=", ">", "<=", "<", "="}:
+            operator = token
+            index += 1
+            if index >= len(tokens):
+                raise ValueError("range-comparator")
+            token = tokens[index]
+        else:
+            match = re.fullmatch(r"(>=|<=|>|<|=)(.+)", token)
+            if match:
+                operator, token = match.groups()
+        version, wildcards = _parse_range_version(token)
+        terms.append(RangeTerm(operator, version, wildcards))
+        index += 1
+    return terms
+
+
+def _caret_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[int, int, int]:
+    if wildcards[0]:
+        return (version.major + 1, 0, 0)
+    if version.major > 0:
+        return (version.major + 1, 0, 0)
+    if wildcards[1] or version.minor > 0:
+        return (0, version.minor + 1, 0)
+    return (0, 0, version.patch + 1)
+
+
+def _tilde_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[int, int, int]:
+    if wildcards[0]:
+        return (version.major + 1, 0, 0)
+    if wildcards[1]:
+        return (version.major + 1, 0, 0)
+    return (version.major, version.minor + 1, 0)
+
+
+def _matches_wildcards(actual: SemVer, version: SemVer, wildcards: tuple[bool, bool, bool]) -> bool:
+    return all(wildcards[index] or actual.core[index] == version.core[index] for index in range(3))
+
+
+def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
+    if term.operator == "*":
+        return _matches_wildcards(actual, term.version, term.wildcards)
+    if term.operator == "=":
+        if any(term.wildcards):
+            return _matches_wildcards(actual, term.version, term.wildcards)
+        return _compare_semver(actual, term.version) == 0
+    if term.operator in {">=", ">", "<", "<="}:
+        comparison = _compare_semver(actual, term.version)
+        return {
+            ">=": comparison >= 0,
+            ">": comparison > 0,
+            "<": comparison < 0,
+            "<=": comparison <= 0,
+        }[term.operator]
+    if term.operator in {"^", "~"}:
+        lower = _compare_semver(actual, term.version) >= 0
+        upper_core = _caret_upper(term.version, term.wildcards) if term.operator == "^" else _tilde_upper(term.version, term.wildcards)
+        upper = actual.core < upper_core
+        return lower and upper
+    return False
 
 
 def _range_matches(version: str, specification: str) -> bool:
-    """Match the finite npm range forms present in the checked-in Bun lockfile.
+    """Match a strict bounded subset of npm semver ranges.
 
-    This is intentionally not a package-manager reimplementation. Unsupported
-    range syntax remains ambiguous rather than being treated as proof of a
-    resolution; the audit is local and fail-closed.
+    The parser accepts only exact numeric components, one optional ``v`` prefix,
+    caret/tilde ranges, comparator sets, wildcard forms, and unions of those
+    forms. Every union arm must parse. Prerelease candidates are excluded unless
+    that arm contains an explicit prerelease identifier.
     """
 
-    actual = _numeric_version(version)
+    actual = _parse_semver(version)
     if actual is None:
         return False
-    for alternative in specification.split("||"):
-        expression = alternative.strip()
-        if not expression:
-            continue
+    alternatives = specification.split("||")
+    if any(not alternative.strip() for alternative in alternatives):
+        return False
+    parsed_alternatives: list[list[RangeTerm]] = []
+    for alternative in alternatives:
         try:
-            if expression in {"*", "x", "X"}:
-                return True
-            if expression.startswith("^"):
-                base, wildcards = _range_version(expression[1:])
-                if base is None or any(wildcards):
-                    lower = base or (0, 0, 0)
-                else:
-                    lower = base
-                if lower[0] > 0:
-                    upper = (lower[0] + 1, 0, 0)
-                elif lower[1] > 0:
-                    upper = (0, lower[1] + 1, 0)
-                else:
-                    upper = (0, 0, lower[2] + 1)
-                if lower <= actual < upper:
-                    return True
-                continue
-            if expression.startswith("~"):
-                lower, _ = _range_version(expression[1:])
-                if lower is not None and lower <= actual < (lower[0], lower[1] + 1, 0):
-                    return True
-                continue
-            if expression.startswith((">", "<")):
-                expression = re.sub(r"(>=|<=|>|<)\s+", r"\1", expression)
-                comparisons = expression.split()
-                matched = True
-                for comparison in comparisons:
-                    operator = ">=" if comparison.startswith(">=") else ">" if comparison.startswith(">") else "<=" if comparison.startswith("<=") else "<"
-                    target = _numeric_version(comparison[len(operator) :])
-                    if target is None:
-                        matched = False
-                        break
-                    if operator == ">=" and not actual >= target:
-                        matched = False
-                    elif operator == ">" and not actual > target:
-                        matched = False
-                    elif operator == "<=" and not actual <= target:
-                        matched = False
-                    elif operator == "<" and not actual < target:
-                        matched = False
-                if matched:
-                    return True
-                continue
-            if expression.startswith("="):
-                expression = expression[1:]
-            base, wildcards = _range_version(expression)
-            if base is not None and all(wildcards[index] or actual[index] == base[index] for index in range(3)):
-                return True
+            parsed_alternatives.append(_parse_range_alternative(alternative))
         except ValueError:
+            # A union is only supported when every arm is understood. Do not
+            # accept a valid arm while silently ignoring unsupported syntax.
+            return False
+    for terms in parsed_alternatives:
+        if actual.prerelease and not any(term.version.prerelease for term in terms):
             continue
+        if all(_matches_term(actual, term) for term in terms):
+            return True
     return False
 
 
@@ -846,7 +970,7 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
         elif not record.integrity_valid:
             integrity_invalid.append(key)
             findings.append(_finding("invalid-integrity", "blocking", package=key))
-        if not SEMVER.fullmatch(record.version):
+        if _parse_semver(record.version) is None:
             unpinned.append(key)
             findings.append(_finding("lock-entry-unpinned", "blocking", package=key))
 

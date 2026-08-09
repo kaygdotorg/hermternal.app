@@ -390,6 +390,78 @@ class DependencyAuditTests(unittest.TestCase):
             self.assertEqual(result["status"], "fail", result)
             self.assertIn("lockfile-json5-unsupported", self.finding_codes(result), result)
 
+    def test_semver_ranges_are_strict_and_prerelease_safe(self) -> None:
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "dependencies": {
+                "leading-zero": "^01.2.3",
+                "extra-v": "vv1.2.3",
+                "union-junk": "^1.0.0 || junk",
+                "caret-pre": "^1.0.0",
+                "tilde-pre": "~1.0.0",
+                "comparator-pre": ">=1.0.0",
+                "wildcard-pre": "1.x",
+                "admitted-pre": "^1.0.0-beta.1",
+            },
+            "peerDependencies": {"required-peer-pre": ">=1.0.0"},
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "leading-zero": package_record("leading-zero", "1.2.3"),
+                "extra-v": package_record("extra-v", "1.2.3"),
+                "union-junk": package_record("union-junk", "1.2.3"),
+                "caret-pre": package_record("caret-pre", "1.2.3-beta.1"),
+                "tilde-pre": package_record("tilde-pre", "1.0.5-beta.1"),
+                "comparator-pre": package_record("comparator-pre", "1.2.3-beta.1"),
+                "wildcard-pre": package_record("wildcard-pre", "1.2.3-beta.1"),
+                "admitted-pre": package_record("admitted-pre", "1.0.0-beta.1"),
+                "required-peer-pre": package_record("required-peer-pre", "1.2.3-beta.1"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "fail", result)
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(
+            blocking,
+            {
+                "leading-zero",
+                "extra-v",
+                "union-junk",
+                "caret-pre",
+                "tilde-pre",
+                "comparator-pre",
+                "wildcard-pre",
+                "required-peer-pre",
+            },
+            result,
+        )
+        self.assertIn("admitted-pre", {item["name"] for item in result["inventory"]["transitive"]}, result)
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": "required-peer-pre",
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+            ],
+            result,
+        )
+
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
         names = {item["name"] for item in result["inventory"]["transitive"]}
