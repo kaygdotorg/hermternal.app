@@ -8,41 +8,33 @@ const screenshotTestSource = readFileSync(
   'utf8'
 );
 
-function bodyForTest(title: string): string {
-  const titleIndex = screenshotTestSource.indexOf(title);
-  if (titleIndex < 0) {
-    throw new Error(`screenshot test title is missing: ${title}`);
-  }
-  const bodyStart = screenshotTestSource.indexOf('\n', titleIndex) + 1;
-  const nextTest = screenshotTestSource.indexOf('\n  it', bodyStart);
-  return screenshotTestSource.slice(bodyStart, nextTest < 0 ? undefined : nextTest);
-}
-
-function captureArgumentBlocks(body: string): string[] {
-  return [...body.matchAll(/captureLiveChatScreenshotIfEnabled\(\{([\s\S]*?)\n\s*\}\)/g)].map(
+function captureArgumentBlocks(source: string): string[] {
+  return [...source.matchAll(/captureLiveChatScreenshotIfEnabled\(\{([\s\S]*?)\n\s*\}\)/g)].map(
     (match) => match[1]
   );
 }
 
 describe('live screenshot proof argument policy', () => {
-  it('keeps the four diagnostic capture calls bound to the complete proof gate', () => {
-    // These browser-prerequisite cases still type-check even when skipped. Keep their
-    // explicit proof binding so route and manifest failures cannot bypass the gate.
-    const cases = [
-      {
-        title: 'pins the route, dimensions, browser inputs, UI state, attestation, and image hash deterministically',
-        calls: 2
-      },
-      {
-        title: 'rejects non-approved routes and dimensions before screenshot bytes exist',
-        calls: 2
-      }
-    ];
+  it('keeps every proof-required capture call bound to the complete proof gate', () => {
+    // Default-off and skipped browser-prerequisite cases still type-check. Scan every
+    // capture call so a future diagnostic path cannot omit the causal proof argument;
+    // only the explicit incomplete-proof rejection case may use FAILED_LIVE_PROOF.
+    const calls = captureArgumentBlocks(screenshotTestSource);
+    const intentionallyIncompleteCalls = calls.filter((call) =>
+      /\bproof:\s*FAILED_LIVE_PROOF\b/.test(call)
+    );
+    const proofRequiredCalls = calls.filter(
+      (call) => !/\bproof:\s*FAILED_LIVE_PROOF\b/.test(call)
+    );
+    const missingCompleteProofCalls = proofRequiredCalls.filter(
+      (call) => !/\bproof:\s*COMPLETE_LIVE_PROOF\b/.test(call)
+    );
 
-    for (const { title, calls: expectedCalls } of cases) {
-      const calls = captureArgumentBlocks(bodyForTest(title));
-      expect(calls).toHaveLength(expectedCalls);
-      expect(calls.every((call) => /\bproof:\s*COMPLETE_LIVE_PROOF\b/.test(call))).toBe(true);
-    }
+    expect(calls).toHaveLength(13);
+    expect(intentionallyIncompleteCalls).toHaveLength(1);
+    expect(
+      missingCompleteProofCalls,
+      'every proof-required diagnostic capture call must pass COMPLETE_LIVE_PROOF'
+    ).toHaveLength(0);
   });
 });
