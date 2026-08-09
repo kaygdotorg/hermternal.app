@@ -61,9 +61,12 @@ swift test
 swift run hermternal-swift-parity --repo-root ../..
 ```
 
-The CLI emits one bounded JSON line. The current registry produces 11 proven
-representative cases and blocked results for pending connection and chat
-coverage. `networkCalls` is always zero and `liveClaim` is always false.
+The CLI emits one bounded JSON line with sorted object keys and canonical case,
+platform, and coverage ordering. A ready report exits zero. A blocked report is
+still emitted as JSON on stdout but exits nonzero; the current host registry is
+expected to return `status: "blocked"` with `errorCode: "c19_validator_blocked"`
+until the authoritative aggregate validator passes. `networkCalls` is always
+zero and `liveClaim` is always false.
 
 ## Exact limitations
 

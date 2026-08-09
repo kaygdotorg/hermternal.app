@@ -43,31 +43,45 @@ private func parseRepositoryRoot() throws -> URL {
     )
 }
 
-private func writeJSON<T: Encodable>(_ value: T, to handle: FileHandle) {
+private func canonicalJSON<T: Encodable>(_ value: T) throws -> Data {
     let encoder = JSONEncoder()
-    encoder.outputFormatting = []
-    do {
-        let data = try encoder.encode(value)
-        handle.write(data)
-        handle.write(Data([0x0A]))
-    } catch {
-        handle.write(Data("{\"ok\":false,\"error\":{\"code\":\"unexpected_failure\",\"message\":\"parity check failed without a contract error\"}}\n".utf8))
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    var data = try encoder.encode(value)
+    data.append(0x0A)
+    guard data.count <= ParityBounds.maxOutputBytes else {
+        throw ContractInputError(
+            code: .malformedInput,
+            message: "parity output exceeds the byte limit"
+        )
     }
+    return data
+}
+
+private func writeCanonical<T: Encodable>(_ value: T, to handle: FileHandle) -> Bool {
+    guard let data = try? canonicalJSON(value) else { return false }
+    handle.write(data)
+    return true
+}
+
+private func fail(_ failure: Failure) -> Never {
+    let fallback = Data("{\"error\":{\"code\":\"unexpected_failure\",\"message\":\"parity check failed without a contract error\"},\"ok\":false}\n".utf8)
+    if !writeCanonical(failure, to: FileHandle.standardError) {
+        FileHandle.standardError.write(fallback)
+    }
+    exit(1)
 }
 
 do {
     let report = try runParity(at: try parseRepositoryRoot())
-    writeJSON(report, to: FileHandle.standardOutput)
+    guard writeCanonical(report, to: FileHandle.standardOutput) else {
+        fail(Failure(error: .init(code: "output_bound", message: "parity output exceeds the byte limit")))
+    }
+    if !report.ok {
+        exit(1)
+    }
+    exit(0)
 } catch let error as ContractInputError {
-    writeJSON(
-        Failure(error: .init(code: error.code.rawValue, message: error.message)),
-        to: FileHandle.standardError
-    )
-    exit(1)
+    fail(Failure(error: .init(code: error.code.rawValue, message: error.message)))
 } catch {
-    writeJSON(
-        Failure(error: .init(code: "unexpected_failure", message: "parity check failed without a contract error")),
-        to: FileHandle.standardError
-    )
-    exit(1)
+    fail(Failure(error: .init(code: "unexpected_failure", message: "parity check failed without a contract error")))
 }

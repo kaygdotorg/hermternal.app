@@ -306,6 +306,58 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testParityReportOrderingIsCanonical() throws {
+        let report = try runParity(at: repoRoot, preflight: .verified(.passed))
+        XCTAssertEqual(report.blockedCoverageIDs, report.blockedCoverageIDs.sorted())
+        let caseKeys = report.cases.map { "\($0.family.rawValue)|\($0.coverageID)|\($0.caseID)" }
+        XCTAssertEqual(caseKeys, caseKeys.sorted())
+        for result in report.cases {
+            XCTAssertEqual(result.platforms.map(\.rawValue), result.platforms.map(\.rawValue).sorted())
+        }
+    }
+
+#if os(macOS)
+    func testCLIBlockedStatusIsNonzeroAndOutputIsStable() throws {
+        let first = try runCLI()
+        let second = try runCLI()
+        XCTAssertEqual(first.status, 1)
+        XCTAssertEqual(second.status, 1)
+        XCTAssertEqual(first.stdout, second.stdout)
+        XCTAssertTrue(first.stderr.isEmpty)
+        XCTAssertLessThanOrEqual(Data(first.stdout.utf8).count, ParityBounds.maxOutputBytes)
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(first.stdout.utf8), options: []) as? [String: Any])
+        XCTAssertEqual(value["ok"] as? Bool, false)
+        XCTAssertEqual(value["status"] as? String, "blocked")
+        XCTAssertEqual(value["errorCode"] as? String, "c19_validator_blocked")
+        XCTAssertEqual(value["readyCaseCount"] as? Int, 0)
+        XCTAssertEqual(value["liveClaim"] as? Bool, false)
+    }
+
+    private func runCLI() throws -> (status: Int32, stdout: String, stderr: String) {
+        let candidates = [
+            packageRoot.appendingPathComponent(".build/debug/hermternal-swift-parity"),
+            packageRoot.appendingPathComponent(".build/release/hermternal-swift-parity")
+        ]
+        guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            throw XCTSkip("HermternalSwiftParityCLI executable is not built")
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--repo-root", repoRoot.path]
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+        return (
+            process.terminationStatus,
+            String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
+            String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        )
+    }
+#endif
+
     private func assertInputCode(
         _ expected: ContractInputCode,
         operation: () throws -> Void,

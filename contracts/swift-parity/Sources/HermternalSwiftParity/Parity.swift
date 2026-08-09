@@ -1479,6 +1479,7 @@ private func runRepresentative(
     representative: Representative
 ) throws -> [ParityCaseResult] {
     let coverage = try coverageByID(registry, representative.coverageID)
+    let orderedPlatforms = coverage.platforms.sorted { $0.rawValue < $1.rawValue }
     if coverage.status != .ready {
         return representative.caseIDs.map { caseID in
             ParityCaseResult(
@@ -1486,7 +1487,7 @@ private func runRepresentative(
                 coverageID: representative.coverageID,
                 caseID: caseID,
                 status: "blocked",
-                platforms: coverage.platforms
+                platforms: orderedPlatforms
             )
         }
     }
@@ -1531,7 +1532,7 @@ private func runRepresentative(
                     coverageID: representative.coverageID,
                     caseID: caseID,
                     status: "proven",
-                    platforms: coverage.platforms,
+                    platforms: orderedPlatforms,
                     webDecision: web.decision,
                     appleDecision: "blocked_platform"
                 )
@@ -1548,7 +1549,7 @@ private func runRepresentative(
                 coverageID: representative.coverageID,
                 caseID: caseID,
                 status: "proven",
-                platforms: coverage.platforms,
+                platforms: orderedPlatforms,
                 webDecision: web.decision,
                 appleDecision: apple.decision
             )
@@ -1770,9 +1771,15 @@ public func runParity(
         ))
     }
     let compatibility = try loadCompatibilityRecord(at: repoRoot, registry: registry)
+    // Canonical ordering keeps bounded reports stable across registry traversal changes.
+    let orderedResults = results.sorted {
+        ($0.family.rawValue, $0.coverageID, $0.caseID) <
+            ($1.family.rawValue, $1.coverageID, $1.caseID)
+    }
     let blockedCoverageIDs = registry.coverage
         .filter { $0.status != .ready }
         .map(\.id)
+        .sorted()
 
     return ParityReport(
         ok: true,
@@ -1782,9 +1789,9 @@ public func runParity(
         syntheticOnly: true,
         liveClaim: false,
         networkCalls: 0,
-        readyCaseCount: results.filter { $0.status == "proven" }.count,
+        readyCaseCount: orderedResults.filter { $0.status == "proven" }.count,
         blockedCoverageIDs: blockedCoverageIDs,
-        cases: results,
+        cases: orderedResults,
         compatibility: compatibility
     )
 }
