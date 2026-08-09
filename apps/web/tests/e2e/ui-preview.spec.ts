@@ -282,22 +282,37 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(page.locator('.section-note').first()).toHaveText('send');
 });
 
-test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {
-  for (const width of [760, 761]) {
+test('Paper width families keep the compact toolbar through 1407px without a tabbed desktop replacement', async ({ page }) => {
+  for (const width of [760, 761, 1407, 1408]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
     const workspace = page.locator('.workspace-preview');
     expect((await workspace.boundingBox())?.width).toBe(width);
 
-    if (width === 760) {
+    if (width <= 1407) {
       await expect(workspace.locator('.mobile-toolbar')).toBeVisible();
       await expect(workspace.locator('.conversation-header')).toBeHidden();
+      await expect(workspace.locator('.sidebar')).toBeHidden();
+      await expect(workspace.locator('.desktop-inspector')).toBeHidden();
+      if (width > 760) {
+        // The intermediate container family keeps the conversation capped at
+        // the approved 720px width while the secondary surfaces use drawers.
+        expect((await workspace.locator('.conversation-panel').boundingBox())?.width).toBeLessThanOrEqual(720);
+      }
+      if (width === 760) await expect(workspace.locator('.workspace-mobile-status-bar')).toBeVisible();
+      else await expect(workspace.locator('.workspace-mobile-status-bar')).toBeHidden();
     } else {
       await expect(workspace.locator('.mobile-toolbar')).toBeHidden();
       await expect(workspace.locator('.conversation-header')).toBeVisible();
       await expect(workspace.locator('.sidebar')).toBeVisible();
+      await expect(workspace.locator('.desktop-inspector')).toBeVisible();
+      const conversationWidth = (await workspace.locator('.conversation-panel').boundingBox())?.width ?? 0;
+      expect(conversationWidth).toBeGreaterThanOrEqual(688);
+      expect(conversationWidth).toBeLessThanOrEqual(720);
     }
+
+    await expect(workspace.getByRole('tab', { name: /Chat|Terminal/ })).toHaveCount(0);
   }
 });
 
