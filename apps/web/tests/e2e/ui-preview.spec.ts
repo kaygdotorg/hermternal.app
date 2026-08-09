@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { createServer } from 'node:net';
 import type { Readable } from 'node:stream';
@@ -16,10 +17,130 @@ import {
 
 let uiPreviewOrigin = '';
 let previewProcess: ChildProcessByStdio<null, Readable, Readable> | undefined;
-let previewDiagnostics = '';
+
+type PreviewDiagnosticCode =
+  | 'preview-process-error'
+  | 'preview-process-exit'
+  | 'preview-readiness-http-failure'
+  | 'preview-readiness-fetch-failure'
+  | 'preview-readiness-timeout';
+
+type PreviewDiagnosticStream = 'stdout' | 'stderr';
+
+type PreviewDiagnostics = {
+  lastErrorCode: PreviewDiagnosticCode | null;
+  stdoutChunkCount: number;
+  stdoutByteCount: number;
+  stderrChunkCount: number;
+  stderrByteCount: number;
+  processErrorCount: number;
+  processExitCount: number;
+  processExitCode: number | null;
+  processTerminatedBySignal: boolean;
+  readinessHttpFailureCount: number;
+  readinessHttpStatus: number | null;
+  readinessFetchFailureCount: number;
+};
+
+const MAX_PREVIEW_DIAGNOSTIC_CHUNKS = 1_024;
+const MAX_PREVIEW_DIAGNOSTIC_BYTES = 64 * 1_024;
+
+function createPreviewDiagnostics(): PreviewDiagnostics {
+  return {
+    lastErrorCode: null,
+    stdoutChunkCount: 0,
+    stdoutByteCount: 0,
+    stderrChunkCount: 0,
+    stderrByteCount: 0,
+    processErrorCount: 0,
+    processExitCount: 0,
+    processExitCode: null,
+    processTerminatedBySignal: false,
+    readinessHttpFailureCount: 0,
+    readinessHttpStatus: null,
+    readinessFetchFailureCount: 0
+  };
+}
+
+function boundedIncrement(value: number, limit: number): number {
+  return Math.min(limit, value + 1);
+}
+
+function boundedByteCount(value: number, amount: number): number {
+  if (!Number.isSafeInteger(amount) || amount < 0) return value;
+  return Math.min(MAX_PREVIEW_DIAGNOSTIC_BYTES, value + amount);
+}
+
+function recordPreviewOutput(
+  diagnostics: PreviewDiagnostics,
+  stream: PreviewDiagnosticStream,
+  chunk: Buffer
+): void {
+  if (stream === 'stdout') {
+    diagnostics.stdoutChunkCount = boundedIncrement(diagnostics.stdoutChunkCount, MAX_PREVIEW_DIAGNOSTIC_CHUNKS);
+    diagnostics.stdoutByteCount = boundedByteCount(diagnostics.stdoutByteCount, chunk.byteLength);
+    return;
+  }
+  diagnostics.stderrChunkCount = boundedIncrement(diagnostics.stderrChunkCount, MAX_PREVIEW_DIAGNOSTIC_CHUNKS);
+  diagnostics.stderrByteCount = boundedByteCount(diagnostics.stderrByteCount, chunk.byteLength);
+}
+
+function recordPreviewProcessError(diagnostics: PreviewDiagnostics, _rawError: unknown): void {
+  // Deliberately ignore the raw error object. Its message, stack, and cause may
+  // contain arbitrary URLs, headers, payloads, or credential-adjacent values.
+  diagnostics.lastErrorCode = 'preview-process-error';
+  diagnostics.processErrorCount = boundedIncrement(diagnostics.processErrorCount, MAX_PREVIEW_DIAGNOSTIC_CHUNKS);
+}
+
+function recordPreviewProcessExit(
+  diagnostics: PreviewDiagnostics,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): void {
+  diagnostics.lastErrorCode = 'preview-process-exit';
+  diagnostics.processExitCount = boundedIncrement(diagnostics.processExitCount, MAX_PREVIEW_DIAGNOSTIC_CHUNKS);
+  diagnostics.processExitCode = Number.isSafeInteger(code) ? code : null;
+  diagnostics.processTerminatedBySignal = signal !== null;
+}
+
+function recordPreviewReadinessHttpFailure(diagnostics: PreviewDiagnostics, status: number): void {
+  diagnostics.lastErrorCode = 'preview-readiness-http-failure';
+  diagnostics.readinessHttpFailureCount = boundedIncrement(
+    diagnostics.readinessHttpFailureCount,
+    MAX_PREVIEW_DIAGNOSTIC_CHUNKS
+  );
+  diagnostics.readinessHttpStatus = Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+function recordPreviewReadinessFetchFailure(diagnostics: PreviewDiagnostics): void {
+  diagnostics.lastErrorCode = 'preview-readiness-fetch-failure';
+  diagnostics.readinessFetchFailureCount = boundedIncrement(
+    diagnostics.readinessFetchFailureCount,
+    MAX_PREVIEW_DIAGNOSTIC_CHUNKS
+  );
+}
+
+function snapshotPreviewDiagnostics(diagnostics: PreviewDiagnostics): PreviewDiagnostics {
+  return { ...diagnostics };
+}
+
+function createPreviewDiagnosticError(code: PreviewDiagnosticCode, diagnostics: PreviewDiagnostics): Error {
+  const snapshot = snapshotPreviewDiagnostics(diagnostics);
+  return new Error(
+    `UI preview ${code}; stdoutChunks=${snapshot.stdoutChunkCount}; stdoutBytes=${snapshot.stdoutByteCount}; ` +
+      `stderrChunks=${snapshot.stderrChunkCount}; stderrBytes=${snapshot.stderrByteCount}; ` +
+      `processErrors=${snapshot.processErrorCount}; processExits=${snapshot.processExitCount}; ` +
+      `exitCode=${snapshot.processExitCode ?? 'null'}; terminatedBySignal=${snapshot.processTerminatedBySignal}; ` +
+      `httpFailures=${snapshot.readinessHttpFailureCount}; httpStatus=${snapshot.readinessHttpStatus ?? 'null'}; ` +
+      `fetchFailures=${snapshot.readinessFetchFailureCount}`
+  );
+}
+
+let previewDiagnostics = createPreviewDiagnostics();
 let previewLifecycleHandlers:
   | {
-      collectDiagnostics: (chunk: Buffer) => void;
+      collectStdoutDiagnostics: (chunk: Buffer) => void;
+      collectStderrDiagnostics: (chunk: Buffer) => void;
       onError: (error: Error) => void;
       onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
     }
@@ -28,7 +149,7 @@ let previewLifecycleHandlers:
 async function reservePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', () => reject(new Error('UI preview port reservation failed.')));
     server.listen(0, '127.0.0.1', () => resolve());
   });
 
@@ -40,32 +161,34 @@ async function reservePort(): Promise<number> {
 
   const port = address.port;
   await new Promise<void>((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
+    server.close((error) => (error ? reject(new Error('UI preview port release failed.')) : resolve()));
   });
   return port;
 }
 
 async function waitForPreview(url: string): Promise<void> {
   const deadline = Date.now() + 15_000;
-  let lastFailure = 'no response';
 
   while (Date.now() < deadline) {
     if (previewProcess?.exitCode !== null && previewProcess?.exitCode !== undefined) {
-      throw new Error(`The isolated UI preview exited before readiness: ${previewDiagnostics}`);
+      throw createPreviewDiagnosticError('preview-process-exit', previewDiagnostics);
     }
 
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     // Bound every fetch independently so a hung preview cannot consume time
-    // past the shared readiness deadline or mask a process failure.
+    // past the shared readiness deadline or mask a process failure. The URL is
+    // used only for the request and never enters retained diagnostics.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), remainingMs);
     try {
       const response = await fetch(url, { redirect: 'manual', signal: controller.signal });
       if (response.status >= 200 && response.status < 400) return;
-      lastFailure = `HTTP ${response.status}`;
-    } catch (error) {
-      lastFailure = error instanceof Error ? error.message : String(error);
+      recordPreviewReadinessHttpFailure(previewDiagnostics, response.status);
+    } catch {
+      // Fetch errors can contain URLs, headers, or payload-adjacent details;
+      // retain only a bounded counter and fixed failure code.
+      recordPreviewReadinessFetchFailure(previewDiagnostics);
     } finally {
       clearTimeout(timeout);
     }
@@ -75,7 +198,7 @@ async function waitForPreview(url: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
-  throw new Error(`The isolated UI preview did not become ready: ${lastFailure}. ${previewDiagnostics}`);
+  throw createPreviewDiagnosticError('preview-readiness-timeout', previewDiagnostics);
 }
 
 function previewUrl(path: string): string {
@@ -495,33 +618,41 @@ async function restorePreviewIndexedDbSpy(page: Page, globalName: string): Promi
 test.beforeAll(async () => {
   const port = await reservePort();
   uiPreviewOrigin = `http://127.0.0.1:${port}`;
-  previewDiagnostics = '';
+  previewDiagnostics = createPreviewDiagnostics();
   const serverProcess = spawn('bun', ['run', 'preview', '--', '--host', '127.0.0.1', '--port', String(port)], {
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe']
   });
   previewProcess = serverProcess;
 
-  const collectDiagnostics = (chunk: Buffer): void => {
-    previewDiagnostics = `${previewDiagnostics}${chunk.toString()}`.slice(-4_000);
+  const collectStdoutDiagnostics = (chunk: Buffer): void => {
+    recordPreviewOutput(previewDiagnostics, 'stdout', chunk);
+  };
+  const collectStderrDiagnostics = (chunk: Buffer): void => {
+    recordPreviewOutput(previewDiagnostics, 'stderr', chunk);
   };
   let rejectProcessFailure: (error: Error) => void = () => undefined;
   const processFailure = new Promise<never>((_, reject) => {
     rejectProcessFailure = reject;
   });
   const onProcessError = (error: Error): void => {
-    collectDiagnostics(Buffer.from(`\n[preview process error] ${error.message}\n`));
-    rejectProcessFailure(new Error(`The isolated UI preview failed before readiness: ${previewDiagnostics}`));
+    recordPreviewProcessError(previewDiagnostics, error);
+    rejectProcessFailure(createPreviewDiagnosticError('preview-process-error', previewDiagnostics));
   };
   const onProcessExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-    collectDiagnostics(Buffer.from(`\n[preview process exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`));
-    rejectProcessFailure(new Error(`The isolated UI preview exited before readiness: ${previewDiagnostics}`));
+    recordPreviewProcessExit(previewDiagnostics, code, signal);
+    rejectProcessFailure(createPreviewDiagnosticError('preview-process-exit', previewDiagnostics));
   };
-  serverProcess.stdout.on('data', collectDiagnostics);
-  serverProcess.stderr.on('data', collectDiagnostics);
+  serverProcess.stdout.on('data', collectStdoutDiagnostics);
+  serverProcess.stderr.on('data', collectStderrDiagnostics);
   serverProcess.once('error', onProcessError);
   serverProcess.once('exit', onProcessExit);
-  previewLifecycleHandlers = { collectDiagnostics, onError: onProcessError, onExit: onProcessExit };
+  previewLifecycleHandlers = {
+    collectStdoutDiagnostics,
+    collectStderrDiagnostics,
+    onError: onProcessError,
+    onExit: onProcessExit
+  };
 
   await Promise.race([waitForPreview(previewUrl('/ui-preview')), processFailure]);
 });
@@ -534,8 +665,8 @@ test.afterAll(async () => {
   if (!processToStop) return;
 
   if (lifecycleHandlers) {
-    processToStop.stdout.off('data', lifecycleHandlers.collectDiagnostics);
-    processToStop.stderr.off('data', lifecycleHandlers.collectDiagnostics);
+    processToStop.stdout.off('data', lifecycleHandlers.collectStdoutDiagnostics);
+    processToStop.stderr.off('data', lifecycleHandlers.collectStderrDiagnostics);
     processToStop.off('error', lifecycleHandlers.onError);
     processToStop.off('exit', lifecycleHandlers.onExit);
   }
@@ -575,6 +706,52 @@ test.afterAll(async () => {
     // Best-effort escalation when graceful termination did not complete.
   }
   await forcedExit;
+});
+
+test('preview diagnostics discard generated secret markers from child output and errors', () => {
+  const secretMarker = `preview-secret-${randomUUID()}`;
+  const diagnostics = createPreviewDiagnostics();
+
+  // Simulate hostile child output containing URL, header, payload, and
+  // credential-adjacent markers. The collector retains only scalar counts.
+  recordPreviewOutput(
+    diagnostics,
+    'stdout',
+    Buffer.from(`url=https://preview.invalid/${secretMarker} authorization=${secretMarker}`)
+  );
+  recordPreviewOutput(
+    diagnostics,
+    'stderr',
+    Buffer.from(`payload=${secretMarker} Error: ${secretMarker}`)
+  );
+  recordPreviewProcessError(diagnostics, new Error(secretMarker));
+
+  let thrownDiagnostic: unknown;
+  try {
+    throw createPreviewDiagnosticError('preview-process-error', diagnostics);
+  } catch (error) {
+    thrownDiagnostic = error;
+  }
+
+  const thrownText =
+    thrownDiagnostic instanceof Error
+      ? `${thrownDiagnostic.name}\n${thrownDiagnostic.message}\n${thrownDiagnostic.stack ?? ''}`
+      : String(thrownDiagnostic);
+  const retainedCandidateArtifacts = JSON.stringify({
+    diagnostics: snapshotPreviewDiagnostics(diagnostics),
+    thrownDiagnostic: thrownDiagnostic instanceof Error
+      ? { name: thrownDiagnostic.name, message: thrownDiagnostic.message, stack: thrownDiagnostic.stack ?? null }
+      : null
+  });
+
+  expect(thrownText).not.toContain(secretMarker);
+  expect(retainedCandidateArtifacts).not.toContain(secretMarker);
+  expect(diagnostics.lastErrorCode).toBe('preview-process-error');
+  expect(diagnostics.stdoutChunkCount).toBe(1);
+  expect(diagnostics.stderrChunkCount).toBe(1);
+  expect(diagnostics.processErrorCount).toBe(1);
+  expect(diagnostics.stdoutByteCount).toBeGreaterThan(0);
+  expect(diagnostics.stderrByteCount).toBeGreaterThan(0);
 });
 
 for (const viewport of [
