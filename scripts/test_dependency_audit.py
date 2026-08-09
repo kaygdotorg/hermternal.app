@@ -192,6 +192,51 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("beta", {item["name"] for item in result["inventory"]["transitive"]}, result)
         self.assertEqual(result["summary"]["transitive"], 1, result)
 
+    def test_unsatisfied_transitive_and_peer_resolution_is_blocking(self) -> None:
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record(
+                    "alpha",
+                    "1.0.0",
+                    {
+                        "dependencies": {"beta": "^2.0.0"},
+                        "peerDependencies": {"peer": "workspace:*"},
+                    },
+                ),
+                "beta": package_record("beta", "1.0.0"),
+                "peer": package_record("peer", "1.0.0"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "fail", result)
+        blocking = [item for item in result["findings"] if item["severity"] == "blocking"]
+        self.assertEqual(
+            {(item["code"], item.get("package")) for item in blocking},
+            {("package-resolution-missing", "beta"), ("package-resolution-missing", "peer")},
+            result,
+        )
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": "peer",
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+            ],
+            result,
+        )
+
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
         names = {item["name"] for item in result["inventory"]["transitive"]}

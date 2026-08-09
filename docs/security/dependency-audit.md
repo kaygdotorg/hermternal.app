@@ -65,20 +65,22 @@ The report separates:
 - `lockfile.unreachable`: lock records not reached from either root.
 
 Dependency, optional-dependency, and peer-dependency edges are counted. Missing
-ordinary or optional edges are blocking. Peer dependencies can be supplied by a
-host and are therefore retained as explicit `peer_dependency_gaps` metadata
-rather than being presented as a package vulnerability. Exact manifest versions
-and exact `npm:` aliases are pinned. Every lock record must resolve to an exact
-semantic version and carry a valid `sha1`, `sha256`, `sha384`, or `sha512`
-integrity string. The harness reports integrity values; it does not recompute
-registry payload hashes because package payloads are intentionally outside this
-offline input scope.
+ordinary or optional edges are blocking. A required peer edge is also blocking
+when no local version satisfies it or when its specification is unsupported or
+malformed; an explicitly optional peer may remain absent and is retained in the
+`peer_dependency_gaps` diagnostics. Exact manifest versions and exact `npm:`
+aliases are pinned. Every lock record must resolve to an exact semantic version
+and carry a valid `sha1`, `sha256`, `sha384`, or `sha512` integrity string. The
+harness reports integrity values; it does not recompute registry payload hashes
+because package payloads are intentionally outside this offline input scope.
 
 Bun v1 virtual keys such as
 `@testing-library/dom/aria-query` and `data-urls/whatwg-url` are supported.
 When several local versions satisfy a range, a parent-scoped virtual key wins;
-otherwise the highest locally resolved semantic version is selected. Unsupported
-or ambiguous shapes fail closed rather than inventing a network resolution.
+otherwise the highest locally resolved semantic version is selected. The matcher
+never falls back to an unmatched local version: unsupported, malformed, or
+unsatisfied transitive and peer specifications fail closed. Unsupported or
+ambiguous shapes fail closed rather than inventing a network resolution.
 
 ## Current origin/dev baseline
 

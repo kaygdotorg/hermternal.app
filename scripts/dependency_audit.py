@@ -412,7 +412,7 @@ def _numeric_version(value: str) -> Optional[tuple[int, int, int]]:
 
 
 def _range_version(value: str) -> tuple[Optional[tuple[int, int, int]], tuple[bool, bool, bool]]:
-    token = value.strip().lstrip("v")
+    token = value.strip().lstrip("v").split("-", 1)[0].split("+", 1)[0]
     parts = token.split(".")
     if len(parts) > 3:
         raise ValueError("range-version")
@@ -472,6 +472,7 @@ def _range_matches(version: str, specification: str) -> bool:
                     return True
                 continue
             if expression.startswith((">", "<")):
+                expression = re.sub(r"(>=|<=|>|<)\s+", r"\1", expression)
                 comparisons = expression.split()
                 matched = True
                 for comparison in comparisons:
@@ -513,9 +514,10 @@ def _resolve_package(
     if expected_version is not None:
         candidates = [record for record in candidates if record.version == expected_version]
     else:
-        matching = [record for record in candidates if _range_matches(record.version, spec)]
-        if matching:
-            candidates = matching
+        # An unsupported or unsatisfied range is not evidence for the highest
+        # local version. An empty match must remain empty so resolution fails
+        # closed instead of silently inventing a package-manager decision.
+        candidates = [record for record in candidates if _range_matches(record.version, spec)]
     # Bun records a parent-scoped virtual key when a range resolves to a
     # version different from the workspace's top-level copy. Prefer that key
     # before applying the deterministic highest-version choice below.
@@ -778,16 +780,17 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
                         parent_key=current.key,
                     )
                 except AuditError as error:
+                    is_optional_peer = field == "peerDependencies" and dependency_name in current.optional_peers
                     if field == "peerDependencies":
                         peer_gaps.append(
                             {
                                 "package": current.key,
                                 "dependency": dependency_name,
-                                "optional": dependency_name in current.optional_peers,
+                                "optional": is_optional_peer,
                                 "status": error.code,
                             }
                         )
-                    else:
+                    if not is_optional_peer:
                         findings.append(_finding(error.code, "blocking", package=dependency_name))
                     continue
                 target_roles = reachable.setdefault(target.key, set())
