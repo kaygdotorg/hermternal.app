@@ -298,6 +298,27 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
     }
   });
 
+  it("binds the reviewed source manifest to exact Git objects", () => {
+    const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+    const sourceRevision = REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceRevision;
+    expect(git(repoRoot, ["rev-parse", `${sourceRevision}^{tree}`])).toBe(
+      REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceTree,
+    );
+    expect(
+      sourceBlobsForRevision(
+        sourceRevision,
+        REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceBlobs.map((entry) => entry.path),
+      ),
+    ).toEqual(REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceBlobs);
+
+    const trustedHead = git(repoRoot, ["rev-parse", "HEAD"]);
+    for (const entry of REVIEWED_PTY_BENCHMARK_TRUST_PIN.trustedCode) {
+      expect(git(repoRoot, ["rev-parse", `${trustedHead}:${entry.path}`])).toBe(
+        entry.gitBlobSha,
+      );
+    }
+  });
+
   it("keeps intentionally stale checked-in evidence out of the positive path", () => {
     expect(() => validatePtyBenchmarkFile(CHECKED_IN_RECONNECT_ARTIFACT)).toThrow(
       /reviewed PTY source pin|followed only by evidence changes|schema-specific contract|reviewed metric contract/iu,
