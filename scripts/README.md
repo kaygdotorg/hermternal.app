@@ -382,13 +382,18 @@ silently claim parity. Static-tree and Git trust boundaries have explicit
 resource and special-file limits: static provenance accepts only bounded
 regular-file data, rejects symlinks and other special files, and applies one
 monotonic deadline from root resolution through the final digest return. Git
-provenance uses timed commands with bounded output and diagnostics. Its local
-metadata scan rejects nested symlink escapes, include/includeIf directives,
-and every promisor or partial-clone selector, including key-only booleans and
-active `config.worktree`; external Git configuration is disabled. A closed
-stdout/stderr pair that leaves Git running is normalized to the same bounded
-proof timeout while the process group is terminated and reaped. Any limit,
-identity, malformed-output, or command failure fails closed. Renderer path
+provenance uses timed commands with bounded output and diagnostics. Its local metadata scan rejects
+nested symlink escapes, include/includeIf directives, and every promisor or
+partial-clone selector, including key-only booleans and active
+`config.worktree`; external Git configuration is disabled. Descriptor-backed
+identity and bounded-byte pins cover config, worktree/configuration pointers,
+packed refs, forbidden metadata, and objects/refs/pack directories, including
+explicit absence pins. Every provenance command asserts those pins immediately
+before and after execution and fails closed on any swap. A closed stdout/stderr
+pair that leaves Git running is normalized to the same bounded proof timeout;
+a direct-child success with a live descendant group is rejected after bounded
+TERM/KILL cleanup and reaping. Any limit, identity, malformed-output, or
+command failure fails closed. Renderer path
 inputs are literal absolute filesystem paths; Caddy placeholders are rejected
 rather than retained as dynamic configuration.
 
