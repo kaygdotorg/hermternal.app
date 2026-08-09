@@ -894,11 +894,13 @@ describe('deterministic live Chat screenshot capture', () => {
     const first = await captureLiveChatScreenshotIfEnabled({
       page: fakePage(),
       uiState: 'ready',
+      proof: COMPLETE_LIVE_PROOF,
       environment: captureEnvironment()
     });
     const second = await captureLiveChatScreenshotIfEnabled({
       page: fakePage(),
       uiState: 'ready',
+      proof: COMPLETE_LIVE_PROOF,
       environment: captureEnvironment()
     });
 
@@ -951,6 +953,7 @@ describe('deterministic live Chat screenshot capture', () => {
       captureLiveChatScreenshotIfEnabled({
         page: wrongRoute,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: captureEnvironment()
       })
     ).rejects.toThrow('approved root route');
@@ -962,6 +965,7 @@ describe('deterministic live Chat screenshot capture', () => {
       captureLiveChatScreenshotIfEnabled({
         page: wrongViewport,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: captureEnvironment()
       })
     ).rejects.toThrow('1440x960');
