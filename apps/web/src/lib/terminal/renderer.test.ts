@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { PassThrough } from 'node:stream';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -428,6 +429,7 @@ const DEPENDENCY_ESCALATION_DELAY_MS = 250;
 const DEPENDENCY_KILL_GRACE_MS = 5_000;
 const BENCHMARK_SHORT_TOTAL_TIMEOUT_MS = DEPENDENCY_KILL_GRACE_MS + 2_000;
 const EXACT_PARENT_DEADLINE_REGRESSION_SHA = '5559e9ad4cf78debc98e8935c47cdc956535f96c';
+const EXACT_PARENT_STREAM_CLEANUP_REGRESSION_SHA = '9512f7ca4a1c99fd1a87b947617a3a1744d8674a';
 const BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const BUN_REGISTRY_BLACKHOLE = 'http://127.0.0.1:1';
 const OWNED_PROCESS_SUPERVISOR_SCRIPT = String.raw`
@@ -597,6 +599,82 @@ async function waitForProcessGroupGone(
   return true;
 }
 
+type OwnedProcessStream = NodeJS.ReadableStream | NodeJS.WritableStream;
+
+function waitForOwnedStreamEvent(
+  stream: OwnedProcessStream | null,
+  event: 'end' | 'close'
+): Promise<void> {
+  if (!stream) return Promise.resolve();
+  const state = stream as OwnedProcessStream & {
+    destroyed?: boolean;
+    readableEnded?: boolean;
+  };
+  if (state.destroyed || (event === 'end' && state.readableEnded)) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const observeError = (): void => {
+      if (event === 'end') settle();
+    };
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      stream.removeListener('end', settle);
+      stream.removeListener('close', settle);
+      stream.removeListener('error', observeError);
+      resolve();
+    };
+    stream.once(event, settle);
+    stream.once('error', observeError);
+    if (event === 'end') stream.once('close', settle);
+  });
+}
+
+function waitForOwnedChildClose(child: ChildProcess): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const settle = (): void => {
+      child.removeListener('close', settle);
+      child.removeListener('error', observeError);
+      resolve();
+    };
+    const observeError = (): void => undefined;
+    child.once('close', settle);
+    // A spawn error has no useful process to close, but still needs a listener
+    // so Node does not report the error as an unhandled event. The descriptor
+    // wait remains bounded until the corresponding close or total deadline.
+    child.once('error', observeError);
+  });
+}
+
+function destroyOwnedProcessDescriptors(child: ChildProcess): void {
+  for (const descriptor of [child.stdin, child.stdout, child.stderr, child.stdio[3]]) {
+    const destroy = (descriptor as { destroy?: () => void } | null)?.destroy;
+    destroy?.call(descriptor);
+  }
+}
+
+async function waitForOwnedProcessDescriptors(
+  completion: Promise<void>,
+  child: ChildProcess,
+  deadline: number
+): Promise<boolean> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    destroyOwnedProcessDescriptors(child);
+    return false;
+  }
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const completed = await Promise.race([
+    completion.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(false), remaining);
+    })
+  ]);
+  if (timeoutHandle) clearTimeout(timeoutHandle);
+  if (!completed) destroyOwnedProcessDescriptors(child);
+  return completed;
+}
+
 type OwnedProcessOptions = Readonly<{
   command: string;
   argumentsList: readonly string[];
@@ -638,6 +716,7 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
       else resolve();
     };
 
+    let finishAfterDescriptorCleanup: (error?: Error) => void = (error) => finish(error);
     let beginCleanup: (error?: Error) => void = () => undefined;
     const observeOutput = (stream: NodeJS.ReadableStream | null): void => {
       stream?.on('data', (chunk: unknown) => {
@@ -670,6 +749,25 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
     observeOutput(child.stderr);
 
     const statusStream = child.stdio[3] as NodeJS.ReadableStream | null;
+    const processDescriptorsClosed = Promise.all([
+      waitForOwnedChildClose(child),
+      waitForOwnedStreamEvent(child.stdin, 'close'),
+      waitForOwnedStreamEvent(child.stdout, 'end'),
+      waitForOwnedStreamEvent(child.stdout, 'close'),
+      waitForOwnedStreamEvent(child.stderr, 'end'),
+      waitForOwnedStreamEvent(child.stderr, 'close'),
+      waitForOwnedStreamEvent(statusStream, 'end'),
+      waitForOwnedStreamEvent(statusStream, 'close')
+    ]).then(() => undefined);
+    finishAfterDescriptorCleanup = (error?: Error): void => {
+      void waitForOwnedProcessDescriptors(
+        processDescriptorsClosed,
+        child,
+        totalDeadline
+      ).then((descriptorsClosed) => {
+        finish(descriptorsClosed ? error : new Error('benchmark subprocess process-group cleanup timed out'));
+      });
+    };
     statusStream?.on('data', (chunk: unknown) => {
       statusBuffer += Buffer.isBuffer(chunk)
         ? chunk.toString('utf8')
@@ -703,34 +801,34 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
       if (processTimeoutHandle) clearTimeout(processTimeoutHandle);
       const ownedGroupId = groupId;
       if (ownedGroupId === undefined) {
-        finish(error ?? new Error(options.failureMessage));
+        finishAfterDescriptorCleanup(error ?? new Error(options.failureMessage));
         return;
       }
       if (!isOwnedProcessLeaderAlive(child, ownedGroupId)) {
-        finish(groupAlive(ownedGroupId)
+        finishAfterDescriptorCleanup(groupAlive(ownedGroupId)
           ? new Error('benchmark subprocess process-group ownership was lost')
           : error);
         return;
       }
       if (!signalOwnedProcessGroup(child, ownedGroupId, 'SIGTERM')) {
-        finish(new Error('benchmark subprocess process-group ownership was lost'));
+        finishAfterDescriptorCleanup(new Error('benchmark subprocess process-group ownership was lost'));
         return;
       }
       const remaining = Math.max(0, totalDeadline - Date.now());
       escalationHandle = setTimeout(() => {
         escalationHandle = undefined;
         if (!isOwnedProcessLeaderAlive(child, ownedGroupId)) {
-          finish(groupAlive(ownedGroupId)
+          finishAfterDescriptorCleanup(groupAlive(ownedGroupId)
             ? new Error('benchmark subprocess process-group ownership was lost')
             : error);
           return;
         }
         if (!signalOwnedProcessGroup(child, ownedGroupId, 'SIGKILL')) {
-          finish(new Error('benchmark subprocess process-group ownership was lost'));
+          finishAfterDescriptorCleanup(new Error('benchmark subprocess process-group ownership was lost'));
           return;
         }
         void waitForProcessGroupGone(ownedGroupId, totalDeadline, groupAlive).then((cleaned) => {
-          finish(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));
+          finishAfterDescriptorCleanup(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));
         });
       }, Math.min(DEPENDENCY_ESCALATION_DELAY_MS, remaining));
     };
@@ -2705,6 +2803,66 @@ setInterval(() => undefined, 1_000);
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('bounds inherited stream cleanup after the exact parent resolves on group disappearance', async () => {
+    const parentSource = execFileSync(
+      'git',
+      ['-C', resolve(process.cwd(), '../..'), 'show', `${EXACT_PARENT_STREAM_CLEANUP_REGRESSION_SHA}:apps/web/src/lib/terminal/renderer.test.ts`],
+      { encoding: 'utf8' }
+    );
+    expect(parentSource).toContain(
+      "finish(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));"
+    );
+    expect(parentSource).not.toContain('waitForOwnedProcessDescriptors');
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const status = new PassThrough();
+    const fakeChild = new PassThrough() as unknown as ChildProcess;
+    Object.assign(fakeChild, {
+      stdin,
+      stdout,
+      stderr,
+      stdio: [stdin, stdout, stderr, status]
+    });
+    const childClosed = waitForOwnedChildClose(fakeChild);
+    const processDescriptorsClosed = Promise.all([
+      childClosed,
+      waitForOwnedStreamEvent(stdin, 'close'),
+      waitForOwnedStreamEvent(stdout, 'end'),
+      waitForOwnedStreamEvent(stdout, 'close'),
+      waitForOwnedStreamEvent(stderr, 'end'),
+      waitForOwnedStreamEvent(stderr, 'close'),
+      waitForOwnedStreamEvent(status, 'end'),
+      waitForOwnedStreamEvent(status, 'close')
+    ]).then(() => undefined);
+
+    // The exact parent can settle on its leader/group signal while these
+    // inherited stdout/stderr pipes still contain buffered data and remain
+    // open. Confirm that compatibility observation before exercising the child
+    // descriptor fence.
+    fakeChild.emit('close');
+    stdout.write('buffered stdout');
+    stderr.write('buffered stderr');
+    await childClosed;
+    expect(stdout.readableEnded).toBe(false);
+    expect(stderr.readableEnded).toBe(false);
+
+    const startedAt = Date.now();
+    const cleaned = await waitForOwnedProcessDescriptors(
+      processDescriptorsClosed,
+      fakeChild,
+      startedAt + 1_000
+    );
+    const elapsedMs = Date.now() - startedAt;
+    expect(cleaned).toBe(false);
+    expect(elapsedMs).toBeLessThanOrEqual(1_500);
+    expect(stdin.destroyed).toBe(true);
+    expect(stdout.destroyed).toBe(true);
+    expect(stderr.destroyed).toBe(true);
+    expect(status.destroyed).toBe(true);
+  });
 
   it('bounds hostile benchmark recomputation and cleans its detached descendants', async () => {
     const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-build-descendant-'));
