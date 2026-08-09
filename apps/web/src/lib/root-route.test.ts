@@ -187,6 +187,56 @@ describe('root route composition', () => {
     context.dispose();
   });
 
+  it('retires a bridge-stamped 4401 lease after reauthentication and accepts the replacement lifecycle once', async () => {
+    const sockets = [createPtySocketHarness(), createPtySocketHarness()];
+    let socketIndex = 0;
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'opaque-test-ticket', ttl_seconds: 30 });
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: vi.fn(() => sockets[socketIndex++]!.socket)
+    });
+    const expire = vi.spyOn(context.auth, 'expire');
+    await context.auth.initialize();
+    const oldTerminal = context.workspace.terminal;
+    if (!oldTerminal) throw new Error('terminal bridge was not composed');
+    const oldAttach = oldTerminal.attach('session-1', new AbortController().signal);
+    await flush();
+    sockets[0]!.open();
+    await oldAttach;
+    const oldLease = context.registerTerminalLifecycle(oldTerminal);
+    expect(oldLease).toBeDefined();
+
+    context.expireTerminalAuthentication(oldLease);
+    context.expireTerminalAuthentication(oldLease);
+    expect(expire).toHaveBeenCalledTimes(1);
+    await context.auth.initialize();
+
+    const newTerminal = context.workspace.terminal;
+    if (!newTerminal) throw new Error('replacement terminal bridge was not composed');
+    expect(newTerminal).not.toBe(oldTerminal);
+    // Workspace selection normally owns this attachment. This root-only test
+    // supplies its bridge-stamped replacement identity directly to isolate the
+    // root retirement fence from coordinator selection fixtures.
+    const newLease = context.registerTerminalLifecycle(newTerminal, {
+      binding: { sessionId: 'session-1', invalidate: () => {} },
+      nativeTransportGeneration: 1
+    });
+    expect(newLease).toBeDefined();
+    expect(newLease).not.toBe(oldLease);
+
+    // A delayed 4401 callback carries only its retired opaque capability.
+    context.expireTerminalAuthentication(oldLease);
+    expect(expire).toHaveBeenCalledTimes(1);
+    context.expireTerminalAuthentication(newLease);
+    context.expireTerminalAuthentication(newLease);
+    expect(expire).toHaveBeenCalledTimes(2);
+    context.dispose();
+  });
+
   it('permanently disposes the root workspace exactly once', async () => {
     const fetch: LiveRestFetch = vi.fn(async (input) => {
       if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);

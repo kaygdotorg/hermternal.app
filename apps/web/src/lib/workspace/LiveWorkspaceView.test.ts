@@ -58,13 +58,21 @@ function createTerminalBridge() {
     outputMayBeTruncated: false,
     explicitlyClosed: false
   };
+  const listeners = new Set<(event: { type: 'state'; state: typeof state; lifecycle: { binding: object | undefined; nativeTransportGeneration: number } }) => void>();
+  const lifecycleIdentity = { binding: undefined as object | undefined, nativeTransportGeneration: 1 };
   return {
     state,
-    lifecycleIdentity: { binding: undefined, nativeTransportGeneration: 1 },
-    subscribe: vi.fn((listener: (event: { type: 'state'; state: typeof state }) => void) => {
-      listener({ type: 'state', state });
-      return vi.fn();
+    lifecycleIdentity,
+    subscribe: vi.fn((listener: (event: { type: 'state'; state: typeof state; lifecycle: typeof lifecycleIdentity }) => void) => {
+      listeners.add(listener);
+      listener({ type: 'state', state, lifecycle: lifecycleIdentity });
+      return () => listeners.delete(listener);
     }),
+    emitLifecycle(binding: object, generation: number) {
+      lifecycleIdentity.binding = binding;
+      lifecycleIdentity.nativeTransportGeneration = generation;
+      for (const listener of listeners) listener({ type: 'state', state, lifecycle: { binding, nativeTransportGeneration: generation } });
+    },
     sendInput: vi.fn(),
     resize: vi.fn(),
     detach: vi.fn(),
@@ -93,6 +101,38 @@ describe('LiveWorkspaceView', () => {
     view.unmount();
     expect(session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(session.dispose).not.toHaveBeenCalled();
+  });
+
+  it('forwards the bridge-stamped active lifecycle through the rendered 4401 action', async () => {
+    const terminal = createTerminalBridge();
+    const binding = {};
+    const lease = {};
+    const registerTerminalLifecycle = vi.fn(() => lease);
+    const onReturnToSignIn = vi.fn();
+    const session = createSession({
+      state: 'permanent-error',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: [],
+      terminal: { status: 'failed', generation: 7, outputMayBeTruncated: false, explicitlyClosed: false, failure: 'authentication-required' },
+      permanentFailure: { reason: 'authentication-required', closeCode: 4401, closeClassification: 'authentication-rejected' }
+    }, { terminal });
+    render(LiveWorkspaceView, {
+      session,
+      registerTerminalLifecycle,
+      onReturnToSignIn,
+      onTerminalAuthenticationFailure: onReturnToSignIn
+    });
+    terminal.emitLifecycle(binding, 7);
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+    expect(registerTerminalLifecycle).toHaveBeenLastCalledWith(terminal, {
+      binding,
+      nativeTransportGeneration: 7
+    });
+    expect(onReturnToSignIn).toHaveBeenCalledWith(lease);
   });
 
   it('routes the Terminal mode action without creating or replacing the current session', async () => {

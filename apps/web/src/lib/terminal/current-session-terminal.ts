@@ -46,7 +46,12 @@ export type CurrentSessionTerminalEvent =
       bytes: Uint8Array;
       outputMayBeTruncated: boolean;
     }>
-  | Readonly<{ type: "state"; state: CurrentSessionTerminalState }>
+  | Readonly<{
+      type: "state";
+      state: CurrentSessionTerminalState;
+      /** Captured from this bridge before a terminal state can retire its lease. */
+      lifecycle?: CurrentSessionTerminalLifecycleIdentity;
+    }>
   | Readonly<{
       type: "notice";
       generation: number;
@@ -264,7 +269,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.activeBinding !== undefined
     ) {
       try {
-        listener({ type: "state", state: this.currentState });
+        listener({
+          type: "state",
+          state: this.currentState,
+          lifecycle: this.lifecycleIdentity,
+        });
       } catch {
         // A presentation observer cannot interrupt bridge setup or transport flow.
       }
@@ -863,6 +872,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       event.type === "state"
         ? event.state.sessionId
         : this.currentState.sessionId;
+    const observedLifecycle = this.lifecycleIdentity;
     if (
       pending !== undefined &&
       !pending.invalidated &&
@@ -891,7 +901,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.activeBinding = undefined;
       }
       this.invalidatedSessionId = pending.sessionId;
-      this.publishState(projectState(event.state, this.explicitlyClosed), true);
+      this.publishState(
+        projectState(event.state, this.explicitlyClosed),
+        true,
+        observedLifecycle,
+      );
       return;
     }
     const quarantined = [...this.quarantinedTransportOperations].find(
@@ -1022,15 +1036,23 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       if (this.activeBinding) this.activeBinding.valid = false;
       this.activeBinding = undefined;
     }
-    this.publishState(projectState(event.state, this.explicitlyClosed));
+    this.publishState(
+      projectState(event.state, this.explicitlyClosed),
+      false,
+      observedLifecycle,
+    );
   }
 
   private publishState(
     state: CurrentSessionTerminalState,
     allowInvalidated = false,
+    lifecycle: CurrentSessionTerminalLifecycleIdentity = this.lifecycleIdentity,
   ): void {
     this.currentState = state;
-    this.emit({ type: "state", state }, allowInvalidated);
+    // State callbacks can synchronously cause coordinator cleanup. Stamp the
+    // producer's real lease before that reentrancy can retire it; no presentation
+    // layer must reconstruct identity from session or generation values.
+    this.emit({ type: "state", state, lifecycle }, allowInvalidated);
   }
 
   private emit(

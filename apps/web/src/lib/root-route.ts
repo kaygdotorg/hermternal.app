@@ -3,7 +3,9 @@ import type { BrowserWebSocketFactory } from '$lib/chat/browser-chat';
 import { createBrowserAuthClient } from '$lib/auth-ui/browser-auth';
 import {
   createBrowserPtyTransport,
-  type BrowserPtyWebSocketFactory
+  type BrowserPtyWebSocketFactory,
+  type CurrentSessionTerminalBridge,
+  type CurrentSessionTerminalLifecycleIdentity
 } from '$lib/terminal/current-session-terminal';
 import { BrowserAuthSession } from '$lib/auth-ui/browser-auth-session';
 import { discoverProviders } from '$lib/auth-ui/provider-discovery';
@@ -14,6 +16,12 @@ import type { MockScenario } from '$lib/transport';
 export type RootRouteSelection =
   { readonly mode: 'fixture'; readonly scenario: MockScenario; readonly delayMs: number } | { readonly mode: 'live' };
 
+/**
+ * Opaque root ownership capability. Its object identity is the lifecycle proof;
+ * it intentionally exposes neither session, ticket, nor transport identifiers.
+ */
+export type RootTerminalLifecycleLease = object;
+
 export interface LiveRootContext {
   readonly auth: BrowserAuthSession;
   /**
@@ -21,6 +29,20 @@ export interface LiveRootContext {
    * authentication expiry unmounts that view and a later sign-in remounts it.
    */
   readonly workspace: LiveWorkspaceSession;
+  /**
+   * Register only a concrete root-owned bridge lifecycle. The root records the
+   * bridge's coordinator binding by reference with its native generation; it
+   * never derives an identifier from session or transport properties.
+   */
+  registerTerminalLifecycle(
+    terminal: CurrentSessionTerminalBridge,
+    identity?: CurrentSessionTerminalLifecycleIdentity
+  ): RootTerminalLifecycleLease | undefined;
+  /**
+   * The rendered 4401 route may expire auth once for the currently registered
+   * capability. Retired or replaced lifecycle callbacks are ignored.
+   */
+  expireTerminalAuthentication(lease: RootTerminalLifecycleLease | undefined): void;
   /** Permanently releases root-owned auth and workspace resources exactly once. */
   dispose(): void;
 }
@@ -30,6 +52,16 @@ export interface LiveRootDependencies {
   readonly createSocket?: BrowserWebSocketFactory;
   /** Binary PTY socket seam; production otherwise uses the same-origin browser adapter. */
   readonly createPtySocket?: BrowserPtyWebSocketFactory;
+}
+
+interface ActiveTerminalLifecycle {
+  readonly lease: RootTerminalLifecycleLease;
+  readonly terminal: CurrentSessionTerminalBridge;
+  readonly identity: CurrentSessionTerminalLifecycleIdentity;
+}
+
+function hasLiveBinding(identity: CurrentSessionTerminalLifecycleIdentity): boolean {
+  return identity.binding !== undefined;
 }
 
 /**
@@ -76,19 +108,63 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
     discoverProviders: (signal) => discoverProviders({ fetch: dependencies.fetch, signal }),
     // Authentication invalidation closes chat and drops session presentation
     // references before logout or expiry publishes its next observable state.
-    invalidateLocalSession: () => workspace.invalidate()
+    // The active root lease is retired first, so an old 4401 control cannot
+    // affect the bridge created by a later authenticated lifecycle.
+    invalidateLocalSession: () => {
+      activeTerminalLifecycle = undefined;
+      workspace.invalidate();
+    }
   });
 
   let disposed = false;
+  let activeTerminalLifecycle: ActiveTerminalLifecycle | undefined;
+
+  function retireTerminalLifecycle(): void {
+    // Dropping the only capability reference makes an old rendered callback
+    // inert. The capability has no serializable data, so tickets and session
+    // identifiers cannot cross this root/presentation boundary.
+    activeTerminalLifecycle = undefined;
+  }
+
+  function registerTerminalLifecycle(
+    terminal: CurrentSessionTerminalBridge,
+    identity: CurrentSessionTerminalLifecycleIdentity = terminal.lifecycleIdentity
+  ): RootTerminalLifecycleLease | undefined {
+    if (disposed || workspace.terminal !== terminal || !hasLiveBinding(identity)) return undefined;
+    const active = activeTerminalLifecycle;
+    if (
+      active?.terminal === terminal &&
+      active.identity.binding === identity.binding &&
+      active.identity.nativeTransportGeneration === identity.nativeTransportGeneration
+    ) {
+      return active.lease;
+    }
+    // Replacement is explicit even for the same session: binding reference and
+    // native generation are the transport-owned lifecycle truth.
+    retireTerminalLifecycle();
+    const lease: RootTerminalLifecycleLease = {};
+    activeTerminalLifecycle = { lease, terminal, identity };
+    return lease;
+  }
+
+  function expireTerminalAuthentication(lease: RootTerminalLifecycleLease | undefined): void {
+    const active = activeTerminalLifecycle;
+    if (disposed || lease === undefined || active?.lease !== lease) return;
+    retireTerminalLifecycle();
+    // Retire before publishing expiry. Duplicate 4401 controls and any old
+    // callback cannot expire a new authenticated lifecycle.
+    auth.expire();
+  }
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    retireTerminalLifecycle();
     // The route is the sole permanent owner; its authenticated child is only a
     // subscriber and may disappear during expiry without closing this session.
     workspace.dispose();
     auth.dispose();
   }
 
-  return { auth, workspace, dispose };
+  return { auth, workspace, registerTerminalLifecycle, expireTerminalAuthentication, dispose };
 }

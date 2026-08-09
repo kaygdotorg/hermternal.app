@@ -171,6 +171,33 @@ describe("CurrentSessionTerminalBridge", () => {
     });
   });
 
+  it("stamps state callbacks with the active bridge lease before a 4401 retires it", async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const states: Extract<CurrentSessionTerminalEvent, { type: "state" }>[] = [];
+    bridge.subscribe((event) => {
+      if (event.type === "state") states.push(event);
+    });
+    const binding = await bridge.attach("session-one", new AbortController().signal);
+    states.length = 0;
+
+    fake.emit({
+      type: "state",
+      state: {
+        status: "failed",
+        generation: 2,
+        mode: "legacy",
+        sessionId: "session-one",
+        closeCode: 4401,
+        closeClassification: "authentication-rejected",
+        outputMayBeTruncated: false,
+      },
+    });
+
+    expect(states.at(-1)?.lifecycle).toEqual({ binding, nativeTransportGeneration: 1 });
+    expect(bridge.lifecycleIdentity.binding).toBeUndefined();
+  });
+
   it.each([
     [["detach", "detach"], 1, 0],
     [["close", "close"], 0, 1],

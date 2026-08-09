@@ -4,14 +4,28 @@
   import TerminalSurface from './TerminalSurface.svelte';
   import WorkspacePreview from './WorkspacePreview.svelte';
   import type { LiveWorkspaceSession, LiveWorkspaceSnapshot } from './live-workspace-session';
+  import type {
+    CurrentSessionTerminalBridge,
+    CurrentSessionTerminalLifecycleIdentity
+  } from '$lib/terminal/current-session-terminal';
+  import type { RootTerminalLifecycleLease } from '$lib/root-route';
   import type { Appearance, WorkspaceAction } from './types';
 
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
-  export let onReturnToSignIn: () => void = () => {};
+  export let onReturnToSignIn: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
+  /** Root only accepts identity stamped by a concrete bridge state callback. */
+  export let registerTerminalLifecycle: ((
+    terminal: CurrentSessionTerminalBridge,
+    identity: CurrentSessionTerminalLifecycleIdentity
+  ) => RootTerminalLifecycleLease | undefined) | undefined = undefined;
+  /** Terminal 4401 must carry the registered opaque lease; chat has its own path. */
+  export let onTerminalAuthenticationFailure: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeTerminalLifecycle: (() => void) | undefined;
+  let terminalAuthenticationLease: RootTerminalLifecycleLease | undefined;
   let coordinator = session.coordinator;
   let terminal = session.terminal;
   let liveWorkspaceElement: HTMLElement | undefined;
@@ -28,13 +42,31 @@
     snapshot.activeSessionId !== undefined &&
     (snapshot.coordinator?.activeSessionId ?? coordinator?.state.activeSessionId) === snapshot.activeSessionId;
 
+  function bindTerminalLifecycle(nextTerminal: CurrentSessionTerminalBridge | undefined): void {
+    unsubscribeTerminalLifecycle?.();
+    unsubscribeTerminalLifecycle = undefined;
+    terminalAuthenticationLease = undefined;
+    if (!nextTerminal || !registerTerminalLifecycle) return;
+    unsubscribeTerminalLifecycle = nextTerminal.subscribe((event) => {
+      if (event.type !== 'state') return;
+      // The bridge stamps this event before terminal settlement can invalidate
+      // its binding. Forward that exact object identity; never infer a root ID.
+      if (event.lifecycle) {
+        terminalAuthenticationLease = registerTerminalLifecycle(nextTerminal, event.lifecycle);
+      }
+    });
+  }
+
   onMount(() => {
     coordinator = session.coordinator;
     terminal = session.terminal;
+    bindTerminalLifecycle(terminal);
     unsubscribe = session.subscribe((next) => {
       snapshot = next;
       coordinator = session.coordinator;
-      terminal = session.terminal;
+      const nextTerminal = session.terminal;
+      if (nextTerminal !== terminal) bindTerminalLifecycle(nextTerminal);
+      terminal = nextTerminal;
       if (next.mode === 'terminal') {
         handoffSequence += 1;
         terminalLayerVisible = true;
@@ -53,6 +85,7 @@
     // The route root owns final disposal. This authenticated projection only
     // releases its subscription so expiry can remount the same workspace.
     unsubscribe?.();
+    unsubscribeTerminalLifecycle?.();
   });
 
   async function requestMode(mode: 'chat' | 'terminal'): Promise<void> {
@@ -169,7 +202,11 @@
         snapshot.permanentFailure?.reason === 'authentication-required' ||
         snapshot.terminal?.failure === 'authentication-required'
       ) {
-        onReturnToSignIn();
+        if (snapshot.terminal?.failure === 'authentication-required') {
+          onTerminalAuthenticationFailure(terminalAuthenticationLease);
+        } else {
+          onReturnToSignIn(undefined);
+        }
       }
       return;
     }
@@ -178,7 +215,11 @@
       // transport proved that authentication is required. Incompatible-origin
       // failures remain on the reviewed fail-closed workspace boundary.
       if (snapshot.permanentFailure?.reason === 'authentication-required') {
-        onReturnToSignIn();
+        if (snapshot.terminal?.failure === 'authentication-required') {
+          onTerminalAuthenticationFailure(terminalAuthenticationLease);
+        } else {
+          onReturnToSignIn(undefined);
+        }
       }
       return;
     }
