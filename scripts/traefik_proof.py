@@ -23,6 +23,8 @@ import json
 import math
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
@@ -30,6 +32,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 from urllib.parse import urlsplit
 
 
@@ -475,6 +478,11 @@ PARSER_SOURCE_MAX_COMMITS = 4096
 PARSER_SOURCE_MAX_SUBPROCESSES = 2048
 PARSER_SOURCE_MAX_SECONDS = 60.0
 PARSER_GIT_COMMAND_TIMEOUT_SECONDS = 5.0
+PARSER_HISTORY_MAX_BYTES = 64 << 20
+PARSER_GIT_OUTPUT_MAX_BYTES = 1 << 20
+PARSER_GIT_INPUT_MAX_BYTES = 8 << 20
+PARSER_GIT_EXECUTABLE = Path("/usr/bin/git")
+PARSER_GIT_HELPER_PATH = "/usr/bin:/bin"
 PARSER_OBJECT_HASHES = MappingProxyType(
     {
         "sha1": hashlib.sha1,
@@ -499,45 +507,234 @@ class _ParserBudgetExceeded(ValueError):
 
 
 class _ParserGitBudget:
-    """Bound every Git subprocess in one provenance calculation."""
+    """Bound every Git subprocess and Python scan in one provenance calculation."""
 
     def __init__(self) -> None:
         self.started = time.monotonic()
         self.calls = 0
 
-    def timeout(self) -> float:
-        if self.calls >= PARSER_SOURCE_MAX_SUBPROCESSES:
-            raise _ParserBudgetExceeded("parser provenance subprocess budget exhausted")
+    def check(self) -> None:
         elapsed = time.monotonic() - self.started
         if elapsed < 0:
             raise _ParserBudgetExceeded("parser provenance monotonic clock moved backwards")
-        remaining = PARSER_SOURCE_MAX_SECONDS - elapsed
-        if remaining <= 0:
+        if elapsed >= PARSER_SOURCE_MAX_SECONDS:
             raise _ParserBudgetExceeded("parser provenance overall time budget exhausted")
+
+    def timeout(self) -> float:
+        self.check()
+        if self.calls >= PARSER_SOURCE_MAX_SUBPROCESSES:
+            raise _ParserBudgetExceeded("parser provenance subprocess budget exhausted")
         self.calls += 1
-        return min(PARSER_GIT_COMMAND_TIMEOUT_SECONDS, remaining)
+        return min(PARSER_GIT_COMMAND_TIMEOUT_SECONDS, PARSER_SOURCE_MAX_SECONDS - (time.monotonic() - self.started))
+
+
+def _trusted_git_executable() -> Path:
+    """Use one validated absolute Git executable, never caller-controlled PATH."""
+
+    path = PARSER_GIT_EXECUTABLE
+    try:
+        metadata = os.lstat(path)
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("parser provenance requires a trusted Git executable") from exc
+    if not path.is_absolute() or not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111 or resolved != path:
+        raise ValueError("parser provenance requires a trusted Git executable")
+    return path
+
+
+def _parser_git_environment() -> dict[str, str]:
+    """Remove every inherited Git redirect before restoring neutral controls."""
+
+    environment = os.environ.copy()
+    for variable in tuple(environment):
+        if variable.startswith("GIT_"):
+            environment.pop(variable, None)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_COUNT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "PATH": PARSER_GIT_HELPER_PATH,
+            "LC_ALL": "C",
+            "LANG": "C",
+        }
+    )
+    return environment
+
+
+def _signal_git_group(process: subprocess.Popen[bytes], signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        try:
+            process.kill() if signal_number == signal.SIGKILL else process.terminate()
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+
+
+def _close_git_stream(selector: selectors.BaseSelector | None, stream: Any) -> None:
+    if selector is not None:
+        try:
+            selector.unregister(stream)
+        except (KeyError, OSError, ValueError):
+            pass
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _terminate_git(process: subprocess.Popen[bytes] | None, selector: selectors.BaseSelector | None, streams: Sequence[Any]) -> None:
+    """Kill and reap a complete Git process group after timeout or overflow."""
+
+    if process is not None:
+        _signal_git_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=0.25)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        _signal_git_group(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=0.5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for stream in streams:
+        if stream is not None:
+            _close_git_stream(selector, stream)
+    if selector is not None:
+        try:
+            selector.close()
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+
+def _run_bounded_git(
+    command: list[str],
+    *,
+    input_data: bytes = b"",
+    deadline: float,
+    output_limit: int,
+    environment: dict[str, str],
+) -> tuple[int, bytes, bytes]:
+    """Stream bounded Git I/O and kill descendants on every exceptional exit."""
+
+    if len(input_data) > PARSER_GIT_INPUT_MAX_BYTES:
+        raise ValueError("parser provenance Git input exceeds the bounded size limit")
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    streams: list[Any] = []
+    stdout = bytearray()
+    stderr = bytearray()
+    input_offset = 0
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            start_new_session=True,
+            env=environment,
+        )
+        streams = [process.stdin, process.stdout, process.stderr]
+        if any(stream is None for stream in streams):
+            raise ValueError("parser provenance Git pipes are unavailable")
+        selector = selectors.DefaultSelector()
+        stdin, stdout_stream, stderr_stream = streams
+        for stream in (stdout_stream, stderr_stream):
+            os.set_blocking(stream.fileno(), False)
+        os.set_blocking(stdin.fileno(), False)
+        selector.register(stdout_stream, selectors.EVENT_READ, "stdout")
+        selector.register(stderr_stream, selectors.EVENT_READ, "stderr")
+        if input_data:
+            selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+        else:
+            _close_git_stream(selector, stdin)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _ParserBudgetExceeded("parser provenance overall time budget exhausted")
+            events = selector.select(remaining)
+            if not events:
+                raise _ParserBudgetExceeded("parser provenance overall time budget exhausted")
+            for key, _ in events:
+                stream = key.fileobj
+                label = key.data
+                if label == "stdin":
+                    try:
+                        written = os.write(stream.fileno(), input_data[input_offset:input_offset + 64 * 1024])
+                    except BlockingIOError:
+                        continue
+                    if written <= 0:
+                        raise ValueError("parser provenance Git input failed")
+                    input_offset += written
+                    if input_offset == len(input_data):
+                        _close_git_stream(selector, stream)
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), min(64 * 1024, output_limit + 1 - len(stdout if label == "stdout" else stderr)))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    _close_git_stream(selector, stream)
+                    continue
+                target = stdout if label == "stdout" else stderr
+                target.extend(chunk)
+                if len(target) > output_limit:
+                    raise ValueError("parser provenance Git output exceeds the bounded size limit")
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return returncode, bytes(stdout), bytes(stderr)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, _ParserBudgetExceeded):
+        _terminate_git(process, selector, streams)
+        raise
+    finally:
+        if selector is not None:
+            try:
+                selector.close()
+            except (OSError, RuntimeError, ValueError):
+                pass
+        for stream in streams:
+            if stream is not None:
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
 
 
 def _git_output(
     project_root: Path,
     *arguments: str,
     budget: _ParserGitBudget | None = None,
+    input_data: bytes = b"",
+    output_limit: int = PARSER_GIT_OUTPUT_MAX_BYTES,
 ) -> bytes:
-    """Read one bounded Git result used to bind evidence to committed sources."""
+    """Read bounded Git output with sanitized environment and process cleanup."""
 
+    local_budget = budget or _ParserGitBudget()
+    timeout = local_budget.timeout()
+    deadline = min(local_budget.started + PARSER_SOURCE_MAX_SECONDS, time.monotonic() + timeout)
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(project_root), *arguments],
-            check=True,
-            capture_output=True,
-            timeout=PARSER_GIT_COMMAND_TIMEOUT_SECONDS if budget is None else budget.timeout(),
+        returncode, stdout, stderr = _run_bounded_git(
+            [str(_trusted_git_executable()), "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-C", str(project_root), *arguments],
+            input_data=input_data,
+            deadline=deadline,
+            output_limit=output_limit,
+            environment=_parser_git_environment(),
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except _ParserBudgetExceeded:
+        raise
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         raise ValueError("parser provenance requires a readable local Git repository") from exc
-    output = completed.stdout
-    if len(output) > PARSER_SOURCE_MAX_BYTES:
-        raise ValueError("parser provenance source exceeds the bounded size limit")
-    return output
+    if returncode != 0 or stderr:
+        raise ValueError("parser provenance Git command failed")
+    if len(stdout) > output_limit:
+        raise ValueError("parser provenance Git output exceeds the bounded size limit")
+    return stdout
 
 
 def _git_object_format(
@@ -597,6 +794,135 @@ def _git_blob_oid(source: bytes, *, object_format: str) -> str:
     return digest.hexdigest()
 
 
+def _lstat_exists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("parser provenance Git metadata cannot be inspected") from exc
+    return True
+
+
+def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> None:
+    """Authenticate the local topology before any commit can become evidence."""
+
+    raw = _git_output(
+        project_root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--show-toplevel",
+        "--git-dir",
+        "--git-common-dir",
+        "--git-path",
+        "objects",
+        "--git-path",
+        "shallow",
+        "--git-path",
+        "info/grafts",
+        "--git-path",
+        "objects/info/alternates",
+        "--git-path",
+        "objects/info/http-alternates",
+        "--git-path",
+        "refs/replace",
+        "--is-inside-work-tree",
+        "--is-bare-repository",
+        "--is-shallow-repository",
+        budget=budget,
+        output_limit=64 * 1024,
+    )
+    try:
+        values = raw.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("parser provenance Git metadata is malformed") from exc
+    if len(values) != 12:
+        raise ValueError("parser provenance Git metadata is malformed")
+    shown_root, git_dir_text, common_dir_text, objects_text, shallow_text, grafts_text, alternates_text, http_alternates_text, replace_text, inside, bare, shallow = values
+    if Path(shown_root).resolve() != project_root or inside != "true" or bare != "false":
+        raise ValueError("parser provenance requires a complete non-bare Git worktree")
+    if shallow != "false":
+        raise ValueError("parser provenance rejects shallow repositories")
+    try:
+        git_dir = Path(git_dir_text).resolve(strict=True)
+        common_dir = Path(common_dir_text).resolve(strict=True)
+        objects_dir = Path(objects_text).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("parser provenance Git metadata cannot be resolved") from exc
+    if not git_dir.is_dir() or not common_dir.is_dir() or not objects_dir.is_dir() or objects_dir != common_dir / "objects":
+        raise ValueError("parser provenance Git metadata points outside the repository")
+
+    marker = project_root / ".git"
+    try:
+        marker_stat = os.lstat(marker)
+    except OSError as exc:
+        raise ValueError("parser provenance Git metadata cannot be inspected") from exc
+    if stat.S_ISLNK(marker_stat.st_mode):
+        raise ValueError("parser provenance Git metadata cannot use a symlinked gitfile")
+    if stat.S_ISDIR(marker_stat.st_mode):
+        if git_dir != marker.resolve() or common_dir != git_dir or _lstat_exists(git_dir / "commondir"):
+            raise ValueError("parser provenance Git metadata has an invalid common directory")
+    elif stat.S_ISREG(marker_stat.st_mode):
+        marker_bytes = _read_bounded_regular_file(marker, 4096, "Git worktree gitfile")
+        try:
+            line = marker_bytes.decode("ascii").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ValueError("parser provenance Git worktree gitfile is malformed") from exc
+        if len(line) != 1 or not line[0].startswith("gitdir:"):
+            raise ValueError("parser provenance Git worktree gitfile is malformed")
+        declared_git_dir = Path(line[0][7:].strip()).resolve()
+        if declared_git_dir != git_dir or git_dir.parent != common_dir / "worktrees":
+            raise ValueError("parser provenance Git worktree metadata is outside the repository")
+        commondir_file = git_dir / "commondir"
+        linked_file = git_dir / "gitdir"
+        if not _lstat_exists(commondir_file) or not _lstat_exists(linked_file):
+            raise ValueError("parser provenance Git worktree metadata is incomplete")
+        commondir = _read_bounded_regular_file(commondir_file, 4096, "Git commondir").decode("ascii").strip()
+        linked = Path(_read_bounded_regular_file(linked_file, 4096, "Git worktree link").decode("ascii").strip()).resolve()
+        if (git_dir / commondir).resolve() != common_dir or linked != marker.resolve():
+            raise ValueError("parser provenance Git worktree metadata is malformed")
+    else:
+        raise ValueError("parser provenance Git metadata has an invalid gitfile")
+
+    reported_metadata = tuple(Path(value) for value in (shallow_text, grafts_text, alternates_text, http_alternates_text, replace_text))
+    for path in {git_dir / "shallow", common_dir / "shallow", git_dir / "info/grafts", common_dir / "info/grafts", git_dir / "objects/info/alternates", common_dir / "objects/info/alternates", git_dir / "objects/info/http-alternates", common_dir / "objects/info/http-alternates", git_dir / "refs/replace", common_dir / "refs/replace", *reported_metadata}:
+        budget.check()
+        if _lstat_exists(path):
+            raise ValueError("parser provenance rejects shallow, alternate, graft, or replacement metadata")
+
+    replacements = _git_output(project_root, "for-each-ref", "--format=%(refname)", "refs/replace", budget=budget, output_limit=64 * 1024)
+    if replacements:
+        raise ValueError("parser provenance rejects replacement refs")
+    config = _git_output(project_root, "config", "--local", "--null", "--list", budget=budget, output_limit=256 * 1024)
+    if config and not config.endswith(b"\0"):
+        raise ValueError("parser provenance Git config is malformed")
+    for record in config.split(b"\0"):
+        if not record:
+            continue
+        key, separator, _value = record.partition(b"\n")
+        if not separator:
+            raise ValueError("parser provenance Git config is malformed")
+        try:
+            lowered = key.decode("ascii").casefold()
+        except UnicodeDecodeError as exc:
+            raise ValueError("parser provenance Git config is malformed") from exc
+        if (
+            lowered in {"extensions.partialclone", "core.alternaterefscommand", "core.alternaterefsprefixes"}
+            or lowered.endswith(".promisor")
+            or lowered.endswith(".partialclonefilter")
+            or lowered.startswith("include")
+        ):
+            raise ValueError("parser provenance rejects partial, alternate, or included Git config")
+    pack_dir = objects_dir / "pack"
+    if _lstat_exists(pack_dir):
+        try:
+            entries = list(pack_dir.iterdir())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("parser provenance Git pack metadata cannot be inspected") from exc
+        if any(entry.name.endswith(".promisor") for entry in entries):
+            raise ValueError("parser provenance rejects promisor objects")
+
+
 def _parser_tree_pair(
     project_root: Path,
     revision: str,
@@ -632,11 +958,220 @@ def _parser_tree_pair(
             kind_text = kind.decode("ascii")
         except (UnicodeDecodeError, ValueError) as exc:
             raise ValueError("parser provenance source tree is malformed") from exc
+        mode_text = mode.decode("ascii")
         if kind_text != "blob" or path not in PARSER_SOURCE_PATHS:
             raise ValueError("parser provenance source tree contains an unexpected entry")
+        if mode_text not in {"100644", "100755"}:
+            raise ValueError("parser provenance source tree contains a non-regular source file")
         _validate_git_oid(oid, object_format, "parser provenance source tree blob")
-        entries[path] = (oid, mode.decode("ascii"))
+        entries[path] = (oid, mode_text)
     return tuple(entries.get(path, (None, ""))[0] for path in PARSER_SOURCE_PATHS)  # type: ignore[return-value]
+
+
+def _parser_batch_tree_entries(raw: bytes, object_format: str, wanted: set[str]) -> dict[str, tuple[str, str]]:
+    """Parse raw Git tree bytes without losing mode/blob identity semantics."""
+
+    oid_bytes = _git_oid_hex_width(object_format) // 2
+    wanted_bytes = {name.encode("utf-8"): name for name in wanted}
+    entries: dict[str, tuple[str, str]] = {}
+    seen_paths: set[bytes] = set()
+    offset = 0
+    while offset < len(raw):
+        space = raw.find(b" ", offset)
+        if space <= offset:
+            raise ValueError("parser provenance source tree is malformed")
+        nul = raw.find(b"\0", space + 1)
+        if nul <= space:
+            raise ValueError("parser provenance source tree is malformed")
+        oid_start = nul + 1
+        oid_end = oid_start + oid_bytes
+        if oid_end > len(raw):
+            raise ValueError("parser provenance source tree is malformed")
+        mode_bytes = raw[offset:space]
+        path_bytes = raw[space + 1:nul]
+        if (
+            not re.fullmatch(rb"[0-7]{5,6}", mode_bytes)
+            or not path_bytes
+            or b"/" in path_bytes
+            or path_bytes in {b".", b".."}
+            or path_bytes in seen_paths
+        ):
+            raise ValueError("parser provenance source tree is malformed")
+        seen_paths.add(path_bytes)
+        if path_bytes in wanted_bytes:
+            mode_text = mode_bytes.decode("ascii")
+            if mode_text not in {"100644", "100755"}:
+                raise ValueError("parser provenance source tree contains a non-regular source file")
+            oid = raw[oid_start:oid_end].hex()
+            _validate_git_oid(oid, object_format, "parser provenance source tree blob")
+            entries[wanted_bytes[path_bytes]] = (oid, mode_text)
+        offset = oid_end
+    if offset != len(raw):
+        raise ValueError("parser provenance source tree is malformed")
+    return entries
+
+
+def _parser_batched_history(
+    project_root: Path,
+    head: str,
+    *,
+    object_format: str,
+    budget: _ParserGitBudget,
+) -> tuple[dict[str, tuple[str, tuple[str, ...]]], dict[str, tuple[str | None, str | None]]]:
+    """Read topology once and source trees through bounded batch Git operations.
+
+    The history command is deliberately unfiltered: every parent named by a
+    reachable commit must also appear in the returned topology. Tree objects
+    are then deduplicated and read through two bounded cat-file operations, so
+    the declared 4,096-commit bound remains reachable under 2,048 subprocesses.
+    """
+
+    try:
+        history_raw = _git_output(
+            project_root,
+            "log",
+            "--topo-order",
+            "--full-history",
+            "--no-decorate",
+            "--no-color",
+            "--format=%H %T %P",
+            head,
+            budget=budget,
+            output_limit=PARSER_HISTORY_MAX_BYTES,
+        ).decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("parser provenance source history cannot be read") from exc
+    history_lines = history_raw.splitlines()
+    if not history_lines or len(history_lines) > PARSER_SOURCE_MAX_COMMITS:
+        raise ValueError("parser provenance source history exceeds its bounded limit")
+    history: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for line in history_lines:
+        budget.check()
+        fields = line.split()
+        if len(fields) < 2:
+            raise ValueError("parser provenance source history contains an invalid Git object ID")
+        commit, tree, *parents = fields
+        _validate_git_oid(commit, object_format, "parser provenance source history commit")
+        _validate_git_oid(tree, object_format, "parser provenance source history tree")
+        if len(set(parents)) != len(parents):
+            raise ValueError("parser provenance source history contains duplicate parents")
+        for parent in parents:
+            _validate_git_oid(parent, object_format, "parser provenance source history parent")
+        if commit in history or commit in parents:
+            raise ValueError("parser provenance source history contains a duplicate commit")
+        history[commit] = (tree, tuple(parents))
+    for _commit, (_tree, parents) in history.items():
+        budget.check()
+        if any(parent not in history for parent in parents):
+            raise ValueError("parser provenance source history has incomplete ancestry")
+
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for index, path in enumerate(PARSER_SOURCE_PATHS):
+        parent, separator, name = path.rpartition("/")
+        parent = parent if separator else "."
+        groups.setdefault(parent, []).append((index, name))
+    ordered_groups = tuple(groups.items())
+    queries: list[tuple[str, str]] = []
+    seen_queries: set[str] = set()
+    for tree, _parents in history.values():
+        for parent, _names in ordered_groups:
+            query = tree if parent == "." else f"{tree}:{parent}"
+            if query not in seen_queries:
+                seen_queries.add(query)
+                queries.append((query, parent))
+    query_input = ("\n".join(query for query, _parent in queries) + "\n").encode("ascii")
+    checked_raw = _git_output(
+        project_root,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+        budget=budget,
+        input_data=query_input,
+        output_limit=PARSER_HISTORY_MAX_BYTES,
+    )
+    try:
+        checked = checked_raw.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("parser provenance source tree batch is malformed") from exc
+    if len(checked) != len(queries):
+        raise ValueError("parser provenance source tree batch is malformed")
+    subtree_by_query: dict[str, str | None] = {}
+    names_by_oid: dict[str, set[str]] = {}
+    for line, (query, parent) in zip(checked, queries):
+        budget.check()
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == "missing":
+            subtree_by_query[query] = None
+            continue
+        if len(fields) != 3 or fields[1] != "tree":
+            raise ValueError("parser provenance source tree batch is malformed")
+        oid = _validate_git_oid(fields[0], object_format, "parser provenance source tree object ID")
+        try:
+            size = int(fields[2], 10)
+        except ValueError as exc:
+            raise ValueError("parser provenance source tree batch is malformed") from exc
+        if size < 0 or size > PARSER_HISTORY_MAX_BYTES:
+            raise ValueError("parser provenance source tree exceeds the bounded size limit")
+        subtree_by_query[query] = oid
+        names_by_oid.setdefault(oid, set()).update(name for _index, name in groups[parent])
+
+    subtree_oids = tuple(names_by_oid)
+    tree_input = ("\n".join(subtree_oids) + "\n").encode("ascii") if subtree_oids else b""
+    tree_raw = (
+        _git_output(
+            project_root,
+            "cat-file",
+            "--batch",
+            budget=budget,
+            input_data=tree_input,
+            output_limit=PARSER_HISTORY_MAX_BYTES,
+        )
+        if subtree_oids
+        else b""
+    )
+    subtree_entries: dict[str, dict[str, tuple[str, str]]] = {}
+    offset = 0
+    for oid in subtree_oids:
+        budget.check()
+        header_end = tree_raw.find(b"\n", offset)
+        if header_end < 0:
+            raise ValueError("parser provenance source tree batch is malformed")
+        fields = tree_raw[offset:header_end].split()
+        if len(fields) != 3 or fields[1] != b"tree":
+            raise ValueError("parser provenance source tree batch is malformed")
+        try:
+            actual_oid = fields[0].decode("ascii")
+            size = int(fields[2], 10)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("parser provenance source tree batch is malformed") from exc
+        _validate_git_oid(actual_oid, object_format, "parser provenance source tree object ID")
+        if actual_oid != oid or size < 0 or size > PARSER_HISTORY_MAX_BYTES:
+            raise ValueError("parser provenance source tree batch is malformed")
+        start = header_end + 1
+        end = start + size
+        if end >= len(tree_raw) or tree_raw[end:end + 1] != b"\n":
+            raise ValueError("parser provenance source tree batch is malformed")
+        subtree_entries[oid] = _parser_batch_tree_entries(tree_raw[start:end], object_format, names_by_oid[oid])
+        offset = end + 1
+    if offset != len(tree_raw):
+        raise ValueError("parser provenance source tree batch has trailing data")
+
+    pair_by_commit: dict[str, tuple[str | None, str | None]] = {}
+    for commit, (tree, _parents) in history.items():
+        budget.check()
+        values: list[str | None] = [None] * len(PARSER_SOURCE_PATHS)
+        for parent, names in ordered_groups:
+            query = tree if parent == "." else f"{tree}:{parent}"
+            subtree = subtree_by_query.get(query)
+            if subtree is None:
+                continue
+            entries = subtree_entries.get(subtree)
+            if entries is None:
+                raise ValueError("parser provenance source tree batch is incomplete")
+            for index, name in names:
+                entry = entries.get(name)
+                values[index] = None if entry is None else entry[0]
+        pair_by_commit[commit] = (values[0], values[1])
+    return history, pair_by_commit
 
 
 def _parser_source_predecessor(
@@ -646,66 +1181,32 @@ def _parser_source_predecessor(
     head: str,
     *,
     object_format: str,
-    budget: _ParserGitBudget | None = None,
+    budget: _ParserGitBudget,
 ) -> tuple[str, bytes, bytes]:
     """Find one unambiguous source-changing predecessor of the current bytes.
 
     Evidence-only descendants remain in the topology but have an unchanged
     blob pair, so they do not move the identity. A merge can expose several
-    incomparable commits that
-    independently introduced the same parser/test bytes; selecting one from Git
-    log order would make retained evidence topology-dependent, so ambiguous
-    maximal candidates fail closed. Commits that only change file mode are
-    ignored because their blob pair is unchanged from a parent.
+    incomparable commits that independently introduced the same parser/test
+    bytes; selecting one from Git log order would make retained evidence
+    topology-dependent, so ambiguous maximal candidates fail closed.
     """
 
-    try:
-        history_lines = _git_output(
-            project_root,
-            "rev-list",
-            "--topo-order",
-            "--full-history",
-            "--parents",
-            head,
-            budget=budget,
-        ).decode("ascii").splitlines()
-    except (UnicodeDecodeError, ValueError) as exc:
-        if isinstance(exc, _ParserBudgetExceeded):
-            raise
-        raise ValueError("parser provenance source history cannot be read") from exc
-    if not history_lines or len(history_lines) > PARSER_SOURCE_MAX_COMMITS:
-        raise ValueError("parser provenance source history exceeds its bounded limit")
-
-    parents_by_commit: dict[str, tuple[str, ...]] = {}
-    for line in history_lines:
-        fields = line.split()
-        if not fields:
-            raise ValueError("parser provenance source history contains an invalid Git object ID")
-        for field in fields:
-            _validate_git_oid(field, object_format, "parser provenance source history object ID")
-        commit, *parents = fields
-        if commit in parents_by_commit:
-            raise ValueError("parser provenance source history contains a duplicate commit")
-        parents_by_commit[commit] = tuple(parents)
-
-    pair_cache: dict[str, tuple[str | None, str | None]] = {}
-
-    def pair(revision: str) -> tuple[str | None, str | None]:
-        if revision not in pair_cache:
-            pair_cache[revision] = _parser_tree_pair(
-                project_root,
-                revision,
-                object_format=object_format,
-                budget=budget,
-            )
-        return pair_cache[revision]
-
-    current_pair = pair(head)
+    history, pair_by_commit = _parser_batched_history(
+        project_root,
+        head,
+        object_format=object_format,
+        budget=budget,
+    )
+    if head not in history:
+        raise ValueError("parser provenance source history does not contain HEAD")
+    current_pair = pair_by_commit[head]
     candidates: list[str] = []
-    for commit, parents in parents_by_commit.items():
-        if pair(commit) != current_pair:
+    for commit, (_tree, parents) in history.items():
+        budget.check()
+        if pair_by_commit[commit] != current_pair:
             continue
-        parent_pairs = [pair(parent) for parent in parents]
+        parent_pairs = [pair_by_commit[parent] for parent in parents]
         # If any parent already has this exact pair, this commit did not
         # introduce the source identity. This covers evidence descendants,
         # mode-only changes, and merges that preserve one source side.
@@ -720,15 +1221,14 @@ def _parser_source_predecessor(
         pending = [descendant]
         visited: set[str] = set()
         while pending:
+            budget.check()
             current = pending.pop()
             if current in visited:
                 continue
             visited.add(current)
-            for parent in parents_by_commit.get(current, ()):
+            for parent in history[current][1]:
                 if parent == ancestor:
                     return True
-                if parent not in parents_by_commit:
-                    raise ValueError("parser provenance source history has incomplete ancestry")
                 pending.append(parent)
         return False
 
@@ -758,43 +1258,60 @@ def _parser_source_predecessor(
     )
     if committed_implementation != implementation or committed_tests != test_source:
         raise ValueError("parser provenance source predecessor does not match committed parser sources")
-    implementation_blob = _git_output(
-        project_root,
-        "rev-parse",
-        f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
-        budget=budget,
-    ).decode("ascii").strip()
-    test_blob = _git_output(
-        project_root,
-        "rev-parse",
-        f"{candidate}:{PARSER_TEST_PATH}",
-        budget=budget,
-    ).decode("ascii").strip()
-    if (
-        _validate_git_oid(implementation_blob, object_format, "parser implementation blob")
-        != _git_blob_oid(committed_implementation, object_format=object_format)
-        or _validate_git_oid(test_blob, object_format, "parser test blob")
-        != _git_blob_oid(committed_tests, object_format=object_format)
-    ):
+    expected_pair = pair_by_commit[candidate]
+    actual_pair = (
+        _git_blob_oid(committed_implementation, object_format=object_format),
+        _git_blob_oid(committed_tests, object_format=object_format),
+    )
+    if actual_pair != expected_pair:
         raise ValueError("parser provenance Git blob identity does not match source bytes")
     return candidate, committed_implementation, committed_tests
 
 
+def _parser_source_snapshot(path: Path, label: str, budget: _ParserGitBudget) -> tuple[bytes, tuple[int, int, int, int, bool]]:
+    """Read one parser source under the shared deadline and retain its identity."""
+
+    budget.check()
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be inspected") from exc
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    content = _read_bounded_regular_file(path, PARSER_SOURCE_MAX_BYTES, label)
+    budget.check()
+    try:
+        after = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{label} disappeared after reading") from exc
+    identity = (after.st_dev, after.st_ino, after.st_size, stat.S_IFMT(after.st_mode), bool(after.st_mode & 0o111))
+    before_identity = (before.st_dev, before.st_ino, before.st_size, stat.S_IFMT(before.st_mode), bool(before.st_mode & 0o111))
+    if identity != before_identity or len(content) != before.st_size:
+        raise ValueError(f"{label} changed while reading")
+    return content, identity
+
+
 def _current_parser_provenance(project_root: Path | None = None) -> dict[str, str]:
-    """Derive and verify stable parser identity instead of trusting CLI claims."""
+    """Derive and verify stable parser identity instead of trusting CLI claims.
+
+    The budget starts before source reads and the sources are read again after
+    Git traversal. This closes the window where a concurrent edit could make a
+    valid historical commit appear to describe different working-tree bytes.
+    """
 
     project_root = Path(__file__).resolve().parents[1] if project_root is None else project_root.resolve()
-    implementation = _read_bounded_regular_file(
-        project_root / PARSER_IMPLEMENTATION_PATH,
-        PARSER_SOURCE_MAX_BYTES,
-        "parser implementation source",
-    )
-    test_source = _read_bounded_regular_file(
-        project_root / PARSER_TEST_PATH,
-        PARSER_SOURCE_MAX_BYTES,
-        "parser test source",
-    )
     budget = _ParserGitBudget()
+    implementation, implementation_identity = _parser_source_snapshot(
+        project_root / PARSER_IMPLEMENTATION_PATH,
+        "parser implementation source",
+        budget,
+    )
+    test_source, test_identity = _parser_source_snapshot(
+        project_root / PARSER_TEST_PATH,
+        "parser test source",
+        budget,
+    )
+    _parser_git_preflight(project_root, budget=budget)
     object_format = _git_object_format(project_root, budget=budget)
     implementation_commit = _git_output(
         project_root,
@@ -812,15 +1329,33 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         object_format=object_format,
         budget=budget,
     )
-    if committed_implementation != implementation or committed_tests != test_source:
-        raise ValueError("parser provenance requires clean committed implementation and test sources")
+    final_implementation, final_implementation_identity = _parser_source_snapshot(
+        project_root / PARSER_IMPLEMENTATION_PATH,
+        "parser implementation source",
+        budget,
+    )
+    final_test_source, final_test_identity = _parser_source_snapshot(
+        project_root / PARSER_TEST_PATH,
+        "parser test source",
+        budget,
+    )
+    if (
+        final_implementation != implementation
+        or final_test_source != test_source
+        or final_implementation_identity != implementation_identity
+        or final_test_identity != test_identity
+        or committed_implementation != final_implementation
+        or committed_tests != final_test_source
+    ):
+        raise ValueError("parser provenance source predecessor does not match final parser sources")
+    budget.check()
     return {
         "implementation_path": PARSER_IMPLEMENTATION_PATH,
         "implementation_commit": implementation_commit,
         "implementation_blob": _git_blob_oid(committed_implementation, object_format=object_format),
-        "implementation_sha256": digest_bytes(implementation),
+        "implementation_sha256": digest_bytes(final_implementation),
         "test_path": PARSER_TEST_PATH,
-        "test_source_sha256": digest_bytes(test_source),
+        "test_source_sha256": digest_bytes(final_test_source),
     }
 
 
@@ -1320,6 +1855,7 @@ def render_manifest(
     browser_evidence: Mapping[str, object] | None = None,
     runtime_inputs: Mapping[str, object] | None = None,
     parser_provenance: Mapping[str, object] | None = None,
+    _parser_provenance_is_verified: bool = False,
 ) -> dict[str, object]:
     _validate_external_git_oid(build_sha, "build_sha")
     for name, value in (("build_digest", build_digest), ("traefik_config_digest", traefik_config_digest)):
@@ -1339,7 +1875,14 @@ def render_manifest(
             runtime_inputs_sha256=runtime_inputs_sha256,
         ),
     )
-    normalized_parser_provenance = _normalize_parser_provenance(parser_provenance)
+    if _parser_provenance_is_verified:
+        if not isinstance(parser_provenance, Mapping) or set(parser_provenance) != PARSER_PROVENANCE_KEYS:
+            raise ValueError("parser provenance keys are outside the closed contract")
+        normalized_parser_provenance = {key: parser_provenance[key] for key in PARSER_PROVENANCE_KEYS}
+        if any(type(item) is not str for item in normalized_parser_provenance.values()):
+            raise ValueError("parser provenance values must be strings")
+    else:
+        normalized_parser_provenance = _normalize_parser_provenance(parser_provenance)
     return {
         "schema": SCHEMA,
         "issue": "92",
@@ -3177,6 +3720,7 @@ def main(argv: list[str] | None = None) -> int:
                     browser_journey=args.browser_journey,
                     browser_evidence=browser_evidence,
                     parser_provenance=parser_provenance,
+                    _parser_provenance_is_verified=True,
                 ),
                 sort_keys=True,
                 separators=(",", ":"),
