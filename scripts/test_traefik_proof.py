@@ -23,7 +23,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -98,6 +98,28 @@ def _append_fast_history(root: Path, count: int) -> None:
     stream.extend(b"done\n")
     subprocess.run(["git", "fast-import"], cwd=root, input=bytes(stream), check=True, capture_output=True)
     _run_git(root, "reset", "--quiet", "--hard", "fast-history")
+
+
+@contextmanager
+def _same_path_copy(path: Path):
+    """Replace one metadata path at the same name, then restore the original."""
+
+    replacement = path.with_name(f".{path.name}.replacement")
+    original = path.with_name(f".{path.name}.original")
+    if path.is_dir():
+        shutil.copytree(path, replacement)
+    else:
+        shutil.copy2(path, replacement)
+    path.rename(original)
+    replacement.rename(path)
+    try:
+        yield
+    finally:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
+        original.rename(path)
 
 
 class TraefikRendererTests(unittest.TestCase):
@@ -1714,7 +1736,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
-            linked = root / "linked"
+            linked = Path(temporary) / "linked"
             root.mkdir()
             _implementation, _tests, source_commit = _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "linked", str(linked))
@@ -1771,6 +1793,110 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "shallow|topology changed"):
                     traefik_proof._current_parser_provenance(root)
 
+    def _assert_metadata_swap_after_show(self, project_root: Path, target: Path) -> None:
+        """Keep one same-path replacement active until the retained pin rejects it."""
+
+        real_output = traefik_proof._git_output
+        replacement = _same_path_copy(target)
+        swapped = False
+
+        def mutate_after_show(project: Path, *arguments: str, **kwargs: object) -> bytes:
+            nonlocal swapped
+            result = real_output(project, *arguments, **kwargs)
+            if arguments and arguments[0] == "show" and not swapped:
+                replacement.__enter__()
+                swapped = True
+            return result
+
+        try:
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=mutate_after_show):
+                with self.assertRaisesRegex(ValueError, "identity changed|topology changed"):
+                    traefik_proof._current_parser_provenance(project_root)
+        finally:
+            if swapped:
+                replacement.__exit__(None, None, None)
+
+    def test_metadata_regular_component_swap_between_lstat_and_open_fails_closed(self) -> None:
+        """A directory replaced after lstat cannot pass the open identity check."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            target = root / ".git"
+            replacement = root / ".git.replacement"
+            original = root / ".git.original"
+            shutil.copytree(target, replacement)
+            real_open = traefik_proof.os.open
+            swapped = False
+
+            def swap_before_open(path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+                nonlocal swapped
+                if path == ".git" and not swapped:
+                    target.rename(original)
+                    replacement.rename(target)
+                    swapped = True
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            try:
+                with mock.patch.object(traefik_proof.os, "open", side_effect=swap_before_open):
+                    with self.assertRaisesRegex(ValueError, "changed between inspection and open"):
+                        traefik_proof._parser_open_metadata_path(
+                            Path("/"), str(root.resolve() / ".git" / "config"), "deterministic metadata swap"
+                        )
+            finally:
+                if swapped:
+                    shutil.rmtree(target)
+                    original.rename(target)
+                elif replacement.exists():
+                    shutil.rmtree(replacement)
+
+    def test_metadata_pin_rejects_marker_replacement_after_git_call(self) -> None:
+        """A linked-worktree gitfile replacement cannot change the authenticated marker."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            linked = Path(temporary) / "linked"
+            root.mkdir()
+            _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "marker-swap", str(linked))
+            self._assert_metadata_swap_after_show(linked, linked / ".git")
+
+    def test_metadata_pin_rejects_config_replacement_after_git_call(self) -> None:
+        """A same-path common config replacement cannot change the authenticated bytes."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            self._assert_metadata_swap_after_show(root, root / ".git" / "config")
+
+    def test_metadata_pin_rejects_git_directory_replacement_after_git_call(self) -> None:
+        """A same-path .git replacement cannot change the authenticated repository."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            self._assert_metadata_swap_after_show(root, root / ".git")
+
+    def test_metadata_pin_rejects_objects_directory_replacement_after_git_call(self) -> None:
+        """A same-path objects replacement cannot change the authenticated object store."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            self._assert_metadata_swap_after_show(root, root / ".git" / "objects")
+
+    def test_project_root_symlink_alias_is_rejected(self) -> None:
+        """A symlink alias for the caller root cannot select a different root identity."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            alias = Path(temporary) / "repo-alias"
+            root.mkdir()
+            self._repo_with_evidence(root)
+            alias.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink alias"):
+                traefik_proof._current_parser_provenance(alias)
+
     def test_pack_metadata_entry_bound_fails_closed(self) -> None:
         """A huge objects/pack directory cannot consume unbounded scan time."""
 
@@ -1805,7 +1931,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
-            linked = root / "linked"
+            linked = Path(temporary) / "linked"
             root.mkdir()
             _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "relative-linked", str(linked))
@@ -1828,7 +1954,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             sandbox = Path(temporary)
             root = sandbox / "repo"
-            linked = root / "linked"
+            linked = Path(temporary) / "linked"
             root.mkdir()
             _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "external-common", str(linked))
@@ -1853,7 +1979,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
-            linked = root / "linked"
+            linked = Path(temporary) / "linked"
             root.mkdir()
             _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "relative-symlink", str(linked))
