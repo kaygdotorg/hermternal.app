@@ -53,7 +53,12 @@ export default defineConfig({
     trace: 'off',
     video: 'off',
     screenshot: 'off',
-    colorScheme: 'light'
+    colorScheme: 'light',
+    reducedMotion: 'reduce',
+    locale: 'en-US',
+    timezoneId: 'UTC',
+    viewport: { width: 1440, height: 960 },
+    deviceScaleFactor: 1
   },
   webServer: {
     // This disposable host keeps browser traffic same-origin while Hermes stays
@@ -66,7 +71,17 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium-live',
-      use: { ...devices['Desktop Chrome'] }
+      // Device defaults are followed by the public capture contract so the
+      // project cannot silently replace the declared viewport or DPR.
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1440, height: 960 },
+        deviceScaleFactor: 1,
+        locale: 'en-US',
+        timezoneId: 'UTC',
+        colorScheme: 'light',
+        reducedMotion: 'reduce'
+      }
     }
   ]
 });

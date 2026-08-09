@@ -1,5 +1,10 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
+import {
+  assertStableLiveCaptureState,
+  inspectPublicPng,
+  LIVE_SCREENSHOT_VARIANTS
+} from '../live/live-screenshot-contract.mjs';
 
 const identity = {
   user_id: 'visual-user',
@@ -119,6 +124,29 @@ for (const fixture of [
     });
   });
 }
+
+test('explicit public capture contract uses only the root route and approved CSS-pixel dimensions', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
+  await installSyntheticLiveBoundary(page);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Edit conversation title' })).toContainText(session.title);
+
+  for (const variant of LIVE_SCREENSHOT_VARIANTS) {
+    await page.setViewportSize({ width: variant.width, height: variant.height });
+    await assertStableLiveCaptureState(page, variant);
+    const bytes = await page.screenshot({
+      fullPage: false,
+      animations: 'disabled',
+      caret: 'hide',
+      scale: 'css'
+    });
+    expect(inspectPublicPng(bytes, variant)).toMatchObject({
+      width: variant.width,
+      height: variant.height,
+      chunks: ['IHDR', 'IDAT', 'IEND']
+    });
+  }
+});
 
 test('authenticated Chat reflows increased text without shrinking controls or clipping horizontally', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
