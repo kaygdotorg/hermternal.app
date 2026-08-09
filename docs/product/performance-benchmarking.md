@@ -51,9 +51,9 @@ each applicable platform and state.
 
 | Surface | Required synthetic operation families | Example recorded metric units |
 | --- | --- | --- |
-| Web chat | startup to the first usable state; chat prompt and stream rendering; long-transcript scroll; memory at defined checkpoints | duration in `ms`; memory in `bytes`; event or dropped-work counts in `count` |
-| Web Terminal | first glyph; sustained output throughput; retained-output replay; interactive input echo; resize completion | first glyph, echo, and resize in `ms`; throughput in bytes or glyphs per second; replay in `ms` or bytes; memory in `bytes` |
-| Apple: iOS, iPadOS, macOS | cold launch; warm resume; first and steady-state render; scene activation or restoration | launch, resume, and render in `ms`; scene completion in `ms` or event `count`; memory in `bytes` when the workload owns that checkpoint |
+| Web chat | startup to the first usable state; bundle evidence (emitted bundle bytes and manifest); chat prompt and stream rendering; reconnect and restoration; long-transcript scroll; memory at defined checkpoints | duration in `ms`; bundle and memory evidence in `bytes`; event or dropped-work counts in `count` |
+| Web Terminal | first glyph; sustained output throughput; retained-output replay; interactive input echo; resize completion; memory at defined checkpoints | first glyph, echo, and resize in `ms`; throughput in bytes or glyphs per second; replay in `ms` or bytes; memory in `bytes` |
+| Apple: iOS, iPadOS, macOS | cold launch; warm resume; stream rendering; transcript scroll; first and steady-state render; scene activation or restoration; memory at defined checkpoints | launch, resume, stream, scroll, and render in `ms`; scene completion in `ms` or event `count`; memory in `bytes` |
 
 Metric names MUST describe the operation and unit without embedding a threshold.
 For example, a later harness MAY use separate records for `startup_ready_ms`,
@@ -113,11 +113,16 @@ contain a host, address, credential, token, or user identifier.
 
 ## Repetitions and distributions
 
-Each accepted run MUST contain at least 30 positive finite raw samples, and
-`repetitions` MUST equal the raw sample count. The raw list MUST be retained;
-`min`, `p50`, `p95`, `p99`, `max`, and `mean` are derived values, not a
-replacement for samples. Cold and warm runs, metrics, devices, browsers, OS
-versions, and build modes MUST keep separate raw lists.
+Each accepted run in the shared `hermternal.benchmark-evidence.v1` format
+MUST contain at least 30 positive finite raw samples, and `repetitions` MUST
+equal the raw sample count. This general B-01 rule does not override a
+separately versioned renderer evidence schema with a reviewed repetition count.
+For example, a renderer schema MAY specify reviewed 5- or 10-repetition runs;
+those runs MUST retain their own schema, provenance, and validator and MUST NOT
+be silently coerced into 30 samples or pooled into a B-01 distribution. The raw
+list MUST be retained; `min`, `p50`, `p95`, `p99`, `max`, and `mean` are derived
+values, not a replacement for samples. Cold and warm runs, metrics, devices,
+browsers, OS versions, and build modes MUST keep separate raw lists.
 
 The distribution uses inclusive linear interpolation (R-7): sort `n` samples,
 compute the zero-based position `(n - 1) * q`, and linearly interpolate when the
