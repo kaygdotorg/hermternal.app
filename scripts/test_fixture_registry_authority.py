@@ -435,11 +435,19 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
     @staticmethod
     def assert_process_exited(pid_file: Path) -> None:
         deadline = time.monotonic() + 2
-        while time.monotonic() < deadline and not pid_file.exists():
+        pid_text = ""
+        while time.monotonic() < deadline:
+            # Creation and the child helper's pid write are separate filesystem
+            # operations. Poll the bounded publication window so a scheduler
+            # interleave cannot turn cleanup verification into a false failure.
+            if pid_file.exists():
+                pid_text = pid_file.read_text(encoding="ascii").strip()
+                if pid_text:
+                    break
             time.sleep(0.01)
-        if not pid_file.exists():
+        if not pid_text:
             raise AssertionError("bounded Git child did not publish its pid")
-        pid = int(pid_file.read_text(encoding="ascii"))
+        pid = int(pid_text)
         while time.monotonic() < deadline:
             try:
                 os.kill(pid, 0)
