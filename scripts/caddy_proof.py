@@ -66,6 +66,7 @@ GIT_COMMAND_TIMEOUT_SECONDS = 5
 GIT_OUTPUT_MAX_BYTES = 4096
 GIT_CONFIG_MAX_BYTES = 64 * 1024
 GIT_PACK_ENTRY_MAX = 4096
+GIT_METADATA_ENTRY_MAX = 65_536
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 TRUSTED_HELPER_PATH = "/usr/bin:/bin"
 GIT_REDIRECT_ENV_VARS = (
@@ -298,7 +299,8 @@ def _validate_path(value: str, name: str) -> str:
 
     Rejecting rather than escaping keeps the rendered proof byte-for-byte
     deterministic and prevents a future caller from changing Caddy's parser
-    context with a quote, backslash, or control character.
+    context with a quote, backslash, placeholder, or control character. Path
+    inputs are literal filesystem names; Caddy placeholders are not accepted.
     """
 
     if type(value) is not str:
@@ -308,6 +310,8 @@ def _validate_path(value: str, name: str) -> str:
         raise ValueError(f"{name} must be an absolute path")
     if any(character in value for character in ('"', "'", "\\")):
         raise ValueError(f"{name} must not contain Caddy quotes or backslashes")
+    if "{" in value or "}" in value:
+        raise ValueError(f"{name} must use a literal path without Caddy placeholders")
     if any(ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F for character in value):
         raise ValueError(f"{name} must not contain Caddy control characters")
     return value
@@ -1303,7 +1307,13 @@ def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[i
                 buffers[label].extend(chunk)
                 if len(buffers[label]) > GIT_OUTPUT_MAX_BYTES:
                     raise ValueError(f"Git {label} exceeds the bounded output size")
-        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        try:
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            # Both pipes may close before a hostile child process exits. Keep
+            # that path inside the bounded proof error contract; the outer
+            # handler still terminates and reaps the complete process group.
+            raise ValueError("Git provenance command timed out") from exc
         if type(returncode) is not int:
             raise ValueError("Git process result is malformed")
         return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
@@ -1334,14 +1344,24 @@ def _git_output_bounded(command: list[str], environment: dict[str, str]) -> tupl
 
 
 def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
-    """Resolve worktree and common Git metadata directories without aliases."""
+    """Resolve reviewed worktree metadata without following nested links."""
 
+    try:
+        root = Path(root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git repository root is unavailable") from exc
+    if not root.is_dir():
+        raise ValueError("Git repository root is unavailable")
     git_entry = root / ".git"
-    if git_entry.is_symlink():
+    try:
+        git_entry_metadata = os.lstat(git_entry)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git metadata root is unavailable") from exc
+    if stat.S_ISLNK(git_entry_metadata.st_mode):
         raise ValueError("Git metadata root must not be a symlink")
-    if git_entry.is_dir():
+    if stat.S_ISDIR(git_entry_metadata.st_mode):
         git_dir = git_entry
-    elif git_entry.is_file():
+    elif stat.S_ISREG(git_entry_metadata.st_mode):
         pointer = _read_verified_file_path(git_entry, 4096, "Git worktree pointer")
         try:
             text = pointer.decode("utf-8")
@@ -1349,16 +1369,32 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
             raise ValueError("Git worktree pointer is malformed") from exc
         if not text.startswith("gitdir: ") or not text.endswith("\n"):
             raise ValueError("Git worktree pointer is malformed")
-        target = Path(text[8:-1])
+        target_text = text[8:-1]
+        if not target_text:
+            raise ValueError("Git worktree pointer is malformed")
+        target = Path(target_text)
         git_dir = target if target.is_absolute() else root / target
     else:
         raise ValueError("Git metadata root is unavailable")
-    git_dir = git_dir.resolve(strict=True)
-    if not git_dir.is_dir() or git_dir.is_symlink():
-        raise ValueError("Git metadata root is unsafe")
+
+    git_fd, git_dir = _open_verified_directory_path(
+        git_dir,
+        label="Git metadata root",
+        resolve_parent_aliases=False,
+    )
+    os.close(git_fd)
     roots = [git_dir]
+
     common_file = git_dir / "commondir"
-    if common_file.exists():
+    try:
+        common_metadata = os.lstat(common_file)
+    except FileNotFoundError:
+        common_metadata = None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git common-dir pointer is unavailable") from exc
+    if common_metadata is not None:
+        if not stat.S_ISREG(common_metadata.st_mode):
+            raise ValueError("Git common-dir pointer is unsafe")
         common_bytes = _read_verified_file_path(common_file, 4096, "Git common-dir pointer")
         try:
             common_text = common_bytes.decode("utf-8")
@@ -1366,46 +1402,162 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
             raise ValueError("Git common-dir pointer is malformed") from exc
         if not common_text.endswith("\n"):
             raise ValueError("Git common-dir pointer is malformed")
-        common = Path(common_text[:-1])
-        common_dir = common if common.is_absolute() else git_dir / common
-        common_dir = common_dir.resolve(strict=True)
-        if not common_dir.is_dir() or common_dir.is_symlink():
-            raise ValueError("Git common metadata root is unsafe")
+        common_text = common_text[:-1]
+        if not common_text:
+            raise ValueError("Git common-dir pointer is malformed")
+        common = Path(common_text)
+        common_target = common if common.is_absolute() else git_dir / common
+        common_fd, common_dir = _open_verified_directory_path(
+            common_target,
+            label="Git common metadata root",
+            resolve_parent_aliases=False,
+        )
+        os.close(common_fd)
         roots.append(common_dir)
     return tuple(dict.fromkeys(roots))
 
 
-def _git_config_has_lazy_metadata(text: str) -> bool:
-    """Parse Git config keys without trusting regex escape interpretation.
+def _reject_git_metadata_links(metadata_root: Path) -> None:
+    """Reject every nested metadata symlink while bounding directory scans.
 
-    Git writes sectioned config files, while ``git config --list`` exposes
-    dotted keys. Accept both representations and normalize key spelling before
-    checking the forbidden partial-clone and promisor selectors.
+    The reviewed checkout may use a ``.git`` file and a regular ``commondir``
+    pointer for linked worktrees. Once those roots are resolved, Git metadata
+    itself must be a descriptor-safe tree: a moved ``objects`` or ``refs``
+    directory, or a deeper link below either, would otherwise redirect object
+    and ref reads outside the reviewed repository.
     """
 
+    root_fd, _canonical = _open_verified_directory_path(
+        metadata_root,
+        label="Git metadata root",
+        resolve_parent_aliases=False,
+    )
+    open_directories: list[int] = [root_fd]
+    stack: list[tuple[int, tuple[str, ...]]] = [(root_fd, ())]
+    entries_seen = 0
+    try:
+        while stack:
+            directory_fd, prefix = stack.pop()
+            try:
+                with os.scandir(directory_fd) as iterator:
+                    entries = []
+                    for entry in iterator:
+                        entries.append(entry)
+                        if len(entries) > GIT_METADATA_ENTRY_MAX:
+                            raise ValueError("Git metadata exceeds the bounded entry count")
+            except ValueError:
+                raise
+            except (OSError, RuntimeError, TypeError) as exc:
+                raise ValueError("Git metadata directory could not be inspected") from exc
+            entries.sort(key=lambda entry: entry.name)
+            for entry in entries:
+                name = entry.name
+                if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
+                    raise ValueError("Git metadata contains an invalid pathname entry")
+                entries_seen += 1
+                if entries_seen > GIT_METADATA_ENTRY_MAX:
+                    raise ValueError("Git metadata exceeds the bounded entry count")
+                try:
+                    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                    raise ValueError("Git metadata entry could not be inspected") from exc
+                if stat.S_ISLNK(metadata.st_mode):
+                    relative = "/".join((*prefix, name))
+                    raise ValueError(f"Git metadata contains a symlink: {relative}")
+                if not stat.S_ISDIR(metadata.st_mode):
+                    continue
+                child_fd = _open_verified_directory_at(
+                    directory_fd,
+                    name,
+                    label="Git metadata directory",
+                )
+                open_directories.append(child_fd)
+                stack.append((child_fd, (*prefix, name)))
+    finally:
+        for descriptor in reversed(open_directories):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _read_git_config(metadata_root: Path, filename: str) -> str | None:
+    """Read one optional local config file through a stable descriptor."""
+
+    if filename not in {"config", "config.worktree"}:
+        raise ValueError("Git config filename is unsupported")
+    path = metadata_root / filename
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git config could not be inspected") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("Git config is not a regular file")
+    raw = _read_verified_file_path(path, GIT_CONFIG_MAX_BYTES, f"Git {filename}")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Git config is malformed") from exc
+
+
+def _git_config_metadata_flags(text: str) -> tuple[bool, bool]:
+    """Return unsafe-config and active-worktree-config flags.
+
+    This is intentionally a small fail-closed parser. It recognizes the
+    section/key forms Git writes, including key-only booleans, but never
+    expands ``include`` or ``includeIf`` input. Any promisor/partial-clone key
+    is rejected regardless of its value so a future Git spelling cannot turn
+    this local trust check into a fetch-capable proof.
+    """
+
+    unsafe = False
+    worktree_config_active = False
     section = ""
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith(("#", ";")):
             continue
+        if "\x00" in line or line.endswith("\\"):
+            raise ValueError("Git config is malformed")
         if line.startswith("["):
-            if not line.endswith("]"):
+            if not line.endswith("]") or len(line) < 3:
                 raise ValueError("Git config is malformed")
             section = line[1:-1].strip().lower()
+            if not section:
+                raise ValueError("Git config is malformed")
+            if section == "include" or section.startswith("includeif"):
+                raise ValueError("Git config includes are not permitted")
             continue
-        key, separator, _value = line.partition("=")
-        if not separator:
-            continue
+        key, separator, raw_value = line.partition("=")
         key = key.strip().lower()
-        if key in {"extensions.partialclone", "partialclone", "promisor"}:
-            return True
-        if key.startswith("remote.") and key.endswith(".promisor"):
-            return True
-        if key == "partialclone" and section == "extensions":
-            return True
-        if key == "promisor" and section.startswith("remote "):
-            return True
-    return False
+        if not key:
+            raise ValueError("Git config is malformed")
+        compact_key = key.replace(" ", "")
+        compact_section = section.replace('"', "").replace(" ", "")
+        if compact_key.startswith("include") or compact_section.startswith("include"):
+            raise ValueError("Git config includes are not permitted")
+        full_key = f"{compact_section}.{compact_key}" if compact_section else compact_key
+        if "promisor" in full_key or "partialclone" in full_key:
+            unsafe = True
+        if full_key == "extensions.worktreeconfig":
+            if not separator:
+                worktree_config_active = True
+                continue
+            normalized_value = raw_value.strip().lower()
+            if normalized_value in {"true", "yes", "on", "1"}:
+                worktree_config_active = True
+            elif normalized_value not in {"false", "no", "off", "0"}:
+                raise ValueError("Git worktreeConfig boolean is malformed")
+    return unsafe, worktree_config_active
+
+
+def _git_config_has_lazy_metadata(text: str) -> bool:
+    """Return whether bounded local config contains unsafe Git selectors."""
+
+    unsafe, _worktree_config_active = _git_config_metadata_flags(text)
+    return unsafe
 
 
 def _reject_packed_replacement_refs(metadata_root: Path) -> None:
@@ -1450,25 +1602,48 @@ def _reject_promisor_pack_sidecars(metadata_root: Path) -> None:
 
 
 def _validate_git_metadata(root: Path) -> None:
-    for metadata_root in _git_metadata_roots(root):
+    metadata_roots = _git_metadata_roots(root)
+    worktree_config_active = False
+    for metadata_root in metadata_roots:
+        _reject_git_metadata_links(metadata_root)
         for relative in GIT_FORBIDDEN_METADATA:
             candidate = metadata_root / relative
-            if candidate.exists() or candidate.is_symlink():
+            try:
+                candidate_metadata = os.lstat(candidate)
+            except FileNotFoundError:
+                continue
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise ValueError("Git metadata could not be inspected") from exc
+            if stat.S_ISLNK(candidate_metadata.st_mode) or candidate.exists():
                 raise ValueError(f"Git metadata uses forbidden {relative}")
         replace_refs = metadata_root / "refs" / "replace"
-        if replace_refs.exists() or replace_refs.is_symlink():
+        try:
+            replace_metadata = os.lstat(replace_refs)
+        except FileNotFoundError:
+            replace_metadata = None
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ValueError("Git replacement refs could not be inspected") from exc
+        if replace_metadata is not None:
             raise ValueError("Git metadata uses replacement refs")
         _reject_packed_replacement_refs(metadata_root)
         _reject_promisor_pack_sidecars(metadata_root)
-        config = metadata_root / "config"
-        if config.exists() or config.is_symlink():
-            raw = _read_verified_file_path(config, GIT_CONFIG_MAX_BYTES, "Git config")
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise ValueError("Git config is malformed") from exc
-            if _git_config_has_lazy_metadata(text):
-                raise ValueError("Git repository uses lazy or promisor metadata")
+        config_text = _read_git_config(metadata_root, "config")
+        if config_text is not None:
+            unsafe, active = _git_config_metadata_flags(config_text)
+            if unsafe:
+                raise ValueError("Git repository uses lazy, promisor, partial, or included metadata")
+            worktree_config_active = worktree_config_active or active
+
+    if worktree_config_active:
+        for metadata_root in metadata_roots:
+            worktree_config = _read_git_config(metadata_root, "config.worktree")
+            if worktree_config is None:
+                continue
+            unsafe, _active = _git_config_metadata_flags(worktree_config)
+            if unsafe:
+                raise ValueError(
+                    "Git repository uses lazy, promisor, partial, or included worktree metadata"
+                )
 
 
 def _verify_git_repository(repository_root: Path) -> None:
@@ -2060,22 +2235,71 @@ def _effective_static_budget(primary: str, alias: str, default: int | float) -> 
     return alias_value
 
 
-def _open_verified_directory_path(path: Path, *, label: str) -> tuple[int, Path]:
+def _lexically_normalize_absolute_path(path: Path) -> Path:
+    """Normalize ``.`` and ``..`` without following any filesystem link."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    if not candidate.parts or candidate.parts[0] != "/":
+        raise ValueError("path must be absolute")
+    components: list[str] = []
+    for component in candidate.parts[1:]:
+        if component in {"", "."}:
+            continue
+        if component == "..":
+            if not components:
+                raise ValueError("path escapes the filesystem root")
+            components.pop()
+            continue
+        components.append(component)
+    return Path("/").joinpath(*components)
+
+
+def _open_verified_directory_path(
+    path: Path,
+    *,
+    label: str,
+    deadline: float | None = None,
+    resolve_parent_aliases: bool = True,
+) -> tuple[int, Path]:
+    """Open a directory with optional deadline and no-follow resolution."""
+
+    def check_deadline() -> None:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ValueError(f"{label} deadline exceeded")
+
+    check_deadline()
     candidate = Path(path)
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     if candidate.is_symlink():
         raise ValueError(f"{label} must not be a symlink")
     try:
-        candidate = candidate.resolve(strict=True)
+        if resolve_parent_aliases:
+            candidate = candidate.resolve(strict=True)
+        else:
+            candidate = _lexically_normalize_absolute_path(candidate)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError(f"{label} is unavailable") from exc
-    parent_fd, name = _open_verified_parent(candidate, label=label)
+    check_deadline()
+    parent_fd, name = _open_verified_parent(
+        candidate,
+        label=label,
+        resolve_parent_aliases=False,
+    )
+    descriptor: int | None = None
     try:
+        check_deadline()
         descriptor = _open_verified_directory_at(parent_fd, name, label=label)
+        check_deadline()
+        return descriptor, candidate
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
     finally:
         os.close(parent_fd)
-    return descriptor, candidate
 
 
 def _build_static_digest(site_root: Path) -> str:
@@ -2111,20 +2335,26 @@ def _build_static_digest(site_root: Path) -> str:
     if min(file_limit, per_file_limit, total_limit, depth_limit) <= 0 or deadline_budget <= 0:
         raise ValueError("static build budgets must be positive")
 
+    deadline = time.monotonic() + deadline_budget
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError("static build digest deadline exceeded")
+
     raw_root = Path(site_root)
     if not raw_root.is_absolute():
         raw_root = Path.cwd() / raw_root
-    root_fd, canonical_root = _open_verified_directory_path(site_root, label="static build root")
-    deadline = time.monotonic() + deadline_budget
+    root_fd, canonical_root = _open_verified_directory_path(
+        site_root,
+        label="static build root",
+        deadline=deadline,
+    )
+    check_deadline()
     open_directories: list[int] = [root_fd]
     stack: list[tuple[int, tuple[str, ...], int]] = [(root_fd, (), 0)]
     files_seen = 0
     total_bytes = 0
     hasher = hashlib.sha256()
-
-    def check_deadline() -> None:
-        if time.monotonic() >= deadline:
-            raise ValueError("static build digest deadline exceeded")
 
     try:
         while stack:
@@ -2254,7 +2484,9 @@ def _build_static_digest(site_root: Path) -> str:
                 hasher.update(content)
                 check_deadline()
         check_deadline()
-        return hasher.hexdigest()
+        digest = hasher.hexdigest()
+        check_deadline()
+        return digest
     finally:
         for descriptor in reversed(open_directories):
             try:
