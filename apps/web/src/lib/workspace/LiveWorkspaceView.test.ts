@@ -337,6 +337,26 @@ describe('LiveWorkspaceView', () => {
     expect(getComputedStyle(scope).backgroundColor).not.toBe('rgba(0, 0, 0, 0)');
   });
 
+  it('reacts to explicit appearance changes after mount', async () => {
+    const terminal = createTerminalBridge();
+    const session = createSession({
+      state: 'ready',
+      mode: 'terminal',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: []
+    }, { terminal });
+    const view = render(LiveWorkspaceView, { session, appearance: 'light' });
+    const scope = screen.getByTestId('terminal-appearance-scope');
+
+    expect(scope).toHaveAttribute('data-appearance', 'light');
+    await view.rerender({ appearance: 'dark' });
+    await waitFor(() => expect(scope).toHaveAttribute('data-appearance', 'dark'));
+    expect(getComputedStyle(scope).getPropertyValue('--canvas').trim()).toBe('#0d1117');
+  });
+
   it('renders truthful live empty state and disables input without a server session', async () => {
     const session = createSession({
       state: 'empty',

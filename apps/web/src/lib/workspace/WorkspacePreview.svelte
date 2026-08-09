@@ -841,7 +841,9 @@
     .mobile-mode-selector {
       position: absolute;
       top: 72px;
-      right: 16px;
+      /* Keep the approved mode capsule in the toolbar row without covering the
+         separately actionable workspace pill at the trailing edge. */
+      right: 68px;
       z-index: 14;
       box-sizing: border-box;
       display: flex;

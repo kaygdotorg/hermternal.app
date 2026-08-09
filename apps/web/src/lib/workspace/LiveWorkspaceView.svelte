@@ -25,7 +25,8 @@
   export let onTerminalAuthenticationFailure: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
 
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
-  let resolvedAppearance: Appearance = appearance ?? 'light';
+  let systemAppearance: Appearance = 'light';
+  let resolvedAppearance: Appearance;
   let unsubscribeAppearance: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   let unsubscribeTerminalLifecycle: (() => void) | undefined;
@@ -38,6 +39,10 @@
   let chatHandoffRequested = false;
   let chatHandoffRunning = false;
   let handoffSequence = 0;
+
+  // Explicit preview controls stay reactive after mount. The media query keeps
+  // its latest value in reserve for the production route and later prop removal.
+  $: resolvedAppearance = appearance ?? systemAppearance;
 
   // A latched factory failure has no bridge or coordinator of its own. Keep an
   // unpromoted draft fail-closed instead of turning its Terminal controls into a
@@ -63,16 +68,14 @@
   }
 
   onMount(() => {
-    if (appearance === undefined && typeof window.matchMedia === 'function') {
+    if (typeof window.matchMedia === 'function') {
       const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
       const applyColorScheme = (): void => {
-        resolvedAppearance = colorScheme.matches ? 'dark' : 'light';
+        systemAppearance = colorScheme.matches ? 'dark' : 'light';
       };
       applyColorScheme();
       colorScheme.addEventListener('change', applyColorScheme);
       unsubscribeAppearance = () => colorScheme.removeEventListener('change', applyColorScheme);
-    } else if (appearance !== undefined) {
-      resolvedAppearance = appearance;
     }
     coordinator = session.coordinator;
     terminal = session.terminal;
