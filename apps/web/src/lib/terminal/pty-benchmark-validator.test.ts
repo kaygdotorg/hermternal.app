@@ -646,6 +646,42 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
     );
   });
 
+  it("binds every connecting stale ledger to the producer owner tuple", () => {
+    const producerOwner = {
+      sessionId: "benchmark-session-a",
+      attach: "benchmark-attach-a",
+      processIdentity: "benchmark-process-a",
+    };
+    const exact = cloneArtifact(connectingArtifactPath);
+    for (const result of exact.results) {
+      const run = result.runs[0];
+      expect(run.staleSocketIdentities[0]).toEqual(producerOwner);
+      expect(run.staleSocketIdentity).toEqual(producerOwner);
+      expect(run.socketClosures[0].ownerIdentity).toEqual(producerOwner);
+    }
+    withTempArtifact(exact, (path) => {
+      expect(runCli(path).ok).toBe(true);
+      expect(runCli(path, true).ok).toBe(true);
+    });
+
+    const unsuffixedTuple = {
+      sessionId: "benchmark-session",
+      attach: "benchmark-attach",
+      processIdentity: "benchmark-process",
+    };
+    const forged = cloneArtifact(connectingArtifactPath);
+    for (const result of forged.results) {
+      const run = result.runs[0];
+      run.staleSocketIdentities[0] = { ...unsuffixedTuple };
+      run.staleSocketIdentity = { ...unsuffixedTuple };
+      run.socketClosures[0].ownerIdentity = { ...unsuffixedTuple };
+    }
+    expectCliFailure(
+      forged,
+      /expected owner identity|deferred socket ledger|exact per-socket cleanup ledger|ownership identities/iu,
+    );
+  }, 30_000);
+
   it("rejects edits to retained callback, Blob, and replacement-state ledgers", () => {
     const sinkNames = cloneArtifact(connectingArtifactPath);
     sinkNames.results[3].runs[0].callbackBoundSinkNames.reverse();

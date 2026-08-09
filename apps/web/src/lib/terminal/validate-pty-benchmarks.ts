@@ -1593,17 +1593,18 @@ function expectedAssertionValues(
         ) === 0;
       }));
 
-  const reconnectOwner: OwnerIdentity = reconnect
-    ? {
-        sessionId: "benchmark-session",
-        attach: "benchmark-attach",
-        processIdentity: "benchmark-process",
-      }
-    : {
-        sessionId: "benchmark-session-a",
-        attach: "benchmark-attach-a",
-        processIdentity: "benchmark-process-a",
-      };
+  const reconnectOwner: OwnerIdentity = {
+    sessionId: "benchmark-session",
+    attach: "benchmark-attach",
+    processIdentity: "benchmark-process",
+  };
+  // Connecting raw ledgers use the producer's suffixed input tuple; reconnect
+  // retains its separate unsuffixed schema identity above.
+  const connectingOwner: OwnerIdentity = {
+    sessionId: "benchmark-session-a",
+    attach: "benchmark-attach-a",
+    processIdentity: "benchmark-process-a",
+  };
   const replacementOwner: OwnerIdentity = {
     sessionId: "benchmark-session-b",
     attach: "benchmark-attach-b",
@@ -1695,7 +1696,7 @@ function expectedAssertionValues(
     socketClosures.some(
       (closure) =>
         closure.socketId === staleSocketId &&
-        sameOwnerIdentity(closure.ownerIdentity, reconnectOwner) &&
+        sameOwnerIdentity(closure.ownerIdentity, connectingOwner) &&
         closure.closeCalls === 1 &&
         !closure.opened,
     );
@@ -1841,7 +1842,7 @@ function expectedAssertionValues(
             expectedOwner !== null &&
             sameOwnerIdentity(closure.ownerIdentity, expectedOwner)
           : !closure.opened &&
-            sameOwnerIdentity(closure.ownerIdentity, reconnectOwner)),
+            sameOwnerIdentity(closure.ownerIdentity, connectingOwner)),
     );
   const callbackApplicabilityMatchesAction =
     callbackProofApplicable === (replacement && callbackApplicability);
@@ -1874,7 +1875,7 @@ function expectedAssertionValues(
     noDuplicateOwners: count("duplicateOwnerViolations") === 0,
     staleSocketIdentityFence:
       staleSocketIdentities.length === 1 &&
-      sameOwnerIdentity(staleSocketIdentities[0]!, reconnectOwner) &&
+      sameOwnerIdentity(staleSocketIdentities[0]!, connectingOwner) &&
       count("staleSocketCloseCalls") === 1,
     staleSocketIdFence:
       staleSocketIds.length === 1 &&
@@ -1916,17 +1917,18 @@ function validateOwnershipProof(
   const reconnect =
     schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
   const replacement = stage === "replace";
-  const reconnectOwner: OwnerIdentity = reconnect
-    ? {
-        sessionId: "benchmark-session",
-        attach: "benchmark-attach",
-        processIdentity: "benchmark-process",
-      }
-    : {
-        sessionId: "benchmark-session-a",
-        attach: "benchmark-attach-a",
-        processIdentity: "benchmark-process-a",
-      };
+  const reconnectOwner: OwnerIdentity = {
+    sessionId: "benchmark-session",
+    attach: "benchmark-attach",
+    processIdentity: "benchmark-process",
+  };
+  // Connecting raw ledgers use the producer's suffixed input tuple; reconnect
+  // retains its separate unsuffixed schema identity above.
+  const connectingOwner: OwnerIdentity = {
+    sessionId: "benchmark-session-a",
+    attach: "benchmark-attach-a",
+    processIdentity: "benchmark-process-a",
+  };
   const replacementOwner: OwnerIdentity = {
     sessionId: "benchmark-session-b",
     attach: "benchmark-attach-b",
@@ -1954,7 +1956,7 @@ function validateOwnershipProof(
     reconnect && stage === "factory"
       ? [reconnectOwner]
       : connectingStale
-        ? [reconnectOwner]
+        ? [connectingOwner]
         : [];
   const expectedStaleSocketIds =
     reconnect && stage === "factory"
@@ -1998,7 +2000,7 @@ function validateOwnershipProof(
     : [
         {
           socketId: "socket-1",
-          ownerIdentity: reconnectOwner,
+          ownerIdentity: connectingOwner,
           closeCalls: 1,
           opened: false,
         },

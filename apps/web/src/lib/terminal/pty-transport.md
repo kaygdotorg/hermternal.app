@@ -227,6 +227,13 @@ late-callback assertions are conditional over the callback-free stale adapter,
 not fabricated callback coverage. Replacement invokes the stale factory once,
 then allocates one identity-owned replacement socket, proves its real `onopen`,
 and then proves callback nulling, late-event suppression, and exactly-once close.
+The connecting producer's stale owner is the exact synthetic tuple
+`{ sessionId: "benchmark-session-a", attach: "benchmark-attach-a",
+processIdentity: "benchmark-process-a" }`. The validator uses that tuple for
+`staleSocketIdentity`, `staleSocketIdentities`, every stale `socketClosures` row,
+and connecting cleanup proofs, including the replacement stage. The unsuffixed
+`benchmark-session` / `benchmark-attach` / `benchmark-process` tuple belongs only
+to the separate reconnect schema; it must not satisfy connecting evidence.
 The v2 artifact retains raw samples, expected ticket/factory counts,
 duplicate-owner checks, the ordered per-socket cleanup ledger, and the
 conditional callback proof.
