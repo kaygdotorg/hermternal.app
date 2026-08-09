@@ -58,9 +58,21 @@ The package owns these versioned records:
 Evidence also carries `protocol_schema:
 hermternal.benchmark-evidence.v1` and keeps the shared field names where they
 apply. Workload bytes are pinned by SHA-256 in the package, and the validator
-recomputes every run distribution from raw samples. Strict decoding rejects
-missing or unknown keys. Tests mutate the fixture, schema, sample list,
-distribution, redaction flags, and build metadata to ensure drift is visible.
+recomputes every run distribution from raw samples. Strict bounded decoding
+rejects duplicate keys, malformed JSON, oversized input/output, excessive tree
+shape, and empty distributions. The validator also binds the exact platform,
+operation, cold/warm, repetition, trace, build, revision, and artifact matrix;
+artifact paths, byte counts, hashes, and manifest identities are code-pinned.
+Tests mutate the fixture, schema, sample list, distribution, redaction flags,
+build metadata, artifact metadata, JSON bounds, and output policy to ensure
+drift is visible.
+
+Evidence that lists the raw trace must emit it. The CLI therefore requires
+`--trace-output`, canonicalizes both destinations, rejects aliases or
+collisions, writes the trace before evidence, and fails closed rather than
+attesting to a missing file. Threshold and budget values remain explicit
+`null` in scaffold output; if a caller supplies nonnil values, serialization
+preserves them and validation rejects them until a reviewed contract exists.
 
 The runner can write two files without putting machine paths into evidence:
 
@@ -85,6 +97,7 @@ swift build --package-path benchmarks/apple
 swift test --package-path benchmarks/apple
 swift build -c release --package-path benchmarks/apple
 swift test -c release --package-path benchmarks/apple
+xcrun swift-format lint --strict --recursive benchmarks/apple/Sources benchmarks/apple/Tests
 ```
 
 The package has no external dependencies and is intended for the local Apple
