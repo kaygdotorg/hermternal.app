@@ -10,6 +10,14 @@ export const BENCHMARK_REPETITIONS = {
   repeated_mount_dispose: 10
 } as const;
 
+/**
+ * The normal benchmark has a measured diagnostic completion near 134 seconds.
+ * Keep a finite 180-second browser fence so slow runs can finish without
+ * turning a stalled page into an unbounded process.
+ */
+export const BENCHMARK_HARNESS_DIAGNOSTIC_SUCCESS_MS = 134_000;
+export const BENCHMARK_HARNESS_TIMEOUT_MS = 180_000;
+
 export const BENCHMARK_EXECUTION_INPUT_PATHS = [
   'apps/web/src/lib/terminal/renderer.ts',
   'apps/web/src/lib/terminal/terminal.css',
