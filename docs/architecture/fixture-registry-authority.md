@@ -121,8 +121,9 @@ two packs plus metadata; its measured snapshot total is 96,034,354 bytes, and th
 directory, file, depth, and retained path-storage budgets remain independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
 CI before content accounting. Strict Git execution remains separately capped at
-15 seconds; the measured seeded 96,034,354-byte snapshot completed strict fsck in 9.061
-seconds on the fixture host. It rejects symlinks/non-regular entries
+30 seconds; the measured seeded 96,034,354-byte snapshot completed strict fsck in 9.061
+seconds on the fixture host, while a serial aggregate run showed 15 seconds was
+marginal for its optimized seeded clone. It rejects symlinks/non-regular entries
 and checks source metadata before and after each copy. Git is invoked only
 against that snapshot,
 so a concurrent rename or symlink replacement of the caller's `.git`, nested

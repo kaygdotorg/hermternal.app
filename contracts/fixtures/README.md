@@ -96,9 +96,10 @@ second) wall-clock deadline. The refreshed four-ref trusted bundle produced a
 4,614,714 bytes of measured headroom. A seeded clone retains two packs plus
 metadata; a measured seeded snapshot totals 96,034,354 bytes, and the independent 96 MiB aggregate cap bounds that composition without
 weakening the 1 MiB non-pack limit, entry/file/path budgets, output limits, or
-the deadline. The separately bounded strict Git process cap is 15 seconds;
+the deadline. The separately bounded strict Git process cap is 30 seconds;
 the measured seeded 96,034,354-byte snapshot completed strict fsck in 9.061 seconds on
-the fixture host. Snapshot entry count, directory count, file count, traversal
+the fixture host, while a serial aggregate run showed 15 seconds was marginal
+for its optimized seeded clone. Snapshot entry count, directory count, file count, traversal
 depth, retained path storage, aggregate bytes, and deadline are bounded
 independently, so arbitrarily many zero-byte metadata entries cannot consume
 CI before the byte limits run. It rejects symlinks/non-regular entries and
