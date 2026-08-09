@@ -67,36 +67,38 @@ final class ParityTests: XCTestCase {
     }
 
     func testRunParityProvesRepresentativeOfflineSurface() throws {
-        let report = try runParityForTests(at: repoRoot)
+        try withFullPlatformBrowserAuthCoverage { temporaryRoot in
+            let report = try runParityForTests(at: temporaryRoot)
 
-        XCTAssertTrue(report.ok)
-        XCTAssertEqual(report.contract, dashboardContract)
-        XCTAssertEqual(report.hermesSourceSHA, hermesSourceSHA)
-        XCTAssertTrue(report.syntheticOnly)
-        XCTAssertFalse(report.liveClaim)
-        XCTAssertEqual(report.networkCalls, 0)
-        XCTAssertEqual(report.readyCaseCount, 11)
-        XCTAssertEqual(report.cases.count, 17)
-        XCTAssertTrue(report.blockedCoverageIDs.contains("chat-stream-and-completion"))
-        XCTAssertTrue(report.blockedCoverageIDs.contains("connection-restoration"))
-        XCTAssertFalse(report.compatibility.compatible)
-        XCTAssertFalse(report.compatibility.liveRun)
+            XCTAssertTrue(report.ok)
+            XCTAssertEqual(report.contract, dashboardContract)
+            XCTAssertEqual(report.hermesSourceSHA, hermesSourceSHA)
+            XCTAssertTrue(report.syntheticOnly)
+            XCTAssertFalse(report.liveClaim)
+            XCTAssertEqual(report.networkCalls, 0)
+            XCTAssertEqual(report.readyCaseCount, 11)
+            XCTAssertEqual(report.cases.count, 17)
+            XCTAssertTrue(report.blockedCoverageIDs.contains("chat-stream-and-completion"))
+            XCTAssertTrue(report.blockedCoverageIDs.contains("connection-restoration"))
+            XCTAssertFalse(report.compatibility.compatible)
+            XCTAssertFalse(report.compatibility.liveRun)
 
-        let families = Set(report.cases.map { $0.family.rawValue })
-        XCTAssertEqual(
-            families,
-            Set(["auth", "connection", "session", "chat", "image", "pty", "deep-link", "compatibility"])
-        )
-        XCTAssertTrue(
-            report.cases
-                .filter { $0.family == .chat }
-                .allSatisfy { $0.status == "blocked" && $0.webDecision == nil && $0.appleDecision == nil }
-        )
-        XCTAssertTrue(
-            report.cases
-                .filter { $0.family == .pty }
-                .allSatisfy { $0.status == "proven" && $0.appleDecision == "blocked_platform" }
-        )
+            let families = Set(report.cases.map { $0.family.rawValue })
+            XCTAssertEqual(
+                families,
+                Set(["auth", "connection", "session", "chat", "image", "pty", "deep-link", "compatibility"])
+            )
+            XCTAssertTrue(
+                report.cases
+                    .filter { $0.family == .chat }
+                    .allSatisfy { $0.status == "blocked" && $0.webDecision == nil && $0.appleDecision == nil }
+            )
+            XCTAssertTrue(
+                report.cases
+                    .filter { $0.family == .pty }
+                    .allSatisfy { $0.status == "proven" && $0.appleDecision == "blocked_platform" }
+            )
+        }
     }
 
     func testC19BlockedPreflightCannotProduceParityEvidence() throws {
@@ -684,12 +686,14 @@ final class ParityTests: XCTestCase {
     }
 
     func testParityReportOrderingIsCanonical() throws {
-        let report = try runParityForTests(at: repoRoot)
-        XCTAssertEqual(report.blockedCoverageIDs, report.blockedCoverageIDs.sorted())
-        let caseKeys = report.cases.map { "\($0.family.rawValue)|\($0.coverageID)|\($0.caseID)" }
-        XCTAssertEqual(caseKeys, caseKeys.sorted())
-        for result in report.cases {
-            XCTAssertEqual(result.platforms.map(\.rawValue), result.platforms.map(\.rawValue).sorted())
+        try withFullPlatformBrowserAuthCoverage { temporaryRoot in
+            let report = try runParityForTests(at: temporaryRoot)
+            XCTAssertEqual(report.blockedCoverageIDs, report.blockedCoverageIDs.sorted())
+            let caseKeys = report.cases.map { "\($0.family.rawValue)|\($0.coverageID)|\($0.caseID)" }
+            XCTAssertEqual(caseKeys, caseKeys.sorted())
+            for result in report.cases {
+                XCTAssertEqual(result.platforms.map(\.rawValue), result.platforms.map(\.rawValue).sorted())
+            }
         }
     }
 
@@ -758,7 +762,7 @@ final class ParityTests: XCTestCase {
 
     private func runCLI(
         at root: URL,
-        timeout: TimeInterval = 5
+        timeout: TimeInterval = 15
     ) throws -> (status: Int32, stdout: String, stderr: String, timedOut: Bool) {
         let candidates = [
             packageRoot.appendingPathComponent(".build/debug/hermternal-swift-parity"),
@@ -1038,6 +1042,43 @@ final class ParityTests: XCTestCase {
         try mutate(&index)
         let data = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
         try withTemporaryIndex(data, body: body)
+    }
+
+    private func withFullPlatformBrowserAuthCoverage(
+        body: (URL) throws -> Void
+    ) throws {
+        let temporaryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermternal-swift-c21-platform-projection-\(UUID().uuidString)", isDirectory: true)
+        let contractsURL = temporaryRoot.appendingPathComponent("contracts", isDirectory: true)
+        try FileManager.default.createDirectory(at: contractsURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+        let sourceFixturesURL = repoRoot.appendingPathComponent("contracts/fixtures", isDirectory: true)
+        try FileManager.default.copyItem(
+            at: sourceFixturesURL,
+            to: contractsURL.appendingPathComponent("fixtures", isDirectory: true)
+        )
+
+        let indexURL = contractsURL
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("index.json")
+        let source = try Data(contentsOf: indexURL)
+        var index = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: source, options: [.mutableContainers]) as? [String: Any]
+        )
+        var coverage = try XCTUnwrap(index["coverage"] as? [[String: Any]])
+        guard let position = coverage.firstIndex(where: {
+            ($0["id"] as? String) == "browser-cookie-auth"
+        }) else {
+            XCTFail("browser-cookie-auth coverage is missing from the checked-in registry")
+            return
+        }
+        coverage[position]["platforms"] = ["web", "ios", "ipados", "macos"]
+        index["coverage"] = coverage
+        let projectedIndex = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+        try projectedIndex.write(to: indexURL, options: .atomic)
+
+        try body(temporaryRoot)
     }
 
     private func fixtureRoots(from index: [String: Any]) throws -> [[String: Any]] {

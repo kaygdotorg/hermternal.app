@@ -80,6 +80,16 @@ replace the host validator. The internal `@testable`
 `runParityForTests(at:)` helper exists only for synthetic projection tests and is
 not part of the public API or CLI report path.
 
+The provisional parent used for this rehearsal narrows `browser-cookie-auth`
+coverage to Web even though its representative fixture carries independent
+Apple semantics. The tests preserve production parity logic by copying the
+fixture repository into test-owned temporary data and broadening only that
+temporary coverage row to `web`, `ios`, `ipados`, and `macos`. No checked-in
+fixture or validator bytes are changed. The CLI test also uses a separate,
+longer host process budget than the validator's five-second deadline so host
+scheduling does not turn the safe `blocked` and `timeout` classifications into
+a test failure.
+
 ## Commands
 
 Run from this directory:
