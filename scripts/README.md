@@ -380,9 +380,17 @@ fixtures do not establish current product identity, and task-244 parity binding
 remains a blocker until an independent check verifies it; this lane must not
 silently claim parity. Static-tree and Git trust boundaries have explicit
 resource and special-file limits: static provenance accepts only bounded
-regular-file data, rejects symlinks and other special files, and Git provenance
-uses timed commands with bounded output and diagnostics. Any limit, identity,
-malformed-output, or command failure fails closed.
+regular-file data, rejects symlinks and other special files, and applies one
+monotonic deadline from root resolution through the final digest return. Git
+provenance uses timed commands with bounded output and diagnostics. Its local
+metadata scan rejects nested symlink escapes, include/includeIf directives,
+and every promisor or partial-clone selector, including key-only booleans and
+active `config.worktree`; external Git configuration is disabled. A closed
+stdout/stderr pair that leaves Git running is normalized to the same bounded
+proof timeout while the process group is terminated and reaped. Any limit,
+identity, malformed-output, or command failure fails closed. Renderer path
+inputs are literal absolute filesystem paths; Caddy placeholders are rejected
+rather than retained as dynamic configuration.
 
 The browser map must use the fixed
 `hermternal.caddy-proof.browser-evidence.v1` schema and bind its status to the
