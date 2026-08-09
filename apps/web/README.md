@@ -168,7 +168,16 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   device/inode, an absolute trusted Python child with `-I -S` and a credential-free environment, and
   exclusive no-overwrite publication. Source swaps, parent swaps, quarantine remnants, attachment
   failures, and cleanup errors are surfaced without recursive pathname deletion. No live Hermes run or
-  retainable live screenshot was performed for this correction.
+  retainable live screenshot was performed for this correction. The separate opt-in
+  `HERMTERNAL_LIVE_RECONCILIATION=1` mode performs a fresh password login and bounded read-only
+  session/history enumeration without creating or resuming a session, acquiring a ticket, opening a
+  WebSocket, or submitting a prompt. It reports only zero/one/multiple fixed prompt matches, zero/one/
+  multiple ordered completion pairs, and `no-match-uncertain`, `delivery-observed`,
+  `completion-observed`, or `ambiguous`; zero history matches remain uncertain, not absent. It fails
+  closed on malformed or incomplete pagination and cleanup failure, then verifies logout and clears
+  cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The mode never retains IDs,
+  timestamps, bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is
+  mutually exclusive with screenshot capture. No live reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

@@ -13,6 +13,13 @@ import {
 // credential-bearing worker or switch the browser to a headed/UI mode.
 assertLiveRunnerDebugDisabled();
 
+if (
+  process.env.HERMTERNAL_LIVE_RECONCILIATION === '1' &&
+  process.env.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE === '1'
+) {
+  throw new Error('live reconciliation mode cannot be combined with screenshot capture');
+}
+
 const paths = getLivePlaywrightPaths();
 const port = Number(process.env.PLAYWRIGHT_LIVE_PORT ?? 4187);
 

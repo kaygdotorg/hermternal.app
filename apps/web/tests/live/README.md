@@ -120,6 +120,34 @@ that can observe the real Hermes Chat state. No live Hermes run or retainable
 live screenshot was performed for this change; credentials and VM access are
 not required for the regression suite.
 
+### Read-only reconciliation mode
+
+A separate opt-in `reconcile-live-proof.spec.ts` resolves uncertain delivery without
+submitting a prompt. Run it only with `HERMTERNAL_LIVE_RECONCILIATION=1` in the
+authorized disposable lane; it performs a fresh password login, then reads one
+bounded authoritative `/api/sessions?limit=100&offset=0` page and complete
+`/messages?limit=500&offset=0` histories in memory. It never creates or resumes a
+fallback session, selects a most-recent session, acquires a ticket, opens a
+WebSocket, or sends a prompt. A list or history whose cap, identity, response
+shape, or pagination cannot prove completeness fails closed.
+
+The reconciler compares only the fixed proof prompt and assistant marker. It
+prints one fixed line with `promptMatches=zero|one|multiple`,
+`completedPairs=zero|one|multiple`, and exactly one of
+`no-match-uncertain|delivery-observed|completion-observed|ambiguous`. Zero history
+matches are still `no-match-uncertain`; a 200 response without a match is not
+absence, and a 401, redirect, or read failure is never treated as absence.
+Multiple matching prompts, pairs, or sessions are `ambiguous`. It preserves
+`promptCount===0` and never prints IDs, timestamps, bodies, prompt/response text,
+endpoints, headers, raw errors, or artifacts.
+
+Finally it verifies logout and clears cookies, Web Storage, IndexedDB, Cache
+Storage, and service workers. Cleanup failure fails closed. The live config keeps
+`preserveOutput: 'never'`, trace/video/screenshot output disabled, and the
+reconciliation mode mutually exclusive with screenshot capture. Do not run live
+reconciliation as part of this correction; unit tests use synthetic bounded
+histories only.
+
 This lane serves the production static build and proxies only `/api/*`, `/auth/*`, `/api/ws`, and the exact `/api/pty` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 
 The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/octal/short IPv4 encodings, percent-encoded or backslash-containing authorities, ambiguous ports, and any path, query, or fragment before creating the proxy-capable server. This validation is the disposable proof boundary; it prevents auth traffic from being sent to a target that URL parsing could reinterpret.
