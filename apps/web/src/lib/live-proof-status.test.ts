@@ -34,7 +34,12 @@ describe('live proof reporter status channel', () => {
       'not allowlisted'
     );
     expect(() =>
-      assertLiveProofStatus({ phase: 'submitted', delivery: 'submitted', detail: 'unsafe' })
+      assertLiveProofStatus(
+        { phase: 'submitted', delivery: 'submitted', detail: 'unsafe' } as unknown as {
+          phase: string;
+          delivery: string;
+        }
+      )
     ).toThrow('not allowlisted');
 
     const valid = [

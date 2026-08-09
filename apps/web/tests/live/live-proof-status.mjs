@@ -40,15 +40,19 @@ const ANNOTATION_KEYS = Object.freeze(['type', 'description']);
  * @param {{ phase: string, delivery: string }} status
  */
 export function setLiveProofStatus(testInfo, status) {
-  if (!testInfo || typeof testInfo !== 'object' || !Array.isArray(testInfo.annotations)) {
+  if (testInfo === null || typeof testInfo !== 'object') {
+    throw new Error('live proof status target is not available');
+  }
+  const target = /** @type {{ annotations?: unknown }} */ (testInfo);
+  if (!Array.isArray(target.annotations)) {
     throw new Error('live proof status target is not available');
   }
   const next = assertLiveProofStatus(status);
-  const annotations = /** @type {Array<Record<string, unknown>>} */ (testInfo.annotations);
+  const annotations = /** @type {Array<Record<string, unknown>>} */ (target.annotations);
   const current = readLiveProofStatus(annotations);
   for (let index = annotations.length - 1; index >= 0; index -= 1) {
     const type = annotations[index]?.type;
-    if (LIVE_PROOF_STATUS_ANNOTATION_TYPES.includes(type)) annotations.splice(index, 1);
+    if (typeof type === 'string' && LIVE_PROOF_STATUS_ANNOTATION_TYPES.includes(type)) annotations.splice(index, 1);
   }
   annotations.push(
     { type: LIVE_PROOF_PHASE_ANNOTATION, description: next.phase },
@@ -68,6 +72,7 @@ export function readLiveProofStatus(annotations) {
   const owned = annotations.filter((annotation) =>
     annotation !== null &&
     typeof annotation === 'object' &&
+    typeof annotation.type === 'string' &&
     LIVE_PROOF_STATUS_ANNOTATION_TYPES.includes(annotation.type)
   );
   const phaseAnnotation = owned.filter((annotation) => annotation.type === LIVE_PROOF_PHASE_ANNOTATION);
