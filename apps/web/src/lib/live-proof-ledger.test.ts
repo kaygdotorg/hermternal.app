@@ -21,7 +21,7 @@ function expectedTags(ledger: ReturnType<typeof createLiveProofLedger>) {
 function historyEvent(
   ledger: ReturnType<typeof createLiveProofLedger>,
   phase: 'pre-send' | 'post-completion',
-  ids: number[],
+  messages: Array<Record<string, unknown>>,
   overrides: Record<string, unknown> = {}
 ) {
   return {
@@ -36,17 +36,19 @@ function historyEvent(
     assistantMarkerMatches: phase === 'post-completion',
     candidateUserCount: phase === 'post-completion' ? 1 : 0,
     candidateAssistantCount: phase === 'post-completion' ? 1 : 0,
-    messageCount: ids.length,
-    historyIdTag: ledger.messageIdTag(ids),
-    prefixIdTag: ledger.messageIdTag(phase === 'pre-send' ? ids : ids.slice(0, 2)),
+    messageCount: messages.length,
+    historyProjectionTag: ledger.messageProjectionTag(messages),
+    prefixProjectionTag: ledger.messageProjectionTag(
+      phase === 'pre-send' ? messages : messages.slice(0, 2)
+    ),
     ...overrides
   };
 }
 
 function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}) {
   const ledger = createLiveProofLedger();
-  const preIds = [10, 11];
-  const postIds = [10, 11, 12, 13];
+  const preMessages = proofMessages([10, 11]);
+  const postMessages = proofMessages();
   ledger.recordWebSocketOpen({
     route: options.route ?? '/api/ws',
     ticketOnly: options.ticketOnly ?? true
@@ -59,7 +61,7 @@ function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}
     sessionId: 'ephemeral-1',
     storedSessionId: 'stored-1'
   });
-  ledger.recordHistoryResponse(historyEvent(ledger, 'pre-send', preIds));
+  ledger.recordHistoryResponse(historyEvent(ledger, 'pre-send', preMessages));
   ledger.recordPrompt({ requestId: 'prompt-1', sessionId: 'ephemeral-1', promptMatches: true });
   ledger.recordWebSocketReceived({ event: 'response', requestId: 'prompt-1' });
   ledger.recordDelta({ sessionId: 'ephemeral-1' });
@@ -68,7 +70,7 @@ function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}
     status: 'complete',
     markerMatches: true
   });
-  ledger.recordHistoryResponse(historyEvent(ledger, 'post-completion', postIds));
+  ledger.recordHistoryResponse(historyEvent(ledger, 'post-completion', postMessages));
   return { ledger, events: ledger.snapshot(), expected: expectedTags(ledger) };
 }
 
@@ -138,6 +140,82 @@ describe('bounded live proof ledger', () => {
     expect(serialized).not.toContain('prompt-1');
     expect(valid.events.every((event) => !('sessionId' in event) && !('requestId' in event))).toBe(true);
     expect(serialized).toContain('h1:');
+  });
+
+  it('canonicalizes dynamic session routes before retaining HTTP events', () => {
+    const ledger = createLiveProofLedger();
+    const rawSessionId = 'raw-session-id-must-not-survive';
+    ledger.recordHttpRequest({
+      method: 'GET',
+      route: `/api/sessions/${rawSessionId}/messages?limit=500&offset=0`
+    });
+    ledger.recordHttpResponse({
+      method: 'GET',
+      route: `/api/sessions/${rawSessionId}/messages?limit=500&offset=0`,
+      status: 200
+    });
+    const serialized = JSON.stringify(ledger.snapshot());
+    expect(serialized).not.toContain(rawSessionId);
+    expect(ledger.snapshot()).toMatchObject([
+      { kind: 'http.request', route: '/api/sessions/:sessionId/messages' },
+      { kind: 'http.response', route: '/api/sessions/:sessionId/messages' }
+    ]);
+  });
+
+  it('binds prefix stability to the full reviewed message projection', () => {
+    const ledger = createLiveProofLedger();
+    const pre = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 11, role: 'assistant', content: 'prior answer' }
+      ]),
+      {
+        phase: 'pre-send',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageProjectionTagger: ledger.messageProjectionTag
+      }
+    );
+
+    const sameIdRoleAndContentChanged = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'assistant', content: 'replacement' },
+        { id: 11, role: 'assistant', content: 'prior answer' },
+        { id: 12, role: 'user', content: LIVE_PROOF_PROMPT },
+        { id: 13, role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+      ]),
+      {
+        phase: 'post-completion',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageProjectionTagger: ledger.messageProjectionTag,
+        fence: pre.watermark,
+        preHistoryProjectionTag: pre.historyProjectionTag
+      }
+    );
+    expect(sameIdRoleAndContentChanged.prefixStable).toBe(false);
+    expect(sameIdRoleAndContentChanged.matched).toBe(false);
+
+    const reviewedOptionalFieldChanged = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 11, role: 'assistant', content: 'prior answer', tool_name: 'changed-tool' },
+        { id: 12, role: 'user', content: LIVE_PROOF_PROMPT },
+        { id: 13, role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+      ]),
+      {
+        phase: 'post-completion',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageProjectionTagger: ledger.messageProjectionTag,
+        fence: pre.watermark,
+        preHistoryProjectionTag: pre.historyProjectionTag
+      }
+    );
+    expect(reviewedOptionalFieldChanged.prefixStable).toBe(false);
   });
 
   it('rejects mismatched identity or re-ordered completion evidence', () => {
@@ -255,7 +333,7 @@ describe('bounded live proof ledger', () => {
         sessionId: 'stored-1',
         prompt: LIVE_PROOF_PROMPT,
         assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-        messageIdTagger: ledger.messageIdTag
+        messageProjectionTagger: ledger.messageProjectionTag
       }
     );
     expect(pre.matched).toBe(true);
@@ -271,12 +349,12 @@ describe('bounded live proof ledger', () => {
         sessionId: 'stored-1',
         prompt: LIVE_PROOF_PROMPT,
         assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-        messageIdTagger: ledger.messageIdTag,
+        messageProjectionTagger: ledger.messageProjectionTag,
         fence: pre.watermark,
-        preHistoryIdTag: pre.historyIdTag
+        preHistoryProjectionTag: pre.historyProjectionTag
       }
     );
-    expect(stale.prefixStable).toBe(true);
+    expect(stale.prefixStable).toBe(false);
     expect(stale.postFenceMatched).toBe(false);
     expect(stale.matched).toBe(false);
 
@@ -287,9 +365,9 @@ describe('bounded live proof ledger', () => {
         sessionId: 'stored-1',
         prompt: LIVE_PROOF_PROMPT,
         assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-        messageIdTagger: ledger.messageIdTag,
+        messageProjectionTagger: ledger.messageProjectionTag,
         fence: pre.watermark,
-        preHistoryIdTag: pre.historyIdTag
+        preHistoryProjectionTag: pre.historyProjectionTag
       }
     );
     expect(post).toMatchObject({
@@ -316,7 +394,7 @@ describe('bounded live proof ledger', () => {
         sessionId: 'stored-1',
         prompt: LIVE_PROOF_PROMPT,
         assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-        messageIdTagger: ledger.messageIdTag
+        messageProjectionTagger: ledger.messageProjectionTag
       }
     );
     const baseExpected = {
@@ -324,9 +402,9 @@ describe('bounded live proof ledger', () => {
       sessionId: 'stored-1',
       prompt: LIVE_PROOF_PROMPT,
       assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-      messageIdTagger: ledger.messageIdTag,
+      messageProjectionTagger: ledger.messageProjectionTag,
       fence: pre.watermark,
-      preHistoryIdTag: pre.historyIdTag
+      preHistoryProjectionTag: pre.historyProjectionTag
     };
 
     const suffix = matchLiveProofHistory(
@@ -378,7 +456,7 @@ describe('bounded live proof ledger', () => {
       sessionId: 'stored-1',
       prompt: LIVE_PROOF_PROMPT,
       assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-      messageIdTagger: ledger.messageIdTag
+      messageProjectionTagger: ledger.messageProjectionTag
     };
     expect(() => matchLiveProofHistory(
       historyResponse('stored-1', [

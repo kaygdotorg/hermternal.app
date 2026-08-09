@@ -30,6 +30,30 @@ const LIVE_PROOF_CAPTURE_KEYS = Object.freeze([
   'completionCount'
 ]);
 
+/**
+ * Canonicalize dynamic REST session routes before they enter the retained
+ * ledger. The route template is intentionally fixed: a route event can prove
+ * which operation ran without retaining an opaque session identity or query.
+ * Unknown descendants remain classified, never copied into the event.
+ *
+ * @param {string} value
+ */
+export function normalizeLiveProofRoute(value) {
+  const pathname = value.split(/[?#]/u, 1)[0];
+  if (pathname === '/api/sessions' || pathname === '/api/sessions/search') return pathname;
+  const segments = pathname.split('/');
+  if (segments[1] !== 'api' || segments[2] !== 'sessions' || segments.length < 4) {
+    return pathname;
+  }
+  if (segments.length === 5 && segments[3].length > 0 && segments[4] === 'messages') {
+    return '/api/sessions/:sessionId/messages';
+  }
+  if (segments.length === 4 && segments[3].length > 0) {
+    return '/api/sessions/:sessionId';
+  }
+  return '/api/sessions/:sessionId/unknown';
+}
+
 /** @param {unknown} value */
 function boundedRawId(value) {
   if (value === undefined || value === null) return undefined;
@@ -73,7 +97,7 @@ function boundedRoute(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ROUTE_LENGTH) {
     throw new Error('live proof ledger received an unsafe route');
   }
-  return value;
+  return normalizeLiveProofRoute(value);
 }
 
 /** @param {unknown} value */
@@ -137,12 +161,12 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
   };
 
   /** @param {unknown} values */
-  const messageIdTag = (values) => {
+  const messageProjectionTag = (values) => {
     if (!Array.isArray(values) || values.length > LIVE_PROOF_HISTORY_LIMIT) {
-      throw new Error('live proof history message identity sequence is not bounded');
+      throw new Error('live proof history message projection sequence is not bounded');
     }
-    const ids = values.map(boundedMessageId);
-    return hmacTag(attemptKey, 'message-id-sequence', ids.join(','));
+    const projections = values.map(canonicalHistoryMessage);
+    return hmacTag(attemptKey, 'message-projection-sequence', JSON.stringify(projections));
   };
 
   /** @param {Record<string, unknown>} event */
@@ -159,8 +183,8 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
   return Object.freeze({
     /** Tag one transient raw identity without retaining it. */
     identityTag,
-    /** Tag one transient ordered message-id sequence without retaining ids. */
-    messageIdTag,
+    /** Tag one transient canonical history-message sequence without retaining rows. */
+    messageProjectionTag,
     /** @param {{ method: string, route: string }} event */
     recordHttpRequest(event) {
       return append({
@@ -253,8 +277,8 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
     },
     /**
      * Store only the bounded canonical-history projection. The watermark and
-     * raw message rows stay transient in the one-shot read; sequence tags are
-     * the only retained message-identity evidence.
+     * raw message rows stay transient in the one-shot read; canonical projection
+     * tags are the only retained history-identity evidence.
      *
      * @param {{
      *   phase: 'pre-send'|'post-completion',
@@ -269,8 +293,8 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
      *   candidateUserCount: number,
      *   candidateAssistantCount: number,
      *   messageCount: number,
-     *   historyIdTag?: string,
-     *   prefixIdTag?: string
+     *   historyProjectionTag?: string,
+     *   prefixProjectionTag?: string
      * }} event
      */
     recordHistoryResponse(event) {
@@ -291,8 +315,8 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
         candidateUserCount: boundedCount(event.candidateUserCount),
         candidateAssistantCount: boundedCount(event.candidateAssistantCount),
         messageCount: boundedCount(event.messageCount),
-        historyIdTag: boundedTag(event.historyIdTag),
-        prefixIdTag: boundedTag(event.prefixIdTag)
+        historyProjectionTag: boundedTag(event.historyProjectionTag),
+        prefixProjectionTag: boundedTag(event.prefixProjectionTag)
       });
     },
     /** @param {{ status: number, cookieJarCleared: boolean, storageCleared: boolean }} event */
@@ -350,9 +374,87 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** @param {unknown} value @returns {value is { present: boolean, value?: unknown }} */
+function isOptionalProjection(value) {
+  return isRecord(value) && (
+    value.present === false ||
+    (value.present === true && Object.prototype.hasOwnProperty.call(value, 'value'))
+  );
+}
+
+/** @param {unknown} value @param {number} maxLength @param {string} message */
+function boundedHistoryString(value, maxLength, message) {
+  if (typeof value !== 'string' || value.length > maxLength) throw new Error(message);
+  return value;
+}
+
+/** @param {unknown} value */
+function parseHistoryToolCalls(value) {
+  if (value === null) return null;
+  if (!Array.isArray(value) || value.length > 64) {
+    throw new Error('live proof history tool calls are invalid');
+  }
+  return value.map((toolCall) => {
+    if (!isRecord(toolCall) || !isRecord(toolCall.function)) {
+      throw new Error('live proof history tool call is invalid');
+    }
+    return {
+      id: boundedHistoryString(toolCall.id, MAX_ID_LENGTH, 'live proof history tool call id is invalid'),
+      function: {
+        name: boundedHistoryString(toolCall.function.name, 512, 'live proof history tool name is invalid'),
+        arguments: boundedHistoryString(
+          toolCall.function.arguments,
+          8_192,
+          'live proof history tool arguments are invalid'
+        )
+      }
+    };
+  });
+}
+
+/** @param {unknown} value */
+function parseHistoryTimestamp(value) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > 4_294_967_295
+  ) {
+    throw new Error('live proof history timestamp is invalid');
+  }
+  return value;
+}
+
+/**
+ * Read one reviewed optional field without collapsing omitted and explicit null.
+ * Parsed rows use camelCase marker objects; raw Hermes rows use snake_case keys.
+ *
+ * @param {Record<string, any>} value
+ * @param {string} rawKey
+ * @param {string} canonicalKey
+ * @param {(value: unknown) => unknown} parser
+ */
+function parseReviewedOptional(value, rawKey, canonicalKey, parser) {
+  const canonical = value[canonicalKey];
+  if (isOptionalProjection(canonical)) {
+    if (!canonical.present) return { present: false };
+    return { present: true, value: parser(canonical.value) };
+  }
+  if (!Object.prototype.hasOwnProperty.call(value, rawKey)) return { present: false };
+  return { present: true, value: parser(value[rawKey]) };
+}
+
 /**
  * @param {unknown} value
- * @returns {{ id: number, role: 'user'|'assistant'|'system'|'tool', content: string|null }}
+ * @returns {{
+ *   id: number,
+ *   role: 'user'|'assistant'|'system'|'tool',
+ *   content: string|null,
+ *   toolCalls: { present: boolean, value?: unknown },
+ *   toolName: { present: boolean, value?: unknown },
+ *   toolCallId: { present: boolean, value?: unknown },
+ *   timestamp: { present: boolean, value?: unknown }
+ * }}
  */
 function parseHistoryMessage(value) {
   if (!isRecord(value)) throw new Error('live proof history message is invalid');
@@ -364,7 +466,30 @@ function parseHistoryMessage(value) {
   if (content !== null && (typeof content !== 'string' || content.length > 8_192)) {
     throw new Error('live proof history message content is invalid');
   }
-  return { id: boundedMessageId(value.id), role, content };
+  return {
+    id: boundedMessageId(value.id),
+    role,
+    content,
+    toolCalls: parseReviewedOptional(value, 'tool_calls', 'toolCalls', parseHistoryToolCalls),
+    toolName: parseReviewedOptional(
+      value,
+      'tool_name',
+      'toolName',
+      (item) => item === null ? null : boundedHistoryString(item, 512, 'live proof history tool name is invalid')
+    ),
+    toolCallId: parseReviewedOptional(
+      value,
+      'tool_call_id',
+      'toolCallId',
+      (item) => item === null ? null : boundedHistoryString(item, MAX_ID_LENGTH, 'live proof history tool call id is invalid')
+    ),
+    timestamp: parseReviewedOptional(value, 'timestamp', 'timestamp', parseHistoryTimestamp)
+  };
+}
+
+/** @param {unknown} value */
+function canonicalHistoryMessage(value) {
+  return parseHistoryMessage(value);
 }
 
 /** @param {unknown} value */
@@ -385,7 +510,8 @@ function requireHistoryResponse(value) {
 
 /**
  * Parse one bounded canonical history response. Raw rows and IDs exist only for
- * this call. The returned projection contains HMAC sequence tags, booleans, and
+ * this call. The returned projection contains HMAC message-projection tags,
+ * booleans, and
  * counts; `watermark` is the transient pre-send high-water mark and must not be
  * written to the ledger.
  *
@@ -395,9 +521,9 @@ function requireHistoryResponse(value) {
  *   sessionId: string,
  *   prompt: string,
  *   assistantMarker: string,
- *   messageIdTagger: (ids: number[]) => string,
+ *   messageProjectionTagger: (messages: unknown[]) => string,
  *   fence?: number,
- *   preHistoryIdTag?: string
+ *   preHistoryProjectionTag?: string
  * }} expected
  */
 export function matchLiveProofHistory(response, expected) {
@@ -408,7 +534,7 @@ export function matchLiveProofHistory(response, expected) {
     expected.sessionId.length === 0 ||
     expected.prompt !== LIVE_PROOF_PROMPT ||
     expected.assistantMarker !== LIVE_PROOF_ASSISTANT_MARKER ||
-    typeof expected.messageIdTagger !== 'function'
+    typeof expected.messageProjectionTagger !== 'function'
   ) {
     throw new Error('live proof history matcher input is not approved');
   }
@@ -428,8 +554,8 @@ export function matchLiveProofHistory(response, expected) {
     pagination.returned === messages.length &&
     messages.length < LIVE_PROOF_HISTORY_LIMIT;
   const sessionMatches = candidate.session_id === expected.sessionId;
-  const historyIdTag = requiredTag(expected.messageIdTagger(ids));
-  const watermark = ids.length === 0 ? 0 : ids[ids.length - 1];
+  const historyProjectionTag = requiredTag(expected.messageProjectionTagger(messages));
+  const watermark = ids.length === 0 ? 0 : Math.max(...ids);
   const watermarkEstablished = expected.phase === 'pre-send' && historyComplete && sessionMatches;
 
   if (expected.phase === 'pre-send') {
@@ -444,8 +570,8 @@ export function matchLiveProofHistory(response, expected) {
       candidateUserCount: 0,
       candidateAssistantCount: 0,
       messageCount: messages.length,
-      historyIdTag,
-      prefixIdTag: historyIdTag,
+      historyProjectionTag,
+      prefixProjectionTag: historyProjectionTag,
       watermark,
       matched: watermarkEstablished
     });
@@ -455,13 +581,12 @@ export function matchLiveProofHistory(response, expected) {
   const fenceValid = typeof fence === 'number' && Number.isSafeInteger(fence) && fence >= 0;
   const fenceValue = fenceValid ? /** @type {number} */ (fence) : 0;
   const prefixMessages = fenceValid ? messages.filter((message) => message.id <= fenceValue) : [];
-  const prefixIds = prefixMessages.map((message) => message.id);
-  const prefixIdTag = requiredTag(expected.messageIdTagger(prefixIds));
+  const prefixProjectionTag = requiredTag(expected.messageProjectionTagger(prefixMessages));
   const prefixStable =
     fenceValid &&
-    typeof expected.preHistoryIdTag === 'string' &&
-    HMAC_TAG_PATTERN.test(expected.preHistoryIdTag) &&
-    prefixIdTag === expected.preHistoryIdTag;
+    typeof expected.preHistoryProjectionTag === 'string' &&
+    HMAC_TAG_PATTERN.test(expected.preHistoryProjectionTag) &&
+    prefixProjectionTag === expected.preHistoryProjectionTag;
   const postFenceMessages = fenceValid ? messages.filter((message) => message.id > fenceValue) : [];
   const candidateUsers = postFenceMessages.filter((message) => message.role === 'user');
   const candidateAssistants = postFenceMessages.filter((message) => message.role === 'assistant');
@@ -490,8 +615,8 @@ export function matchLiveProofHistory(response, expected) {
     candidateUserCount: candidateUsers.length,
     candidateAssistantCount: candidateAssistants.length,
     messageCount: messages.length,
-    historyIdTag,
-    prefixIdTag,
+    historyProjectionTag,
+    prefixProjectionTag,
     watermark: undefined,
     matched:
       historyComplete &&
@@ -577,7 +702,7 @@ export function matchLiveProofLedger(events, expected) {
     event.sessionTag === expectedSessionTag &&
     event.historyComplete === true &&
     event.watermarkEstablished === true &&
-    typeof event.historyIdTag === 'string'
+    typeof event.historyProjectionTag === 'string'
   );
   const postHistories = histories.filter((event) =>
     event.phase === 'post-completion' &&

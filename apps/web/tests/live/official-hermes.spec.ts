@@ -4,6 +4,7 @@ import {
   LIVE_PROOF_ASSISTANT_MARKER,
   LIVE_PROOF_PROMPT,
   createLiveProofLedger,
+  normalizeLiveProofRoute,
   matchLiveProofHistory,
   matchLiveProofLedger
 } from './live-proof-ledger.mjs';
@@ -232,16 +233,16 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     candidateUserCount: preSendHistory.candidateUserCount,
     candidateAssistantCount: preSendHistory.candidateAssistantCount,
     messageCount: preSendHistory.messageCount,
-    historyIdTag: preSendHistory.historyIdTag,
-    prefixIdTag: preSendHistory.prefixIdTag
+    historyProjectionTag: preSendHistory.historyProjectionTag,
+    prefixProjectionTag: preSendHistory.prefixProjectionTag
   });
   if (!preSendHistory.matched || preSendHistory.watermark === undefined) {
     setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
     throw new Error('live proof pre-send history fence was not established');
   }
   const fence = preSendHistory.watermark;
-  const preHistoryIdTag = preSendHistory.historyIdTag;
-  if (!preHistoryIdTag) {
+  const preHistoryProjectionTag = preSendHistory.historyProjectionTag;
+  if (!preHistoryProjectionTag) {
     setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
     throw new Error('live proof pre-send history identity was unavailable');
   }
@@ -264,7 +265,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     postCompletionHistory = await readCanonicalProofHistory(page, canonicalSessionId, ledger, {
       phase: 'post-completion',
       fence,
-      preHistoryIdTag
+      preHistoryProjectionTag
     });
   } catch {
     setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
@@ -283,8 +284,8 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     candidateUserCount: postCompletionHistory.candidateUserCount,
     candidateAssistantCount: postCompletionHistory.candidateAssistantCount,
     messageCount: postCompletionHistory.messageCount,
-    historyIdTag: postCompletionHistory.historyIdTag,
-    prefixIdTag: postCompletionHistory.prefixIdTag
+    historyProjectionTag: postCompletionHistory.historyProjectionTag,
+    prefixProjectionTag: postCompletionHistory.prefixProjectionTag
   });
   if (!postCompletionHistory.matched) {
     setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
@@ -449,7 +450,7 @@ function trackedRoute(url: string): string | undefined {
   try {
     const parsed = new URL(url);
     if (!parsed.pathname.startsWith('/api/') && !parsed.pathname.startsWith('/auth/')) return undefined;
-    return parsed.pathname;
+    return normalizeLiveProofRoute(parsed.pathname);
   } catch {
     return undefined;
   }
@@ -513,7 +514,7 @@ async function readCanonicalProofHistory(
   options: {
     phase: 'pre-send' | 'post-completion';
     fence?: number;
-    preHistoryIdTag?: string;
+    preHistoryProjectionTag?: string;
   }
 ): Promise<ReturnType<typeof matchLiveProofHistory> & { status: number }> {
   const body = await page.evaluate(async (value) => {
@@ -611,9 +612,9 @@ async function readCanonicalProofHistory(
       sessionId,
       prompt: LIVE_PROOF_PROMPT,
       assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
-      messageIdTagger: ledger.messageIdTag,
+      messageProjectionTagger: ledger.messageProjectionTag,
       fence: options.fence,
-      preHistoryIdTag: options.preHistoryIdTag
+      preHistoryProjectionTag: options.preHistoryProjectionTag
     })
   };
 }
