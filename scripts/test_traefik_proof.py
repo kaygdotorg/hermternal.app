@@ -2112,6 +2112,151 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "Git packed refs bytes changed|Git packed refs identity changed|Git packed refs exceeds",
             )
 
+    def test_first_git_command_is_fenced_by_chained_head_ref_during_real_execution(self) -> None:
+        """A final chained loose-ref mutation cannot select a new baseline."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _implementation, _tests, source_commit, evidence_commit = self._repo_with_evidence(root)
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            current_ref = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            current_ref_path = root / ".git" / current_ref
+            original_current_ref = current_ref_path.read_bytes()
+            alias = root / ".git" / "refs" / "heads" / "alias"
+            main = root / ".git" / "refs" / "heads" / "main"
+            alias.write_bytes(b"ref: refs/heads/main\n")
+            main.write_bytes((source_commit + "\n").encode("ascii"))
+            head.write_bytes(b"ref: refs/heads/alias\n")
+            self.assertEqual(_run_git(root, "rev-parse", "HEAD"), source_commit)
+
+            def mutate() -> None:
+                main.write_bytes((evidence_commit + "\n").encode("ascii"))
+
+            def restore() -> None:
+                head.write_bytes(original_head)
+                current_ref_path.write_bytes(original_current_ref)
+                for path in (alias, main):
+                    if path != current_ref_path and path.exists():
+                        path.unlink()
+
+            self._assert_first_git_command_rejects_runtime_mutation(
+                root,
+                mutate,
+                restore,
+                "Git HEAD loose ref bytes changed|Git HEAD loose ref identity changed",
+            )
+
+    def test_chained_head_ref_rejects_malformed_loose_ref(self) -> None:
+        """A chained loose ref must be one exact symbolic record or OID."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            current_ref = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            current_ref_path = root / ".git" / current_ref
+            original_current_ref = current_ref_path.read_bytes()
+            alias = root / ".git" / "refs" / "heads" / "alias"
+            alias.write_bytes(b"not-a-canonical-ref\n")
+            head.write_bytes(b"ref: refs/heads/alias\n")
+            try:
+                with self.assertRaisesRegex(ValueError, "Git HEAD loose ref.*canonical|Git HEAD loose ref.*malformed"):
+                    traefik_proof._current_parser_provenance(root)
+            finally:
+                head.write_bytes(original_head)
+                current_ref_path.write_bytes(original_current_ref)
+                if alias != current_ref_path and alias.exists():
+                    alias.unlink()
+
+    def test_chained_head_ref_rejects_symbolic_loop(self) -> None:
+        """A symbolic loose-ref loop cannot consume unbounded traversal."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            current_ref = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            current_ref_path = root / ".git" / current_ref
+            original_current_ref = current_ref_path.read_bytes()
+            alias = root / ".git" / "refs" / "heads" / "alias"
+            main = root / ".git" / "refs" / "heads" / "main"
+            alias.write_bytes(b"ref: refs/heads/main\n")
+            main.write_bytes(b"ref: refs/heads/alias\n")
+            head.write_bytes(b"ref: refs/heads/alias\n")
+            try:
+                with self.assertRaisesRegex(ValueError, "Git HEAD loose ref chain contains a loop"):
+                    traefik_proof._current_parser_provenance(root)
+            finally:
+                head.write_bytes(original_head)
+                current_ref_path.write_bytes(original_current_ref)
+                for path in (alias, main):
+                    if path != current_ref_path and path.exists():
+                        path.unlink()
+
+    def test_chained_head_ref_rejects_excessive_symbolic_depth(self) -> None:
+        """A symbolic loose-ref chain has a fixed traversal-depth budget."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            current_ref = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            current_ref_path = root / ".git" / current_ref
+            original_current_ref = current_ref_path.read_bytes()
+            refs_root = root / ".git" / "refs" / "heads"
+            chain_paths = [
+                refs_root / f"chain-{index}"
+                for index in range(traefik_proof.PARSER_GIT_REF_MAX_DEPTH + 1)
+            ]
+            for index, path in enumerate(chain_paths):
+                target = (
+                    f"ref: refs/heads/chain-{index + 1}\n"
+                    if index + 1 < len(chain_paths)
+                    else "f" * 40 + "\n"
+                )
+                path.write_bytes(target.encode("ascii"))
+            head.write_bytes(b"ref: refs/heads/chain-0\n")
+            try:
+                with self.assertRaisesRegex(ValueError, "Git HEAD loose ref chain exceeds its bounded depth"):
+                    traefik_proof._current_parser_provenance(root)
+            finally:
+                head.write_bytes(original_head)
+                current_ref_path.write_bytes(original_current_ref)
+                for path in chain_paths:
+                    if path != current_ref_path and path.exists():
+                        path.unlink()
+
+    def test_chained_head_ref_supports_sha256_repository(self) -> None:
+        """A valid chained HEAD preserves SHA-256 repository provenance."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _implementation, _tests, source_commit = _create_parser_repo(root, object_format="sha256")
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            current_ref = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            current_ref_path = root / ".git" / current_ref
+            original_current_ref = current_ref_path.read_bytes()
+            alias = root / ".git" / "refs" / "heads" / "alias"
+            nested_main = root / ".git" / "refs" / "heads" / "team" / "main"
+            nested_main.parent.mkdir(parents=True, exist_ok=True)
+            alias.write_bytes(b"ref: refs/heads/team/main\n")
+            nested_main.write_bytes((source_commit + "\n").encode("ascii"))
+            head.write_bytes(b"ref: refs/heads/alias\n")
+            try:
+                provenance = traefik_proof._current_parser_provenance(root)
+                self.assertEqual(len(provenance["implementation_commit"]), 64)
+            finally:
+                head.write_bytes(original_head)
+                current_ref_path.write_bytes(original_current_ref)
+                for path in (alias, nested_main):
+                    if path != current_ref_path and path.exists():
+                        path.unlink()
+
     def test_pack_metadata_entry_bound_fails_closed(self) -> None:
         """A huge objects/pack directory cannot consume unbounded scan time."""
 
