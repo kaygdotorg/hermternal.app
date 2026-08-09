@@ -14,7 +14,7 @@
   "artifact_manifest": [
     {
       "path": "contracts/fixtures/index.json",
-      "sha256": "dddbec1b9172f60337de93d8fe97987d5e0439392107df67f2fd0f87d3413360",
+      "sha256": "d8a36697ae069426f66524952643e09a4efbe82bb650b204b0cc2b50d6ca5266",
       "size_bytes": 64564
     },
     {
@@ -29,7 +29,7 @@
     },
     {
       "path": "contracts/fixtures/validator/validate.py",
-      "sha256": "7b975b9aa7a45635c27eb6477fc0ffa645004d639a01d089cdac80b580ad1957",
+      "sha256": "18e0d0d307b49e8fcf4c54c69739a83393f6a6678bbef2a70620e029b2465b45",
       "size_bytes": 175235
     }
   ],

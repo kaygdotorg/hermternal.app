@@ -77,13 +77,13 @@ GIT_TIMEOUT_SECONDS = 10.0
 # Ordinary metadata and loose objects stay at the conservative one-MiB cap.
 # Packed clones need a separate bound. The refreshed trusted four-ref bundle
 # produces a 33,787,115-byte pack in a fresh no-local single-head clone on
-# macOS after the versioned authority bundle rotation. A 40 MiB per-pack cap
+# macOS after the versioned authority bundle rotation. A 48 MiB per-pack cap
 # retains 8,155,925 measured bytes of headroom. The seeded clone retains two
-# packs plus metadata, so its separate 80 MiB aggregate cap preserves bounded
+# packs plus metadata, so its separate 96 MiB aggregate cap preserves bounded
 # copy accounting while leaving file-count, output, and timeout limits intact.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
-MAX_SNAPSHOT_PACK_FILE_BYTES = 40 * 1024 * 1024
-MAX_SNAPSHOT_TOTAL_BYTES = 80 * 1024 * 1024
+MAX_SNAPSHOT_PACK_FILE_BYTES = 48 * 1024 * 1024
+MAX_SNAPSHOT_TOTAL_BYTES = 96 * 1024 * 1024
 # Snapshot metadata is bounded separately from copied bytes. A repository with
 # unlimited empty entries could otherwise exhaust directory listings, retained
 # names, or descriptor stacks before any byte budget is reached.

@@ -188,7 +188,7 @@ ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
 # through a stable descriptor and match this source-level pin. It is not imported
 # by path, so a checkout edit cannot execute before authentication.
 HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
-HARDENED_AUTHORITY_VERIFIER_SHA256 = "cb6a1a2443421529c048e97854598e886bce9bc1297973c9c7e834d628307082"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "c2b80203617fae417d3e34fb5d316c3f850d69814638168cd2e3e01f7b735489"
 HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
 # Temporary-directory roots on macOS may expose /tmp through one of these
 # system aliases. All other ancestors stay no-follow descriptor anchored.
@@ -209,7 +209,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "7c9545a028b506c5434f8fe2cf85e0d3ab53274bc55ef91fc8b53bf868380f71"
+BASELINE_CANONICAL_SHA256 = "92362271ddf2ce26b94d10192cfc2c79b09f4517cf17a7b6f0f84ee5c7adf3ed"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
