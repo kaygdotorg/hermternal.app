@@ -111,16 +111,17 @@ opens the caller root and `.git` directory from the held descriptors and copies
 the complete Git metadata tree into a private mode-700 temporary snapshot. The
 copy is chunked and category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (16 MiB) for legitimate pack,
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (32 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
-`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. Snapshot entry,
-directory, file, depth, and retained path-storage budgets are independent of
+`MAX_SNAPSHOT_TOTAL_BYTES` (64 MiB), and the copy has a
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The refreshed
+four-ref trusted bundle measured a 26,063,108-byte macOS fresh-clone pack, so the
+32 MiB per-pack cap retains 7,491,324 bytes of headroom. A seeded clone retains
+two packs plus metadata; its independent 64 MiB total cap keeps that measured
+composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
+directory, file, depth, and retained path-storage budgets remain independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
-CI before content accounting. The 16 MiB pack cap covers the checked-in authority
-bundle's measured roughly 11 MiB macOS clone pack while keeping each individual
-file bounded; the 1 MiB non-pack cap remains above the checked-in evidence and
-metadata sizes. It rejects symlinks/non-regular entries
+CI before content accounting. It rejects symlinks/non-regular entries
 and checks source metadata before and after each copy. Git is invoked only
 against that snapshot,
 so a concurrent rename or symlink replacement of the caller's `.git`, nested

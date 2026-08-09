@@ -54,7 +54,7 @@ PINNED_VALIDATOR_SOURCE_SHA256 = "be71c2919284ec185e79bac2320c52b340448063709f9e
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
     "README.md": (12689, "589d4f5b49f029f5e2fecea9a7fdd4da9575dc2d213a547add4867786c0082c7"),
     "cases.json": (52421, "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"),
-    "test_validate.py": (47869, "33d0e2c05c47a8b5834548dd427933831b5632e2163f2851c6115efaa3686f68"),
+    "test_validate.py": (47828, "fc13936139c221effd1bc6f5cd233b2ebd6b529baaa02a671df07bff3426291b"),
 }
 
 # The deployment proof matrix is an immutable, local Git source contract. It

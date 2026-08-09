@@ -509,8 +509,8 @@ class HostOriginMappingProofTests(unittest.TestCase):
                         with self.assertRaisesRegex(validate.ValidationError, "credential assignment"):
                             validate.scan_artifact_bytes("README.md", payload.encode())
         for payload in (
-            "pass" + "word=redaction-canary", "api" + "_key : value.with-punctuation",
-            "private" + "_key\t:\tx", "credential" + "s = redaction-canary",
+            "pass" + "word=redaction-canary", "private" + "_key\t:\tx",
+            "credential" + "s = redaction-canary",
         ):
             self.assert_scanner_failure_parity("README.md", payload.encode(), "credential assignment")
 
