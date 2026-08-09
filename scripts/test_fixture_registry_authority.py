@@ -1206,7 +1206,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assert_bounded_failure(optimized)
 
     def test_fifo_checkout_read_exits_bounded_in_both_modes(self) -> None:
-        """Allow the measured 96-MiB snapshot budget, never a blocking checkout read."""
+        """Allow the bounded 128-MiB snapshot budget, never a blocking checkout read."""
 
         with self.copy_checkout() as temporary:
             checkout = Path(temporary).resolve()
@@ -1214,7 +1214,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             target.unlink()
             os.mkfifo(target)
             # Snapshot validation now permits two measured packs plus metadata up
-            # to 96 MiB before this checkout read. Keep this external deadline
+            # to 128 MiB before this checkout read. Keep this external deadline
             # above that bounded work while preserving a finite FIFO regression.
             self.assert_pair_failure(checkout, timeout=40)
 
