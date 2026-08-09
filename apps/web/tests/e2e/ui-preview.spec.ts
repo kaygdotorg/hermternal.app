@@ -232,6 +232,266 @@ async function scrubPreviewCredentialProbe(page: Page): Promise<void> {
     .catch(() => undefined);
 }
 
+type PreviewIndexedDbSpyOptions = {
+  databaseName: string;
+  objectStoreName: string;
+  objectKey: string;
+  globalName: string;
+};
+
+type PreviewIndexedDbSpyObservation = {
+  databaseEnumerationCount: number;
+  databaseOpenCount: number;
+  reviewedDatabaseOpenCount: number;
+  unrelatedDatabaseOpenCount: number;
+  transactionInvocationCount: number;
+  reviewedStoreInvocationCount: number;
+  unrelatedStoreInvocationCount: number;
+  countInvocationCount: number;
+  getInvocationCount: number;
+  reviewedKeyInvocationCount: number;
+  unrelatedKeyInvocationCount: number;
+};
+
+type PreviewIndexedDbSpyCleanup = {
+  restored: boolean;
+  cleanupFailure: boolean;
+};
+
+async function installPreviewIndexedDbSpy(page: Page, options: PreviewIndexedDbSpyOptions): Promise<boolean> {
+  return page.evaluate(
+    ({ databaseName, objectStoreName, objectKey, globalName }) => {
+      const previousGlobalDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
+      if (
+        typeof indexedDB === 'undefined' ||
+        typeof indexedDB.open !== 'function' ||
+        typeof indexedDB.databases !== 'function' ||
+        typeof IDBDatabase === 'undefined' ||
+        typeof IDBObjectStore === 'undefined' ||
+        typeof IDBKeyRange === 'undefined'
+      ) {
+        return false;
+      }
+
+      const factory = indexedDB;
+      const factoryPrototype = Object.getPrototypeOf(factory) as IDBFactory;
+      const originalOpenDescriptor = Object.getOwnPropertyDescriptor(factoryPrototype, 'open');
+      const originalDatabasesDescriptor = Object.getOwnPropertyDescriptor(factoryPrototype, 'databases');
+      const originalTransactionDescriptor = Object.getOwnPropertyDescriptor(IDBDatabase.prototype, 'transaction');
+      const originalCountDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'count');
+      const originalGetDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'get');
+      const originalOpen = factoryPrototype.open as unknown;
+      const originalDatabases = factoryPrototype.databases as unknown;
+      const originalTransaction = IDBDatabase.prototype.transaction as unknown;
+      const originalCount = IDBObjectStore.prototype.count as unknown;
+      const originalGet = IDBObjectStore.prototype.get as unknown;
+      if (
+        !originalOpenDescriptor ||
+        !originalDatabasesDescriptor ||
+        !originalTransactionDescriptor ||
+        !originalCountDescriptor ||
+        !originalGetDescriptor ||
+        typeof originalOpen !== 'function' ||
+        typeof originalDatabases !== 'function' ||
+        typeof originalTransaction !== 'function' ||
+        typeof originalCount !== 'function' ||
+        typeof originalGet !== 'function'
+      ) {
+        return false;
+      }
+
+      const sameDescriptor = (left: PropertyDescriptor | undefined, right: PropertyDescriptor | undefined): boolean => {
+        if (!left || !right) return left === right;
+        if (left.configurable !== right.configurable || left.enumerable !== right.enumerable) return false;
+        const leftIsData = 'value' in left;
+        if (leftIsData !== ('value' in right)) return false;
+        if (leftIsData) return left.value === right.value && left.writable === right.writable;
+        return left.get === right.get && left.set === right.set;
+      };
+      const defineWrapped = (
+        target: object,
+        property: string,
+        descriptor: PropertyDescriptor | undefined,
+        value: unknown
+      ): void => {
+        Object.defineProperty(
+          target,
+          property,
+          descriptor && 'value' in descriptor
+            ? { ...descriptor, value }
+            : {
+                configurable: descriptor?.configurable ?? true,
+                enumerable: descriptor?.enumerable ?? false,
+                writable: true,
+                value
+              }
+        );
+      };
+      const restoreDescriptor = (
+        target: object,
+        property: string,
+        descriptor: PropertyDescriptor | undefined
+      ): boolean => {
+        try {
+          if (descriptor) Object.defineProperty(target, property, descriptor);
+          else if (!Reflect.deleteProperty(target, property)) return false;
+          return sameDescriptor(Object.getOwnPropertyDescriptor(target, property), descriptor);
+        } catch {
+          return false;
+        }
+      };
+
+      const originalOpenMethod = originalOpen as (...args: unknown[]) => unknown;
+      const originalDatabasesMethod = originalDatabases as (...args: unknown[]) => unknown;
+      const originalTransactionMethod = originalTransaction as (...args: unknown[]) => unknown;
+      const originalCountMethod = originalCount as (...args: unknown[]) => unknown;
+      const originalGetMethod = originalGet as (...args: unknown[]) => unknown;
+      let databaseEnumerationCount = 0;
+      let databaseOpenCount = 0;
+      let reviewedDatabaseOpenCount = 0;
+      let unrelatedDatabaseOpenCount = 0;
+      let transactionInvocationCount = 0;
+      let reviewedStoreInvocationCount = 0;
+      let unrelatedStoreInvocationCount = 0;
+      let countInvocationCount = 0;
+      let getInvocationCount = 0;
+      let reviewedKeyInvocationCount = 0;
+      let unrelatedKeyInvocationCount = 0;
+
+      const open = function (this: IDBFactory, name: string, version?: number): IDBOpenDBRequest {
+        databaseOpenCount += 1;
+        if (name === databaseName) reviewedDatabaseOpenCount += 1;
+        else unrelatedDatabaseOpenCount += 1;
+        const argumentsList = version === undefined ? [name] : [name, version];
+        return Reflect.apply(originalOpenMethod, this, argumentsList) as IDBOpenDBRequest;
+      };
+      const databases = function (this: IDBFactory): Promise<IDBDatabaseInfo[]> {
+        databaseEnumerationCount += 1;
+        return Reflect.apply(originalDatabasesMethod, this, []) as Promise<IDBDatabaseInfo[]>;
+      };
+      const transaction = function (
+        this: IDBDatabase,
+        storeNames: string | string[],
+        mode?: IDBTransactionMode,
+        options?: IDBTransactionOptions
+      ): IDBTransaction {
+        transactionInvocationCount += 1;
+        const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+        for (const name of names) {
+          if (name === objectStoreName) reviewedStoreInvocationCount += 1;
+          else unrelatedStoreInvocationCount += 1;
+        }
+        const argumentsList: unknown[] = [storeNames];
+        if (mode !== undefined) argumentsList.push(mode);
+        if (options !== undefined) argumentsList.push(options);
+        return Reflect.apply(originalTransactionMethod, this, argumentsList) as IDBTransaction;
+      };
+      const count = function (this: IDBObjectStore, query?: IDBValidKey | IDBKeyRange): IDBRequest {
+        countInvocationCount += 1;
+        const reviewed = query instanceof IDBKeyRange
+          ? query.lower === objectKey && query.upper === objectKey && !query.lowerOpen && !query.upperOpen
+          : query === objectKey;
+        if (reviewed) reviewedKeyInvocationCount += 1;
+        else unrelatedKeyInvocationCount += 1;
+        const argumentsList = query === undefined ? [] : [query];
+        return Reflect.apply(originalCountMethod, this, argumentsList) as IDBRequest;
+      };
+      const get = function (this: IDBObjectStore, query?: IDBValidKey): IDBRequest {
+        getInvocationCount += 1;
+        if (query === objectKey) reviewedKeyInvocationCount += 1;
+        else unrelatedKeyInvocationCount += 1;
+        const argumentsList = query === undefined ? [] : [query];
+        return Reflect.apply(originalGetMethod, this, argumentsList) as IDBRequest;
+      };
+
+      const read = (): PreviewIndexedDbSpyObservation => ({
+        databaseEnumerationCount,
+        databaseOpenCount,
+        reviewedDatabaseOpenCount,
+        unrelatedDatabaseOpenCount,
+        transactionInvocationCount,
+        reviewedStoreInvocationCount,
+        unrelatedStoreInvocationCount,
+        countInvocationCount,
+        getInvocationCount,
+        reviewedKeyInvocationCount,
+        unrelatedKeyInvocationCount
+      });
+      let publishedProbe: {
+        read: () => PreviewIndexedDbSpyObservation;
+        restore: () => PreviewIndexedDbSpyCleanup;
+      };
+      let cleanupComplete = false;
+      const restore = (): PreviewIndexedDbSpyCleanup => {
+        if (cleanupComplete) return { restored: true, cleanupFailure: false };
+        const methodResults = [
+          restoreDescriptor(factoryPrototype, 'open', originalOpenDescriptor),
+          restoreDescriptor(factoryPrototype, 'databases', originalDatabasesDescriptor),
+          restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor),
+          restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor),
+          restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor)
+        ];
+        const currentGlobalDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        const globalResult =
+          currentGlobalDescriptor && 'value' in currentGlobalDescriptor && currentGlobalDescriptor.value === publishedProbe
+            ? restoreDescriptor(window, globalName, previousGlobalDescriptor)
+            : false;
+        const restored = [...methodResults, globalResult].every(Boolean);
+        if (restored) cleanupComplete = true;
+        return { restored, cleanupFailure: !restored };
+      };
+
+      publishedProbe = { read, restore };
+      try {
+        defineWrapped(factoryPrototype, 'open', originalOpenDescriptor, open);
+        defineWrapped(factoryPrototype, 'databases', originalDatabasesDescriptor, databases);
+        defineWrapped(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor, transaction);
+        defineWrapped(IDBObjectStore.prototype, 'count', originalCountDescriptor, count);
+        defineWrapped(IDBObjectStore.prototype, 'get', originalGetDescriptor, get);
+        // Publish last. If a pre-existing global rejects replacement, every method
+        // above is rolled back and the prior global descriptor is restored exactly.
+        Object.defineProperty(window, globalName, {
+          configurable: true,
+          enumerable: false,
+          writable: false,
+          value: publishedProbe
+        });
+      } catch {
+        restoreDescriptor(factoryPrototype, 'open', originalOpenDescriptor);
+        restoreDescriptor(factoryPrototype, 'databases', originalDatabasesDescriptor);
+        restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor);
+        restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor);
+        restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor);
+        restoreDescriptor(window, globalName, previousGlobalDescriptor);
+        return false;
+      }
+      return true;
+    },
+    options
+  );
+}
+
+async function restorePreviewIndexedDbSpy(page: Page, globalName: string): Promise<PreviewIndexedDbSpyCleanup> {
+  return page
+    .evaluate((name): PreviewIndexedDbSpyCleanup => {
+      const descriptor = Object.getOwnPropertyDescriptor(window, name);
+      if (!descriptor) return { restored: false, cleanupFailure: true };
+      if (!('value' in descriptor)) return { restored: false, cleanupFailure: true };
+      const spy = descriptor.value as { restore?: () => PreviewIndexedDbSpyCleanup };
+      if (typeof spy.restore !== 'function') return { restored: false, cleanupFailure: true };
+      try {
+        const result = spy.restore();
+        return {
+          restored: result.restored === true,
+          cleanupFailure: result.cleanupFailure === true || result.restored !== true
+        };
+      } catch {
+        return { restored: false, cleanupFailure: true };
+      }
+    }, globalName)
+    .catch(() => ({ restored: false, cleanupFailure: true }));
+}
+
 test.beforeAll(async () => {
   const port = await reservePort();
   uiPreviewOrigin = `http://127.0.0.1:${port}`;
@@ -1107,6 +1367,8 @@ test('first-load no-script product route exposes only the inert loading boundary
         expect(storageEvidenceEqual(seededStorage, storageBefore)).toBe(true);
 
         await installNativeCredentialProof(page);
+        const preActionEvidence = await readNativeCredentialEvidence(page);
+        expect(preActionEvidence.liveValueMatchCount).toBe(2);
         await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
         scriptDisabled = true;
 
@@ -1201,7 +1463,16 @@ test('first-load no-script product route exposes only the inert loading boundary
       expect(supportedStorage.truncated).toBe(false);
       expect(storageEvidenceEqual(supportedStorage, supportedStorage)).toBe(true);
 
-      for (const injectFailure of ['import-key', 'probe-sign', 'sign', 'canonicalization', 'truncation'] as const) {
+      for (const injectFailure of [
+        'random',
+        'import-key',
+        'probe-sign',
+        'sign',
+        'cookie-sign',
+        'idb-enumeration-unavailable',
+        'canonicalization',
+        'truncation'
+      ] as const) {
         const failedStorage = await readStorageEvidence(page, { injectFailure });
         if (injectFailure === 'truncation') {
           expect(failedStorage).toEqual({
@@ -1252,6 +1523,7 @@ test('first-load no-script product route exposes only the inert loading boundary
     } as const;
     const spyGlobal = '__uiPreviewStorageEvidenceIndexedDbSpy';
     let methodsRestored = false;
+    let cleanupFailure = false;
 
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
@@ -1266,175 +1538,12 @@ test('first-load no-script product route exposes only the inert loading boundary
       // Install the spy only after seeding so setup writes cannot be mistaken for
       // evidence reads. It retains only counts plus the reviewed labels; no raw
       // IndexedDB names, keys, values, or thrown messages cross the page boundary.
-      const spyInstalled = await page.evaluate(
-        ({ databaseName, objectStoreName, objectKey, globalName }) => {
-          const windowRecord = window as unknown as Record<string, unknown>;
-          if (windowRecord[globalName]) return false;
-          if (
-            typeof indexedDB === 'undefined' ||
-            typeof indexedDB.open !== 'function' ||
-            typeof indexedDB.databases !== 'function' ||
-            typeof IDBDatabase === 'undefined' ||
-            typeof IDBObjectStore === 'undefined' ||
-            typeof IDBKeyRange === 'undefined'
-          ) {
-            return false;
-          }
-
-          const factory = indexedDB;
-          const originalOpen = factory.open;
-          const originalDatabases = factory.databases;
-          const originalTransaction = IDBDatabase.prototype.transaction;
-          const originalCount = IDBObjectStore.prototype.count;
-          const originalGet = IDBObjectStore.prototype.get;
-          const originalOpenDescriptor = Object.getOwnPropertyDescriptor(factory, 'open');
-          const originalDatabasesDescriptor = Object.getOwnPropertyDescriptor(factory, 'databases');
-          const originalTransactionDescriptor = Object.getOwnPropertyDescriptor(IDBDatabase.prototype, 'transaction');
-          const originalCountDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'count');
-          const originalGetDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'get');
-
-          let databaseEnumerationCount = 0;
-          let databaseOpenCount = 0;
-          let reviewedDatabaseOpenCount = 0;
-          let unrelatedDatabaseOpenCount = 0;
-          let transactionInvocationCount = 0;
-          let reviewedStoreInvocationCount = 0;
-          let unrelatedStoreInvocationCount = 0;
-          let countInvocationCount = 0;
-          let getInvocationCount = 0;
-          let reviewedKeyInvocationCount = 0;
-          let unrelatedKeyInvocationCount = 0;
-
-          const defineWrapped = (target: object, property: string, descriptor: PropertyDescriptor | undefined, value: unknown): void => {
-            Object.defineProperty(
-              target,
-              property,
-              descriptor ? { ...descriptor, value } : { configurable: true, enumerable: false, writable: true, value }
-            );
-          };
-          const restoreDescriptor = (target: object, property: string, descriptor: PropertyDescriptor | undefined): boolean => {
-            try {
-              if (descriptor) Object.defineProperty(target, property, descriptor);
-              else delete (target as Record<string, unknown>)[property];
-              return true;
-            } catch {
-              return false;
-            }
-          };
-
-          const open = function (this: IDBFactory, name: string, version?: number): IDBOpenDBRequest {
-            databaseOpenCount += 1;
-            if (name === databaseName) reviewedDatabaseOpenCount += 1;
-            else unrelatedDatabaseOpenCount += 1;
-            const argumentsList = version === undefined ? [name] : [name, version];
-            return Reflect.apply(originalOpen, this, argumentsList) as IDBOpenDBRequest;
-          };
-          const databases = function (this: IDBFactory): Promise<IDBDatabaseInfo[]> {
-            databaseEnumerationCount += 1;
-            return Reflect.apply(originalDatabases, this, []) as Promise<IDBDatabaseInfo[]>;
-          };
-          const transaction = function (
-            this: IDBDatabase,
-            storeNames: string | string[],
-            mode?: IDBTransactionMode,
-            options?: IDBTransactionOptions
-          ): IDBTransaction {
-            transactionInvocationCount += 1;
-            const names = Array.isArray(storeNames) ? storeNames : [storeNames];
-            for (const name of names) {
-              if (name === objectStoreName) reviewedStoreInvocationCount += 1;
-              else unrelatedStoreInvocationCount += 1;
-            }
-            const argumentsList: unknown[] = [storeNames];
-            if (mode !== undefined) argumentsList.push(mode);
-            if (options !== undefined) argumentsList.push(options);
-            return Reflect.apply(originalTransaction, this, argumentsList) as IDBTransaction;
-          };
-          const count = function (this: IDBObjectStore, query?: IDBValidKey | IDBKeyRange): IDBRequest {
-            countInvocationCount += 1;
-            const reviewed = query instanceof IDBKeyRange
-              ? query.lower === objectKey && query.upper === objectKey && !query.lowerOpen && !query.upperOpen
-              : query === objectKey;
-            if (reviewed) reviewedKeyInvocationCount += 1;
-            else unrelatedKeyInvocationCount += 1;
-            const argumentsList = query === undefined ? [] : [query];
-            return Reflect.apply(originalCount, this, argumentsList) as IDBRequest;
-          };
-          const get = function (this: IDBObjectStore, query?: IDBValidKey): IDBRequest {
-            getInvocationCount += 1;
-            if (query === objectKey) reviewedKeyInvocationCount += 1;
-            else unrelatedKeyInvocationCount += 1;
-            const argumentsList = query === undefined ? [] : [query];
-            return Reflect.apply(originalGet, this, argumentsList) as IDBRequest;
-          };
-
-          try {
-            defineWrapped(factory, 'open', originalOpenDescriptor, open);
-            defineWrapped(factory, 'databases', originalDatabasesDescriptor, databases);
-            defineWrapped(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor, transaction);
-            defineWrapped(IDBObjectStore.prototype, 'count', originalCountDescriptor, count);
-            defineWrapped(IDBObjectStore.prototype, 'get', originalGetDescriptor, get);
-          } catch {
-            restoreDescriptor(factory, 'open', originalOpenDescriptor);
-            restoreDescriptor(factory, 'databases', originalDatabasesDescriptor);
-            restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor);
-            restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor);
-            restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor);
-            return false;
-          }
-
-          const read = (): {
-            databaseLabel: string;
-            storeLabel: string;
-            keyLabel: string;
-            databaseEnumerationCount: number;
-            databaseOpenCount: number;
-            reviewedDatabaseOpenCount: number;
-            unrelatedDatabaseOpenCount: number;
-            transactionInvocationCount: number;
-            reviewedStoreInvocationCount: number;
-            unrelatedStoreInvocationCount: number;
-            countInvocationCount: number;
-            getInvocationCount: number;
-            reviewedKeyInvocationCount: number;
-            unrelatedKeyInvocationCount: number;
-          } => ({
-            databaseLabel: databaseName,
-            storeLabel: objectStoreName,
-            keyLabel: objectKey,
-            databaseEnumerationCount,
-            databaseOpenCount,
-            reviewedDatabaseOpenCount,
-            unrelatedDatabaseOpenCount,
-            transactionInvocationCount,
-            reviewedStoreInvocationCount,
-            unrelatedStoreInvocationCount,
-            countInvocationCount,
-            getInvocationCount,
-            reviewedKeyInvocationCount,
-            unrelatedKeyInvocationCount
-          });
-          const restore = (): boolean => {
-            const restored = [
-              restoreDescriptor(factory, 'open', originalOpenDescriptor),
-              restoreDescriptor(factory, 'databases', originalDatabasesDescriptor),
-              restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor),
-              restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor),
-              restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor)
-            ];
-            try {
-              delete windowRecord[globalName];
-            } catch {
-              restored.push(false);
-            }
-            return restored.every(Boolean);
-          };
-
-          windowRecord[globalName] = { read, restore };
-          return true;
-        },
-        { databaseName: reviewedLabels.database, objectStoreName: reviewedLabels.store, objectKey: reviewedLabels.key, globalName: spyGlobal }
-      );
+      const spyInstalled = await installPreviewIndexedDbSpy(page, {
+        databaseName: reviewedLabels.database,
+        objectStoreName: reviewedLabels.store,
+        objectKey: reviewedLabels.key,
+        globalName: spyGlobal
+      });
       expect(spyInstalled).toBe(true);
 
       const storageEvidence = await readStorageEvidence(page);
@@ -1443,15 +1552,13 @@ test('first-load no-script product route exposes only the inert loading boundary
       expect(storageEvidence.readFailure).toBe(false);
       expect(storageEvidenceEqual(storageEvidence, storageEvidence)).toBe(true);
 
-      const observations = await page.evaluate((globalName) => {
-        const spy = (window as unknown as Record<string, unknown>)[globalName] as
-          | { read?: () => Record<string, string | number> }
-          | undefined;
-        return typeof spy?.read === 'function' ? spy.read() : null;
+      const observations = await page.evaluate((globalName): PreviewIndexedDbSpyObservation | null => {
+        const descriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        if (!descriptor || !('value' in descriptor)) return null;
+        const spy = descriptor.value as { read?: () => PreviewIndexedDbSpyObservation };
+        return typeof spy.read === 'function' ? spy.read() : null;
       }, spyGlobal);
-      expect(observations?.databaseLabel).toBe(reviewedLabels.database);
-      expect(observations?.storeLabel).toBe(reviewedLabels.store);
-      expect(observations?.keyLabel).toBe(reviewedLabels.key);
+      expect(observations).not.toBeNull();
       expect(observations?.databaseEnumerationCount).toBe(1);
       expect(observations?.databaseOpenCount).toBe(1);
       expect(observations?.reviewedDatabaseOpenCount).toBe(1);
@@ -1464,22 +1571,215 @@ test('first-load no-script product route exposes only the inert loading boundary
       expect(observations?.reviewedKeyInvocationCount).toBe(2);
       expect(observations?.unrelatedKeyInvocationCount).toBe(0);
     } finally {
-      methodsRestored = await page
-        .evaluate((globalName) => {
-          const spy = (window as unknown as Record<string, unknown>)[globalName] as
-            | { restore?: () => boolean }
-            | undefined;
-          return typeof spy?.restore === 'function' ? spy.restore() : true;
-        }, spyGlobal)
-        .catch(() => false);
+      const restoration = await restorePreviewIndexedDbSpy(page, spyGlobal);
+      methodsRestored = restoration.restored;
+      cleanupFailure = restoration.cleanupFailure;
       await scrubNativeCredentialProof(page);
       await clearNativeStorage(page);
     }
 
     expect(methodsRestored).toBe(true);
+    expect(cleanupFailure).toBe(false);
   });
 
- test('password ownership fences delayed hydration, rapid focus transfer, and keyboard submission', async ({ page }) => {
+  test('preview IndexedDB spy cleanup reports ownership loss and succeeds on retry', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
+
+    const spyGlobal = '__uiPreviewStorageEvidenceIndexedDbSpy';
+    const recoveryGlobal = '__uiPreviewStorageEvidenceIndexedDbRecovery';
+    let cleanupCompleted = false;
+    await page.goto(previewUrl('/ui-preview'));
+
+    try {
+      const spyInstalled = await installPreviewIndexedDbSpy(page, {
+        databaseName: '__hermternal_native_auth_proof__',
+        objectStoreName: 'proof',
+        objectKey: 'same-key',
+        globalName: spyGlobal
+      });
+      expect(spyInstalled).toBe(true);
+
+      const moved = await page.evaluate(({ globalName, recoveryName }) => {
+        const descriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        if (!descriptor || !('value' in descriptor)) return false;
+        if (!Reflect.deleteProperty(window, globalName)) return false;
+        Object.defineProperty(window, recoveryName, {
+          configurable: true,
+          enumerable: false,
+          writable: false,
+          value: descriptor.value
+        });
+        return true;
+      }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
+      expect(moved).toBe(true);
+
+      const failedCleanup = await restorePreviewIndexedDbSpy(page, spyGlobal);
+      expect(failedCleanup.restored).toBe(false);
+      expect(failedCleanup.cleanupFailure).toBe(true);
+
+      const republished = await page.evaluate(({ globalName, recoveryName }) => {
+        const descriptor = Object.getOwnPropertyDescriptor(window, recoveryName);
+        if (!descriptor || !('value' in descriptor)) return false;
+        Object.defineProperty(window, globalName, {
+          configurable: true,
+          enumerable: false,
+          writable: false,
+          value: descriptor.value
+        });
+        return Reflect.deleteProperty(window, recoveryName);
+      }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
+      expect(republished).toBe(true);
+
+      const retriedCleanup = await restorePreviewIndexedDbSpy(page, spyGlobal);
+      expect(retriedCleanup.restored).toBe(true);
+      expect(retriedCleanup.cleanupFailure).toBe(false);
+      cleanupCompleted = true;
+    } finally {
+      if (!cleanupCompleted) {
+        await page.evaluate(({ globalName, recoveryName }) => {
+          const current = Object.getOwnPropertyDescriptor(window, globalName);
+          const recovery = Object.getOwnPropertyDescriptor(window, recoveryName);
+          const candidate = current && 'value' in current ? current.value : recovery && 'value' in recovery ? recovery.value : null;
+          if (candidate && typeof (candidate as { restore?: () => unknown }).restore === 'function') {
+            try {
+              (candidate as { restore: () => unknown }).restore();
+            } catch {
+              // The test result already reports the sanitized cleanup failure.
+            }
+          }
+          if (current?.configurable) Reflect.deleteProperty(window, globalName);
+          if (recovery?.configurable) Reflect.deleteProperty(window, recoveryName);
+        }, { globalName: spyGlobal, recoveryName: recoveryGlobal });
+      }
+    }
+  });
+
+  test('preview IndexedDB spy rollback preserves an existing falsy non-writable global', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
+
+    const spyGlobal = '__uiPreviewStorageEvidenceIndexedDbSpy';
+    const baselineGlobal = '__uiPreviewStorageEvidenceIndexedDbBaseline';
+    await page.goto(previewUrl('/ui-preview'));
+
+    try {
+      await page.evaluate(({ globalName, baselineName }) => {
+        const factory = indexedDB;
+        const databasePrototype = IDBDatabase.prototype;
+        const storePrototype = IDBObjectStore.prototype;
+        const state = {
+          open: factory.open,
+          databases: factory.databases,
+          transaction: databasePrototype.transaction,
+          count: storePrototype.count,
+          get: storePrototype.get,
+          openDescriptor: Object.getOwnPropertyDescriptor(factory, 'open'),
+          databasesDescriptor: Object.getOwnPropertyDescriptor(factory, 'databases'),
+          transactionDescriptor: Object.getOwnPropertyDescriptor(databasePrototype, 'transaction'),
+          countDescriptor: Object.getOwnPropertyDescriptor(storePrototype, 'count'),
+          getDescriptor: Object.getOwnPropertyDescriptor(storePrototype, 'get')
+        };
+        Object.defineProperty(window, baselineName, {
+          configurable: true,
+          enumerable: false,
+          writable: false,
+          value: state
+        });
+        Object.defineProperty(window, globalName, {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: false
+        });
+      }, { globalName: spyGlobal, baselineName: baselineGlobal });
+
+      const spyInstalled = await installPreviewIndexedDbSpy(page, {
+        databaseName: '__hermternal_native_auth_proof__',
+        objectStoreName: 'proof',
+        objectKey: 'same-key',
+        globalName: spyGlobal
+      });
+      expect(spyInstalled).toBe(false);
+
+      const rollback = await page.evaluate(({ globalName, baselineName }) => {
+        const windowDescriptor = Object.getOwnPropertyDescriptor(window, globalName);
+        const baselineDescriptor = Object.getOwnPropertyDescriptor(window, baselineName);
+        const baseline = baselineDescriptor && 'value' in baselineDescriptor
+          ? baselineDescriptor.value as {
+              open: unknown;
+              databases: unknown;
+              transaction: unknown;
+              count: unknown;
+              get: unknown;
+              openDescriptor?: PropertyDescriptor;
+              databasesDescriptor?: PropertyDescriptor;
+              transactionDescriptor?: PropertyDescriptor;
+              countDescriptor?: PropertyDescriptor;
+              getDescriptor?: PropertyDescriptor;
+            }
+          : undefined;
+        const sameDescriptor = (
+          left: PropertyDescriptor | undefined,
+          right: PropertyDescriptor | undefined
+        ): boolean => {
+          if (!left || !right) return left === right;
+          if (left.configurable !== right.configurable || left.enumerable !== right.enumerable) return false;
+          const leftIsData = 'value' in left;
+          if (leftIsData !== ('value' in right)) return false;
+          if (leftIsData) return left.value === right.value && left.writable === right.writable;
+          return left.get === right.get && left.set === right.set;
+        };
+        return {
+          globalPresent: Boolean(windowDescriptor),
+          globalIsFalse: Boolean(
+            windowDescriptor && 'value' in windowDescriptor && windowDescriptor.value === false
+          ),
+          globalConfigurable: windowDescriptor?.configurable ?? null,
+          globalEnumerable: windowDescriptor?.enumerable ?? null,
+          globalWritable: windowDescriptor && 'writable' in windowDescriptor ? windowDescriptor.writable ?? null : null,
+          methodIdentityRestored: Boolean(
+            baseline &&
+              indexedDB.open === baseline.open &&
+              indexedDB.databases === baseline.databases &&
+              IDBDatabase.prototype.transaction === baseline.transaction &&
+              IDBObjectStore.prototype.count === baseline.count &&
+              IDBObjectStore.prototype.get === baseline.get
+          ),
+          descriptorShapeRestored: Boolean(
+            baseline &&
+              sameDescriptor(Object.getOwnPropertyDescriptor(indexedDB, 'open'), baseline.openDescriptor) &&
+              sameDescriptor(Object.getOwnPropertyDescriptor(indexedDB, 'databases'), baseline.databasesDescriptor) &&
+              sameDescriptor(
+                Object.getOwnPropertyDescriptor(IDBDatabase.prototype, 'transaction'),
+                baseline.transactionDescriptor
+              ) &&
+              sameDescriptor(Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'count'), baseline.countDescriptor) &&
+              sameDescriptor(Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'get'), baseline.getDescriptor)
+          )
+        };
+      }, { globalName: spyGlobal, baselineName: baselineGlobal });
+
+      expect(rollback.globalPresent).toBe(true);
+      expect(rollback.globalIsFalse).toBe(true);
+      expect(rollback.globalConfigurable).toBe(false);
+      expect(rollback.globalEnumerable).toBe(false);
+      expect(rollback.globalWritable).toBe(false);
+      expect(rollback.methodIdentityRestored).toBe(true);
+      expect(rollback.descriptorShapeRestored).toBe(true);
+    } finally {
+      await page.evaluate((baselineName) => {
+        const descriptor = Object.getOwnPropertyDescriptor(window, baselineName);
+        if (descriptor?.configurable) Reflect.deleteProperty(window, baselineName);
+      }, baselineGlobal);
+    }
+  });
+
+  test('password ownership fences delayed hydration, rapid focus transfer, and keyboard submission', async ({ page }) => {
   await page.addInitScript(() => {
     const frames: Array<(timestamp: number) => void> = [];
     Object.defineProperty(window, 'requestAnimationFrame', {
