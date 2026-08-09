@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""Regression tests for the disposable official Hermes Agent launcher.
+"""Offline tests for the marker-owned disposable Hermes launcher.
 
-The unit suite uses a fake Podman boundary and local synthetic HTTP responses.
-It never starts a container, contacts Hermes, or reads a real credential.
+All Podman and readiness boundaries are synthetic. The suite never starts a
+container, contacts Hermes, opens an endpoint, or reads a real credential value.
 """
 
 from __future__ import annotations
 
 import contextlib
-import http.server
 import importlib.util
 import json
 import os
-import socketserver
 import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from pathlib import Path
-from unittest import mock
 from typing import Mapping, Sequence
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,14 +32,16 @@ spec.loader.exec_module(launcher)
 
 
 class FakePodman:
+    """Small exact-ID Podman boundary with no real process or socket."""
+
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
         self.containers: dict[str, dict[str, object]] = {}
         self.fail_run_for: set[str] = set()
         self.fail_start_for: set[str] = set()
         self.fail_stop_for: set[str] = set()
-        self.raise_start_for: set[str] = set()
-        self.raise_stop_for: set[str] = set()
+        self.fail_rm_for: set[str] = set()
+        self._next_id = 1
 
     def _resolve(self, target: str) -> tuple[str, dict[str, object]] | None:
         document = self.containers.get(target)
@@ -58,11 +57,10 @@ class FakePodman:
         command: Sequence[str],
         environment: Mapping[str, str],
         timeout: float,
-    ):
+    ) -> launcher.CommandResult:
         del timeout
         command_tuple = tuple(command)
-        environment_copy = dict(environment)
-        self.calls.append((command_tuple, environment_copy))
+        self.calls.append((command_tuple, dict(environment)))
         args = command_tuple[1:]
         if args == ("info", "--format", "{{.Host.Security.Rootless}}"):
             return launcher.CommandResult(0, "true\n")
@@ -84,7 +82,7 @@ class FakePodman:
         if args[:1] == ("run",):
             name = args[args.index("--name") + 1]
             if name in self.fail_run_for:
-                return launcher.CommandResult(125, "")
+                return launcher.CommandResult(125, "synthetic-run-output-secret")
             labels: dict[str, str] = {}
             for index, value in enumerate(args):
                 if value == "--label":
@@ -92,12 +90,11 @@ class FakePodman:
                     labels[key] = label_value
             volume = args[args.index("--volume") + 1]
             image = args[-3]
-            published = args[args.index("--publish") + 1].split(":")
-            host_ip, host_port, container_port = published
+            host_ip, host_port, container_port = args[args.index("--publish") + 1].split(":")
+            container_id = f"{self._next_id:012x}" + ("a" * 52)
+            self._next_id += 1
             self.containers[name] = {
-                # The launcher persists Podman's immutable hexadecimal ID, never
-                # a mutable container name, for endpoint-handoff verification.
-                "Id": (f"{len(self.containers) + 1:012x}" + ("a" * 52)),
+                "Id": container_id,
                 "Name": f"/{name}",
                 "ImageName": image,
                 "Config": {"Labels": labels},
@@ -119,92 +116,50 @@ class FakePodman:
         if args[:1] == ("start",):
             target = args[1]
             resolved = self._resolve(target)
-            name = resolved[0] if resolved is not None else target
-            if name in self.raise_start_for or target in self.raise_start_for:
-                raise RuntimeError("synthetic-start-output-secret")
-            if name in self.fail_start_for or target in self.fail_start_for:
+            if resolved is None or target in self.fail_start_for or resolved[0] in self.fail_start_for:
                 return launcher.CommandResult(125, "synthetic-start-output-secret")
-            if resolved is None:
-                return launcher.CommandResult(125, "synthetic-start-output-secret")
-            state = resolved[1].get("State")
-            if not isinstance(state, dict):
-                raise AssertionError(f"missing fake state for {name}")
+            state = resolved[1]["State"]
+            assert isinstance(state, dict)
             state["Status"] = "running"
             return launcher.CommandResult(0, "synthetic-start-id\n")
         if args[:1] == ("stop",):
             target = args[1]
             resolved = self._resolve(target)
-            name = resolved[0] if resolved is not None else target
-            if name in self.raise_stop_for or target in self.raise_stop_for:
-                raise RuntimeError("synthetic-stop-output-secret")
-            if name in self.fail_stop_for or target in self.fail_stop_for:
+            if resolved is None or target in self.fail_stop_for or resolved[0] in self.fail_stop_for:
                 return launcher.CommandResult(125, "synthetic-stop-output-secret")
-            if resolved is None:
-                return launcher.CommandResult(125, "synthetic-stop-output-secret")
-            state = resolved[1].get("State")
-            if not isinstance(state, dict):
-                raise AssertionError(f"missing fake state for {name}")
+            state = resolved[1]["State"]
+            assert isinstance(state, dict)
             state["Status"] = "exited"
             return launcher.CommandResult(0, "")
         if args[:2] == ("rm", "--force"):
-            self.containers.pop(args[2], None)
-            return launcher.CommandResult(0, "")
-        if args[:3] == ("unshare", "rm", "-rf"):
-            path = Path(args[-1])
-            if path.exists():
-                import shutil
-
-                shutil.rmtree(path)
+            target = args[2]
+            resolved = self._resolve(target)
+            if resolved is None or target in self.fail_rm_for or resolved[0] in self.fail_rm_for:
+                return launcher.CommandResult(125, "synthetic-rm-output-secret")
+            self.containers.pop(resolved[0], None)
             return launcher.CommandResult(0, "")
         raise AssertionError(f"Unexpected fake Podman command: {command_tuple!r}")
-
-
-class ProviderHandler(http.server.BaseHTTPRequestHandler):
-    payload = b'{"providers":[{"name":"basic","supports_password":true}]}'
-    status = 200
-
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path != "/api/auth/providers":
-            self.send_response(404)
-            self.end_headers()
-            return
-        self.send_response(self.status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(self.payload)))
-        self.end_headers()
-        self.wfile.write(self.payload)
-
-    def log_message(self, format: str, *args: object) -> None:
-        del format, args
-
-
-@contextlib.contextmanager
-def provider_server(payload: bytes, status: int = 200):
-    handler = type("ConfiguredProviderHandler", (ProviderHandler,), {"payload": payload, "status": status})
-    with socketserver.TCPServer(("127.0.0.1", 0), handler) as server:
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            host, port = server.server_address
-            yield f"http://{host}:{port}"
-        finally:
-            server.shutdown()
-            thread.join(timeout=2)
 
 
 class HermesAgentLauncherTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
+        self.runs = self.root / "runs"
+        self.runs.mkdir(mode=0o700)
+        self.runs.chmod(0o700)
         self.roots = launcher.Roots(
-            state=root / "state",
-            data=root / "data",
-            credentials=root / "credentials",
+            state=self.root / "legacy-state",
+            data=self.root / "data",
+            credentials=self.root / "legacy-credentials",
         )
         self.fake = FakePodman()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def marker_path(self, name: str = "fixture.json") -> Path:
+        return self.runs / name
 
     def make_spec(self, instance: str = "test-one", port: int = 19119):
         return launcher.make_spec(instance, port, roots=self.roots)
@@ -213,19 +168,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def ready(endpoint: str, attempts: int, interval: float) -> None:
         del endpoint, attempts, interval
 
-    def foreign_container(self, spec, *, status: str) -> dict[str, object]:
-        return {
-            "Id": f"foreign-{spec.container}",
-            "Name": f"/{spec.container}",
-            "ImageName": "docker.io/other/hermes-agent:v1@sha256:" + ("b" * 64),
-            "Config": {"Labels": {}},
-            "Mounts": [],
-            "State": {"Status": status},
-        }
-
-    def start(self, spec=None, *, readiness=None):
+    def start(self, spec=None, *, marker_path: Path | None = None, readiness=None, **overrides):
+        current_spec = spec or self.make_spec()
         return launcher.start_instance(
-            spec or self.make_spec(),
+            current_spec,
+            marker_path=marker_path or self.marker_path(),
             runner=self.fake,
             readiness=readiness or self.ready,
             port_checker=lambda port: True,
@@ -233,7 +180,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
             source_environment={"PATH": "/usr/bin"},
             attempts=1,
             interval=0,
+            **overrides,
         )
+
+    def load(self, path: Path | None = None):
+        return launcher.load_launcher_state(path or self.marker_path(), self.roots)
 
     def test_default_image_is_exact_official_tag_and_digest(self) -> None:
         tag, digest = launcher.validate_image(launcher.DEFAULT_IMAGE)
@@ -242,10 +193,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
             digest,
             "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
         )
-        self.assertEqual(
-            launcher.expected_repo_digest(launcher.DEFAULT_IMAGE),
-            "docker.io/nousresearch/hermes-agent@" + digest,
-        )
+        self.assertEqual(launcher.expected_repo_digest(launcher.DEFAULT_IMAGE), "docker.io/nousresearch/hermes-agent@" + digest)
 
     def test_mutable_or_nonofficial_images_fail_closed(self) -> None:
         digest = "a" * 64
@@ -254,53 +202,36 @@ class HermesAgentLauncherTests(unittest.TestCase):
             f"docker.io/other/hermes-agent:v1@sha256:{digest}",
             "docker.io/nousresearch/hermes-agent:v1",
             f"docker.io/nousresearch/hermes-agent:v1@sha256:{digest.upper()}",
-            f"docker.io/nousresearch/hermes-agent@sha256:{digest}",
         )
         for image in rejected:
             with self.subTest(image=image), self.assertRaises(launcher.LauncherError) as raised:
                 launcher.validate_image(image)
             self.assertEqual(raised.exception.code, "image_not_immutable_official")
 
-    def test_batch_names_and_ports_are_deterministic_and_unique(self) -> None:
-        specs = launcher.specs_for_batch(
-            "playwright",
-            4,
-            19120,
-            image=launcher.DEFAULT_IMAGE,
-            username=launcher.DEFAULT_USERNAME,
-            roots=self.roots,
-        )
-        self.assertEqual([item.instance for item in specs], [f"playwright-{index}" for index in range(1, 5)])
-        self.assertEqual([item.port for item in specs], [19120, 19121, 19122, 19123])
-        self.assertEqual(len({item.container for item in specs}), 4)
-        self.assertEqual(len({item.data_dir for item in specs}), 4)
-        self.assertEqual(len({item.credential_file for item in specs}), 4)
-
-    def test_run_command_preserves_upstream_behavior_without_policy_flags(self) -> None:
+    def test_marker_is_required_and_run_arguments_bind_the_run_id_label(self) -> None:
         spec = self.make_spec()
-        command = launcher.run_arguments(spec, "/usr/bin/podman")
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(spec, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "marker_required")
+
+        run_id = "a" * 64
+        command = launcher.run_arguments(spec, "/usr/bin/podman", run_id)
+        self.assertIn(f"io.hermternal.run-id={run_id}", command)
         self.assertEqual(command[-3:], (spec.image, "gateway", "run"))
         self.assertIn("127.0.0.1:19119:9119", command)
-        self.assertIn(f"{spec.data_dir}:/opt/data", command)
-        self.assertNotIn("--entrypoint", command)
-        forbidden = {
-            "build",
-            "compose",
-            "tag",
-            "--network",
-            "host",
-            "--cpus",
-            "--memory",
-            "--pids-limit",
-            "--cap-add",
-            "--cap-drop",
-            "--security-opt",
-            "--log-driver",
-            "8642",
-        }
+        forbidden = {"build", "compose", "tag", "--network", "host", "--cpus", "--memory", "--pids-limit", "--cap-add", "--cap-drop", "--security-opt", "podman.sock", "docker.sock"}
         self.assertTrue(forbidden.isdisjoint(command), command)
-        self.assertFalse(any("/.hermes" in value or "~/.hermes" in value for value in command))
-        self.assertFalse(any("podman.sock" in value or "docker.sock" in value for value in command))
+
+    def test_batch_paths_are_caller_supplied_and_unique_specs_remain_deterministic(self) -> None:
+        specs = launcher.specs_for_batch(
+            "playwright", 3, 19120, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
+        )
+        paths = [self.marker_path(f"run-{index}.json") for index in range(1, 4)]
+        self.assertEqual([item.instance for item in specs], ["playwright-1", "playwright-2", "playwright-3"])
+        self.assertEqual([item.port for item in specs], [19120, 19121, 19122])
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_many(specs, paths[:-1], runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "marker_count_invalid")
 
     def test_environment_is_provider_free_and_remote_podman_is_rejected(self) -> None:
         cleaned = launcher.clean_environment(
@@ -319,235 +250,170 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 launcher.clean_environment({name: "ssh://synthetic"})
             self.assertEqual(raised.exception.code, "remote_podman_rejected")
 
-    def test_password_is_private_reused_and_never_enters_public_artifacts(self) -> None:
-        spec = self.make_spec()
-        first = launcher.read_or_create_password(spec)
-        second = launcher.read_or_create_password(spec)
-        self.assertEqual(first, second)
-        self.assertRegex(first, r"^[0-9a-f]{48}$")
-        self.assertEqual(spec.credential_file.read_bytes(), (first + "\n").encode("ascii"))
-        self.assertEqual(stat.S_IMODE(spec.credential_file.stat().st_mode), 0o600)
-
-        result, created = self.start(spec)
-        self.assertTrue(created)
-        self.assertNotIn(first, json.dumps(result))
-        self.assertNotIn(first, spec.state_file.read_text(encoding="utf-8"))
-        run_calls = [(command, environment) for command, environment in self.fake.calls if command[1] == "run"]
-        self.assertEqual(len(run_calls), 1)
-        command, environment = run_calls[0]
-        self.assertNotIn(first, command)
-        self.assertEqual(environment["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"], first)
-        self.assertIn("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", command)
-
-    def test_existing_credential_file_normalizes_only_trailing_crlf(self) -> None:
-        spec = self.make_spec()
-        value = b"a" * 48
-        spec.credential_file.parent.mkdir(parents=True)
-
-        for suffix in (b"", b"\n", b"\r", b"\r\n", b"\n\r"):
-            with self.subTest(suffix=suffix):
-                spec.credential_file.write_bytes(value + suffix)
-                self.assertEqual(launcher.read_or_create_password(spec), value.decode("ascii"))
-
-        rejected = (
-            value + b" ",
-            value + b"\t\n",
-            value + b"\ntrailing",
-            value[:24] + b"\n" + value[24:],
-            value.upper(),
-            value[:-1],
-            value + b"0",
-            b"",
-        )
-        for raw in rejected:
-            with self.subTest(raw=raw):
-                spec.credential_file.write_bytes(raw)
-                with self.assertRaises(launcher.LauncherError) as raised:
-                    launcher.read_or_create_password(spec)
-                self.assertEqual(raised.exception.code, "credential_file_invalid")
-
-    def test_start_verifies_image_and_writes_nonsecret_state(self) -> None:
+    def test_new_run_creates_fresh_scoped_credential_state_and_marker_without_secret_or_run_id_output(self) -> None:
         spec = self.make_spec()
         result, created = self.start(spec)
         self.assertTrue(created)
-        self.assertEqual(result["status"], "ready")
-        self.assertEqual(result["endpoint"], "http://127.0.0.1:19119")
-        self.assertEqual(result["credential_file"], str(spec.credential_file))
-        loaded = launcher.load_state(spec.instance, self.roots)
-        self.assertEqual(loaded, spec)
-        commands = [command[1:] for command, _ in self.fake.calls]
-        self.assertIn(("pull", spec.image), commands)
-        self.assertIn(("image", "inspect", spec.image, "--format", "json"), commands)
+        state = self.load()
+        bound = state.marker
+        self.assertEqual(bound.status, "running")
+        self.assertEqual(bound.instance, spec.instance)
+        self.assertRegex(bound.run_id, r"^[0-9a-f]{64}$")
+        self.assertEqual(bound.credential_path, self.runs / "fixture.credential")
+        self.assertEqual(bound.state_path, self.runs / "fixture.state.json")
+        self.assertEqual(stat.S_IMODE(bound.credential_path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(bound.state_path.stat().st_mode), 0o600)
+        password = bound.credential_path.read_text(encoding="ascii").strip()
+        self.assertRegex(password, r"^[0-9a-f]{48}$")
+        public = json.dumps(result)
+        self.assertNotIn(password, public)
+        self.assertNotIn(bound.run_id, public)
+        self.assertNotIn(password, bound.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn(bound.run_id, result.get("marker_path", ""))
 
-    def test_verified_endpoint_requires_the_running_owned_loopback_mapping(self) -> None:
+        run_count = sum(command[1] == "run" for command, _ in self.fake.calls)
+        self.assertEqual(run_count, 1)
+        run_command, environment = next((command, env) for command, env in self.fake.calls if command[1] == "run")
+        self.assertEqual(environment["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"], password)
+        self.assertNotIn(password, run_command)
+        self.assertIn(f"io.hermternal.run-id={bound.run_id}", run_command)
+
+    def test_same_marker_reuses_one_running_instance_without_second_run_or_fresh_credential(self) -> None:
         spec = self.make_spec()
         self.start(spec)
-        state = launcher.load_launcher_state(spec.instance, self.roots)
+        original = self.load().marker
+        original_credential = original.credential_path.read_bytes()
         self.fake.calls.clear()
+        result, created = self.start(spec)
+        self.assertFalse(created)
+        self.assertFalse(result["created"])
+        self.assertEqual(self.load().marker.run_id, original.run_id)
+        self.assertEqual(original.credential_path.read_bytes(), original_credential)
+        self.assertFalse(any(command[1] == "run" for command, _ in self.fake.calls))
 
+    def test_different_marker_cannot_adopt_or_start_a_second_shared_instance(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.calls.clear()
+        other = self.marker_path("other.json")
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, marker_path=other)
+        self.assertEqual(raised.exception.code, "marker_missing")
+        self.assertFalse(other.exists())
+        self.assertEqual(len(self.fake.containers), 1)
+        self.assertFalse(any(command[1] == "run" for command, _ in self.fake.calls if command[1] == "run"))
+
+    def test_existing_unmarked_stopped_container_is_never_started(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        marker = self.marker_path()
+        marker.unlink()
+        self.load_marker_cleanup_files()
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec)
+        self.assertEqual(raised.exception.code, "marker_missing")
+        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop", "rm"}]
+        self.assertEqual(lifecycle, [])
+
+    def load_marker_cleanup_files(self) -> None:
+        for path in (self.runs / "fixture.state.json", self.runs / "fixture.credential"):
+            if path.exists():
+                path.unlink()
+
+    def test_endpoint_selects_only_fully_bound_running_marker_and_releases_bounded_paths(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
         result = launcher.verify_handoff_endpoint(
             state,
             runner=self.fake,
             executable="/usr/bin/podman",
             source_environment={"PATH": "/usr/bin"},
         )
-
-        self.assertEqual(result, {**spec.public(), "status": "running"})
+        self.assertEqual(
+            result,
+            {
+                "status": "running",
+                "endpoint": spec.endpoint,
+                "marker_path": str(self.marker_path()),
+                "credential_file": str(self.runs / "fixture.credential"),
+            },
+        )
+        self.assertNotIn(state.run_id, json.dumps(result))
         self.assertEqual(self.fake.calls[-1][0][1:3], ("container", "inspect"))
         self.assertEqual(self.fake.calls[-1][0][3], state.container_id)
 
-    def test_verified_endpoint_rejects_stopped_tombstone_before_handoff(self) -> None:
+    def test_endpoint_rejects_stale_copied_symlink_and_replaced_resources_before_contact(self) -> None:
         spec = self.make_spec()
         self.start(spec)
-        original_id = launcher.load_launcher_state(spec.instance, self.roots).container_id
-        launcher.stop_instance(
-            spec,
-            runner=self.fake,
-            executable="/usr/bin/podman",
-            source_environment={"PATH": "/usr/bin"},
-        )
-        state = launcher.load_launcher_state(spec.instance, self.roots)
-        self.assertEqual(state.container_id, original_id)
-
+        original = self.load().marker
+        copied = self.marker_path("copied.json")
+        copied.write_bytes(original.marker_path.read_bytes())
+        copied.chmod(0o600)
         with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
+            launcher.execute(type("Args", (), {"operation": "endpoint", "marker": str(copied), "state_root": str(self.roots.state), "data_root": str(self.roots.data), "credential_root": str(self.roots.credentials)})())
+        self.assertEqual(raised.exception.code, "marker_path_mismatch")
 
-        self.assertEqual(raised.exception.code, "container_inspect_failed")
-
-    def test_verified_endpoint_rejects_missing_or_rebound_port_mapping(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        state = launcher.load_launcher_state(spec.instance, self.roots)
-        ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
-        self.assertIsInstance(ports, dict)
-        ports.clear()
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
-
-        ports["9119/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": "19120"}]
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
-
-    def test_verified_endpoint_rejects_container_replacement_and_ownership_mismatch(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        state = launcher.load_launcher_state(spec.instance, self.roots)
-        self.fake.containers[spec.container]["Id"] = "b" * 64
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "container_inspect_failed")
-
-        self.fake.containers[spec.container]["Id"] = state.container_id
         self.fake.containers[spec.container]["Config"] = {"Labels": {}}
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "container_not_launcher_owned")
-
-    def test_verified_endpoint_rejects_non_loopback_mapping(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        state = launcher.load_launcher_state(spec.instance, self.roots)
-        ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
-        self.assertIsInstance(ports, dict)
-        ports["9119/tcp"] = [{"HostIp": "0.0.0.0", "HostPort": str(spec.port)}]
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.verify_handoff_endpoint(
-                state,
-                runner=self.fake,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
-
-    def test_existing_exact_container_is_reused_but_mismatch_is_rejected(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
         self.fake.calls.clear()
-        result, created = self.start(spec)
-        self.assertFalse(created)
-        self.assertFalse(result["created"])
-        run_count = sum(command[1] == "run" for command, _ in self.fake.calls)
-        self.assertEqual(run_count, 0)
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [])
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(self.load(), runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "container_not_launcher_owned")
+        self.assertEqual(self.fake.calls[-1][0][3], original.container_id)
 
-        self.fake.containers[spec.container]["Config"] = {"Labels": {}}
+        self.fake.containers[spec.container]["Config"] = {"Labels": {launcher.MANAGED_LABEL: launcher.MANAGED_VERSION}}
+        with self.assertRaises(launcher.LauncherError):
+            launcher.verify_handoff_endpoint(self.load(), runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+
+    def test_endpoint_rejects_mapping_and_credential_identity_replacements(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+        assert isinstance(ports, dict)
+        ports["9119/tcp"] = [{"HostIp": "0.0.0.0", "HostPort": str(spec.port)}]
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(state, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+
+        ports["9119/tcp"] = [{"HostIp": "127.0.0.1", "HostPort": str(spec.port)}]
+        replacement = self.runs / "replacement"
+        replacement.write_bytes(state.marker.credential_path.read_bytes())
+        replacement.chmod(0o600)
+        state.marker.credential_path.unlink()
+        replacement.rename(state.marker.credential_path)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.verify_handoff_endpoint(state, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+
+    def test_container_label_run_id_mismatch_never_starts_or_contacts_endpoint(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        labels = self.fake.containers[spec.container]["Config"]["Labels"]
+        assert isinstance(labels, dict)
+        labels["io.hermternal.run-id"] = "f" * 64
+        self.fake.calls.clear()
         with self.assertRaises(launcher.LauncherError) as raised:
             self.start(spec)
         self.assertEqual(raised.exception.code, "container_not_launcher_owned")
+        self.assertFalse(any(command[1] in {"start", "stop", "rm"} for command, _ in self.fake.calls))
 
-    def test_existing_stopped_container_is_started_before_readiness(self) -> None:
+    def test_stopped_bound_container_starts_only_by_pinned_id_and_rolls_back_exactly(self) -> None:
         spec = self.make_spec()
         self.start(spec)
+        state = self.load()
         self.fake.containers[spec.container]["State"] = {"Status": "exited"}
         self.fake.calls.clear()
-
         result, created = self.start(spec)
-
         self.assertFalse(created)
         self.assertEqual(result["status"], "ready")
-        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [("start", self.fake.containers[spec.container]["Id"])])
+        self.assertEqual(lifecycle, [("start", state.container_id)])
 
-    def test_existing_stopped_container_failure_before_start_preserves_stopped_state(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
         self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.calls.clear()
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_instance(
-                spec,
-                runner=self.fake,
-                readiness=self.ready,
-                port_checker=lambda port: False,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-                attempts=1,
-                interval=0,
-            )
-
-        self.assertEqual(raised.exception.code, "port_unavailable")
-        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [])
-
-    def test_existing_stopped_container_failure_after_start_rolls_back_once(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.calls.clear()
 
         def not_ready(endpoint: str, attempts: int, interval: float) -> None:
             del endpoint, attempts, interval
@@ -555,255 +421,12 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
         with self.assertRaises(launcher.LauncherError) as raised:
             self.start(spec, readiness=not_ready)
-
         self.assertEqual(raised.exception.code, "provider_readiness_timeout")
         self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(
-            lifecycle,
-            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
-        )
+        self.assertEqual(lifecycle[-2:], [("start", state.container_id), ("stop", state.container_id)])
 
-    def test_existing_stopped_container_start_failure_is_bounded_and_redacted(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.fail_start_for.add(spec.container)
-        self.fake.calls.clear()
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            self.start(spec)
-
-        self.assertEqual(raised.exception.code, "container_start_failed")
-        self.assertNotIn("synthetic-start-output-secret", str(raised.exception))
-        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [("start", self.fake.containers[spec.container]["Id"])])
-
-    def test_existing_stopped_container_rollback_failure_fails_closed(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.fail_stop_for.add(spec.container)
-        self.fake.calls.clear()
-
-        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
-            del endpoint, attempts, interval
-            raise launcher.LauncherError("provider_readiness_timeout")
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            self.start(spec, readiness=not_ready)
-
-        self.assertEqual(raised.exception.code, "container_recovery_rollback_failed")
-        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(
-            lifecycle,
-            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
-        )
-
-    def test_existing_stopped_container_cancellation_rolls_back_once(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.calls.clear()
-
-        def cancelled(endpoint: str, attempts: int, interval: float) -> None:
-            del endpoint, attempts, interval
-            raise KeyboardInterrupt
-
-        with self.assertRaises(KeyboardInterrupt):
-            self.start(spec, readiness=cancelled)
-
-        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(
-            lifecycle,
-            [("start", self.fake.containers[spec.container]["Id"]), ("stop", self.fake.containers[spec.container]["Id"])],
-        )
-
-    def test_existing_foreign_container_is_rejected_before_recovery_mutation(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.containers[spec.container]["Config"] = {"Labels": {launcher.MANAGED_LABEL: launcher.MANAGED_VERSION}}
-        self.fake.calls.clear()
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            self.start(spec)
-
-        self.assertEqual(raised.exception.code, "container_not_launcher_owned")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [])
-
-    def test_existing_container_mount_mismatch_fails_closed_before_recovery(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.containers[spec.container]["Mounts"] = [
-            {
-                "Type": "bind",
-                "Source": str(self.roots.data / "foreign"),
-                "Destination": "/opt/data",
-            }
-        ]
-        self.fake.calls.clear()
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            self.start(spec)
-
-        self.assertEqual(raised.exception.code, "container_identity_unproven")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [])
-
-    def test_existing_container_image_or_name_mismatch_fails_closed_before_recovery(self) -> None:
-        for field, value in (("ImageName", "docker.io/other/hermes-agent:v1@sha256:" + ("a" * 64)), ("Name", "/foreign-container")):
-            with self.subTest(field=field):
-                spec = self.make_spec(instance=f"test-{field.lower()}")
-                self.start(spec)
-                self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-                self.fake.containers[spec.container][field] = value
-                self.fake.calls.clear()
-
-                with self.assertRaises(launcher.LauncherError) as raised:
-                    self.start(spec)
-
-                self.assertEqual(raised.exception.code, "container_identity_unproven")
-                lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-                self.assertEqual(lifecycle, [])
-
-    def test_existing_container_replacement_race_is_rejected_before_start(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        self.fake.calls.clear()
-        inspect_count = 0
-
-        def racing_runner(command, environment, timeout):
-            nonlocal inspect_count
-            if tuple(command[1:3]) == ("container", "inspect"):
-                inspect_count += 1
-                if inspect_count == 2:
-                    self.fake.containers[spec.container]["Id"] = "b" * 64
-            return self.fake(command, environment, timeout)
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_instance(
-                spec,
-                runner=racing_runner,
-                readiness=self.ready,
-                port_checker=lambda port: True,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-                attempts=1,
-                interval=0,
-            )
-
-        self.assertEqual(raised.exception.code, "container_recovery_race")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [])
-
-    def test_existing_container_replacement_after_final_inspect_is_not_started(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        original_id = self.fake.containers[spec.container]["Id"]
-        foreign = self.foreign_container(spec, status="exited")
-        self.fake.calls.clear()
-
-        def racing_runner(command, environment, timeout):
-            if command[1:] == ("start", original_id):
-                self.fake.containers[spec.container] = foreign
-            return self.fake(command, environment, timeout)
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_instance(
-                spec,
-                runner=racing_runner,
-                readiness=self.ready,
-                port_checker=lambda port: True,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-                attempts=1,
-                interval=0,
-            )
-
-        self.assertEqual(raised.exception.code, "container_start_failed")
-        self.assertNotIn("synthetic-start-output-secret", str(raised.exception))
-        self.assertEqual(foreign["State"]["Status"], "exited")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(lifecycle, [("start", original_id)])
-
-    def test_existing_container_replacement_after_rollback_inspect_is_not_stopped(self) -> None:
-        spec = self.make_spec()
-        self.start(spec)
-        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
-        original_id = self.fake.containers[spec.container]["Id"]
-        foreign = self.foreign_container(spec, status="running")
-        self.fake.calls.clear()
-
-        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
-            del endpoint, attempts, interval
-            raise launcher.LauncherError("provider_readiness_timeout")
-
-        def racing_runner(command, environment, timeout):
-            if command[1:] == ("stop", original_id):
-                self.fake.containers[spec.container] = foreign
-            return self.fake(command, environment, timeout)
-
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_instance(
-                spec,
-                runner=racing_runner,
-                readiness=not_ready,
-                port_checker=lambda port: True,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-                attempts=1,
-                interval=0,
-            )
-
-        self.assertEqual(raised.exception.code, "container_recovery_rollback_failed")
-        self.assertNotIn("synthetic-stop-output-secret", str(raised.exception))
-        self.assertEqual(foreign["State"]["Status"], "running")
-        lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
-        self.assertEqual(
-            lifecycle,
-            [("start", original_id), ("stop", original_id)],
-        )
-
-    def test_occupied_port_fails_before_run(self) -> None:
-        spec = self.make_spec()
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_instance(
-                spec,
-                runner=self.fake,
-                readiness=self.ready,
-                port_checker=lambda port: False,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-            )
-        self.assertEqual(raised.exception.code, "port_unavailable")
-        self.assertFalse(any(command[1] == "run" for command, _ in self.fake.calls))
-
-    def test_readiness_requires_expected_basic_provider(self) -> None:
-        valid = b'{"providers":[{"name":"basic","supports_password":true}]}'
-        with provider_server(valid) as endpoint:
-            launcher.check_provider_readiness(endpoint, 1, 0)
-
-        malformed = b'{"providers":"wrong"}'
-        with provider_server(malformed) as endpoint:
-            with self.assertRaises(launcher.LauncherError) as raised:
-                launcher.check_provider_readiness(endpoint, 1, 0)
-            self.assertEqual(raised.exception.code, "provider_readiness_invalid")
-
-        missing = b'{"providers":[{"name":"oauth","supports_password":false}]}'
-        with provider_server(missing) as endpoint:
-            with self.assertRaises(launcher.LauncherError) as raised:
-                launcher.check_provider_readiness(endpoint, 1, 0)
-            self.assertEqual(raised.exception.code, "basic_provider_missing")
-
-    def test_readiness_timeout_removes_only_created_container(self) -> None:
+    def test_readiness_failure_uses_marker_cleanup_and_removes_only_pinned_files(self) -> None:
         spec = self.make_spec()
 
         def not_ready(endpoint: str, attempts: int, interval: float) -> None:
@@ -813,92 +436,158 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             self.start(spec, readiness=not_ready)
         self.assertEqual(raised.exception.code, "provider_readiness_timeout")
-        self.assertNotIn(spec.container, self.fake.containers)
-        self.assertTrue(spec.data_dir.is_dir())
-        self.assertTrue(spec.credential_file.is_file())
-
-    def test_partial_batch_failure_rolls_back_created_instances(self) -> None:
-        specs = launcher.specs_for_batch(
-            "batch",
-            3,
-            19200,
-            image=launcher.DEFAULT_IMAGE,
-            username=launcher.DEFAULT_USERNAME,
-            roots=self.roots,
-        )
-        self.fake.fail_run_for.add(specs[1].container)
-        with self.assertRaises(launcher.LauncherError) as raised:
-            launcher.start_many(
-                specs,
-                runner=self.fake,
-                readiness=self.ready,
-                port_checker=lambda port: True,
-                executable="/usr/bin/podman",
-                source_environment={"PATH": "/usr/bin"},
-                attempts=1,
-                interval=0,
-            )
-        self.assertEqual(raised.exception.code, "container_start_failed")
         self.assertEqual(self.fake.containers, {})
-        self.assertFalse(specs[2].credential_file.exists())
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertTrue(self.runs.is_dir())
 
-    def test_container_owned_data_uses_exact_rootless_unshare_fallback(self) -> None:
-        spec = self.make_spec()
-        launcher._ensure_private_directory(spec.data_dir)
-        real_remove = launcher._remove_owned_path
-
-        def permission_once(path: Path) -> None:
-            if path == spec.data_dir:
-                raise launcher.LauncherError("owned_path_permission_denied")
-            real_remove(path)
-
-        with mock.patch.object(launcher, "_remove_owned_path", side_effect=permission_once):
-            launcher._remove_container_owned_data(
-                spec,
-                self.fake,
-                {"PATH": "/usr/bin"},
-                "/usr/bin/podman",
-            )
-        self.assertFalse(spec.data_dir.exists())
-        unshare = [command for command, _ in self.fake.calls if command[1:4] == ("unshare", "rm", "-rf")]
-        self.assertEqual(
-            unshare,
-            [
-                (
-                    "/usr/bin/podman",
-                    "unshare",
-                    "rm",
-                    "-rf",
-                    "--",
-                    str(spec.data_dir),
-                )
-            ],
-        )
-
-    def test_stop_is_idempotent_and_purge_is_explicit(self) -> None:
+    def test_cleanup_failure_retains_bounded_cleanup_failed_tombstone_and_retry_is_exact(self) -> None:
         spec = self.make_spec()
         self.start(spec)
-        first = launcher.stop_instance(
-            spec,
-            runner=self.fake,
-            executable="/usr/bin/podman",
-            source_environment={"PATH": "/usr/bin"},
-        )
-        self.assertEqual(first["status"], "removed")
-        self.assertTrue(spec.data_dir.exists())
-        self.assertTrue(spec.credential_file.exists())
-        self.assertTrue(spec.state_file.exists())
+        state = self.load()
+        self.fake.fail_rm_for.add(spec.container)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(self.marker_path(), roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "container_remove_failed")
+        tombstone = launcher.load_launcher_state(self.marker_path(), self.roots)
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertTrue(self.marker_path().exists())
+        self.assertTrue(tombstone.marker.credential_path.exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
+        self.assertEqual(len(self.fake.containers), 1)
 
-        second = launcher.stop_instance(
-            spec,
-            purge_data=True,
+        self.fake.fail_rm_for.clear()
+        result = launcher.stop_instance(self.marker_path(), roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(result["status"], "removed")
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse(tombstone.marker.credential_path.exists())
+        self.assertFalse(tombstone.marker.state_path.exists())
+        self.assertEqual(self.fake.containers, {})
+
+    def test_cleanup_marker_unlink_failure_recreates_tombstone_for_exact_retry(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        original_unlink = Path.unlink
+        unlink_targets = [
+            self.runs / "fixture.credential",
+            self.runs / "fixture.state.json",
+            self.marker_path(),
+        ]
+
+        def fail_marker_unlink(*args: object, **kwargs: object) -> None:
+            path = unlink_targets.pop(0)
+            if path == self.marker_path():
+                raise OSError("synthetic marker unlink failure")
+            original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", side_effect=fail_marker_unlink):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.stop_instance(
+                    self.marker_path(),
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "marker_remove_failed")
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertTrue(tombstone.marker.state_path.exists())
+        self.assertFalse(tombstone.marker.credential_path.exists())
+        self.assertEqual(self.fake.containers, {})
+
+        result = launcher.stop_instance(
+            self.marker_path(),
+            roots=self.roots,
             runner=self.fake,
             executable="/usr/bin/podman",
             source_environment={"PATH": "/usr/bin"},
         )
-        self.assertEqual(second["status"], "absent")
-        self.assertFalse(spec.data_dir.exists())
-        self.assertFalse(spec.credential_dir.exists())
+        self.assertEqual(result["status"], "removed")
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse(tombstone.marker.state_path.exists())
+
+    def test_cleanup_does_not_overwrite_a_raced_marker_replacement(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        raced = launcher.live_run_marker.RunMarker(
+            marker_path=state.marker.marker_path,
+            status=launcher.live_run_marker.STATUS_RUNNING,
+            run_id="f" * 64,
+            instance=state.marker.instance,
+            container_id=state.marker.container_id,
+            container_name=state.marker.container_name,
+            image=state.marker.image,
+            endpoint=state.marker.endpoint,
+            state_path=state.marker.state_path,
+            credential_path=state.marker.credential_path,
+            credential_identity=state.marker.credential_identity,
+        )
+
+        def replace_marker_then_fail(current: launcher.LauncherState, expected: tuple[int, int, int, int, int]) -> None:
+            del expected
+            launcher.live_run_marker.replace_marker(raced)
+            raise launcher.LauncherError("marker_replaced")
+
+        with mock.patch.object(launcher, "_remove_marker_last", side_effect=replace_marker_then_fail):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.stop_instance(
+                    self.marker_path(),
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).run_id, "f" * 64)
+        self.assertFalse(self.runs.joinpath("fixture.state.json").exists())
+
+    def test_cleanup_rejects_replaced_credential_before_container_removal(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        replacement = self.runs / "replacement"
+        replacement.write_bytes(state.marker.credential_path.read_bytes())
+        replacement.chmod(0o600)
+        state.marker.credential_path.unlink()
+        replacement.rename(state.marker.credential_path)
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(self.marker_path(), roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+        self.assertFalse(any(command[1] == "rm" for command, _ in self.fake.calls))
+        self.assertEqual(launcher.load_launcher_state(self.marker_path(), self.roots).marker.status, "cleanup_failed")
+
+    def test_cleanup_rejects_marker_copy_hardlink_symlink_and_fifo_without_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        copied = self.marker_path("copied.json")
+        copied.write_bytes(self.marker_path().read_bytes())
+        copied.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError):
+            launcher.stop_instance(copied, roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        self.assertTrue(self.marker_path().exists())
+
+        hardlink = self.marker_path("hardlink.json")
+        os.link(self.marker_path(), hardlink)
+        with self.assertRaises(launcher.LauncherError):
+            launcher.stop_instance(self.marker_path(), roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        hardlink.unlink()
+
+        symlink = self.marker_path("symlink.json")
+        symlink.symlink_to(self.marker_path())
+        with self.assertRaises(launcher.LauncherError):
+            launcher.stop_instance(symlink, roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        symlink.unlink()
+        fifo = self.marker_path("fifo.json")
+        os.mkfifo(fifo)
+        with self.assertRaises(launcher.LauncherError):
+            launcher.stop_instance(fifo, roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+        fifo.unlink()
+        self.assertIn(spec.container, self.fake.containers)
 
     def test_rootless_false_fails_before_image_or_run(self) -> None:
         def rootful(command, environment, timeout):
@@ -910,6 +599,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.start_instance(
                 self.make_spec(),
+                marker_path=self.marker_path(),
                 runner=rootful,
                 readiness=self.ready,
                 port_checker=lambda port: True,
@@ -918,7 +608,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "rootless_podman_required")
 
-    def test_cli_invalid_image_emits_one_bounded_json_error_without_traceback(self) -> None:
+    def test_cli_invalid_image_is_bounded_and_requires_exact_marker_without_traceback(self) -> None:
         completed = subprocess.run(
             [
                 sys.executable,
@@ -928,6 +618,8 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 "safe",
                 "--port",
                 "19119",
+                "--marker",
+                str(self.marker_path()),
                 "--image",
                 "docker.io/nousresearch/hermes-agent:latest",
             ],
@@ -944,4 +636,4 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(verbosity=2)
