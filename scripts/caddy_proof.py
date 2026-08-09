@@ -2566,6 +2566,16 @@ def _validated_git_metadata(
                     if len(fields) >= 2 and fields[1].startswith("refs/replace/"):
                         raise ValueError("Git metadata uses replacement refs")
 
+            refs_directory = require_pin(metadata_root / "refs", "Git ref metadata")
+            if refs_directory is not None and refs_directory.entries is not None:
+                for relative, _identity, _content in refs_directory.entries:
+                    _check_git_operation_deadline(deadline, "validating Git metadata")
+                    # The recursive pin records descendants relative to refs;
+                    # reject the loose replacement namespace itself, not only a
+                    # top-level pin that is never created for nested entries.
+                    if relative == "replace" or relative.startswith("replace/"):
+                        raise ValueError("Git metadata uses replacement refs")
+
             objects_directory = require_pin(metadata_root / "objects", "Git object metadata")
             if objects_directory is not None and objects_directory.entries is not None:
                 for relative, _identity, _content in objects_directory.entries:
