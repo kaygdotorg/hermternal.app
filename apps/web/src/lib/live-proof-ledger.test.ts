@@ -3,6 +3,7 @@ import {
   LIVE_PROOF_ASSISTANT_MARKER,
   LIVE_PROOF_PROMPT,
   assertLiveProofHappensBefore,
+  assertLiveProofLedgerCaptureReady,
   createLiveProofLedger,
   matchLiveProofHistory,
   matchLiveProofLedger
@@ -104,7 +105,15 @@ describe('bounded live proof ledger', () => {
       promptCount: 1,
       completionCount: 1
     });
-    expect(assertLiveProofHappensBefore(events, 'gateway.ready', 'prompt.submit')).toBe(true);
+    const proof = matchLiveProofLedger(events, {
+      sessionId: 'stored-1',
+      promptRequestId: 'prompt-1',
+      promptSessionId: 'ephemeral-1'
+    });
+    expect(assertLiveProofLedgerCaptureReady(proof)).toBe(true);
+    expect(() => assertLiveProofLedgerCaptureReady({ ...proof, ordered: false })).toThrow(
+      'complete causal Hermes proof'
+    );
   });
 
   it('rejects mismatched identity or re-ordered completion evidence', () => {

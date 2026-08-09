@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertLiveProofLedgerCaptureReady } from './live-proof-ledger.mjs';
 
 /**
  * This module is the only explicit screenshot path in the live lane. It is
@@ -1533,8 +1534,7 @@ function requirePageMethod(page, method) {
  *   page: any,
  *   clientSha: string,
  *   enabled?: boolean,
- *   paperParityApproved: boolean,
- *   stateStable: boolean,
+ *   proof?: Record<string, unknown>,
  *   uiState: 'empty' | 'ready',
  *   sensitiveMarkers?: string[],
  *   theme?: 'light' | 'dark',
@@ -1546,8 +1546,7 @@ async function captureLiveChatScreenshot({
   page,
   clientSha,
   enabled = true,
-  paperParityApproved,
-  stateStable,
+  proof,
   uiState,
   sensitiveMarkers = [],
   theme = 'light',
@@ -1555,12 +1554,7 @@ async function captureLiveChatScreenshot({
   provenance
 }) {
   if (!enabled) return undefined;
-  if (paperParityApproved !== true) {
-    throw new Error('live screenshot capture requires approved issue #352 Paper parity');
-  }
-  if (stateStable !== true) {
-    throw new Error('live screenshot capture requires a stable Chat UI state');
-  }
+  assertLiveProofLedgerCaptureReady(proof);
   if (!COMMIT_SHA_PATTERN.test(clientSha)) {
     throw new Error('live screenshot capture requires an explicit full client SHA');
   }
@@ -1714,15 +1708,17 @@ async function captureLiveChatScreenshot({
  * explicit independent-review value and an operator-supplied destination.
  *
  * @returns {Promise<LiveScreenshotCapture | undefined>}
- * @param {{ page: any, uiState: 'empty' | 'ready', environment?: Record<string, string | undefined>, provenance?: ChromiumProvenance }} options
+ * @param {{ page: any, uiState: 'empty' | 'ready', proof: Record<string, unknown>, environment?: Record<string, string | undefined>, provenance?: ChromiumProvenance }} options
  */
 export async function captureLiveChatScreenshotIfEnabled({
   page,
   uiState,
+  proof,
   environment = process.env,
   provenance
 }) {
   if (!isLiveScreenshotCaptureEnabled(environment)) return undefined;
+  assertLiveProofLedgerCaptureReady(proof);
   let retentionDestination;
   if (environment[LIVE_SCREENSHOT_RETAIN_ENV] === '1') {
     if (environment[LIVE_SCREENSHOT_REVIEW_ENV] !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
@@ -1742,8 +1738,7 @@ export async function captureLiveChatScreenshotIfEnabled({
     page,
     clientSha,
     enabled: true,
-    paperParityApproved: true,
-    stateStable: true,
+    proof,
     uiState,
     sensitiveMarkers: /** @type {string[]} */ (
       [environment.HERMES_TEST_PASSWORD, environment.HERMES_TEST_USERNAME].filter(

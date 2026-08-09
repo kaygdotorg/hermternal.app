@@ -8,6 +8,22 @@ const MAX_METHOD_LENGTH = 64;
 const MAX_EVENT_NAME_LENGTH = 96;
 const MAX_STATUS_LENGTH = 32;
 const MAX_MESSAGE_COUNT = 10_000;
+const LIVE_PROOF_CAPTURE_KEYS = Object.freeze([
+  'ordered',
+  'websocketOpen',
+  'gatewayReady',
+  'serverFirstReady',
+  'sessionAction',
+  'prompt',
+  'promptAcknowledgement',
+  'delta',
+  'completion',
+  'history',
+  'historyStatusOk',
+  'messageCount',
+  'promptCount',
+  'completionCount'
+]);
 
 /** @param {unknown} value */
 function boundedId(value) {
@@ -385,6 +401,43 @@ export function matchLiveProofLedger(events, expected) {
     promptCount: prompts.length,
     completionCount: eventCount(events, 'message.complete')
   });
+}
+
+/**
+ * Require the exact fixed-shape result before the screenshot lane can start.
+ * Keeping this assertion beside the ledger prevents a caller from replacing the
+ * causal proof with independent booleans or a stable-looking UI attribute.
+ *
+ * @param {unknown} proof
+ */
+export function assertLiveProofLedgerCaptureReady(proof) {
+  if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) {
+    throw new Error('live screenshot capture requires a complete causal Hermes proof');
+  }
+  const candidate = /** @type {Record<string, unknown>} */ (proof);
+  const actualKeys = Object.keys(candidate);
+  if (
+    actualKeys.length !== LIVE_PROOF_CAPTURE_KEYS.length ||
+    LIVE_PROOF_CAPTURE_KEYS.some((key, index) => actualKeys[index] !== key)
+  ) {
+    throw new Error('live screenshot capture proof shape is not approved');
+  }
+  for (const key of LIVE_PROOF_CAPTURE_KEYS.slice(0, -3)) {
+    if (candidate[key] !== true) {
+      throw new Error('live screenshot capture requires a complete causal Hermes proof');
+    }
+  }
+  if (
+    typeof candidate.messageCount !== 'number' ||
+    !Number.isInteger(candidate.messageCount) ||
+    candidate.messageCount < 1 ||
+    candidate.messageCount > MAX_MESSAGE_COUNT ||
+    candidate.promptCount !== 1 ||
+    candidate.completionCount !== 1
+  ) {
+    throw new Error('live screenshot capture proof counts are not approved');
+  }
+  return true;
 }
 
 /** @param {Array<Record<string, unknown>>} events @param {string} before @param {string} after */

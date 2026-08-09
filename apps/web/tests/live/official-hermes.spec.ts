@@ -238,7 +238,6 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   if (captureState !== 'empty' && captureState !== 'ready') {
     throw new Error('live screenshot capture state was not approved');
   }
-  await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState });
 
   const eventsBeforeLogout = ledger.snapshot();
   const expectedSession = expectedStoredSessionId;
@@ -267,6 +266,7 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     promptCount: 1,
     completionCount: 1
   });
+  await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState, proof });
 
   const loginSequence = findEventSequence(
     eventsBeforeLogout,

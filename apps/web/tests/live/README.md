@@ -30,6 +30,12 @@ Chromium revision `1234`, browser version `151.0.7922.34`, the regular
 executable path, and its SHA-256 before `emulateMedia`, DOM evaluation, or
 capture. `PW_RUNNER_DEBUG` and `PWDEBUG` are rejected before workers start.
 
+The official spec snapshots the ledger, runs the complete
+`matchLiveProofLedger` assertion, and only then calls the capture helper. The
+helper requires that fixed-shape assertion result, rather than independent
+stable-state booleans; an incomplete official-Hermes chain fails before
+retention preflight, page mutation, capture, or publication.
+
 All live proof assertions finish before the capture-only page transform. The
 transform replaces the live conversation timeline, session labels, conversation
 title, provider/model metadata (`.header-model`), session counts

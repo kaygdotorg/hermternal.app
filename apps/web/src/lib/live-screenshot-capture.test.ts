@@ -36,6 +36,23 @@ const PNG_BYTES = Buffer.concat([
   Buffer.from('synthetic-approved-png', 'utf8')
 ]);
 const CLIENT_SHA = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+const COMPLETE_LIVE_PROOF = Object.freeze({
+  ordered: true,
+  websocketOpen: true,
+  gatewayReady: true,
+  serverFirstReady: true,
+  sessionAction: true,
+  prompt: true,
+  promptAcknowledgement: true,
+  delta: true,
+  completion: true,
+  history: true,
+  historyStatusOk: true,
+  messageCount: 2,
+  promptCount: 1,
+  completionCount: 1
+});
+const FAILED_LIVE_PROOF = Object.freeze({ ...COMPLETE_LIVE_PROOF, ordered: false, completion: false });
 const CONTROLLED_TEST_PROVENANCE = Object.freeze({
   ...getLiveScreenshotChromiumRegistry(),
   executablePath: '/controlled/chromium-1234/chrome',
@@ -258,6 +275,22 @@ describe('deterministic live Chat screenshot capture', () => {
 
     expect(result).toBeUndefined();
     expect(screenshot).not.toHaveBeenCalled();
+  });
+
+  it('refuses capture and retention when the causal official-Hermes proof is incomplete', async () => {
+    const page = fakePage();
+    await expect(
+      captureLiveChatScreenshotIfEnabled({
+        page,
+        uiState: 'ready',
+        proof: FAILED_LIVE_PROOF,
+        environment: captureEnvironment(),
+        provenance: CONTROLLED_TEST_PROVENANCE
+      })
+    ).rejects.toThrow('complete causal Hermes proof');
+    expect(page.emulateMedia).not.toHaveBeenCalled();
+    expect(page.evaluate).not.toHaveBeenCalled();
+    expect(page.locatorScreenshot).not.toHaveBeenCalled();
   });
 
   it('sanitizes real live component DOM before the capture-only presentation', async () => {
@@ -674,6 +707,7 @@ describe('deterministic live Chat screenshot capture', () => {
       captureLiveChatScreenshotIfEnabled({
         page,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: {
           HERMTERNAL_LIVE_SCREENSHOT_CAPTURE: '1',
           HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA: 'short'
@@ -685,6 +719,7 @@ describe('deterministic live Chat screenshot capture', () => {
       captureLiveChatScreenshotIfEnabled({
         page,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: {
           HERMTERNAL_LIVE_SCREENSHOT_CAPTURE: '1',
           HERMTERNAL_PAPER_PARITY_APPROVED: '1',
@@ -739,6 +774,7 @@ describe('deterministic live Chat screenshot capture', () => {
         captureLiveChatScreenshotIfEnabled({
           page,
           uiState: 'ready',
+          proof: COMPLETE_LIVE_PROOF,
           environment: captureEnvironment()
         })
       ).rejects.toThrow('Chromium provenance is not pinned');
@@ -810,6 +846,7 @@ describe('deterministic live Chat screenshot capture', () => {
         captureLiveChatScreenshotIfEnabled({
           page,
           uiState: 'ready',
+          proof: COMPLETE_LIVE_PROOF,
           environment: testCase.environment
         })
       ).rejects.toThrow(testCase.error);
@@ -837,6 +874,7 @@ describe('deterministic live Chat screenshot capture', () => {
       captureLiveChatScreenshotIfEnabled({
         page,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: captureEnvironment({
           HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
           HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',

@@ -159,7 +159,9 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   event, request/session identity, status, boolean-match, and count projections. It requires the
   ordered auth/ticket/upgrade, server-first readiness, session, one-prompt acknowledgement, correlated
   delta/completion, and canonical REST history chain, then performs same-context logout and browser
-  storage absence checks. Screenshot retention uses a trusted private staging parent anchored by
+  storage absence checks. The screenshot helper receives the exact complete ledger match only after
+  that assertion; an incomplete proof cannot enter capture or retention. Screenshot retention uses a
+  trusted private staging parent anchored by
   device/inode, an absolute trusted Python child with `-I -S` and a credential-free environment, and
   exclusive no-overwrite publication. Source swaps, parent swaps, quarantine remnants, attachment
   failures, and cleanup errors are surfaced without recursive pathname deletion. No live Hermes run or
