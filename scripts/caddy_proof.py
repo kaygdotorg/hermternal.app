@@ -12,6 +12,7 @@ local Caddy checks are synthetic edge evidence, not a live Hermes browser proof.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -87,6 +88,20 @@ GIT_FORBIDDEN_METADATA = (
     "objects/info/http-alternates",
     "info/grafts",
     "shallow",
+)
+GIT_METADATA_PIN_FILES = (
+    "commondir",
+    "config",
+    "config.worktree",
+    "packed-refs",
+    *GIT_FORBIDDEN_METADATA,
+)
+GIT_METADATA_PIN_DIRECTORIES = (
+    "objects",
+    "objects/info",
+    "objects/pack",
+    "refs",
+    "refs/replace",
 )
 HEX40_RE = re.compile(r"[0-9a-f]{40}")
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
@@ -897,6 +912,70 @@ def _metadata_identity(
     )
 
 
+def _metadata_pin_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int]:
+    """Return the stable descriptor identity retained across Git commands."""
+
+    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
+
+
+class _GitMetadataPin:
+    """Keep one descriptor-relative Git metadata entry pinned for a command."""
+
+    __slots__ = (
+        "path",
+        "parent_fd",
+        "parent_identity",
+        "name",
+        "descriptor",
+        "identity",
+        "content",
+        "entries",
+        "label",
+    )
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        parent_fd: int,
+        parent_identity: tuple[int, int, int],
+        name: str,
+        descriptor: int | None,
+        identity: tuple[int, int, int] | None,
+        content: bytes | None,
+        entries: tuple[tuple[str, tuple[int, int, int]], ...] | None,
+        label: str,
+    ) -> None:
+        self.path = path
+        self.parent_fd = parent_fd
+        self.parent_identity = parent_identity
+        self.name = name
+        self.descriptor = descriptor
+        self.identity = identity
+        self.content = content
+        self.entries = entries
+        self.label = label
+
+    def close(self) -> None:
+        descriptor = self.descriptor
+        self.descriptor = None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        parent_fd = self.parent_fd
+        self.parent_fd = -1
+        if parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+
 def _verify_regular_metadata(
     metadata: os.stat_result,
     *,
@@ -1019,6 +1098,245 @@ def _open_verified_parent(
         except (OSError, UnboundLocalError):
             pass
         raise
+
+
+def _snapshot_git_metadata_directory(
+    descriptor: int,
+    *,
+    label: str,
+) -> tuple[tuple[str, tuple[int, int, int]], ...]:
+    """Retain bounded direct-child identities for a Git metadata directory."""
+
+    entries: list[tuple[str, tuple[int, int, int]]] = []
+    try:
+        with os.scandir(descriptor) as iterator:
+            for entry in iterator:
+                name = entry.name
+                if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
+                    raise ValueError(f"{label} contains an invalid pathname entry")
+                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise ValueError(f"{label} contains a symlink: {name}")
+                entries.append((name, _metadata_pin_identity(metadata)))
+                if len(entries) > GIT_METADATA_ENTRY_MAX:
+                    raise ValueError(f"{label} exceeds the bounded entry count")
+    except ValueError:
+        raise
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise ValueError(f"{label} could not be inspected") from exc
+    entries.sort(key=lambda item: item[0])
+    return tuple(entries)
+
+
+def _open_git_metadata_pin_parent(
+    path: Path,
+    *,
+    label: str,
+) -> tuple[int, str]:
+    """Open the deepest existing parent and pin the first missing component."""
+
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise ValueError(f"{label} has a non-absolute pathname")
+    parts = candidate.parts
+    if len(parts) < 2 or parts[0] != "/" or any(
+        part in {"", ".", ".."} or "/" in part for part in parts[1:]
+    ):
+        raise ValueError(f"{label} has a non-canonical pathname")
+    current_fd: int | None = None
+    try:
+        current_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        for component in parts[1:-1]:
+            try:
+                metadata = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return current_fd, component
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise ValueError(f"{label} parent could not be inspected") from exc
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(f"{label} parent is unsafe")
+            next_fd = _open_verified_directory_at(current_fd, component, label=f"{label} parent")
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd, parts[-1]
+    except BaseException:
+        if current_fd is not None:
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
+        raise
+
+
+def _pin_git_metadata_path(
+    path: Path,
+    *,
+    label: str,
+    pin_content: bool,
+    pin_entries: bool,
+) -> _GitMetadataPin:
+    """Retain descriptor, identity, and bounded bytes for one Git path."""
+
+    parent_fd, name = _open_git_metadata_pin_parent(path, label=label)
+    descriptor: int | None = None
+    try:
+        parent_identity = _metadata_pin_identity(os.fstat(parent_fd))
+        try:
+            entry_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return _GitMetadataPin(
+                path=path,
+                parent_fd=parent_fd,
+                parent_identity=parent_identity,
+                name=name,
+                descriptor=None,
+                identity=None,
+                content=None,
+                entries=None,
+                label=label,
+            )
+        if stat.S_ISLNK(entry_metadata.st_mode):
+            raise ValueError(f"{label} must not be a symlink")
+        if stat.S_ISDIR(entry_metadata.st_mode):
+            descriptor = _open_verified_directory_at(parent_fd, name, label=label)
+        elif stat.S_ISREG(entry_metadata.st_mode):
+            descriptor, entry_metadata = _open_verified_regular_file_at(
+                parent_fd,
+                name,
+                limit=GIT_CONFIG_MAX_BYTES if pin_content else None,
+                label=label,
+            )
+        else:
+            raise ValueError(f"{label} is not a regular file or directory")
+        descriptor_metadata = os.fstat(descriptor)
+        identity = _metadata_pin_identity(descriptor_metadata)
+        if identity != _metadata_pin_identity(entry_metadata):
+            raise ValueError(f"{label} changed during pinning")
+        content: bytes | None = None
+        entries: tuple[tuple[str, tuple[int, int, int]], ...] | None = None
+        if stat.S_ISDIR(descriptor_metadata.st_mode):
+            if pin_entries:
+                entries = _snapshot_git_metadata_directory(descriptor, label=label)
+        elif pin_content:
+            content = _read_bounded_fd(descriptor, GIT_CONFIG_MAX_BYTES, label)
+            if len(content) != descriptor_metadata.st_size:
+                raise ValueError(f"{label} changed during pinning")
+        return _GitMetadataPin(
+            path=path,
+            parent_fd=parent_fd,
+            parent_identity=parent_identity,
+            name=name,
+            descriptor=descriptor,
+            identity=identity,
+            content=content,
+            entries=entries,
+            label=label,
+        )
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+        raise
+
+
+def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
+    """Fail closed when a pinned Git entry or its bytes changed."""
+
+    try:
+        parent_metadata = os.fstat(pin.parent_fd)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Git metadata {pin.label} parent changed {phase}") from exc
+    if _metadata_pin_identity(parent_metadata) != pin.parent_identity:
+        raise ValueError(f"Git metadata {pin.label} parent changed {phase}")
+    try:
+        current = os.stat(pin.name, dir_fd=pin.parent_fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        if pin.identity is None:
+            return
+        raise ValueError(f"Git metadata {pin.label} disappeared {phase}") from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Git metadata {pin.label} could not be checked {phase}") from exc
+    current_identity = _metadata_pin_identity(current)
+    if pin.identity is None:
+        raise ValueError(f"Git metadata {pin.label} appeared {phase}")
+    if current_identity != pin.identity:
+        raise ValueError(f"Git metadata {pin.label} identity changed {phase}")
+    if pin.descriptor is None:
+        raise ValueError(f"Git metadata {pin.label} descriptor is missing")
+    try:
+        descriptor_metadata = os.fstat(pin.descriptor)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(f"Git metadata {pin.label} descriptor changed {phase}") from exc
+    if _metadata_pin_identity(descriptor_metadata) != pin.identity:
+        raise ValueError(f"Git metadata {pin.label} descriptor changed {phase}")
+    if pin.entries is not None:
+        try:
+            current_entries = _snapshot_git_metadata_directory(pin.descriptor, label=pin.label)
+        except ValueError as exc:
+            raise ValueError(f"Git metadata {pin.path} entries changed {phase}") from exc
+        if current_entries != pin.entries:
+            raise ValueError(f"Git metadata {pin.path} entries changed {phase}")
+    if pin.content is not None:
+        if descriptor_metadata.st_size != len(pin.content):
+            raise ValueError(f"Git metadata {pin.label} byte length changed {phase}")
+        pread = getattr(os, "pread", None)
+        if not callable(pread):
+            raise ValueError(f"Git metadata {pin.label} bytes cannot be checked")
+        offset = 0
+        while offset < len(pin.content):
+            try:
+                chunk = pread(
+                    pin.descriptor,
+                    min(64 * 1024, len(pin.content) - offset),
+                    offset,
+                )
+            except (OSError, RuntimeError, TypeError) as exc:
+                raise ValueError(f"Git metadata {pin.label} bytes could not be checked") from exc
+            if not chunk or chunk != pin.content[offset : offset + len(chunk)]:
+                raise ValueError(f"Git metadata {pin.label} bytes changed {phase}")
+            offset += len(chunk)
+
+
+def _assert_git_metadata_pins(
+    pins: tuple[_GitMetadataPin, ...],
+    *,
+    phase: str,
+) -> None:
+    for pin in pins:
+        _assert_git_metadata_pin(pin, phase=phase)
+
+
+def _close_git_metadata_pins(pins: tuple[_GitMetadataPin, ...]) -> None:
+    for pin in reversed(pins):
+        pin.close()
+
+
+def _run_with_git_metadata_pins(
+    pins: tuple[_GitMetadataPin, ...],
+    operation: Any,
+) -> Any:
+    """Run one provenance command with descriptor and byte pins held."""
+
+    _assert_git_metadata_pins(pins, phase="before command")
+    operation_error: Exception | None = None
+    result: Any = None
+    try:
+        result = operation()
+    except Exception as exc:
+        operation_error = exc
+    try:
+        _assert_git_metadata_pins(pins, phase="after command")
+    except ValueError as exc:
+        raise ValueError("Git metadata changed during provenance command") from exc
+    if operation_error is not None:
+        raise operation_error
+    return result
 
 
 def _read_bounded_fd(
@@ -1210,33 +1528,90 @@ def _signal_git_group(process: subprocess.Popen[bytes], signal_number: int) -> N
         pass
 
 
+def _git_process_group_exists(process: subprocess.Popen[bytes]) -> bool:
+    """Return whether a started Git process group still has a live member."""
+
+    pid = getattr(process, "pid", None)
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("Git process group identity is malformed")
+    try:
+        os.killpg(pid, 0)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno in {errno.EPERM, errno.EACCES}:
+            return True
+        raise ValueError("Git process group liveness could not be checked") from exc
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git process group liveness could not be checked") from exc
+    return True
+
+
+def _ensure_git_process_group_quiescent(
+    process: subprocess.Popen[bytes],
+    deadline: float,
+) -> None:
+    """Kill remaining descendants before accepting direct-child success."""
+
+    if not _git_process_group_exists(process):
+        return
+    _signal_git_group(process, signal.SIGTERM)
+    while _git_process_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            process.wait(timeout=min(0.01, remaining))
+        except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+        time.sleep(min(0.005, max(0.0, remaining)))
+    if not _git_process_group_exists(process):
+        raise ValueError("Git process group had live descendants")
+    _signal_git_group(process, signal.SIGKILL)
+    while _git_process_group_exists(process):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("Git process group did not exit within deadline")
+        try:
+            process.wait(timeout=min(0.01, remaining))
+        except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+        time.sleep(min(0.005, max(0.0, remaining)))
+    raise ValueError("Git process group had live descendants")
+
+
 def _terminate_and_drain_git(
     process: subprocess.Popen[bytes] | None,
     selector: selectors.BaseSelector | None,
     streams: tuple[Any, ...] = (),
+    *,
+    deadline: float | None = None,
 ) -> None:
+    cleanup_deadline = deadline if deadline is not None else time.monotonic() + 1.0
     if process is not None:
         _signal_git_group(process, signal.SIGTERM)
         try:
-            process.wait(timeout=0.25)
+            timeout = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+            process.wait(timeout=timeout)
         except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             pass
         _signal_git_group(process, signal.SIGKILL)
         try:
+            # Reap the direct child even when the shared command budget has
+            # already expired; descendants remain covered by the group kill.
             process.wait(timeout=0.25)
         except (AttributeError, OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             pass
-    deadline = time.monotonic() + 1.0
     if selector is not None:
         while True:
             try:
                 registered = selector.get_map()
             except (OSError, RuntimeError, ValueError):
                 break
-            if not registered or time.monotonic() >= deadline:
+            if not registered or time.monotonic() >= cleanup_deadline:
                 break
             try:
-                events = selector.select(max(0.0, deadline - time.monotonic()))
+                events = selector.select(max(0.0, cleanup_deadline - time.monotonic()))
             except (OSError, RuntimeError, ValueError):
                 break
             for key, _ in events:
@@ -1264,6 +1639,7 @@ def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[i
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
     streams: tuple[Any, ...] = ()
+    deadline: float | None = None
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     try:
         process = subprocess.Popen(
@@ -1316,9 +1692,10 @@ def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[i
             raise ValueError("Git provenance command timed out") from exc
         if type(returncode) is not int:
             raise ValueError("Git process result is malformed")
+        _ensure_git_process_group_quiescent(process, deadline)
         return returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
     except (OSError, RuntimeError, TypeError, ValueError, subprocess.SubprocessError):
-        _terminate_and_drain_git(process, selector, streams)
+        _terminate_and_drain_git(process, selector, streams, deadline=deadline)
         raise
     finally:
         if selector is not None:
@@ -1601,49 +1978,116 @@ def _reject_promisor_pack_sidecars(metadata_root: Path) -> None:
         raise ValueError("Git pack metadata could not be inspected") from exc
 
 
-def _validate_git_metadata(root: Path) -> None:
+def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
+    """Validate and retain the local Git metadata trust surface."""
+
+    try:
+        root = Path(root).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("Git repository root is unavailable") from exc
     metadata_roots = _git_metadata_roots(root)
-    worktree_config_active = False
-    for metadata_root in metadata_roots:
-        _reject_git_metadata_links(metadata_root)
-        for relative in GIT_FORBIDDEN_METADATA:
-            candidate = metadata_root / relative
-            try:
-                candidate_metadata = os.lstat(candidate)
-            except FileNotFoundError:
+    pins: list[_GitMetadataPin] = []
+    try:
+        for metadata_root in metadata_roots:
+            _reject_git_metadata_links(metadata_root)
+
+        specs: list[tuple[Path, bool, bool, str]] = [
+            (Path(root) / ".git", True, False, "Git worktree metadata entry"),
+        ]
+        for metadata_root in metadata_roots:
+            specs.append((metadata_root, False, False, "Git metadata root"))
+            for relative in GIT_METADATA_PIN_DIRECTORIES:
+                specs.append((metadata_root / relative, False, True, f"Git metadata {relative}"))
+            for relative in GIT_METADATA_PIN_FILES:
+                specs.append((metadata_root / relative, True, False, f"Git metadata {relative}"))
+        seen: set[str] = set()
+        for path, pin_content, pin_entries, label in specs:
+            key = os.fspath(path)
+            if key in seen:
                 continue
-            except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                raise ValueError("Git metadata could not be inspected") from exc
-            if stat.S_ISLNK(candidate_metadata.st_mode) or candidate.exists():
-                raise ValueError(f"Git metadata uses forbidden {relative}")
-        replace_refs = metadata_root / "refs" / "replace"
-        try:
-            replace_metadata = os.lstat(replace_refs)
-        except FileNotFoundError:
-            replace_metadata = None
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise ValueError("Git replacement refs could not be inspected") from exc
-        if replace_metadata is not None:
-            raise ValueError("Git metadata uses replacement refs")
-        _reject_packed_replacement_refs(metadata_root)
-        _reject_promisor_pack_sidecars(metadata_root)
-        config_text = _read_git_config(metadata_root, "config")
-        if config_text is not None:
+            seen.add(key)
+            pins.append(
+                _pin_git_metadata_path(
+                    path,
+                    label=label,
+                    pin_content=pin_content,
+                    pin_entries=pin_entries,
+                )
+            )
+        retained = tuple(pins)
+        _assert_git_metadata_pins(retained, phase="validation")
+        pins_by_path = {pin.path: pin for pin in retained}
+
+        def require_pin(path: Path, label: str) -> _GitMetadataPin | None:
+            return pins_by_path.get(path)
+
+        def pinned_text(pin: _GitMetadataPin | None, label: str) -> str | None:
+            if pin is None or pin.identity is None:
+                return None
+            if pin.content is None:
+                raise ValueError(f"{label} is not a regular file")
+            try:
+                return pin.content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"{label} is malformed") from exc
+
+        for metadata_root in metadata_roots:
+            for relative in GIT_FORBIDDEN_METADATA:
+                forbidden = require_pin(metadata_root / relative, f"Git metadata {relative}")
+                if forbidden is not None and forbidden.identity is not None:
+                    raise ValueError(f"Git metadata uses forbidden {relative}")
+            replacement = require_pin(metadata_root / "refs" / "replace", "Git replacement refs")
+            if replacement is not None and replacement.identity is not None:
+                raise ValueError("Git metadata uses replacement refs")
+
+            packed_refs = require_pin(metadata_root / "packed-refs", "Git packed-refs")
+            packed_text = pinned_text(packed_refs, "Git packed-refs")
+            if packed_text is not None:
+                for raw_line in packed_text.splitlines():
+                    fields = raw_line.strip().split()
+                    if len(fields) >= 2 and fields[1].startswith("refs/replace/"):
+                        raise ValueError("Git metadata uses replacement refs")
+
+            pack_directory = require_pin(metadata_root / "objects" / "pack", "Git pack metadata")
+            if pack_directory is not None and pack_directory.entries is not None:
+                for name, _identity in pack_directory.entries:
+                    if name.endswith(".promisor"):
+                        raise ValueError("Git metadata uses a promisor pack sidecar")
+
+        worktree_config_active = False
+        for metadata_root in metadata_roots:
+            config = require_pin(metadata_root / "config", "Git config")
+            config_text = pinned_text(config, "Git config")
+            if config_text is None:
+                continue
             unsafe, active = _git_config_metadata_flags(config_text)
             if unsafe:
                 raise ValueError("Git repository uses lazy, promisor, partial, or included metadata")
             worktree_config_active = worktree_config_active or active
 
-    if worktree_config_active:
-        for metadata_root in metadata_roots:
-            worktree_config = _read_git_config(metadata_root, "config.worktree")
-            if worktree_config is None:
-                continue
-            unsafe, _active = _git_config_metadata_flags(worktree_config)
-            if unsafe:
-                raise ValueError(
-                    "Git repository uses lazy, promisor, partial, or included worktree metadata"
-                )
+        if worktree_config_active:
+            for metadata_root in metadata_roots:
+                worktree_config = require_pin(metadata_root / "config.worktree", "Git worktree config")
+                worktree_text = pinned_text(worktree_config, "Git worktree config")
+                if worktree_text is None:
+                    continue
+                unsafe, _active = _git_config_metadata_flags(worktree_text)
+                if unsafe:
+                    raise ValueError(
+                        "Git repository uses lazy, promisor, partial, or included worktree metadata"
+                    )
+        _assert_git_metadata_pins(retained, phase="validation")
+        return retained
+    except BaseException:
+        _close_git_metadata_pins(tuple(pins))
+        raise
+
+
+def _validate_git_metadata(root: Path) -> None:
+    """Validate Git metadata without retaining command-lifetime descriptors."""
+
+    pins = _validated_git_metadata(root)
+    _close_git_metadata_pins(pins)
 
 
 def _verify_git_repository(repository_root: Path) -> None:
@@ -1655,26 +2099,32 @@ def _verify_git_repository(repository_root: Path) -> None:
         raise ValueError("Git repository root is unavailable") from exc
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
-    _validate_git_metadata(root)
-    executable = _trusted_git_path()
-    environment = _strict_git_environment()
-    command = [
-        str(executable),
-        "--no-replace-objects",
-        "--no-lazy-fetch",
-        "--no-optional-locks",
-        "-C",
-        str(root),
-        "rev-parse",
-        "--is-shallow-repository",
-    ]
-    returncode, stdout, stderr = _run_bounded_git(command, environment)
-    if type(returncode) is not int or returncode != 0:
-        raise ValueError("Git repository trust could not be checked")
-    if type(stdout) is not bytes or stdout != b"false\n":
-        raise ValueError("Git repository is shallow or malformed")
-    if type(stderr) is not bytes or stderr:
-        raise ValueError("Git repository diagnostics are malformed")
+    pins = _validated_git_metadata(root)
+    try:
+        executable = _trusted_git_path()
+        environment = _strict_git_environment()
+        command = [
+            str(executable),
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--is-shallow-repository",
+        ]
+        returncode, stdout, stderr = _run_with_git_metadata_pins(
+            pins,
+            lambda: _run_bounded_git(command, environment),
+        )
+        if type(returncode) is not int or returncode != 0:
+            raise ValueError("Git repository trust could not be checked")
+        if type(stdout) is not bytes or stdout != b"false\n":
+            raise ValueError("Git repository is shallow or malformed")
+        if type(stderr) is not bytes or stderr:
+            raise ValueError("Git repository diagnostics are malformed")
+    finally:
+        _close_git_metadata_pins(pins)
 
 
 _verify_git_repository_integrity = _verify_git_repository
@@ -1691,8 +2141,8 @@ def _validated_git_context(repository_root: Path) -> dict[str, object]:
         raise ValueError("Git repository root is unavailable")
     executable = _trusted_git_path()
     environment = _strict_git_environment()
-    _validate_git_metadata(root)
-    return {"root": root, "executable": executable, "environment": environment}
+    pins = _validated_git_metadata(root)
+    return {"root": root, "executable": executable, "environment": environment, "pins": pins}
 
 
 def _git(repo_root: Path, *arguments: str) -> bytes:
@@ -1702,27 +2152,39 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     root = context["root"]
     executable = context["executable"]
     environment = context["environment"]
-    if not isinstance(root, Path) or not isinstance(executable, Path) or not isinstance(environment, dict):
+    pins = context["pins"]
+    if (
+        not isinstance(root, Path)
+        or not isinstance(executable, Path)
+        or not isinstance(environment, dict)
+        or not isinstance(pins, tuple)
+    ):
         raise ValueError("Git context is malformed")
-    command = [
-        str(executable),
-        "--no-replace-objects",
-        "--no-lazy-fetch",
-        "--no-optional-locks",
-        "-C",
-        str(root),
-        *arguments,
-    ]
-    returncode, stdout, stderr = _git_output_bounded(command, environment)
-    if type(returncode) is not int or returncode != 0:
-        raise ValueError("Git provenance could not be checked")
-    if type(stdout) is not bytes or len(stdout) > GIT_OUTPUT_MAX_BYTES:
-        raise ValueError("Git provenance output is malformed")
-    if type(stderr) is not bytes:
-        raise ValueError("Git provenance diagnostics are malformed")
-    if stderr:
-        raise ValueError("Git provenance output is malformed")
-    return stdout
+    try:
+        command = [
+            str(executable),
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--no-optional-locks",
+            "-C",
+            str(root),
+            *arguments,
+        ]
+        returncode, stdout, stderr = _run_with_git_metadata_pins(
+            pins,
+            lambda: _git_output_bounded(command, environment),
+        )
+        if type(returncode) is not int or returncode != 0:
+            raise ValueError("Git provenance could not be checked")
+        if type(stdout) is not bytes or len(stdout) > GIT_OUTPUT_MAX_BYTES:
+            raise ValueError("Git provenance output is malformed")
+        if type(stderr) is not bytes:
+            raise ValueError("Git provenance diagnostics are malformed")
+        if stderr:
+            raise ValueError("Git provenance output is malformed")
+        return stdout
+    finally:
+        _close_git_metadata_pins(pins)
 
 
 def _git_text(repository_root: Path, *arguments: str) -> str:
@@ -1738,55 +2200,86 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
     root = context["root"]
     executable = context["executable"]
     environment = context["environment"]
-    if not isinstance(root, Path) or not isinstance(executable, Path) or not isinstance(environment, dict):
+    pins = context["pins"]
+    if (
+        not isinstance(root, Path)
+        or not isinstance(executable, Path)
+        or not isinstance(environment, dict)
+        or not isinstance(pins, tuple)
+    ):
         raise ValueError("Git context is malformed")
-    if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
-        try:
-            result = subprocess.run(
-                (
-                    str(executable),
-                    "--no-replace-objects",
-                    "--no-lazy-fetch",
-                    "--no-optional-locks",
-                    "-C",
-                    str(root),
-                    *arguments,
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=False,
-                timeout=GIT_COMMAND_TIMEOUT_SECONDS,
-                env=environment,
-            )
-        except (OSError, RuntimeError, TypeError, UnicodeError, ValueError, subprocess.SubprocessError) as exc:
-            raise ValueError("Git provenance could not be checked") from exc
-        try:
-            returncode = result.returncode
-            output = result.stdout
-            diagnostics = result.stderr
-        except AttributeError as exc:
-            raise ValueError("Git provenance result is malformed") from exc
-        if type(returncode) is not int or returncode != 0:
-            raise ValueError("Git provenance could not be checked")
-        if type(diagnostics) is not bytes:
-            raise ValueError("Git provenance diagnostics are malformed")
-        if diagnostics:
-            raise ValueError("Git provenance output is malformed")
-        if type(output) is not bytes or len(output) > GIT_OUTPUT_MAX_BYTES:
-            raise ValueError("Git provenance output is malformed")
-    else:
-        output = _git(repository_root, *arguments)
+    command = (
+        str(executable),
+        "--no-replace-objects",
+        "--no-lazy-fetch",
+        "--no-optional-locks",
+        "-C",
+        str(root),
+        *arguments,
+    )
     try:
-        text = output.decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise ValueError("Git provenance output is malformed") from exc
-    if text.endswith("\n"):
-        text = text[:-1]
-    if not text or "\n" in text or "\r" in text or text != text.strip():
-        raise ValueError("Git provenance output is malformed")
-    return text
+        if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+            def legacy_run() -> Any:
+                try:
+                    return subprocess.run(
+                        command,
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=False,
+                        timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+                        env=environment,
+                    )
+                except (
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    UnicodeError,
+                    ValueError,
+                    subprocess.SubprocessError,
+                ) as exc:
+                    raise ValueError("Git provenance could not be checked") from exc
+
+            result = _run_with_git_metadata_pins(pins, legacy_run)
+            try:
+                returncode = result.returncode
+                output = result.stdout
+                diagnostics = result.stderr
+            except AttributeError as exc:
+                raise ValueError("Git provenance result is malformed") from exc
+            if type(returncode) is not int or returncode != 0:
+                raise ValueError("Git provenance could not be checked")
+            if type(diagnostics) is not bytes:
+                raise ValueError("Git provenance diagnostics are malformed")
+            if diagnostics:
+                raise ValueError("Git provenance output is malformed")
+            if type(output) is not bytes or len(output) > GIT_OUTPUT_MAX_BYTES:
+                raise ValueError("Git provenance output is malformed")
+        else:
+            returncode, output, diagnostics = _run_with_git_metadata_pins(
+                pins,
+                lambda: _git_output_bounded(list(command), environment),
+            )
+            if type(returncode) is not int or returncode != 0:
+                raise ValueError("Git provenance could not be checked")
+            if type(diagnostics) is not bytes:
+                raise ValueError("Git provenance diagnostics are malformed")
+            if diagnostics:
+                raise ValueError("Git provenance output is malformed")
+            if type(output) is not bytes or len(output) > GIT_OUTPUT_MAX_BYTES:
+                raise ValueError("Git provenance output is malformed")
+        try:
+            text = output.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Git provenance output is malformed") from exc
+        if text.endswith("\n"):
+            text = text[:-1]
+        if not text or "\n" in text or "\r" in text or text != text.strip():
+            raise ValueError("Git provenance output is malformed")
+        return text
+    finally:
+        _close_git_metadata_pins(pins)
 
 
 def _git_head(repository_root: Path = PROJECT_ROOT) -> str:
