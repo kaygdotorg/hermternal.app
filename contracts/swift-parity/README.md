@@ -41,16 +41,19 @@ all neutral statuses (`ready`, `pending`, `empty`, `failure`, `cancelled`, and
 `unknown`); only `ready` can provide evidence, while pending roots may explicitly
 set `validator` to JSON `null`.
 
-Before reading parity evidence, the runner performs an authoritative C-19
-preflight. On macOS it may execute the checked-in validator with bounded
-`/usr/bin/python3 -B`, `PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
-stdout/stderr, and a five-second deadline. A blocked, unavailable, malformed,
-truncated, timed-out, failed, or live-claiming validator result returns a blocked
-report with a specific `errorCode`, zero proven cases, and `liveClaim: false`. On
-iOS and other non-host builds, callers must inject a separately verified preflight
-result; otherwise the runner fails closed with `c19_validator_unavailable`.
-The injected preflight mode is for offline tests and verified host-produced
-results only; it does not replace the C-19 validator or make a live claim.
+Before reading parity evidence, the public runner performs an authoritative
+C-19 preflight. On macOS it executes the checked-in validator's exact, bounded
+bytes with `/usr/bin/python3 -B -c` and a stdin pipe (the reviewed path is
+only the compile filename and `__file__` value, never a script reopen),
+`PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
+stdin/stdout/stderr, and one five-second deadline. A blocked,
+unavailable, malformed, truncated, timed-out, failed, or live-claiming validator
+result returns a blocked report with a specific `errorCode`, zero proven cases,
+and `liveClaim: false`. On iOS and other non-host builds, the public runner
+always fails closed with `c19_validator_unavailable`; no caller-supplied preflight
+status or evidence can replace the host validator. The internal `@testable`
+`runParityForTests(at:)` helper exists only for synthetic projection tests and is
+not part of the public API or CLI report path.
 
 ## Commands
 

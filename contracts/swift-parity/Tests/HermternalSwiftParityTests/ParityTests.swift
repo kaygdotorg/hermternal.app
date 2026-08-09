@@ -15,7 +15,7 @@ final class ParityTests: XCTestCase {
     }
 
     func testRunParityProvesRepresentativeOfflineSurface() throws {
-        let report = try runParity(at: repoRoot, preflight: .verified(.passed))
+        let report = try runParityForTests(at: repoRoot)
 
         XCTAssertTrue(report.ok)
         XCTAssertEqual(report.contract, dashboardContract)
@@ -55,6 +55,19 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(report.readyCaseCount, 0)
         XCTAssertTrue(report.cases.isEmpty)
         XCTAssertFalse(report.liveClaim)
+    }
+
+    func testPublicParityAPIOwnsC19Preflight() throws {
+        let sourceURL = packageRoot
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("HermternalSwiftParity", isDirectory: true)
+            .appendingPathComponent("Parity.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertFalse(source.contains("public enum C19PreflightMode"))
+        XCTAssertFalse(source.contains("public enum C19ValidatorStatus"))
+        XCTAssertFalse(source.contains("public func runParity(\n    at repoRoot: URL,\n    preflight:"))
+        XCTAssertTrue(source.contains("public func runParity(at repoRoot: URL)"))
+        XCTAssertTrue(source.contains("switch runC19Preflight(at: repoRoot)"))
     }
 
     func testNeutralCoverageStatusesAndPendingValidatorAreRepresentable() throws {
@@ -307,7 +320,7 @@ final class ParityTests: XCTestCase {
     }
 
     func testParityReportOrderingIsCanonical() throws {
-        let report = try runParity(at: repoRoot, preflight: .verified(.passed))
+        let report = try runParityForTests(at: repoRoot)
         XCTAssertEqual(report.blockedCoverageIDs, report.blockedCoverageIDs.sorted())
         let caseKeys = report.cases.map { "\($0.family.rawValue)|\($0.coverageID)|\($0.caseID)" }
         XCTAssertEqual(caseKeys, caseKeys.sorted())

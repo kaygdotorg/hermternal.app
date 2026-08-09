@@ -151,16 +151,6 @@ public enum CoverageStatus: String, CaseIterable, Sendable {
     case unknown
 }
 
-public enum C19ValidatorStatus: String, Sendable {
-    case passed
-    case blocked
-}
-
-public enum C19PreflightMode: Equatable, Sendable {
-    case executeOnHost
-    case verified(C19ValidatorStatus)
-}
-
 public struct RegistryFile: Equatable, Sendable {
     public let path: String
     public let sha256: String
@@ -1696,21 +1686,14 @@ private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
 }
 #endif
 
-private func runC19Preflight(at repoRoot: URL, mode: C19PreflightMode) -> C19PreflightOutcome {
-    switch mode {
-    case .verified(.passed):
-        return .passed
-    case .verified(.blocked):
-        return .blocked("c19_validator_blocked")
-    case .executeOnHost:
-        #if os(macOS)
-        return runC19Validator(at: repoRoot)
-        #else
-        // iOS and other non-host builds cannot run the host validator. A caller
-        // must inject a separately verified C-19 result or remain blocked.
-        return .blocked("c19_validator_unavailable")
-        #endif
-    }
+private func runC19Preflight(at repoRoot: URL) -> C19PreflightOutcome {
+    #if os(macOS)
+    return runC19Validator(at: repoRoot)
+    #else
+    // Non-host builds cannot execute the authoritative host validator and must
+    // remain blocked; no caller-supplied status can substitute for it.
+    return .blocked("c19_validator_unavailable")
+    #endif
 }
 
 private func unavailableCompatibilityRecord() -> CompatibilityRecord {
@@ -1742,17 +1725,7 @@ private func blockedParityReport(code: String) -> ParityReport {
     )
 }
 
-public func runParity(
-    at repoRoot: URL,
-    preflight: C19PreflightMode = .executeOnHost
-) throws -> ParityReport {
-    switch runC19Preflight(at: repoRoot, mode: preflight) {
-    case .blocked(let code):
-        return blockedParityReport(code: code)
-    case .passed:
-        break
-    }
-
+private func runParityCore(at repoRoot: URL) throws -> ParityReport {
     let registry = try loadRegistry(at: repoRoot)
     try literal(registry.parity.ptyPolicy, expected: "web_only_apple_blocked", "parity PTY policy")
     try literal(registry.parity.missingResultPolicy, expected: "block", "parity missing-result policy")
@@ -1794,6 +1767,24 @@ public func runParity(
         cases: orderedResults,
         compatibility: compatibility
     )
+}
+
+/// The production entry point owns C-19 preflight. Callers cannot replace the
+/// authoritative host result with a passed status or synthetic evidence.
+public func runParity(at repoRoot: URL) throws -> ParityReport {
+    switch runC19Preflight(at: repoRoot) {
+    case .blocked(let code):
+        return blockedParityReport(code: code)
+    case .passed:
+        return try runParityCore(at: repoRoot)
+    }
+}
+
+/// Synthetic projection tests need to exercise the post-preflight core without
+/// entering production report generation. This helper is internal so external
+/// callers and the CLI cannot bypass the public host preflight.
+func runParityForTests(at repoRoot: URL) throws -> ParityReport {
+    try runParityCore(at: repoRoot)
 }
 
 /// This package is intentionally a file-only parity reader. The static check
