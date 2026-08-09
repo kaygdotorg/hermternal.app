@@ -87,15 +87,19 @@ root resolution through the final digest return. Git provenance uses timed
 commands with bounded output and diagnostics. Its bounded local metadata scan
 rejects nested symlink escapes, include/includeIf directives, and every
 promisor or partial-clone selector, including key-only booleans and active
-`config.worktree`; external Git configuration is disabled. Descriptor-backed
-identity and bounded-byte pins cover config, worktree/configuration pointers,
-packed refs, forbidden metadata, and objects/refs/pack directories, including
-explicit absence pins. Every provenance command asserts those pins immediately
-before and after execution and fails closed on any swap. If both Git pipes
-close while the process continues, the path still returns the bounded proof
-timeout after terminating and reaping the process group. A direct-child success
-with a live descendant group is rejected after bounded TERM/KILL cleanup and
-reaping. Renderer path inputs are literal absolute filesystem paths; Caddy
+`config.worktree`; external Git configuration is disabled. The checkout root is pinned by descriptor identity and every Git command
+fchdirs from that retained descriptor; no command uses pathname-based `git -C`
+rediscovery. A bounded recursive descriptor-relative snapshot covers `HEAD`,
+all nested refs, loose objects, pack metadata, and their nested type/symlink
+topology. Each entry compares device, inode, type, size, and bounded content;
+the walker keeps only O(depth) directory descriptors open and retains explicit
+absence pins for missing metadata. Every provenance command asserts the root and
+complete metadata snapshot immediately before and after execution and fails
+closed on any swap or same-inode byte rewrite. If both Git pipes close while the
+process continues, the path still returns the bounded proof timeout after
+terminating and reaping the process group. A direct-child success with a live
+descendant group is rejected after bounded TERM/KILL cleanup and reaping.
+Renderer path inputs are literal absolute filesystem paths; Caddy
 placeholders are rejected. Any limit, identity, malformed-output, or command
 failure fails closed.
 
