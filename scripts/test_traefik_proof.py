@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -38,6 +39,64 @@ EVIDENCE_ANCHOR_PATH = ROOT / "tests/integration/hermes-traefik/traefik-proof-ev
 EXPECTED_BUILD_SHA = "521ede32b904a42e22eebb279fd7d404074cd318"
 EXPECTED_BUILD_DIGEST = "77f6d0e8bb4977c16eb1f1eaec32000f84f346ddec9f474ebd873d7b9a833d21"
 EXPECTED_CONFIG_DIGEST = "3da2c93e74b4c205cac0aee16fcbed93cb6e87948b59e4592e1247a426da5e36"
+RETAINED_PARSER_COMMIT = "a9d323b522438fe6d3bf6839c0c249eba0e3645d"
+RETAINED_PARSER_BLOB = "f2d60fe74ff8343ab6c1466ff9f38abcfc2dd657"
+RETAINED_PARSER_SOURCE_SHA256 = "683cd633311c0314bda5433265077dce3c182616bec2099bae57a8c519b9c325"
+RETAINED_PARSER_TEST_SHA256 = "24d40f7a810ad251fb00e6632a3c60928cfb450e74064e2a8731e30fd0f7a1df"
+RETAINED_RUNTIME_INPUTS_SHA256 = "4880b6d1ca97fe22b2f0015dce5d5f446354969edf42a282eed1237ce96c0114"
+RETAINED_STATIC_ROUTE_SHA256 = "f0542d97b363b8e2a921e93001d72dd0f56d5f30001f15e95bbca5b2f4165165"
+RETAINED_DEEP_LINK_SHA256 = "91fad69ec110ea8042678b963076056b4474072d24f9698067ed8bfc10c03d96"
+
+
+def _run_git(cwd: Path, *arguments: str, input_data: bytes | None = None) -> str:
+    completed = subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        input=input_data,
+        check=True,
+        capture_output=True,
+        text=input_data is None,
+    )
+    return completed.stdout.decode("utf-8").strip() if input_data is not None else completed.stdout.strip()
+
+
+def _create_parser_repo(root: Path, *, object_format: str = "sha1") -> tuple[bytes, bytes, str]:
+    scripts_root = root / "scripts"
+    scripts_root.mkdir(parents=True)
+    implementation = (ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes()
+    test_source = (ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes()
+    (scripts_root / "traefik_proof.py").write_bytes(implementation)
+    (scripts_root / "test_traefik_proof.py").write_bytes(test_source)
+    init_args = ["init", "--quiet"]
+    if object_format == "sha256":
+        init_args.append("--object-format=sha256")
+    _run_git(root, *init_args)
+    _run_git(root, "config", "user.name", "Hermternal test")
+    _run_git(root, "config", "user.email", "hermternal-test@example.invalid")
+    _run_git(root, "add", "scripts")
+    _run_git(root, "commit", "--quiet", "-m", "parser source")
+    source_commit = _run_git(root, "rev-parse", "HEAD")
+    return implementation, test_source, source_commit
+
+
+def _append_fast_history(root: Path, count: int) -> None:
+    """Create many unchanged descendants in one import process for the budget test."""
+
+    if count < 1:
+        return
+    parent = _run_git(root, "rev-parse", "HEAD")
+    stream = bytearray()
+    for index in range(1, count + 1):
+        message = f"evidence {index}\n".encode("ascii")
+        timestamp = 1_700_000_000 + index
+        stream.extend(
+            f"commit refs/heads/fast-history\nmark :{index}\nauthor Hermternal test <hermternal-test@example.invalid> {timestamp} +0000\ncommitter Hermternal test <hermternal-test@example.invalid> {timestamp} +0000\ndata {len(message)}\n".encode("ascii")
+        )
+        stream.extend(message)
+        stream.extend(f"from {parent if index == 1 else ':' + str(index - 1)}\n".encode("ascii"))
+    stream.extend(b"done\n")
+    subprocess.run(["git", "fast-import"], cwd=root, input=bytes(stream), check=True, capture_output=True)
+    _run_git(root, "reset", "--quiet", "--hard", "fast-history")
 
 
 class TraefikRendererTests(unittest.TestCase):
@@ -1571,6 +1630,341 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             text=True,
         ).strip()
         self.assertEqual(blob, provenance["implementation_blob"])
+
+    def _repo_with_evidence(self, root: Path) -> tuple[bytes, bytes, str, str]:
+        implementation, test_source, source_commit = _create_parser_repo(root)
+        (root / "retained-evidence.json").write_text("{}\n", encoding="utf-8")
+        _run_git(root, "add", "retained-evidence.json")
+        _run_git(root, "commit", "--quiet", "-m", "evidence only")
+        return implementation, test_source, source_commit, _run_git(root, "rev-parse", "HEAD")
+
+    def test_retained_contract_binds_reviewed_values(self) -> None:
+        """The retained JSON is checked against reviewed values, not only its self-hash."""
+
+        parser = self.evidence["forward_auth_contract"]["parser_provenance"]
+        self.assertEqual(self.evidence["product"], {"build_commit": EXPECTED_BUILD_SHA, "static_manifest_sha256": EXPECTED_BUILD_DIGEST})
+        self.assertEqual(self.evidence["browser_evidence"]["provenance"]["build_sha"], EXPECTED_BUILD_SHA)
+        self.assertEqual(self.evidence["browser_evidence"]["provenance"]["build_digest"], EXPECTED_BUILD_DIGEST)
+        self.assertEqual(self.evidence["browser_evidence"]["provenance"]["traefik_config_digest"], EXPECTED_CONFIG_DIGEST)
+        self.assertEqual(self.evidence["browser_evidence"]["provenance"]["runtime_inputs_sha256"], RETAINED_RUNTIME_INPUTS_SHA256)
+        self.assertEqual(parser["implementation_commit"], RETAINED_PARSER_COMMIT)
+        self.assertEqual(parser["implementation_blob"], RETAINED_PARSER_BLOB)
+        self.assertEqual(parser["implementation_sha256"], RETAINED_PARSER_SOURCE_SHA256)
+        self.assertEqual(parser["test_source_sha256"], RETAINED_PARSER_TEST_SHA256)
+        self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["static_route_grammar"]["sha256"], RETAINED_STATIC_ROUTE_SHA256)
+        self.assertEqual(self.evidence["deployment"]["parity_fixtures"]["deep_link_cases"]["sha256"], RETAINED_DEEP_LINK_SHA256)
+        self.assertEqual(
+            EVIDENCE_ANCHOR_PATH.read_text(encoding="ascii").strip(),
+            hashlib.sha256(EVIDENCE_PATH.read_bytes()).hexdigest(),
+        )
+
+    def test_tampering_retained_json_and_anchor_does_not_self_authorize(self) -> None:
+        """Recomputing the self-hash cannot replace the reviewed retained contract."""
+
+        tampered = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
+        tampered["product"]["build_commit"] = "0" * 40
+        tampered["browser_evidence"]["provenance"]["build_sha"] = "0" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "evidence.json"
+            anchor = Path(temporary) / "evidence.sha256"
+            encoded = (json.dumps(tampered, sort_keys=True, indent=2) + "\n").encode("utf-8")
+            path.write_bytes(encoded)
+            anchor.write_text(hashlib.sha256(encoded).hexdigest() + "\n", encoding="ascii")
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(anchor.read_text(encoding="ascii").strip(), hashlib.sha256(path.read_bytes()).hexdigest())
+            with self.assertRaises(AssertionError):
+                self.assertEqual(loaded["product"]["build_commit"], EXPECTED_BUILD_SHA)
+            with self.assertRaises(AssertionError):
+                self.assertEqual(loaded["browser_evidence"]["provenance"]["build_sha"], EXPECTED_BUILD_SHA)
+
+    def test_external_build_sha_contract_accepts_sha1_and_sha256(self) -> None:
+        """Product build identity is cross-repository and supports both hash widths."""
+
+        for width in (40, 64):
+            self.assertEqual(traefik_proof._validate_external_git_oid("a" * width, "build_sha"), "a" * width)
+        for value in ("A" * 40, "a" * 39, "a" * 63, "a" * 65):
+            with self.assertRaises(ValueError):
+                traefik_proof._validate_external_git_oid(value, "build_sha")
+
+    def test_shallow_clone_with_evidence_descendant_fails_closed(self) -> None:
+        """A depth-one clone cannot promote its evidence-only tip to source identity."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            source_root = Path(temporary) / "source"
+            clone_root = Path(temporary) / "clone"
+            source_root.mkdir()
+            _create_parser_repo(source_root)
+            (source_root / "retained-evidence.json").write_text("{}\n", encoding="utf-8")
+            _run_git(source_root, "add", "retained-evidence.json")
+            _run_git(source_root, "commit", "--quiet", "-m", "evidence only")
+            subprocess.run(
+                ["git", "clone", "--quiet", "--depth=1", f"file://{source_root}", str(clone_root)],
+                check=True,
+                capture_output=True,
+            )
+            with self.assertRaisesRegex(ValueError, "shallow"):
+                traefik_proof._current_parser_provenance(clone_root)
+
+    def test_linked_worktree_shallow_metadata_fails_closed(self) -> None:
+        """The shared shallow marker is rejected when a linked worktree is inspected."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            linked = Path(temporary) / "linked"
+            root.mkdir()
+            _implementation, _tests, source_commit = _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "linked", str(linked))
+            (root / ".git" / "shallow").write_text(source_commit + "\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "shallow"):
+                traefik_proof._current_parser_provenance(linked)
+
+    def test_malformed_history_and_git_failure_fail_closed(self) -> None:
+        """Malformed topology and Git failures are never interpreted as source history."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.mkdir(exist_ok=True)
+            self._repo_with_evidence(root)
+            real_output = traefik_proof._git_output
+
+            def malformed(project: Path, *arguments: str, **kwargs: object) -> bytes:
+                if arguments and arguments[0] == "log":
+                    return b"not-a-valid-history\n"
+                return real_output(project, *arguments, **kwargs)
+
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=malformed):
+                with self.assertRaisesRegex(ValueError, "invalid Git object ID"):
+                    traefik_proof._current_parser_provenance(root)
+
+            def failed(project: Path, *arguments: str, **kwargs: object) -> bytes:
+                if arguments and arguments[0] == "log":
+                    raise ValueError("synthetic Git failure")
+                return real_output(project, *arguments, **kwargs)
+
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=failed):
+                with self.assertRaisesRegex(ValueError, "synthetic Git failure"):
+                    traefik_proof._current_parser_provenance(root)
+
+    def test_git_metadata_indirections_fail_closed(self) -> None:
+        """Repository-local indirection and partial-clone markers cannot authorize ancestry."""
+
+        metadata_cases = (
+            ("shallow", lambda git_dir: (git_dir / "shallow").write_text("0" * 40 + "\n", encoding="ascii")),
+            ("graft", lambda git_dir: (git_dir / "info" / "grafts").write_text("\n", encoding="ascii")),
+            ("alternate", lambda git_dir: (git_dir / "objects" / "info" / "alternates").write_text("/tmp\n", encoding="ascii")),
+            ("http alternate", lambda git_dir: (git_dir / "objects" / "info" / "http-alternates").write_text("https://invalid/\n", encoding="ascii")),
+            ("replacement", lambda git_dir: (git_dir / "refs" / "replace").mkdir(parents=True)),
+            ("promisor", lambda git_dir: (git_dir / "objects" / "pack" / "test.promisor").write_text("", encoding="ascii")),
+        )
+        for label, install in metadata_cases:
+            with self.subTest(metadata=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self._repo_with_evidence(root)
+                install(root / ".git")
+                with self.assertRaisesRegex(ValueError, "rejects|shallow|alternate|promisor|replacement"):
+                    traefik_proof._current_parser_provenance(root)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            _run_git(root, "config", "extensions.partialClone", "blob:none")
+            with self.assertRaisesRegex(ValueError, "partial"):
+                traefik_proof._current_parser_provenance(root)
+
+    def test_git_redirect_environment_is_sanitized(self) -> None:
+        """Caller-controlled Git directory and object redirects do not cross the trust boundary."""
+
+        redirect_names = (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_GRAFT_FILE",
+            "GIT_SHALLOW_FILE",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+        )
+        malicious = {name: "/tmp/attacker" for name in redirect_names}
+        malicious["GIT_CONFIG_COUNT"] = "1"
+        with mock.patch.dict(os.environ, malicious, clear=False):
+            environment = traefik_proof._parser_git_environment()
+        for name in redirect_names:
+            if name == "GIT_CONFIG_COUNT":
+                self.assertEqual(environment[name], "0")
+            elif name.startswith("GIT_CONFIG_"):
+                self.assertNotIn(name, environment)
+            else:
+                self.assertNotIn(name, environment)
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(environment["PATH"], traefik_proof.PARSER_GIT_HELPER_PATH)
+
+    def test_bounded_git_output_and_stderr_overflow_are_reaped(self) -> None:
+        """Both output streams are capped while the process group is terminated."""
+
+        environment = traefik_proof._parser_git_environment()
+        for stream in ("stdout", "stderr"):
+            code = f"import sys; sys.{stream}.write('x' * 4096); sys.{stream}.flush()"
+            with self.subTest(stream=stream):
+                with self.assertRaisesRegex(ValueError, "output exceeds"):
+                    traefik_proof._run_bounded_git(
+                        [sys.executable, "-c", code],
+                        deadline=traefik_proof.time.monotonic() + 5,
+                        output_limit=1024,
+                        environment=environment,
+                    )
+
+    def test_git_timeout_kills_process_group_descendants(self) -> None:
+        """Timeout cleanup targets descendants, not only the Git parent."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "child.pid"
+            code = (
+                "import pathlib, subprocess, sys, time; "
+                f"child=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(child.pid)); time.sleep(30)"
+            )
+            with self.assertRaisesRegex(ValueError, "overall time budget exhausted"):
+                traefik_proof._run_bounded_git(
+                    [sys.executable, "-c", code],
+                    deadline=traefik_proof.time.monotonic() + 0.2,
+                    output_limit=1024,
+                    environment=traefik_proof._parser_git_environment(),
+                )
+            if pid_path.exists():
+                child_pid = int(pid_path.read_text(encoding="ascii"))
+                for _ in range(20):
+                    try:
+                        os.kill(child_pid, 0)
+                    except OSError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail("Git descendant survived timeout cleanup")
+
+    def test_source_provenance_rechecks_final_source_bytes(self) -> None:
+        """A source edit after the first Git call fails the final identity check."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            implementation, _tests, _source, _evidence = self._repo_with_evidence(root)
+            real_output = traefik_proof._git_output
+            mutated = False
+
+            def mutate_after_git(project: Path, *arguments: str, **kwargs: object) -> bytes:
+                nonlocal mutated
+                result = real_output(project, *arguments, **kwargs)
+                if not mutated:
+                    (root / traefik_proof.PARSER_IMPLEMENTATION_PATH).write_bytes(implementation + b"mutation")
+                    mutated = True
+                return result
+
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=mutate_after_git):
+                with self.assertRaisesRegex(ValueError, "final parser sources|source predecessor"):
+                    traefik_proof._current_parser_provenance(root)
+
+    def test_symlink_source_mode_fails_closed(self) -> None:
+        """A symlink blob is never equivalent to a regular source file."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            implementation = b"current\n"
+            test_source = b"test\n"
+            implementation_path = scripts / "traefik_proof.py"
+            test_path = scripts / "test_traefik_proof.py"
+            implementation_path.write_bytes(implementation)
+            test_path.write_bytes(test_source)
+            _run_git(root, "init", "--quiet")
+            _run_git(root, "config", "user.name", "Hermternal test")
+            _run_git(root, "config", "user.email", "hermternal-test@example.invalid")
+            _run_git(root, "add", "scripts")
+            _run_git(root, "commit", "--quiet", "-m", "regular source")
+            implementation_path.unlink()
+            implementation_path.symlink_to("current\n")
+            _run_git(root, "add", "-A", "scripts")
+            _run_git(root, "commit", "--quiet", "-m", "symlink source")
+            implementation_path.unlink()
+            implementation_path.write_bytes(implementation)
+            with self.assertRaisesRegex(ValueError, "non-regular source file"):
+                traefik_proof._current_parser_provenance(root)
+
+    def test_valid_history_beyond_subprocess_ceiling_uses_batched_reads(self) -> None:
+        """A valid 2,050-commit history stays below the subprocess ceiling."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            _append_fast_history(root, 2050)
+            real_output = traefik_proof._git_output
+            calls = 0
+
+            def count_calls(project: Path, *arguments: str, **kwargs: object) -> bytes:
+                nonlocal calls
+                calls += 1
+                return real_output(project, *arguments, **kwargs)
+
+            started = traefik_proof.time.monotonic()
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=count_calls):
+                provenance = traefik_proof._current_parser_provenance(root)
+            elapsed = traefik_proof.time.monotonic() - started
+            self.assertEqual(len(provenance["implementation_commit"]), 40)
+            self.assertLess(calls, 20)
+            self.assertLess(elapsed, traefik_proof.PARSER_SOURCE_MAX_SECONDS)
+
+    def test_source_pair_only_update_selects_unique_predecessor(self) -> None:
+        """A source pair update, not an evidence descendant, selects its commit."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _implementation, test_source, _source, _evidence = self._repo_with_evidence(root)
+            test_path = root / traefik_proof.PARSER_TEST_PATH
+            test_path.write_bytes(test_source + b"pair update")
+            _run_git(root, "add", str(test_path.relative_to(root)))
+            _run_git(root, "commit", "--quiet", "-m", "pair update")
+            selected = _run_git(root, "rev-parse", "HEAD")
+            provenance = traefik_proof._current_parser_provenance(root)
+            self.assertEqual(provenance["implementation_commit"], selected)
+
+    def test_cli_normalizes_parser_provenance_once_and_reuses_result(self) -> None:
+        """The evidence CLI shares one provenance result across validation and rendering."""
+
+        fake = {
+            "implementation_path": traefik_proof.PARSER_IMPLEMENTATION_PATH,
+            "implementation_commit": "a" * 40,
+            "implementation_blob": "b" * 40,
+            "implementation_sha256": "c" * 64,
+            "test_path": traefik_proof.PARSER_TEST_PATH,
+            "test_source_sha256": "d" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            browser_path = Path(temporary) / "browser.json"
+            browser_path.write_text(json.dumps(self._browser_evidence("blocked_provider")), encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(traefik_proof, "_current_parser_provenance", return_value=fake) as current:
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        traefik_proof.main(
+                            [
+                                "evidence",
+                                "--build-sha",
+                                EXPECTED_BUILD_SHA,
+                                "--build-digest",
+                                EXPECTED_BUILD_DIGEST,
+                                "--traefik-config-digest",
+                                EXPECTED_CONFIG_DIGEST,
+                                "--browser-evidence",
+                                str(browser_path),
+                            ]
+                        ),
+                        0,
+                    )
+            self.assertEqual(current.call_count, 1)
+            self.assertEqual(json.loads(output.getvalue())["forward_auth_contract"]["parser_provenance"], fake)
 
     def test_source_provenance_fails_closed_on_overall_budget(self) -> None:
         """A per-command timeout cannot permit unbounded aggregate Git work."""
