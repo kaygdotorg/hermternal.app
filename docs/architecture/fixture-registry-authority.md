@@ -111,13 +111,16 @@ opens the caller root and `.git` directory from the held descriptors and copies
 the complete Git metadata tree into a private mode-700 temporary snapshot. The
 copy is chunked and category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (48 MiB) for legitimate pack,
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (64 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
-`MAX_SNAPSHOT_TOTAL_BYTES` (96 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The refreshed
-four-ref trusted bundle measured a 49,802,392-byte macOS fresh-clone pack, so the
-48 MiB per-pack cap retains 529,256 bytes of headroom. A seeded clone retains
-two packs plus metadata; its measured snapshot total is 96,034,354 bytes, and the independent 96 MiB total cap keeps that composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
+`MAX_SNAPSHOT_TOTAL_BYTES` (128 MiB), and the copy has a
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The previously
+refreshed four-ref trusted bundle measured a 49,802,392-byte macOS fresh-clone
+pack. A pending bundle rotation includes that reviewed bundle in checkout
+history, so the 64 MiB per-pack cap keeps a finite allowance for the measured
+pack plus its audited successor. A seeded clone retains two packs plus metadata;
+its prior measured snapshot total was 96,034,354 bytes, and the independent 128
+MiB total cap keeps that composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
 directory, file, depth, and retained path-storage budgets remain independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
 CI before content accounting. Strict Git execution remains separately capped at
