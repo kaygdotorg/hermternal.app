@@ -39,7 +39,7 @@ test('read-only reconciliation checks the current account without submitting', a
   let result = {
     promptMatches: 'zero',
     completedPairs: 'zero',
-    status: 'ambiguous'
+    status: 'reconciliation-failed-uncertain'
   };
   let operationFailed = false;
   let cleanupFailed = false;
@@ -87,7 +87,11 @@ test('read-only reconciliation checks the current account without submitting', a
   }
 
   if (operationFailed || cleanupFailed) {
-    result = { promptMatches: 'zero', completedPairs: 'zero', status: 'ambiguous' };
+    result = {
+      promptMatches: 'zero',
+      completedPairs: 'zero',
+      status: 'reconciliation-failed-uncertain'
+    };
     setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
   }
   console.log(formatLiveReconciliationResult(result));

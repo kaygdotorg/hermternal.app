@@ -5,9 +5,9 @@ export const LIVE_RECONCILIATION_MAX_SESSIONS = 100;
 export const LIVE_RECONCILIATION_MAX_MESSAGES = 500;
 export const LIVE_RECONCILIATION_STATUSES = Object.freeze([
   'no-match-uncertain',
-  'delivery-observed',
-  'completion-observed',
-  'ambiguous'
+  'match-unattributed',
+  'multiple-matches-ambiguous',
+  'reconciliation-failed-uncertain'
 ]);
 export const LIVE_RECONCILIATION_COUNT_VALUES = Object.freeze(['zero', 'one', 'multiple']);
 
@@ -90,8 +90,10 @@ export function parseReconciliationSessionMessages(value, expectedSessionId, exp
 
 /**
  * Scan all supplied authoritative histories in memory and return only fixed
- * counts and a safe status. The caller owns the transient IDs required to
- * request each history; this result never returns them.
+ * counts and an unattributed status. The caller owns the transient IDs required
+ * to request each history; this result never returns them. Without a reviewed
+ * pre-send session nonce and history boundary, an exact historical pair cannot
+ * be claimed as delivery or completion for the current run.
  *
  * @param {{
  *   sessions: Array<{ id: string, messageCount: number }>,
@@ -149,8 +151,7 @@ export async function reconcileLiveHistory({
         if (candidate.role === 'user' && candidate.content === prompt) break;
         if (
           candidate.role === 'assistant' &&
-          typeof candidate.content === 'string' &&
-          candidate.content.includes(assistantMarker)
+          candidate.content === assistantMarker
         ) {
           pair = true;
           break;
@@ -165,20 +166,18 @@ export async function reconcileLiveHistory({
 
   const promptMatches = countValue(promptCount);
   const completedPairs = countValue(completedPairCount);
-  const ambiguous =
+  const multipleMatches =
     promptCount > 1 ||
     completedPairCount > 1 ||
     promptSessions.size > 1 ||
     completedPairSessions.size > 1 ||
     (completedPairCount === 1 &&
       (promptCount !== 1 || !sameOnlySession(promptSessions, completedPairSessions)));
-  const status = ambiguous
-    ? 'ambiguous'
-    : completedPairCount === 1
-      ? 'completion-observed'
-      : promptCount === 1
-        ? 'delivery-observed'
-        : 'no-match-uncertain';
+  const status = promptCount === 0
+    ? 'no-match-uncertain'
+    : multipleMatches
+      ? 'multiple-matches-ambiguous'
+      : 'match-unattributed';
 
   return Object.freeze({ promptMatches, completedPairs, status });
 }

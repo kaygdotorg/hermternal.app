@@ -176,12 +176,16 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   excludes the official, shared, and capture prompt lanes, while the official spec has a defensive
   reconciliation-mode skip. The no-submit lane keeps its live-proof ledger `promptCount` at zero.
   It reports only zero/one/multiple fixed prompt matches, zero/one/multiple bounded completion pairs,
-  and `no-match-uncertain`, `delivery-observed`, `completion-observed`, or `ambiguous`; zero history
-  matches remain uncertain, not absent. It fails closed on malformed or incomplete pagination and
-  cleanup failure, then verifies logout and clears cookies, Web Storage, IndexedDB, Cache Storage, and
-  service workers. The mode never retains IDs, timestamps, bodies, prompt/response text, endpoints,
-  headers, raw errors, or artifacts, and it is mutually exclusive with screenshot capture. No live
-  reconciliation was run for this correction.
+  and `no-match-uncertain`, `match-unattributed`, `multiple-matches-ambiguous`, or
+  `reconciliation-failed-uncertain`; zero history matches remain uncertain, not absent. Exact
+  historical matches never claim current delivery or completion: one stale or manually seeded pair is
+  `match-unattributed`, while multiple matches are `multiple-matches-ambiguous`. Positive current
+  attribution requires a future independently reviewed pre-send session correlation and history
+  boundary, so this reconciliation cannot clear uncertain delivery. It requires exact assistant marker
+  equality, fails closed on malformed or incomplete pagination and cleanup failure, then verifies logout
+  and clears cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The mode never retains
+  IDs, timestamps, bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is
+  mutually exclusive with screenshot capture. No live reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

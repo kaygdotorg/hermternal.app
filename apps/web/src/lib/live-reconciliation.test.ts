@@ -14,7 +14,7 @@ const SESSION = { id: 'session-1', messageCount: 2 };
 function messages() {
   return [
     { role: 'user' as const, content: LIVE_PROOF_PROMPT },
-    { role: 'assistant' as const, content: `prefix ${LIVE_PROOF_ASSISTANT_MARKER}` }
+    { role: 'assistant' as const, content: LIVE_PROOF_ASSISTANT_MARKER }
   ];
 }
 
@@ -44,7 +44,7 @@ describe('live reconciliation-only proof', () => {
     expect(result).toEqual({
       promptMatches: 'one',
       completedPairs: 'one',
-      status: 'completion-observed'
+      status: 'match-unattributed'
     });
 
     const incomplete = await reconcileLiveHistory({
@@ -54,7 +54,58 @@ describe('live reconciliation-only proof', () => {
     expect(incomplete).toEqual({
       promptMatches: 'one',
       completedPairs: 'zero',
-      status: 'delivery-observed'
+      status: 'match-unattributed'
+    });
+  });
+
+  it('keeps one stale historical pair unattributed to the current run', async () => {
+    const result = await reconcileLiveHistory({
+      sessions: [{ id: 'stale-session', messageCount: 2 }],
+      getMessages: async () => messages()
+    });
+    expect(result).toEqual({
+      promptMatches: 'one',
+      completedPairs: 'one',
+      status: 'match-unattributed'
+    });
+  });
+
+  it('keeps one manually seeded pair unattributed without a pre-send boundary', async () => {
+    const result = await reconcileLiveHistory({
+      sessions: [{ id: 'manually-seeded-session', messageCount: 2 }],
+      getMessages: async () => messages()
+    });
+    expect(result).toEqual({
+      promptMatches: 'one',
+      completedPairs: 'one',
+      status: 'match-unattributed'
+    });
+  });
+
+  it('requires exact assistant marker equality', async () => {
+    const result = await reconcileLiveHistory({
+      sessions: [{ id: 'substring-session', messageCount: 2 }],
+      getMessages: async () => [
+        { role: 'user', content: LIVE_PROOF_PROMPT },
+        { role: 'assistant', content: `${LIVE_PROOF_ASSISTANT_MARKER} with extra text` }
+      ]
+    });
+    expect(result).toEqual({
+      promptMatches: 'one',
+      completedPairs: 'zero',
+      status: 'match-unattributed'
+    });
+  });
+
+  it('marks multiple exact historical pairs as ambiguous', async () => {
+    const result = await reconcileLiveHistory({
+      sessions: [{ id: 'multiple-pair-session', messageCount: 4 }],
+      getMessages: async () => [...messages(), ...messages()]
+    });
+    expect(result).toEqual({
+      promptMatches: 'multiple',
+      completedPairs: 'multiple',
+      status: 'multiple-matches-ambiguous'
     });
   });
 
@@ -66,7 +117,7 @@ describe('live reconciliation-only proof', () => {
         { role: 'user', content: LIVE_PROOF_PROMPT }
       ]
     });
-    expect(duplicate.status).toBe('ambiguous');
+    expect(duplicate.status).toBe('multiple-matches-ambiguous');
     expect(duplicate.promptMatches).toBe('multiple');
 
     expect(() =>

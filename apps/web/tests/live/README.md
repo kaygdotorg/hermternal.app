@@ -136,15 +136,21 @@ WebSocket, or sends a prompt; its live-proof ledger prompt count remains zero. A
 list or history whose cap, identity, response shape, or pagination cannot prove
 completeness fails closed.
 
-The reconciler compares only the fixed proof prompt and assistant marker. It
-prints one fixed line with `promptMatches=zero|one|multiple`,
-`completedPairs=zero|one|multiple`, and exactly one of
-`no-match-uncertain|delivery-observed|completion-observed|ambiguous`. Zero history
-matches are still `no-match-uncertain`; a 200 response without a match is not
-absence, and a 401, redirect, or read failure is never treated as absence.
-Multiple matching prompts, pairs, or sessions are `ambiguous`. It preserves
-`promptCount===0` and never prints IDs, timestamps, bodies, prompt/response text,
-endpoints, headers, raw errors, or artifacts.
+The reconciler compares only the fixed proof prompt and the assistant marker
+using exact equality. It prints one fixed line with
+`promptMatches=zero|one|multiple`, `completedPairs=zero|one|multiple`, and exactly
+one of `no-match-uncertain|match-unattributed|multiple-matches-ambiguous|
+reconciliation-failed-uncertain`. Zero history matches are still
+`no-match-uncertain`; a 200 response without a match is not absence, and a 401,
+redirect, or read failure is never treated as absence. One exact historical
+prompt/pair is `match-unattributed`, even when it is stale or manually seeded;
+multiple matching prompts, pairs, or sessions are
+`multiple-matches-ambiguous`. No status claims current delivery or completion.
+Positive current attribution requires a future independently reviewed pre-send
+session correlation and history boundary. This reconciliation cannot clear
+uncertain delivery. It preserves `promptCount===0` in the no-submit lane and
+never prints IDs, timestamps, bodies, prompt/response text, endpoints, headers,
+raw errors, or artifacts.
 
 Finally it verifies logout and clears cookies, Web Storage, IndexedDB, Cache
 Storage, and service workers. Cleanup failure fails closed. The live config keeps
