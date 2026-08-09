@@ -26,7 +26,7 @@ function createSession(snapshot: LiveWorkspaceSnapshot) {
 }
 
 describe('LiveWorkspaceView', () => {
-  it('initializes the controller, sends user input, and releases only its subscription', async () => {
+  it('initializes the controller, sends user input, and disposes a standalone session', async () => {
     const session = createSession({
       state: 'ready',
       sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
@@ -45,7 +45,7 @@ describe('LiveWorkspaceView', () => {
 
     view.unmount();
     expect(session.unsubscribe).toHaveBeenCalledTimes(1);
-    expect(session.dispose).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a root-owned session reusable when the authenticated slot unmounts', async () => {
