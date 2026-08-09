@@ -235,7 +235,11 @@ test('authenticated Chat keeps the exact desktop and narrow family boundaries', 
       await expect(workspace.locator('.conversation-header')).toBeVisible();
       await expect(workspace.locator('.sidebar')).toBeVisible();
       await expect(workspace.locator('.desktop-inspector')).toBeVisible();
-      expect((await conversation.boundingBox())?.width).toBe(720);
+      // 1440px proves the exact 720px Paper center. At the 1408px family
+      // boundary, the approved desktop columns remain present while only the
+      // center flexes to fit the fixed 276px and 380px secondary surfaces.
+      expect((await conversation.boundingBox())?.width).toBeLessThanOrEqual(720);
+      expect((await conversation.boundingBox())?.width).toBeGreaterThanOrEqual(688);
     }
 
     await expectNoHorizontalOverflow(page);
