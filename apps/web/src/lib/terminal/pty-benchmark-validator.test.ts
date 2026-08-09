@@ -300,10 +300,10 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
 
   it("keeps intentionally stale checked-in evidence out of the positive path", () => {
     expect(() => validatePtyBenchmarkFile(CHECKED_IN_RECONNECT_ARTIFACT)).toThrow(
-      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract/iu,
+      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract|reviewed metric contract/iu,
     );
     expect(() => validatePtyBenchmarkFile(CHECKED_IN_CONNECTING_ARTIFACT)).toThrow(
-      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract/iu,
+      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract|reviewed metric contract/iu,
     );
   });
 

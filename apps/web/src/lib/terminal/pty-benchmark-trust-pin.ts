@@ -14,26 +14,26 @@ export const PTY_BENCHMARK_TRUST_PIN_SOURCE =
 
 export const REVIEWED_PTY_BENCHMARK_TRUST_PIN = {
   sourceRevision:
-    "6732e2e70b22ab17830a9a18f5c34cca3258e535",
-  sourceTree: "51a70bebf55c99c763d6df9122100e55ca757a88",
+    "7f25cd496f60732e5f6fdf5ba4781ee55e911ecb",
+  sourceTree: "d98b07c47914a5f06b87f07d554c7c5d7e29d136",
   sourceBlobs: [
     {
       path: "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
-      gitBlobSha: "d81a485c07cd5c19ad3bb76fc12d143a6e7b97de",
+      gitBlobSha: "447124f324b805e71c1aaca393cdaa7c53429629",
       sha256:
-        "9b89e8f1c181f2c60b33b617b89b0d8cf71e628a978fa2b92a035162bee73d82",
+        "882ac6fd0863e38cc29b6f74e796a533229673beac128a090f6898f85b7111ae",
     },
     {
       path: "apps/web/src/lib/terminal/pty-connecting-ownership.bench.ts",
-      gitBlobSha: "87dd66aac39b4374eb6a49da9c2b45b2d039aebc",
+      gitBlobSha: "f7d1b3d04696f694897f3c47ca6f9e4fd79d883e",
       sha256:
-        "46c0fa79e0e17289ebf604070619c0c9ac3b5fe067dea2ead31ad1efde611f38",
+        "cdfaa883fbcf9b6397eff674dd3cac2df0e4579cf59993e88f3508a0d73202b4",
     },
     {
       path: "apps/web/src/lib/terminal/pty-transport.ts",
-      gitBlobSha: "bf2f2a9fd540118b0630e76ae2ce4d902401417b",
+      gitBlobSha: "41ab670d62c6544a5c475b8bb8a46ac424549e67",
       sha256:
-        "30e1d44b6161147848c5e43110290bcc92b09a75ee2471729389d3adab4b4a0c",
+        "3bc4b9a7a49fa7cd2c1ad9f34ad5455157d8620f712275baa67c1ce5f1f82f57",
     },
     {
       path: "apps/web/package.json",
@@ -57,9 +57,9 @@ export const REVIEWED_PTY_BENCHMARK_TRUST_PIN = {
   trustedCode: [
     {
       path: "apps/web/src/lib/terminal/validate-pty-benchmarks.ts",
-      gitBlobSha: "382253ef0a9bbed0704cea5f2d0adc9e76e8eed4",
+      gitBlobSha: "96933f0785fb9871d327d19fa7b51cd54be2adfa",
       sha256:
-        "c067fdcc999b90a361a2a0a1c0b23ba3a963a30ce42557e382a76ea29fefebc7",
+        "851e689bbb7c4c1cb36dade25ffb8967ef5245b4b4a0bc825255cf8f41d05fd6",
     },
     {
       path: "apps/web/src/lib/terminal/pty-benchmark-validator.ts",

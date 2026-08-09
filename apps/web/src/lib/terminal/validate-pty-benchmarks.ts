@@ -1460,7 +1460,42 @@ function validateCallbackBindingProof(
     `${label}.stalePublications`,
     optimized,
   );
-  validateDelayedBlob(run.delayedBlob, `${label}.delayedBlob`, applicable, optimized);
+  const delayedBlobProof = validateDelayedBlob(
+    run.delayedBlob,
+    `${label}.delayedBlob`,
+    applicable,
+    optimized,
+  );
+  const stalePublications = asRecord(
+    run.stalePublications,
+    `${label}.stalePublications`,
+  );
+  const delayedBlobPostCloseBytesRejected =
+    delayedBlobProof &&
+    asCounter(run.postCloseBytesEvents, `${label}.postCloseBytesEvents`) === 0 &&
+    SINK_PUBLICATION_KEYS.every((sink) => {
+      const counters = asRecord(
+        stalePublications[sink],
+        `${label}.stalePublications.${sink}`,
+      );
+      return (
+        asCounter(
+          counters.bytesCount,
+          `${label}.stalePublications.${sink}.bytesCount`,
+        ) === 0
+      );
+    });
+  const delayedBlob = asRecord(run.delayedBlob, `${label}.delayedBlob`);
+  if (
+    asBoolean(
+      delayedBlob.postCloseBytesRejected,
+      `${label}.delayedBlob.postCloseBytesRejected`,
+    ) !== delayedBlobPostCloseBytesRejected
+  ) {
+    throw new Error(
+      `${label}.delayedBlob.postCloseBytesRejected was not derived from the publication ledger`,
+    );
+  }
   return applicable;
 }
 
@@ -1558,11 +1593,17 @@ function expectedAssertionValues(
         ) === 0;
       }));
 
-  const reconnectOwner: OwnerIdentity = {
-    sessionId: "benchmark-session",
-    attach: "benchmark-attach",
-    processIdentity: "benchmark-process",
-  };
+  const reconnectOwner: OwnerIdentity = reconnect
+    ? {
+        sessionId: "benchmark-session",
+        attach: "benchmark-attach",
+        processIdentity: "benchmark-process",
+      }
+    : {
+        sessionId: "benchmark-session-a",
+        attach: "benchmark-attach-a",
+        processIdentity: "benchmark-process-a",
+      };
   const replacementOwner: OwnerIdentity = {
     sessionId: "benchmark-session-b",
     attach: "benchmark-attach-b",
@@ -1875,11 +1916,17 @@ function validateOwnershipProof(
   const reconnect =
     schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
   const replacement = stage === "replace";
-  const reconnectOwner: OwnerIdentity = {
-    sessionId: "benchmark-session",
-    attach: "benchmark-attach",
-    processIdentity: "benchmark-process",
-  };
+  const reconnectOwner: OwnerIdentity = reconnect
+    ? {
+        sessionId: "benchmark-session",
+        attach: "benchmark-attach",
+        processIdentity: "benchmark-process",
+      }
+    : {
+        sessionId: "benchmark-session-a",
+        attach: "benchmark-attach-a",
+        processIdentity: "benchmark-process-a",
+      };
   const replacementOwner: OwnerIdentity = {
     sessionId: "benchmark-session-b",
     attach: "benchmark-attach-b",
