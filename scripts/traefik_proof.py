@@ -897,6 +897,7 @@ def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> No
     if config and not config.endswith(b"\0"):
         raise ValueError("parser provenance Git config is malformed")
     for record in config.split(b"\0"):
+        budget.check()
         if not record:
             continue
         key, separator, _value = record.partition(b"\n")
@@ -968,7 +969,13 @@ def _parser_tree_pair(
     return tuple(entries.get(path, (None, ""))[0] for path in PARSER_SOURCE_PATHS)  # type: ignore[return-value]
 
 
-def _parser_batch_tree_entries(raw: bytes, object_format: str, wanted: set[str]) -> dict[str, tuple[str, str]]:
+def _parser_batch_tree_entries(
+    raw: bytes,
+    object_format: str,
+    wanted: set[str],
+    *,
+    budget: _ParserGitBudget | None = None,
+) -> dict[str, tuple[str, str]]:
     """Parse raw Git tree bytes without losing mode/blob identity semantics."""
 
     oid_bytes = _git_oid_hex_width(object_format) // 2
@@ -977,6 +984,8 @@ def _parser_batch_tree_entries(raw: bytes, object_format: str, wanted: set[str])
     seen_paths: set[bytes] = set()
     offset = 0
     while offset < len(raw):
+        if budget is not None:
+            budget.check()
         space = raw.find(b" ", offset)
         if space <= offset:
             raise ValueError("parser provenance source tree is malformed")
@@ -1150,7 +1159,12 @@ def _parser_batched_history(
         end = start + size
         if end >= len(tree_raw) or tree_raw[end:end + 1] != b"\n":
             raise ValueError("parser provenance source tree batch is malformed")
-        subtree_entries[oid] = _parser_batch_tree_entries(tree_raw[start:end], object_format, names_by_oid[oid])
+        subtree_entries[oid] = _parser_batch_tree_entries(
+            tree_raw[start:end],
+            object_format,
+            names_by_oid[oid],
+            budget=budget,
+        )
         offset = end + 1
     if offset != len(tree_raw):
         raise ValueError("parser provenance source tree batch has trailing data")
@@ -1181,7 +1195,7 @@ def _parser_source_predecessor(
     head: str,
     *,
     object_format: str,
-    budget: _ParserGitBudget,
+    budget: _ParserGitBudget | None = None,
 ) -> tuple[str, bytes, bytes]:
     """Find one unambiguous source-changing predecessor of the current bytes.
 
@@ -1192,6 +1206,7 @@ def _parser_source_predecessor(
     topology-dependent, so ambiguous maximal candidates fail closed.
     """
 
+    budget = _ParserGitBudget() if budget is None else budget
     history, pair_by_commit = _parser_batched_history(
         project_root,
         head,
