@@ -1206,7 +1206,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             target.unlink()
             os.mkfifo(target)
             # Snapshot validation now permits two measured packs plus metadata up
-            # to 64 MiB before this checkout read. Keep this external deadline
+            # to 96 MiB before this checkout read. Keep this external deadline
             # above that bounded work while preserving a finite FIFO regression.
             self.assert_pair_failure(checkout, timeout=40)
 
