@@ -270,6 +270,7 @@ describe('deterministic live Chat screenshot capture', () => {
     const result = await captureLiveChatScreenshotIfEnabled({
       page: { screenshot },
       uiState: 'ready',
+      proof: COMPLETE_LIVE_PROOF,
       environment: {}
     });
 
@@ -606,6 +607,7 @@ describe('deterministic live Chat screenshot capture', () => {
       const baseline = await captureLiveChatScreenshotIfEnabled({
         page: baselinePage,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: captureEnvironment()
       });
       await baselineContext.close();
@@ -640,6 +642,7 @@ describe('deterministic live Chat screenshot capture', () => {
       const captured = await captureLiveChatScreenshotIfEnabled({
         page: attackPage,
         uiState: 'ready',
+        proof: COMPLETE_LIVE_PROOF,
         environment: captureEnvironment()
       });
       expect(repopulated).toBe(true);

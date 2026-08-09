@@ -1,5 +1,3 @@
-import { createHmac, randomBytes } from 'node:crypto';
-
 export const LIVE_PROOF_PROMPT = 'Reply with exactly: Hermternal live proof complete.';
 export const LIVE_PROOF_ASSISTANT_MARKER = 'Hermternal live proof complete.';
 
@@ -13,6 +11,9 @@ const MAX_MESSAGE_COUNT = 10_000;
 export const LIVE_PROOF_HISTORY_LIMIT = 500;
 const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
 const RAW_ID_KEYS = Object.freeze(['requestId', 'sessionId', 'storedSessionId']);
+
+/** @typedef {{ kind: 'page', sign?: never } | { kind: 'test', sign: (domain: string, value: string) => string }} LiveProofSigner */
+
 const LIVE_PROOF_CAPTURE_KEYS = Object.freeze([
   'ordered',
   'websocketOpen',
@@ -56,7 +57,7 @@ export function normalizeLiveProofRoute(value) {
 
 /** @param {unknown} value */
 function boundedRawId(value) {
-  if (value === undefined || value === null) return undefined;
+  if (value === undefined) return undefined;
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw new Error('live proof ledger received an unsafe identity');
   }
@@ -65,7 +66,7 @@ function boundedRawId(value) {
 
 /** @param {unknown} value */
 function boundedTag(value) {
-  if (value === undefined || value === null) return undefined;
+  if (value === undefined) return undefined;
   if (typeof value !== 'string' || !HMAC_TAG_PATTERN.test(value)) {
     throw new Error('live proof ledger received an unsafe identity tag');
   }
@@ -79,9 +80,49 @@ function requiredTag(value) {
   return tag;
 }
 
-/** @param {Uint8Array} key @param {string} domain @param {string} value */
-function hmacTag(key, domain, value) {
-  return `h1:${createHmac('sha256', key).update(domain).update('\0').update(value).digest('hex')}`;
+/**
+ * This signer exists only so synchronous unit tests can exercise the ledger
+ * without a browser. It is deliberately not cryptographic and is never used
+ * by the production page lane. Production callers must pass the page signer
+ * mode and supply tags created by the page-local nonextractable CryptoKey.
+ *
+ * @param {string} domain
+ * @param {string} value
+ */
+function deterministicTestTag(domain, value) {
+  const input = `${domain}\0${value}`;
+  let state = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    state ^= input.charCodeAt(index);
+    state = Math.imul(state, 0x01000193) >>> 0;
+  }
+  let hex = '';
+  for (let lane = 0; lane < 8; lane += 1) {
+    state = (state ^ (state >>> 13)) >>> 0;
+    state = Math.imul(state, 0x5bd1e995) >>> 0;
+    state = (state ^ (state >>> 15)) >>> 0;
+    hex += state.toString(16).padStart(8, '0');
+  }
+  return `h1:${hex}`;
+}
+
+/**
+ * Explicit deterministic signer for unit tests only. Keeping it in the test
+ * ledger module makes the production factory fail closed when no page signer
+ * is supplied without importing Node crypto or retaining a production key.
+ */
+export function createLiveProofTestSigner() {
+  /** @type {{ kind: 'test', sign: (domain: string, value: string) => string }} */
+  const signer = {
+    kind: 'test',
+    sign(domain, value) {
+      if (typeof domain !== 'string' || typeof value !== 'string') {
+        throw new Error('live proof test signer input is invalid');
+      }
+      return deterministicTestTag(domain, value);
+    }
+  };
+  return Object.freeze(signer);
 }
 
 /** @param {unknown} value */
@@ -141,33 +182,77 @@ function boundedHistoryPhase(value) {
 }
 
 /**
- * Keep only typed, assertion-local projections. Raw session/request identities
- * are HMAC-tagged with a fresh attempt key before they enter this ledger. The
- * key never appears in a snapshot, reporter annotation, artifact, or error.
+ * Keep only typed, assertion-local projections. Production tags must be made
+ * in the page realm by a nonextractable Web Crypto HMAC key. The Node ledger
+ * accepts those tags but never owns a key or receives the source identity.
+ *
+ * The deterministic signer is available only through the explicit unit-test
+ * escape hatch. Omitting a signer or passing any other signer mode fails closed.
+ *
+ * @param {number} maxEvents
+ * @param {{ signer?: LiveProofSigner, allowTestSigner?: boolean }} options
  */
-export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
+export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS, options = {}) {
   if (!Number.isInteger(maxEvents) || maxEvents < 16 || maxEvents > 1024) {
     throw new Error('live proof ledger capacity is not bounded');
   }
-  const attemptKey = randomBytes(32);
+  const signer = options?.signer;
+  if (!signer || (signer.kind !== 'page' && signer.kind !== 'test')) {
+    throw new Error('live proof ledger requires a page-local signer');
+  }
+  if (signer.kind === 'test' && options.allowTestSigner !== true) {
+    throw new Error('live proof test signer requires explicit test opt-in');
+  }
+  if (signer.kind === 'test' && typeof signer.sign !== 'function') {
+    throw new Error('live proof test signer is incomplete');
+  }
+  const trustedSigner = /** @type {LiveProofSigner} */ (signer);
   /** @type {Array<Record<string, unknown>>} */
   const events = [];
   let nextSequence = 0;
 
   /** @param {unknown} value */
   const identityTag = (value) => {
+    if (trustedSigner.kind !== 'test') {
+      throw new Error('production identity tags must come from the page realm');
+    }
     const raw = boundedRawId(value);
-    return raw === undefined ? undefined : hmacTag(attemptKey, 'identity', raw);
+    return raw === undefined ? undefined : requiredTag(trustedSigner.sign('identity', raw));
   };
 
   /** @param {unknown} values */
   const messageProjectionTag = (values) => {
-    if (!Array.isArray(values) || values.length > LIVE_PROOF_HISTORY_LIMIT) {
+    if (trustedSigner.kind !== 'test') {
+      throw new Error('production history tags must come from the page realm');
+    }
+    if (!Array.isArray(values) || !Number.isSafeInteger(values.length) || values.length > LIVE_PROOF_HISTORY_LIMIT) {
       throw new Error('live proof history message projection sequence is not bounded');
     }
-    const projections = values.map(canonicalHistoryMessage);
-    return hmacTag(attemptKey, 'message-projection-sequence', JSON.stringify(projections));
+    const trustedValues = readStrictArray(values, 'live proof history message projection sequence');
+    const projections = trustedValues.map(canonicalHistoryMessage);
+    return requiredTag(trustedSigner.sign('message-projection-sequence', JSON.stringify(projections)));
   };
+
+  /** @param {Record<string, unknown>} event @param {string} tagKey @param {string} rawKey */
+  function eventTag(event, tagKey, rawKey) {
+    if (Object.prototype.hasOwnProperty.call(event, tagKey)) {
+      return boundedTag(event[tagKey]);
+    }
+    if (Object.prototype.hasOwnProperty.call(event, rawKey)) {
+      if (trustedSigner.kind !== 'test') {
+        throw new Error('production ledger received a raw dynamic identity');
+      }
+      return identityTag(event[rawKey]);
+    }
+    return undefined;
+  }
+
+  /** @param {Record<string, unknown>} event */
+  function rejectRawIdentityFields(event) {
+    if (trustedSigner.kind === 'page' && RAW_ID_KEYS.some((key) => Object.prototype.hasOwnProperty.call(event, key))) {
+      throw new Error('production ledger received a raw dynamic identity');
+    }
+  }
 
   /** @param {Record<string, unknown>} event */
   function append(event) {
@@ -213,64 +298,78 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
         ticketOnly: event.ticketOnly === true
       });
     },
-    /** @param {{ method: string, requestId?: string, sessionId?: string }} event */
+    /**
+     * Production callers provide only page-produced tags. Raw identity aliases
+     * remain accepted solely for explicit deterministic unit-test signers.
+     * @param {{ method: string, requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string }} event
+     */
     recordWebSocketSent(event) {
+      rejectRawIdentityFields(event);
       return append({
         kind: 'ws.sent',
         method: boundedMethod(event.method),
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId)
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId')
       });
     },
-    /** @param {{ event: string, requestId?: string, sessionId?: string }} event */
+    /** @param {{ event: string, requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string }} event */
     recordWebSocketReceived(event) {
+      rejectRawIdentityFields(event);
       return append({
         kind: 'ws.received',
         event: boundedEventName(event.event),
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId)
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId')
       });
     },
-    /** @param {{ sessionId?: string }} [event] */
+    /** @param {{ sessionTag?: string, sessionId?: string }} [event] */
     recordGatewayReady(event = {}) {
-      return append({ kind: 'gateway.ready', sessionTag: identityTag(event.sessionId) });
+      rejectRawIdentityFields(event);
+      return append({
+        kind: 'gateway.ready',
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId')
+      });
     },
-    /** @param {{ method: 'session.create' | 'session.resume', requestId?: string, sessionId?: string, storedSessionId?: string }} event */
+    /** @param {{ method: 'session.create' | 'session.resume', requestTag?: string, sessionTag?: string, storedSessionTag?: string, requestId?: string, sessionId?: string, storedSessionId?: string }} event */
     recordSessionAction(event) {
+      rejectRawIdentityFields(event);
       if (event.method !== 'session.create' && event.method !== 'session.resume') {
         throw new Error('live proof ledger received an unsafe session action');
       }
       return append({
         kind: 'session.action',
         method: event.method,
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId),
-        storedSessionTag: identityTag(event.storedSessionId)
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId'),
+        storedSessionTag: eventTag(event, 'storedSessionTag', 'storedSessionId')
       });
     },
-    /** @param {{ requestId?: string, sessionId?: string, promptMatches: boolean }} event */
+    /** @param {{ requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string, promptMatches: boolean }} event */
     recordPrompt(event) {
+      rejectRawIdentityFields(event);
       return append({
         kind: 'prompt.submit',
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId),
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId'),
         promptMatches: event.promptMatches === true
       });
     },
-    /** @param {{ requestId?: string, sessionId?: string }} event */
+    /** @param {{ requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string }} event */
     recordDelta(event) {
+      rejectRawIdentityFields(event);
       return append({
         kind: 'message.delta',
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId)
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId')
       });
     },
-    /** @param {{ requestId?: string, sessionId?: string, status: string, markerMatches: boolean }} event */
+    /** @param {{ requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string, status: string, markerMatches: boolean }} event */
     recordCompletion(event) {
+      rejectRawIdentityFields(event);
       return append({
         kind: 'message.complete',
-        requestTag: identityTag(event.requestId),
-        sessionTag: identityTag(event.sessionId),
+        requestTag: eventTag(event, 'requestTag', 'requestId'),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId'),
         status: boundedStatus(event.status),
         markerMatches: event.markerMatches === true
       });
@@ -283,6 +382,7 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
      * @param {{
      *   phase: 'pre-send'|'post-completion',
      *   status: number,
+     *   sessionTag?: string,
      *   sessionId?: string,
      *   historyComplete: boolean,
      *   watermarkEstablished: boolean,
@@ -298,6 +398,7 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
      * }} event
      */
     recordHistoryResponse(event) {
+      rejectRawIdentityFields(event);
       if (!Number.isInteger(event.status) || event.status < 100 || event.status > 599) {
         throw new Error('live proof ledger received an unsafe history status');
       }
@@ -305,7 +406,7 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
         kind: 'history.response',
         phase: boundedHistoryPhase(event.phase),
         status: event.status,
-        sessionTag: identityTag(event.sessionId),
+        sessionTag: eventTag(event, 'sessionTag', 'sessionId'),
         historyComplete: event.historyComplete === true,
         watermarkEstablished: event.watermarkEstablished === true,
         prefixStable: event.prefixStable === true,
@@ -374,36 +475,299 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** @param {unknown} value @returns {value is { present: boolean, value?: unknown }} */
-function isOptionalProjection(value) {
-  return isRecord(value) && (
-    value.present === false ||
-    (value.present === true && Object.prototype.hasOwnProperty.call(value, 'value'))
-  );
+const DESCRIPTOR_KEYS = Object.freeze(['value', 'writable', 'enumerable', 'configurable']);
+const RAW_MESSAGE_KEYS = Object.freeze([
+  'id', 'role', 'content', 'tool_calls', 'tool_name', 'tool_call_id', 'timestamp'
+]);
+const CANONICAL_MESSAGE_KEYS = Object.freeze([
+  'id', 'role', 'content', 'toolCalls', 'toolName', 'toolCallId', 'timestamp'
+]);
+const MESSAGE_KEYS = Object.freeze([...new Set([...RAW_MESSAGE_KEYS, ...CANONICAL_MESSAGE_KEYS])]);
+
+/**
+ * @param {unknown} descriptor
+ * @param {string} label
+ * @returns {PropertyDescriptor}
+ */
+function readNativeDataDescriptor(descriptor, label) {
+  if (descriptor === undefined || descriptor === null || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+    throw new Error(`${label} descriptor is malformed`);
+  }
+  let descriptorKeys;
+  try {
+    descriptorKeys = Reflect.ownKeys(descriptor);
+  } catch {
+    throw new Error(`${label} descriptor is malformed`);
+  }
+  if (
+    descriptorKeys.length !== DESCRIPTOR_KEYS.length ||
+    descriptorKeys.some((key) => typeof key !== 'string' || !DESCRIPTOR_KEYS.includes(key))
+  ) {
+    throw new Error(`${label} descriptor is malformed`);
+  }
+  for (const key of DESCRIPTOR_KEYS) {
+    const field = Object.getOwnPropertyDescriptor(descriptor, key);
+    if (
+      !field ||
+      !Object.prototype.hasOwnProperty.call(field, 'value') ||
+      Object.prototype.hasOwnProperty.call(field, 'get') ||
+      Object.prototype.hasOwnProperty.call(field, 'set') ||
+      field.enumerable !== true ||
+      field.writable !== true ||
+      field.configurable !== true
+    ) {
+      throw new Error(`${label} descriptor is malformed`);
+    }
+  }
+  const typedDescriptor = /** @type {PropertyDescriptor} */ (descriptor);
+  if (
+    typeof typedDescriptor.writable !== 'boolean' ||
+    typeof typedDescriptor.enumerable !== 'boolean' ||
+    typeof typedDescriptor.configurable !== 'boolean'
+  ) {
+    throw new Error(`${label} descriptor is malformed`);
+  }
+  return typedDescriptor;
 }
 
-/** @param {unknown} value @param {number} maxLength @param {string} message */
+/** @param {unknown} value @param {string} label @param {readonly string[]|undefined} allowedKeys @param {boolean} exact */
+function readStrictObject(value, label, allowedKeys = undefined, exact = false) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} is not a plain object`);
+  }
+  try {
+    const firstPrototype = Object.getPrototypeOf(value);
+    if (firstPrototype !== Object.prototype) throw new Error(`${label} is not a plain object`);
+    const firstKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+    const secondPrototype = Object.getPrototypeOf(value);
+    const secondKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+    if (
+      secondPrototype !== firstPrototype ||
+      firstKeys.length !== secondKeys.length ||
+      firstKeys.some((key, index) => key !== secondKeys[index]) ||
+      firstKeys.some((key) => typeof key !== 'string')
+    ) {
+      throw new Error(`${label} has unstable or symbol keys`);
+    }
+    const allowed = allowedKeys ? new Set(allowedKeys) : undefined;
+    if (allowed && firstKeys.some((key) => !allowed.has(key))) {
+      throw new Error(`${label} has unexpected keys`);
+    }
+    if (exact && allowed && (firstKeys.length !== allowed.size || [...allowed].some((key) => !firstKeys.includes(key)))) {
+      throw new Error(`${label} has unexpected keys`);
+    }
+    const values = new Map();
+    for (const key of firstKeys) {
+      const descriptor = readNativeDataDescriptor(
+        Object.getOwnPropertyDescriptor(value, key),
+        `${label}.${key}`
+      );
+      if (descriptor.writable !== true || descriptor.enumerable !== true || descriptor.configurable !== true) {
+        throw new Error(`${label}.${key} descriptor is malformed`);
+      }
+      const readBack = Reflect.get(value, key, value);
+      if (!Object.is(readBack, descriptor.value)) {
+        throw new Error(`${label}.${key} descriptor read-back changed`);
+      }
+      const secondDescriptor = readNativeDataDescriptor(
+        Object.getOwnPropertyDescriptor(value, key),
+        `${label}.${key}`
+      );
+      if (
+        !Object.is(secondDescriptor.value, descriptor.value) ||
+        secondDescriptor.writable !== descriptor.writable ||
+        secondDescriptor.enumerable !== descriptor.enumerable ||
+        secondDescriptor.configurable !== descriptor.configurable
+      ) {
+        throw new Error(`${label}.${key} descriptor changed`);
+      }
+      values.set(key, descriptor.value);
+    }
+    const finalKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+    if (
+      Object.getPrototypeOf(value) !== Object.prototype ||
+      finalKeys.length !== firstKeys.length ||
+      finalKeys.some((key, index) => key !== firstKeys[index])
+    ) {
+      throw new Error(`${label} has unstable or symbol keys`);
+    }
+    for (const key of firstKeys) {
+      const finalDescriptor = readNativeDataDescriptor(
+        Object.getOwnPropertyDescriptor(value, key),
+        `${label}.${key}`
+      );
+      if (
+        !Object.is(finalDescriptor.value, values.get(key)) ||
+        !Object.is(Reflect.get(value, key, value), finalDescriptor.value)
+      ) {
+        throw new Error(`${label}.${key} descriptor changed`);
+      }
+    }
+    return values;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (
+        error.message.startsWith(`${label} `) ||
+        error.message.startsWith(`${label}.`) ||
+        error.message.startsWith(`${label}[`)
+      )
+    ) {
+      throw error;
+    }
+    throw new Error(`${label} is not a trusted plain object`);
+  }
+}
+
+/** @param {unknown} value @param {string} label */
+function readStrictArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} is not a trusted array`);
+  }
+  const firstPrototype = Object.getPrototypeOf(value);
+  if (firstPrototype !== Array.prototype) {
+    throw new Error(`${label} is not a trusted array`);
+  }
+  const length = value.length;
+  if (!Number.isSafeInteger(length) || length < 0) throw new Error(`${label} length is invalid`);
+  let firstKeys;
+  let secondKeys;
+  let secondPrototype;
+  try {
+    firstKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+    secondPrototype = Object.getPrototypeOf(value);
+    secondKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+  } catch {
+    throw new Error(`${label} keys are invalid`);
+  }
+  if (
+    value.length !== length ||
+    secondPrototype !== firstPrototype ||
+    firstKeys.length !== secondKeys.length ||
+    firstKeys.some((key, index) => key !== secondKeys[index])
+  ) {
+    throw new Error(`${label} has unstable shape`);
+  }
+  if (
+    firstKeys.length !== length + 1 ||
+    firstKeys.some((key) => typeof key !== 'string') ||
+    !firstKeys.includes('length') ||
+    firstKeys.some((key) => key !== 'length' && (!/^[0-9]+$/u.test(key) || Number(key) >= length))
+  ) {
+    throw new Error(`${label} has unexpected keys`);
+  }
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  const normalizedLength = readNativeDataDescriptor(lengthDescriptor, `${label}.length`);
+  if (
+    normalizedLength.value !== length ||
+    normalizedLength.writable !== true ||
+    normalizedLength.enumerable !== false ||
+    normalizedLength.configurable !== false
+  ) {
+    throw new Error(`${label}.length descriptor is malformed`);
+  }
+  const result = [];
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    const descriptor = readNativeDataDescriptor(
+      Object.getOwnPropertyDescriptor(value, key),
+      `${label}[${index}]`
+    );
+    if (descriptor.writable !== true || descriptor.enumerable !== true || descriptor.configurable !== true) {
+      throw new Error(`${label}[${index}] descriptor is malformed`);
+    }
+    const readBack = Reflect.get(value, key, value);
+    if (!Object.is(readBack, descriptor.value)) {
+      throw new Error(`${label}[${index}] descriptor read-back changed`);
+    }
+    const secondDescriptor = readNativeDataDescriptor(
+      Object.getOwnPropertyDescriptor(value, key),
+      `${label}[${index}]`
+    );
+    if (
+      !Object.is(secondDescriptor.value, descriptor.value) ||
+      secondDescriptor.writable !== descriptor.writable ||
+      secondDescriptor.enumerable !== descriptor.enumerable ||
+      secondDescriptor.configurable !== descriptor.configurable ||
+      !Object.is(Reflect.get(value, key, value), secondDescriptor.value)
+    ) {
+      throw new Error(`${label}[${index}] descriptor changed`);
+    }
+    result.push(descriptor.value);
+  }
+  const finalKeys = /** @type {string[]} */ (Reflect.ownKeys(value));
+  if (
+    value.length !== length ||
+    Object.getPrototypeOf(value) !== Array.prototype ||
+    finalKeys.length !== firstKeys.length ||
+    finalKeys.some((key, index) => key !== firstKeys[index])
+  ) {
+    throw new Error(`${label} has unstable shape`);
+  }
+  const finalLengthDescriptor = readNativeDataDescriptor(
+    Object.getOwnPropertyDescriptor(value, 'length'),
+    `${label}.length`
+  );
+  if (
+    finalLengthDescriptor.value !== length ||
+    finalLengthDescriptor.writable !== true ||
+    finalLengthDescriptor.enumerable !== false ||
+    finalLengthDescriptor.configurable !== false
+  ) {
+    throw new Error(`${label}.length descriptor changed`);
+  }
+  for (let index = 0; index < length; index += 1) {
+    const key = String(index);
+    const finalDescriptor = readNativeDataDescriptor(
+      Object.getOwnPropertyDescriptor(value, key),
+      `${label}[${index}]`
+    );
+    if (
+      !Object.is(finalDescriptor.value, result[index]) ||
+      !Object.is(Reflect.get(value, key, value), finalDescriptor.value)
+    ) {
+      throw new Error(`${label}[${index}] descriptor changed`);
+    }
+  }
+  return result;
+}
+
+/**
+ * Keep source-defined history text lossless: optional tool metadata and message
+ * content may be empty, but never exceed the reviewed size bound.
+ * @param {unknown} value
+ * @param {number} maxLength
+ * @param {string} message
+ */
 function boundedHistoryString(value, maxLength, message) {
   if (typeof value !== 'string' || value.length > maxLength) throw new Error(message);
   return value;
 }
 
 /** @param {unknown} value */
+function boundedHistorySessionId(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
+    throw new Error('live proof history session identity is invalid');
+  }
+  return value;
+}
+
+/** @param {unknown} value */
 function parseHistoryToolCalls(value) {
   if (value === null) return null;
-  if (!Array.isArray(value) || value.length > 64) {
+  if (!Array.isArray(value) || !Number.isSafeInteger(value.length) || value.length > 64) {
     throw new Error('live proof history tool calls are invalid');
   }
-  return value.map((toolCall) => {
-    if (!isRecord(toolCall) || !isRecord(toolCall.function)) {
-      throw new Error('live proof history tool call is invalid');
-    }
+  const toolCalls = readStrictArray(value, 'live proof history tool calls');
+  return toolCalls.map((toolCall, index) => {
+    const call = readStrictObject(toolCall, `live proof history tool call ${index}`, ['id', 'function'], true);
+    const functionValue = readStrictObject(call.get('function'), `live proof history tool call ${index}.function`, ['name', 'arguments'], true);
     return {
-      id: boundedHistoryString(toolCall.id, MAX_ID_LENGTH, 'live proof history tool call id is invalid'),
+      id: boundedHistoryString(call.get('id'), MAX_ID_LENGTH, 'live proof history tool call id is invalid'),
       function: {
-        name: boundedHistoryString(toolCall.function.name, 512, 'live proof history tool name is invalid'),
+        name: boundedHistoryString(functionValue.get('name'), 512, 'live proof history tool name is invalid'),
         arguments: boundedHistoryString(
-          toolCall.function.arguments,
+          functionValue.get('arguments'),
           8_192,
           'live proof history tool arguments are invalid'
         )
@@ -416,7 +780,8 @@ function parseHistoryToolCalls(value) {
 function parseHistoryTimestamp(value) {
   if (
     typeof value !== 'number' ||
-    !Number.isFinite(value) ||
+    !Number.isSafeInteger(value) ||
+    Object.is(value, -0) ||
     value < 0 ||
     value > 4_294_967_295
   ) {
@@ -425,23 +790,40 @@ function parseHistoryTimestamp(value) {
   return value;
 }
 
+/** @param {unknown} projection @param {string} label @param {(value: unknown) => unknown} parser */
+function parseOptionalProjection(projection, label, parser) {
+  const properties = readStrictObject(projection, label, ['present', 'value'], false);
+  const present = properties.get('present');
+  if (present === false && properties.size === 1) return { present: false };
+  if (present === true && properties.size === 2) {
+    return { present: true, value: parser(properties.get('value')) };
+  }
+  throw new Error(`${label} projection is malformed`);
+}
+
 /**
  * Read one reviewed optional field without collapsing omitted and explicit null.
+ * A malformed canonical projection is terminal; it never falls back to raw data.
  * Parsed rows use camelCase marker objects; raw Hermes rows use snake_case keys.
  *
- * @param {Record<string, any>} value
+ * @param {Map<string, unknown>} properties
  * @param {string} rawKey
  * @param {string} canonicalKey
  * @param {(value: unknown) => unknown} parser
  */
-function parseReviewedOptional(value, rawKey, canonicalKey, parser) {
-  const canonical = value[canonicalKey];
-  if (isOptionalProjection(canonical)) {
-    if (!canonical.present) return { present: false };
-    return { present: true, value: parser(canonical.value) };
+function parseReviewedOptional(properties, rawKey, canonicalKey, parser) {
+  const hasCanonical = properties.has(canonicalKey);
+  const hasRaw = rawKey !== canonicalKey && properties.has(rawKey);
+  if (hasCanonical && hasRaw) throw new Error(`live proof history ${canonicalKey} projection is ambiguous`);
+  if (hasCanonical) {
+    const value = properties.get(canonicalKey);
+    if (canonicalKey === 'timestamp' && (value === null || typeof value !== 'object')) {
+      return { present: true, value: parser(value) };
+    }
+    return parseOptionalProjection(value, `live proof history ${canonicalKey}`, parser);
   }
-  if (!Object.prototype.hasOwnProperty.call(value, rawKey)) return { present: false };
-  return { present: true, value: parser(value[rawKey]) };
+  if (!hasRaw) return { present: false };
+  return { present: true, value: parser(properties.get(rawKey)) };
 }
 
 /**
@@ -457,33 +839,36 @@ function parseReviewedOptional(value, rawKey, canonicalKey, parser) {
  * }}
  */
 function parseHistoryMessage(value) {
-  if (!isRecord(value)) throw new Error('live proof history message is invalid');
-  const role = value.role;
+  const properties = readStrictObject(value, 'live proof history message', MESSAGE_KEYS, false);
+  if (!properties.has('id') || !properties.has('role') || !properties.has('content')) {
+    throw new Error('live proof history message is incomplete');
+  }
+  const role = properties.get('role');
   if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') {
     throw new Error('live proof history message role is invalid');
   }
-  const content = value.content;
+  const content = properties.get('content');
   if (content !== null && (typeof content !== 'string' || content.length > 8_192)) {
     throw new Error('live proof history message content is invalid');
   }
   return {
-    id: boundedMessageId(value.id),
+    id: boundedMessageId(properties.get('id')),
     role,
     content,
-    toolCalls: parseReviewedOptional(value, 'tool_calls', 'toolCalls', parseHistoryToolCalls),
+    toolCalls: parseReviewedOptional(properties, 'tool_calls', 'toolCalls', parseHistoryToolCalls),
     toolName: parseReviewedOptional(
-      value,
+      properties,
       'tool_name',
       'toolName',
       (item) => item === null ? null : boundedHistoryString(item, 512, 'live proof history tool name is invalid')
     ),
     toolCallId: parseReviewedOptional(
-      value,
+      properties,
       'tool_call_id',
       'toolCallId',
       (item) => item === null ? null : boundedHistoryString(item, MAX_ID_LENGTH, 'live proof history tool call id is invalid')
     ),
-    timestamp: parseReviewedOptional(value, 'timestamp', 'timestamp', parseHistoryTimestamp)
+    timestamp: parseReviewedOptional(properties, 'timestamp', 'timestamp', parseHistoryTimestamp)
   };
 }
 
@@ -494,18 +879,35 @@ function canonicalHistoryMessage(value) {
 
 /** @param {unknown} value */
 function requireHistoryResponse(value) {
-  if (!isRecord(value)) throw new Error('live proof history response is invalid');
-  if (!('session_id' in value) || !('messages' in value) || !('pagination' in value)) {
+  const properties = readStrictObject(
+    value,
+    'live proof history response',
+    ['session_id', 'messages', 'pagination'],
+    true
+  );
+  if (!properties.has('session_id') || !properties.has('messages') || !properties.has('pagination')) {
     throw new Error('live proof history response is incomplete');
   }
-  if (!Array.isArray(value.messages) || value.messages.length > LIVE_PROOF_HISTORY_LIMIT) {
+  const rawMessages = properties.get('messages');
+  if (
+    !Array.isArray(rawMessages) ||
+    !Number.isSafeInteger(rawMessages.length) ||
+    rawMessages.length > LIVE_PROOF_HISTORY_LIMIT
+  ) {
     throw new Error('live proof history exceeded its bound');
   }
-  if (!isRecord(value.pagination)) throw new Error('live proof history pagination is incomplete');
-  if (!('limit' in value.pagination) || !('offset' in value.pagination) || !('returned' in value.pagination)) {
-    throw new Error('live proof history pagination is incomplete');
-  }
-  return /** @type {Record<string, any>} */ (value);
+  const messages = readStrictArray(rawMessages, 'live proof history messages');
+  const pagination = readStrictObject(
+    properties.get('pagination'),
+    'live proof history pagination',
+    ['limit', 'offset', 'returned'],
+    true
+  );
+  return {
+    sessionId: boundedHistorySessionId(properties.get('session_id')),
+    messages,
+    pagination
+  };
 }
 
 /**
@@ -532,6 +934,7 @@ export function matchLiveProofHistory(response, expected) {
     (expected.phase !== 'pre-send' && expected.phase !== 'post-completion') ||
     typeof expected.sessionId !== 'string' ||
     expected.sessionId.length === 0 ||
+    expected.sessionId.length > MAX_ID_LENGTH ||
     expected.prompt !== LIVE_PROOF_PROMPT ||
     expected.assistantMarker !== LIVE_PROOF_ASSISTANT_MARKER ||
     typeof expected.messageProjectionTagger !== 'function'
@@ -549,11 +952,11 @@ export function matchLiveProofHistory(response, expected) {
   }
   const pagination = candidate.pagination;
   const historyComplete =
-    pagination.limit === LIVE_PROOF_HISTORY_LIMIT &&
-    pagination.offset === 0 &&
-    pagination.returned === messages.length &&
+    pagination.get('limit') === LIVE_PROOF_HISTORY_LIMIT &&
+    pagination.get('offset') === 0 &&
+    pagination.get('returned') === messages.length &&
     messages.length < LIVE_PROOF_HISTORY_LIMIT;
-  const sessionMatches = candidate.session_id === expected.sessionId;
+  const sessionMatches = candidate.sessionId === expected.sessionId;
   const historyProjectionTag = requiredTag(expected.messageProjectionTagger(messages));
   const watermark = ids.length === 0 ? 0 : Math.max(...ids);
   const watermarkEstablished = expected.phase === 'pre-send' && historyComplete && sessionMatches;

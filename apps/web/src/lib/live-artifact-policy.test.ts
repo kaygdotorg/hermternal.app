@@ -13,7 +13,11 @@ import {
   getLivePlaywrightPaths,
   isLiveReconciliationEnabled
 } from '../../tests/live/live-playwright-config.mjs';
-import { createLiveProofLedger, matchLiveProofLedger } from '../../tests/live/live-proof-ledger.mjs';
+import {
+  createLiveProofLedger,
+  createLiveProofTestSigner,
+  matchLiveProofLedger
+} from '../../tests/live/live-proof-ledger.mjs';
 import {
   LIVE_ARTIFACT_REDACTION,
   assertLiveRunnerDebugDisabled,
@@ -1680,7 +1684,10 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(reconciliationSource).not.toContain("prompt.submit");
     expect(reconciliationSource).not.toContain("Message Hermes");
 
-    const emptyLedger = createLiveProofLedger();
+    const emptyLedger = createLiveProofLedger(256, {
+      signer: createLiveProofTestSigner(),
+      allowTestSigner: true
+    });
     expect(matchLiveProofLedger(emptyLedger.snapshot(), {})).toMatchObject({
       promptCount: 0,
       completionCount: 0

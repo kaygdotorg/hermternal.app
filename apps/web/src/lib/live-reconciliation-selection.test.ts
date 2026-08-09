@@ -6,7 +6,11 @@ import {
   createLivePlaywrightConfig,
   getLivePlaywrightPaths
 } from '../../tests/live/live-playwright-config.mjs';
-import { createLiveProofLedger, matchLiveProofLedger } from '../../tests/live/live-proof-ledger.mjs';
+import {
+  createLiveProofLedger,
+  createLiveProofTestSigner,
+  matchLiveProofLedger
+} from '../../tests/live/live-proof-ledger.mjs';
 
 function configForReconciliationSelection() {
   const appRoot = resolve(process.cwd());
@@ -37,7 +41,10 @@ describe('reconciliation test selection contract', () => {
       ]);
       expect(config.testMatch).not.toContain('official-hermes');
       expect(config.testMatch).not.toContain('capture');
-      expect(matchLiveProofLedger(createLiveProofLedger().snapshot(), {})).toMatchObject({
+      expect(matchLiveProofLedger(createLiveProofLedger(256, {
+        signer: createLiveProofTestSigner(),
+        allowTestSigner: true
+      }).snapshot(), {})).toMatchObject({
         promptCount: 0,
         completionCount: 0
       });

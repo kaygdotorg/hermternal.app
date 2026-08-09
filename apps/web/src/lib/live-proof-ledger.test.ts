@@ -6,9 +6,17 @@ import {
   assertLiveProofHappensBefore,
   assertLiveProofLedgerCaptureReady,
   createLiveProofLedger,
+  createLiveProofTestSigner,
   matchLiveProofHistory,
   matchLiveProofLedger
 } from '../../tests/live/live-proof-ledger.mjs';
+
+function createTestLedger(maxEvents?: number) {
+  return createLiveProofLedger(maxEvents, {
+    signer: createLiveProofTestSigner(),
+    allowTestSigner: true
+  });
+}
 
 function expectedTags(ledger: ReturnType<typeof createLiveProofLedger>) {
   return {
@@ -46,7 +54,7 @@ function historyEvent(
 }
 
 function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}) {
-  const ledger = createLiveProofLedger();
+  const ledger = createTestLedger();
   const preMessages = proofMessages([10, 11]);
   const postMessages = proofMessages();
   ledger.recordWebSocketOpen({
@@ -96,8 +104,131 @@ function proofMessages(ids: number[] = [10, 11, 12, 13]) {
 }
 
 describe('bounded live proof ledger', () => {
+  it('requires an explicit page signer and keeps test signing opt-in', () => {
+    expect(() => createLiveProofLedger()).toThrow('page-local signer');
+    expect(() => createLiveProofLedger(256, { signer: createLiveProofTestSigner() })).toThrow(
+      'explicit test opt-in'
+    );
+    expect(() => createTestLedger().recordPrompt({
+      requestId: 'raw-request',
+      sessionId: 'raw-session',
+      promptMatches: true
+    })).not.toThrow();
+    const production = createLiveProofLedger(256, { signer: { kind: 'page' } });
+    expect(() => production.recordPrompt({
+      requestId: 'raw-request',
+      sessionId: 'raw-session',
+      promptMatches: true
+    })).toThrow('raw dynamic identity');
+    const pageTag = createTestLedger().identityTag('page-session');
+    expect(() => production.recordPrompt({
+      requestTag: pageTag,
+      sessionTag: pageTag,
+      promptMatches: true
+    })).not.toThrow();
+    expect(() => production.identityTag('page-session')).toThrow('page realm');
+    expect(() => production.messageProjectionTag([])).toThrow('page realm');
+    expect(() => createLiveProofLedger(256, {
+      signer: { kind: 'test', sign: () => undefined as unknown as string },
+      allowTestSigner: true
+    }).identityTag('raw-request')).toThrow('identity tag');
+  });
+
+  it('rejects hostile optional descriptors, wrappers, proxies, and fractional timestamps', () => {
+    const ledger = createTestLedger();
+    const accessor = {
+      id: 1,
+      role: 'assistant',
+      content: 'answer',
+      toolCalls: { present: true, value: null }
+    };
+    Object.defineProperty(accessor.toolCalls, 'present', {
+      configurable: true,
+      enumerable: true,
+      get: () => true
+    });
+    expect(() => ledger.messageProjectionTag([accessor])).toThrow('descriptor');
+
+    const extra = {
+      id: 1,
+      role: 'assistant',
+      content: 'answer',
+      toolCalls: { present: false, value: null }
+    };
+    expect(() => ledger.messageProjectionTag([extra])).toThrow('projection is malformed');
+
+    const fallback = {
+      id: 1,
+      role: 'assistant',
+      content: 'answer',
+      toolCalls: { present: 'yes' },
+      tool_calls: null
+    };
+    expect(() => ledger.messageProjectionTag([fallback])).toThrow();
+
+    const hostileProxy = new Proxy(
+      { id: 1, role: 'assistant', content: 'answer' },
+      {
+        getOwnPropertyDescriptor(target, key) {
+          if (key === 'content') {
+            return {
+              configurable: true,
+              enumerable: true,
+              get: () => 'answer'
+            };
+          }
+          return Object.getOwnPropertyDescriptor(target, key);
+        }
+      }
+    );
+    expect(() => ledger.messageProjectionTag([hostileProxy])).toThrow('descriptor');
+
+    let ownKeysCalls = 0;
+    const unstableArray = new Proxy(
+      [{ id: 1, role: 'assistant', content: 'answer' }],
+      {
+        ownKeys(target) {
+          ownKeysCalls += 1;
+          const keys = Reflect.ownKeys(target);
+          return ownKeysCalls === 1 ? keys : [...keys, 'extra'];
+        }
+      }
+    );
+    expect(() => ledger.messageProjectionTag(unstableArray)).toThrow('unstable shape');
+
+    let addedExtra = false;
+    const lateExtraProxy = new Proxy(
+      { id: 1, role: 'assistant', content: 'answer' },
+      {
+        getOwnPropertyDescriptor(target, key) {
+          if (!addedExtra && key === 'content') {
+            addedExtra = true;
+            Object.defineProperty(target, 'extra', {
+              configurable: true,
+              enumerable: true,
+              writable: true,
+              value: true
+            });
+          }
+          return Object.getOwnPropertyDescriptor(target, key);
+        }
+      }
+    );
+    expect(() => ledger.messageProjectionTag([lateExtraProxy])).toThrow('unstable or symbol keys');
+
+    expect(() => ledger.messageProjectionTag([
+      { id: 1, role: 'assistant', content: 'answer', timestamp: 1.5 }
+    ])).toThrow('timestamp');
+    expect(() => ledger.messageProjectionTag([
+      { id: 1, role: 'assistant', content: 'answer', timestamp: Number.NaN }
+    ])).toThrow('timestamp');
+    expect(() => ledger.messageProjectionTag([
+      { id: 1, role: 'assistant', content: 'answer', timestamp: 4_294_967_296 }
+    ])).toThrow('timestamp');
+  });
+
   it('keeps a bounded typed sequence and refuses overflow', () => {
-    const ledger = createLiveProofLedger(16);
+    const ledger = createTestLedger(16);
     for (let index = 0; index < 16; index += 1) {
       ledger.recordHttpRequest({ method: 'GET', route: 'auth.me' });
     }
@@ -142,8 +273,69 @@ describe('bounded live proof ledger', () => {
     expect(serialized).toContain('h1:');
   });
 
+  it('binds every reviewed row field and optional presence state in the tag', () => {
+    const ledger = createTestLedger();
+    const base = {
+      id: 1,
+      role: 'tool',
+      content: 'tool output',
+      tool_calls: [{ id: 'call-1', function: { name: 'lookup', arguments: '{}' } }],
+      tool_name: 'lookup',
+      tool_call_id: 'call-1',
+      timestamp: 1_700_000_000
+    };
+    const tag = (row: Record<string, unknown>) => ledger.messageProjectionTag([row]);
+    expect(() => tag({ id: 1, role: 'assistant', content: '' })).not.toThrow();
+    expect(() => tag({
+      id: 1,
+      role: 'tool',
+      content: '',
+      tool_calls: [{ id: '', function: { name: '', arguments: '' } }],
+      tool_name: '',
+      tool_call_id: ''
+    })).not.toThrow();
+    expect(tag(base)).not.toBe(tag({ ...base, id: 2 }));
+    expect(tag(base)).not.toBe(tag({ ...base, role: 'assistant' }));
+    expect(tag(base)).not.toBe(tag({ ...base, content: 'changed' }));
+    expect(tag(base)).not.toBe(tag({ ...base, tool_calls: null }));
+    expect(tag(base)).not.toBe(tag({
+      ...base,
+      tool_calls: [{ id: 'call-1', function: { name: 'lookup', arguments: 'changed' } }]
+    }));
+    expect(tag(base)).not.toBe(tag({ ...base, tool_name: 'other' }));
+    expect(tag(base)).not.toBe(tag({ ...base, tool_call_id: 'other' }));
+    expect(tag(base)).not.toBe(tag({ ...base, timestamp: 1_700_000_001 }));
+    expect(() => tag({ ...base, content: 'x'.repeat(8_193) })).toThrow('content');
+    expect(() => tag({ ...base, tool_name: 'x'.repeat(513) })).toThrow('tool name');
+    expect(() => tag({ ...base, tool_name: undefined })).toThrow('tool name');
+    const explicitNull = {
+      id: 1,
+      role: 'tool',
+      content: 'tool output',
+      tool_calls: null,
+      tool_name: null,
+      tool_call_id: null,
+      timestamp: 1_700_000_000
+    };
+    expect(tag(explicitNull)).not.toBe(tag({
+      id: 1,
+      role: 'tool',
+      content: 'tool output',
+      timestamp: 1_700_000_000
+    }));
+    expect(tag(explicitNull)).toBe(tag({
+      id: 1,
+      role: 'tool',
+      content: 'tool output',
+      toolCalls: { present: true, value: null },
+      toolName: { present: true, value: null },
+      toolCallId: { present: true, value: null },
+      timestamp: 1_700_000_000
+    }));
+  });
+
   it('canonicalizes dynamic session routes before retaining HTTP events', () => {
-    const ledger = createLiveProofLedger();
+    const ledger = createTestLedger();
     const rawSessionId = 'raw-session-id-must-not-survive';
     ledger.recordHttpRequest({
       method: 'GET',
@@ -163,7 +355,7 @@ describe('bounded live proof ledger', () => {
   });
 
   it('binds prefix stability to the full reviewed message projection', () => {
-    const ledger = createLiveProofLedger();
+    const ledger = createTestLedger();
     const pre = matchLiveProofHistory(
       historyResponse('stored-1', [
         { id: 10, role: 'system', content: null },
@@ -322,7 +514,7 @@ describe('bounded live proof ledger', () => {
   });
 
   it('requires an exact post-watermark pair and rejects stale-only history', () => {
-    const ledger = createLiveProofLedger();
+    const ledger = createTestLedger();
     const pre = matchLiveProofHistory(
       historyResponse('stored-1', [
         { id: 10, role: 'system', content: null },
@@ -383,7 +575,7 @@ describe('bounded live proof ledger', () => {
   });
 
   it('rejects prefix or suffix marker text, extra candidates, and session mismatch', () => {
-    const ledger = createLiveProofLedger();
+    const ledger = createTestLedger();
     const pre = matchLiveProofHistory(
       historyResponse('stored-1', [
         { id: 10, role: 'system', content: null },
@@ -450,7 +642,7 @@ describe('bounded live proof ledger', () => {
   });
 
   it('fails closed on duplicate IDs, incomplete pagination, and an unbounded page', () => {
-    const ledger = createLiveProofLedger();
+    const ledger = createTestLedger();
     const expected = {
       phase: 'pre-send' as const,
       sessionId: 'stored-1',
@@ -458,6 +650,14 @@ describe('bounded live proof ledger', () => {
       assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
       messageProjectionTagger: ledger.messageProjectionTag
     };
+    expect(() => matchLiveProofHistory(
+      historyResponse('x'.repeat(257), []),
+      expected
+    )).toThrow('session identity');
+    expect(() => matchLiveProofHistory(
+      historyResponse('stored-1', []),
+      { ...expected, sessionId: 'x'.repeat(257) }
+    )).toThrow('matcher input');
     expect(() => matchLiveProofHistory(
       historyResponse('stored-1', [
         { id: 10, role: 'system', content: null },

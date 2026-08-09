@@ -66,13 +66,45 @@ command, and the SHA-256 of the returned PNG. It never attaches or writes
 prompt text, transcripts, provider payloads, tickets, cookies, credentials,
 WebSocket frames, PTY bytes, stdout/stderr, traces, or test results.
 
-The live proof uses a bounded typed in-memory ledger. Raw request and session
-identities are never retained: a fresh attempt-local HMAC key converts each
-transient identity to an `h1:` tag before it enters the ledger. The ledger keeps
+The live proof uses a bounded typed in-memory ledger with a deliberate page/Node
+retention boundary. The page bridge creates one attempt-local, nonextractable
+Web Crypto HMAC-SHA-256 key in the browser realm and turns each transient request
+or session identity into an `h1:` tag before the projection crosses to Playwright.
+The key cannot be exported and is never sent to Node. In the approved production
+path the Node ledger receives only bounded page-produced tags through its
+`{ kind: 'page' }` signer; the Node module has no HMAC key, does not create or
+verify a tag, and cannot derive one from a raw identity. The deterministic Node
+signer exists only behind an explicit unit-test opt-in. The ledger keeps
 only fixed method/route/event projections, HMAC tags, statuses, booleans, and
 bounded counts; dynamic session paths are reduced to fixed route templates. The
-HMAC key, message rows, message IDs, prompt, response body, frames, and
+page key, message rows, message IDs, prompt, response body, frames, and
 watermark are discarded outside the one-shot assertion step.
+
+Canonical history projections are strict on both shape and value. They snapshot
+plain own data properties, reject accessors, inconsistent proxy-backed
+observations, symbol or unknown keys, extra optional-wrapper properties,
+ambiguous raw/canonical aliases, and
+malformed `{ present, value }` descriptors. Omitted and explicit-null optional
+fields remain distinct. Reviewed timestamps must be non-negative safe integers
+no greater than `2^32 - 1`; fractional, non-finite, or otherwise malformed
+values fail closed before a projection tag is produced. This prevents a lenient
+Node-side parser from widening the page-produced canonical boundary.
+
+`live-proof-parent-compat.mjs` is intentionally a focused offline migration
+probe. It loads only `live-proof-ledger.mjs` from exact parent commit
+`a98b3ad901292ff3434f19e8a17f9e9b1eab4d65` and the working-tree child, then
+contrasts the old default Node-HMAC and lenient projection behavior with the
+child's page-signer requirement and strict rejection of malformed optional
+shapes and fractional timestamps. It does not import the live host, reporter,
+capture, browser, or reconciliation surfaces because none of those boundaries
+changed in this compatibility correction. Run it directly with Node:
+
+```sh
+node apps/web/tests/live/live-proof-parent-compat.mjs
+```
+
+It uses only the local Git object database and does not start Hermes, open a
+network connection, install dependencies, or retain source rows.
 
 The proof must resume an existing durable canonical session. The pinned Hermes
 source persists a newly created session lazily on its first prompt, so a fresh
