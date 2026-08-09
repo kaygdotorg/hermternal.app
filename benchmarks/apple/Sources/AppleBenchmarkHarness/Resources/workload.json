@@ -1,0 +1,59 @@
+{
+  "schema": "hermternal.apple-benchmark-fixture.v1",
+  "fixture_id": "apple-release-mock-workload",
+  "fixture_version": "1.0.0",
+  "seed": 1080427,
+  "repetitions": {
+    "cold": 30,
+    "warm": 30,
+    "maximum": 120
+  },
+  "warmup_repetitions": 1,
+  "target_platforms": [
+    "ios",
+    "ipados",
+    "macos"
+  ],
+  "build": {
+    "mode": "release",
+    "optimization": "swiftc -O",
+    "metadata_status": "scaffold_only"
+  },
+  "operations": [
+    {
+      "id": "launch-setup-state",
+      "kind": "launch_setup_state_construction",
+      "item_count": 96,
+      "batch_size": 1,
+      "text_length": 0
+    },
+    {
+      "id": "streaming-batch-reduction",
+      "kind": "streaming_batch_reduction",
+      "item_count": 256,
+      "batch_size": 16,
+      "text_length": 32
+    },
+    {
+      "id": "transcript-diff-scroll",
+      "kind": "transcript_diff_scroll_model",
+      "item_count": 128,
+      "batch_size": 1,
+      "text_length": 48
+    },
+    {
+      "id": "scene-restoration-serialization",
+      "kind": "scene_restoration_serialization",
+      "item_count": 32,
+      "batch_size": 1,
+      "text_length": 0
+    },
+    {
+      "id": "dynamic-type-layout",
+      "kind": "dynamic_type_layout_calculation",
+      "item_count": 192,
+      "batch_size": 1,
+      "text_length": 72
+    }
+  ]
+}
