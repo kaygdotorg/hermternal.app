@@ -214,18 +214,28 @@ The generator walks a bounded, full `HEAD` commit topology for the parser and
 focused test paths. Shallow repositories and incomplete parent output fail closed
 before a source predecessor can be selected. The preflight also rejects grafts,
 replacement refs, local or HTTP alternates, promisor/partial-clone metadata,
-lazy-fetch controls, and unsafe Git indirection. Normal repositories and validated
-linked worktrees are supported; their common directory, object directory, gitfile,
-and worktree metadata must resolve inside the expected repository context. The
-trusted common directory is the canonical non-symlink `.git` directory on the
-checkout's ancestor chain, so a linked worktree may keep common metadata outside
-itself but copied sibling metadata cannot authorize provenance. A relative linked-
-worktree `gitdir:` is resolved against the containing `.git` file with component-
-wise `O_NOFOLLOW` traversal; direct `..` paths remain supported, while symlinked
-redirects and escapes fail closed. Standalone `--separate-git-dir` checkouts are
-explicitly unsupported because they do not provide this trusted ancestor root.
-The preflight returns a bounded topology snapshot and repeats it after traversal
-so forbidden metadata created mid-calculation cannot authorize a result.
+lazy-fetch controls, and unsafe Git indirection. Normal repositories and validated sibling or out-of-tree linked worktrees are
+supported. Their common directory, object directory, gitfile, and reciprocal
+worktree metadata are opened component-wise with `O_NOFOLLOW`, then bound by
+retained device, inode, and file-type identities. Regular metadata files also
+retain bounded expected bytes. The `lstat`/`O_NOFOLLOW`/`fstat` comparison closes
+the replacement window during one open, while every later Git call revalidates
+the retained descriptors and identities before and after pathname-based
+execution. A supplied project root that is itself a symlink alias is rejected;
+harmless system aliases in its ancestors are canonicalized before pinning.
+A linked worktree's `gitdir`, `commondir`, and reciprocal `gitdir` must resolve
+back to the pinned marker and common directory. The common directory must also
+have the matching structural `.git` anchor at `common_dir.parent / ".git"`, which
+rejects the copied external-common topology covered by the regression suite.
+This is structural/content trust for the calculation, not proof of historical
+origin for a byte-for-byte copied Git database; the contract therefore does not
+claim an ambient external-path allowlist. Relative linked-worktree `gitdir:` is
+resolved against the containing `.git` file with component-wise `O_NOFOLLOW`
+traversal; direct `..` paths remain supported, while symlinked redirects and
+escapes fail closed. Standalone `--separate-git-dir` checkouts remain explicitly
+unsupported because they do not provide the required structural anchor. The
+preflight returns a bounded topology snapshot and repeats it after traversal so
+forbidden metadata or same-path swaps cannot authorize a result.
 
 It treats the implementation/test blob pair as the source identity, ignores
 mode-only commits (`100644` versus `100755`) and descendants that do not change
