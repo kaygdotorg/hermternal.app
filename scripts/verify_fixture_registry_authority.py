@@ -73,7 +73,10 @@ RECORD_KEYS = ("path", "blob_oid", "sha256", "size_bytes")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
-GIT_TIMEOUT_SECONDS = 10.0
+# A final seeded 96-MiB snapshot took 9.061 seconds for local strict fsck on
+# the measured macOS fixture host. Keep a separate finite 15-second process
+# cap rather than letting the expanded copy budget turn Git execution unbounded.
+GIT_TIMEOUT_SECONDS = 15.0
 # Ordinary metadata and loose objects stay at the conservative one-MiB cap.
 # Packed clones need a separate bound. The refreshed trusted four-ref bundle
 # produces a 33,787,115-byte pack in a fresh no-local single-head clone on
