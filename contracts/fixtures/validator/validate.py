@@ -188,7 +188,7 @@ ACTIVE_SOURCE_COMMIT_ENV = "HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT"
 # through a stable descriptor and match this source-level pin. It is not imported
 # by path, so a checkout edit cannot execute before authentication.
 HARDENED_AUTHORITY_VERIFIER_PATH = "scripts/verify_fixture_registry_authority.py"
-HARDENED_AUTHORITY_VERIFIER_SHA256 = "01a0b3db1a832ba07bd8f932df4abd892b738463f5d3246fd3880ef71dadd61d"
+HARDENED_AUTHORITY_VERIFIER_SHA256 = "1b2571a64cb39f1f6537801b2ed70afe01e0ea55987653f4f56fb336705402d3"
 HARDENED_AUTHORITY_VERIFIER_MAX_BYTES = 256 * 1024
 # Temporary-directory roots on macOS may expose /tmp through one of these
 # system aliases. All other ancestors stay no-follow descriptor anchored.

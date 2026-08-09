@@ -68,6 +68,12 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         )
         cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-class-repo-")
         cls.object_repo = (Path(cls.object_repo_temporary.name) / "repo").resolve()
+        branch = subprocess.check_output(
+            ["git", "-C", str(ROOT), "branch", "--show-current"], text=True
+        ).strip()
+        if not branch:
+            cls.object_repo_temporary.cleanup()
+            raise AssertionError("authority test source must have one checked-out branch")
         completed = subprocess.run(
             [
                 "git",
@@ -75,6 +81,8 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "--no-local",
                 "--no-hardlinks",
                 "--single-branch",
+                "--branch",
+                branch,
                 "--quiet",
                 str(ROOT),
                 str(cls.object_repo),
@@ -872,6 +880,29 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         with self.assertRaises(verifier.AuthorityError):
             verifier._git(object_repo, "cat-file", "blob", blob_oid)
         self.assertLess(time.monotonic() - started, 5)
+
+    def test_pack_at_exact_snapshot_limit_is_copied(self) -> None:
+        """The measured pack allowance is inclusive; only one byte over rejects."""
+
+        temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-pack-limit-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        source = root / "exact-limit.pack"
+        destination = root / "snapshot.pack"
+        source.write_bytes(b"x" * verifier.MAX_SNAPSHOT_PACK_FILE_BYTES)
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        try:
+            budget = verifier._SnapshotBudget.start()
+            verifier._copy_regular_from_fd(
+                descriptor,
+                destination,
+                budget,
+                verifier.PurePosixPath("objects/pack/exact-limit.pack"),
+            )
+        finally:
+            os.close(descriptor)
+        self.assertEqual(destination.stat().st_size, verifier.MAX_SNAPSHOT_PACK_FILE_BYTES)
+        self.assertEqual(budget.total_bytes, verifier.MAX_SNAPSHOT_PACK_FILE_BYTES)
 
     def test_oversized_snapshot_files_fail_closed_in_both_modes(self) -> None:
         variants = ("pack", "loose", "reflog", "metadata")
