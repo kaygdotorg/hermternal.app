@@ -17,6 +17,12 @@ from urllib.parse import urlsplit
 
 FIELDS = frozenset({"endpoint", "credential-file"})
 MAX_RESULT_TEXT = 2048
+# The helper is only a bridge from the freshly verified ``endpoint`` operation
+# into the child-environment credential handoff. Keeping this shape closed
+# prevents a ready ``start`` response or retained metadata from bypassing it.
+VERIFIED_ENDPOINT_RESULT_KEYS = frozenset(
+    {"instance", "container", "endpoint", "image", "data_path", "credential_file", "status"}
+)
 
 
 class LauncherResultError(Exception):
@@ -62,17 +68,30 @@ def _endpoint(value: object) -> str:
 
 
 def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
-    """Return the public endpoint and credential-file metadata under ``result``."""
+    """Return metadata only from the closed, freshly verified endpoint result."""
 
     try:
         document = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
         raise LauncherResultError() from None
-    if not isinstance(document, dict) or document.get("ok") is not True:
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"ok", "operation", "result"}
+        or document.get("ok") is not True
+        or document.get("operation") != "endpoint"
+    ):
         raise LauncherResultError()
     result = document.get("result")
-    if not isinstance(result, dict):
+    if (
+        not isinstance(result, dict)
+        or set(result) != VERIFIED_ENDPOINT_RESULT_KEYS
+        or result.get("status") != "running"
+    ):
         raise LauncherResultError()
+    # Validate every public field in the closed response. This prevents callers
+    # from silently treating a partly retained or substituted result as proof.
+    for field in ("instance", "container", "image", "data_path"):
+        _metadata(result.get(field))
     return {
         "endpoint": _endpoint(result.get("endpoint")),
         "credential-file": _metadata(result.get("credential_file")),

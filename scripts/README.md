@@ -227,10 +227,11 @@ inspects the persisted immutable container ID, requires `running`, and requires
 exactly one `127.0.0.1:<requested-port>:9119` Dashboard mapping. It rejects a
 stopped tombstone, absent or stale ID, replacement, label/image/mount mismatch,
 missing or rebound port, additional mapping, and non-loopback publication before
-any credential-file read. `read_launcher_result.py` accepts only that canonical
-loopback endpoint and the matching credential-file metadata; it never infers a
-port or substitutes a remembered listener. Use the checked values immediately at
-the local live-proof handoff:
+any credential-file read. `read_launcher_result.py` accepts only the closed
+successful `endpoint` result with `status` `running`, its canonical loopback
+endpoint, and matching credential-file metadata; it rejects `start`, `status`,
+and retained metadata rather than inferring a port or substituting a remembered
+listener. Use the checked values immediately at the local live-proof handoff:
 
 ```sh
 HERMES_LIVE_TARGET="$endpoint" \

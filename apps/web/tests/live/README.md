@@ -29,11 +29,13 @@ persisted immutable launcher container ID, requires `running`, and requires the
 sole `127.0.0.1:<requested-port>:9119` mapping. A stopped tombstone, missing or
 stale mapping, replacement, launcher-ownership mismatch, rebound port, or
 non-loopback publication aborts before the credential file is read.
-`read_launcher_result.py` parses `.result.endpoint` and `.result.credential_file`
-from the launcher output. The handoff strips only trailing CR/LF, validates
-exactly 48 lowercase hexadecimal characters, and passes the value only as
-transient `HERMES_TEST_PASSWORD` child-process environment state. It never
-prints or writes the password, and invalid input fails before Playwright starts.
+`read_launcher_result.py` accepts only the closed successful `endpoint` result
+with `.result.status` `running`; it rejects `start`, `status`, and retained
+metadata before parsing `.result.endpoint` or `.result.credential_file`. The
+handoff strips only trailing CR/LF, validates exactly 48 lowercase hexadecimal
+characters, and passes the value only as transient `HERMES_TEST_PASSWORD`
+child-process environment state. It never prints or writes the password, and
+invalid input fails before Playwright starts.
 If the browser runs outside the VM, set `HERMES_LIVE_TARGET` to the approved
 local tunnel URL selected from that endpoint; do not hard-code or infer a port.
 Do not place the password in a command argument, repository file, fixture,

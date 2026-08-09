@@ -61,9 +61,10 @@ requires the launcher-owned container to be `running` with exactly one
 `127.0.0.1:<requested-port>:9119` mapping. It rejects stopped tombstones,
 missing/stale IDs, replacements, ownership mismatches, rebound or extra ports,
 and non-loopback mappings before any credential-file read.
-`read_launcher_result.py` accepts only the canonical launcher loopback endpoint
-and matching credential-file metadata; it never prints the password or infers a
-port.
+`read_launcher_result.py` accepts only the closed successful `endpoint` result
+with `status` `running`, its canonical launcher loopback endpoint, and matching
+credential-file metadata; it rejects `start`, `status`, and retained metadata.
+It never prints the password or infers a port.
 
 Do not print the credential file. A local test process may read it through the
 repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
