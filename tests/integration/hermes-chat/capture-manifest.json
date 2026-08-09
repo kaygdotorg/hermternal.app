@@ -1,0 +1,31 @@
+{
+  "schema": "hermternal.live-chat-screenshot-contract.v1",
+  "issue": "https://github.com/kaygdotorg/hermternal/issues/353",
+  "route": "/",
+  "browser": "chromium",
+  "device_pixel_ratio": 1,
+  "browser_zoom": 1,
+  "theme": "light",
+  "reduced_motion": "reduce",
+  "locale": "en-US",
+  "timezone": "UTC",
+  "capture_state": "authenticated-chat-message-complete-rest-reconciled-stable-v1",
+  "variants": [
+    {
+      "name": "desktop",
+      "width": 1440,
+      "height": 960
+    },
+    {
+      "name": "narrow",
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "status": "blocked",
+  "client_commit": "f00d0cfc47a698cf6d29c7e07d087c10c1c83c30",
+  "official_hermes_image": "docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+  "command": "bun run --cwd apps/web test:e2e:live --grep \"browser UI reaches the official Hermes gateway through completion\"",
+  "blocker": "issue-327-missing-authenticated-inference-capability",
+  "images": []
+}
