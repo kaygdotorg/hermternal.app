@@ -114,13 +114,11 @@ copy is chunked and category-bounded: ordinary metadata and loose objects use
 `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (64 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (128 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The previously
-refreshed four-ref trusted bundle measured a 49,802,392-byte macOS fresh-clone
-pack. A pending bundle rotation includes that reviewed bundle in checkout
-history, so the 64 MiB per-pack cap keeps a finite allowance for the measured
-pack plus its audited successor. A seeded clone retains two packs plus metadata;
-its prior measured snapshot total was 96,034,354 bytes, and the independent 128
-MiB total cap keeps that composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The final four-ref successor bundle measured a 53,949,336-byte macOS fresh-clone
+pack, leaving 13,159,528 bytes under the finite 64 MiB per-pack cap. A seeded
+clone retains two packs plus metadata; its measured snapshot total is
+104,271,517 bytes, leaving 29,946,211 bytes under the independent 128 MiB total
+cap without widening the 1 MiB non-pack cap. Snapshot entry,
 directory, file, depth, and retained path-storage budgets remain independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
 CI before content accounting. Strict Git execution remains separately capped at
