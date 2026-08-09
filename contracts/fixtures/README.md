@@ -42,40 +42,42 @@ the legacy path readable and places the new multi-artifact authority at
 `scripts/fixture_registry_authority.v2.json` with the explicit schema
 `hermternal.fixture-registry-authority.v2`.
 
-The standalone v2 verifier loads that separate path from its immutable Git
-introduction object. It can read the legacy v1 shape for migration checks, but
-it never treats the legacy path as a v2 fallback. The v2 trust root accepts
-only the approved external predecessor
-`abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
-ancestor is rejected. The trust root remains independent of the
-scanner-preparation change; after this authority is merged, that preparation
-must rebase onto the merged external predecessor before regenerating the index,
-baseline, and next authority.
+The bootstrap v2 verifier record remains readable historical evidence. The
+active standalone verifier instead loads
+`scripts/fixture_registry_authority.v2.hardened.json` from its exact immutable
+Git introduction object. It can read the legacy v1 and bootstrap v2 shapes for
+migration checks, but it never treats either historical path as an active
+fallback. The hardened trust root accepts only source commit
+`a707f5af9612118d6d41450c5090e5c11c3e5c10`, requires direct parentage from
+introduction commit `fc33b1f461321f319b8c2566d9f0faf6c535b77b`, and rejects an
+arbitrary self-consistent ancestor. The trust root remains independent of the
+scanner-preparation change; a later preparation must rebase onto the merged
+external predecessor before regenerating the index, baseline, and next
+authority.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
-`commondir`, object, ref, or config boundaries. Before any path-based Git
-command, it opens `/` and every caller ancestor through a descriptor-relative
-chain with no-follow flags, allowing only the explicit host aliases `/tmp`,
-`/var`, `/var/folders`, and `/var/tmp`; it then opens the caller root and `.git`
-directory from those held descriptors. It copies the complete Git metadata tree
-into a private mode-700 temporary snapshot. The copy is chunked and
-category-bounded: ordinary metadata and loose objects use
-`MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
-index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
+`commondir`, object, ref, or config boundaries. The standalone success fixture
+is materialized from the checked-in authority bundle as the exact reachable
+closure of loose objects. Before any path-based Git command, the verifier opens
+`/` and every caller ancestor through a descriptor-relative chain with no-follow
+flags, allowing only the explicit host aliases `/tmp`, `/var`, `/var/folders`,
+and `/var/tmp`; it then opens the caller root and `.git` directory from those
+held descriptors. It copies the complete Git metadata tree into a private
+mode-700 temporary snapshot. The copy is chunked and category-bounded: ordinary
+metadata and loose objects use `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every
+regular file under `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) so
+packed hostile inputs fail within the existing budget. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
-second) wall-clock deadline. The 8 MiB pack cap derives from the supported
-repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
-pack; it leaves measured growth headroom while keeping individual files
-bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
-metadata sizes. It rejects symlinks/non-regular entries and checks source
-metadata before and after each copy. Git then runs only against that snapshot,
-so concurrent rename or symlink replacement of nested fanout/pack/ref paths,
-config, or metadata cannot redirect reads. The snapshot also descriptor-walks
-the full `objects` and `refs` trees with no-follow descriptors as a second
-structural check. It fails closed on local grafts, shallow metadata, alternates
-and HTTP alternates,
+second) wall-clock deadline. The 1 MiB non-pack and 8 MiB pack caps remain
+unchanged. After the bounded snapshot, any nonempty pack metadata directory is
+rejected; the verifier accepts only the loose-object success fixture. It
+rejects symlinks/non-regular entries and checks source metadata before and after
+each copy. Git then runs only against that snapshot, so concurrent rename or
+symlink replacement of nested fanout/pack/ref paths, config, or metadata cannot
+redirect reads. The snapshot also descriptor-walks the full `objects` and
+`refs` trees with no-follow descriptors as a second structural check. It fails
+closed on local grafts, shallow metadata, alternates and HTTP alternates,
 replacement refs, partial-clone/promisor settings, and local include or
 URL-redirection config. Git is invoked only through validated `/usr/bin/git`
 with fixed helper `PATH` `/usr/bin:/bin`; inherited Git redirects and
