@@ -94,6 +94,13 @@ absolute filesystem paths. JSON is also walked recursively so `user`,
 `role: user`, `content`, `transcript`, `messages`, and related user/transcript
 payloads fail closed.
 
+The sensitive-assignment detector composes its approved name grammar from a
+separate source-safe constant before compiling the reviewed expression. This
+prevents the detector implementation itself from being retained as a
+credential-shaped example. The compiled pattern is asserted byte-for-byte
+against the reviewed grammar and adversarial assignment variants still reject;
+this is a source representation change, not a scanner allowance.
+
 Exemptions are narrow and structural:
 
 - exact reserved `.invalid` fixture authorities and their frozen mutation forms;

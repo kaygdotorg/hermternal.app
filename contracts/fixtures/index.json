@@ -557,27 +557,27 @@
       "files": [
         {
           "path": "deployment-security/host-origin-mapping/README.md",
-          "sha256": "199ff911e5b386d4a437ef762c520f6e5eafef776fbf9702a1481e2404788724",
-          "size_bytes": 12203
+          "sha256": "589d4f5b49f029f5e2fecea9a7fdd4da9575dc2d213a547add4867786c0082c7",
+          "size_bytes": 12689
         },
         {
           "path": "deployment-security/host-origin-mapping/cases.json",
-          "sha256": "0cf4f545eef2b9dba17792cef04fb8bfee1f785ada06c44d53a8e116a66b0b34",
+          "sha256": "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32",
           "size_bytes": 52421
         },
         {
           "path": "deployment-security/host-origin-mapping/test_validate.py",
-          "sha256": "2fdccc34467472d163cd82a98e7f9dd55035d82e5487b69bb02b80908d46e55e",
-          "size_bytes": 43123
+          "sha256": "33d0e2c05c47a8b5834548dd427933831b5632e2163f2851c6115efaa3686f68",
+          "size_bytes": 47869
         },
         {
           "path": "deployment-security/host-origin-mapping/validate.py",
-          "sha256": "afcf83a2e8fd7f343317e9ec7c5c75e87b2cfdf2564bfd3025970b85d8fb8c84",
-          "size_bytes": 60433
+          "sha256": "8a67da5efbc0fdfb17d2ba67fde8850765944e1d4475001d6cc1963f0d8c24ed",
+          "size_bytes": 60635
         },
         {
           "path": "deployment-security/host-origin-mapping/validation-baseline.json",
-          "sha256": "fe639d2bf83cd8cc12c5b9ed9ad102a66e2445a2d165f64ec6f5d9c313e1db60",
+          "sha256": "61c4e9d90fc1a93c023efaebe0372dcb381c1a7a95b917df4aa0b9ee098e1254",
           "size_bytes": 3032
         }
       ]
