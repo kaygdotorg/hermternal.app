@@ -1248,6 +1248,111 @@ def _parser_pin_head_refs(
     )
 
 
+def _parser_open_trusted_repository_anchor(
+    pin: _ParserGitMetadataPin,
+    project_root: Path,
+    common_dir: Path,
+) -> tuple[Path, _ParserMetadataIdentity, _ParserMetadataIdentity]:
+    """Open the common ``.git`` anchor from the retained root boundary.
+
+    A linked-worktree ``commondir`` is attacker-controlled metadata.  Its
+    parent must therefore be either a retained project-root ancestor or a
+    direct sibling beneath the retained project-root parent.  Opening the sibling and
+    its ``.git`` entry relative to the retained descriptor prevents a copied
+    ``/attacker-parent/.git/worktrees`` tree from becoming its own trust root.
+    """
+
+    boundary = pin.get(project_root)
+    candidate_root = common_dir.parent
+    root_parts = project_root.parts
+    candidate_parts = candidate_root.parts
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0)
+    if not nofollow:
+        raise ValueError("parser provenance requires O_NOFOLLOW Git metadata traversal")
+
+    child_descriptor: int | None = None
+    if candidate_parts == root_parts[: len(candidate_parts)]:
+        parent_descriptor = boundary.descriptors[len(candidate_parts) - 1]
+        parent_path = candidate_root
+        trusted_root_identity = _parser_metadata_identity(os.fstat(parent_descriptor))
+    elif len(candidate_parts) > 1 and candidate_parts[:-1] == root_parts[:-1]:
+        parent_descriptor = boundary.descriptors[len(root_parts) - 2]
+        parent_path = candidate_root
+        try:
+            before = os.lstat(candidate_root.name, dir_fd=parent_descriptor)
+            if stat.S_ISLNK(before.st_mode):
+                raise ValueError("parser provenance trusted repository metadata root contains a symlink")
+            child_descriptor = os.open(candidate_root.name, directory_flags, dir_fd=parent_descriptor)
+            opened = os.fstat(child_descriptor)
+            if _parser_metadata_identity(before) != _parser_metadata_identity(opened):
+                raise ValueError(
+                    "parser provenance trusted repository metadata root changed between inspection and open"
+                )
+            if not stat.S_ISDIR(opened.st_mode):
+                raise ValueError("parser provenance trusted repository metadata root is not a directory")
+            trusted_root_identity = _parser_metadata_identity(opened)
+            parent_descriptor = child_descriptor
+        except ValueError:
+            if child_descriptor is not None:
+                os.close(child_descriptor)
+            raise
+        except OSError as exc:
+            if child_descriptor is not None:
+                os.close(child_descriptor)
+            raise ValueError("parser provenance trusted repository metadata root cannot be opened") from exc
+    else:
+        raise ValueError("parser provenance requires a trusted repository metadata root")
+
+    anchor_descriptor: int | None = None
+    try:
+        try:
+            before = os.lstat(".git", dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise ValueError("parser provenance trusted repository metadata root is missing") from exc
+        if stat.S_ISLNK(before.st_mode):
+            raise ValueError("parser provenance trusted repository metadata root contains a symlink")
+        try:
+            anchor_descriptor = os.open(".git", directory_flags, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise ValueError("parser provenance trusted repository metadata root cannot be opened") from exc
+        opened = os.fstat(anchor_descriptor)
+        if _parser_metadata_identity(before) != _parser_metadata_identity(opened):
+            raise ValueError("parser provenance trusted repository metadata root changed between inspection and open")
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError("parser provenance trusted repository metadata root is not a directory")
+        return parent_path / ".git", _parser_metadata_identity(opened), trusted_root_identity
+    finally:
+        if anchor_descriptor is not None:
+            os.close(anchor_descriptor)
+        if child_descriptor is not None:
+            os.close(child_descriptor)
+
+
+def _parser_validate_trusted_common_dir(
+    pin: _ParserGitMetadataPin,
+    project_root: Path,
+    common_dir: Path,
+    common_watcher: _ParserPinnedMetadataPath,
+) -> None:
+    """Bind common metadata to an anchor opened from project-root ancestry."""
+
+    if common_dir.name != ".git":
+        raise ValueError("parser provenance requires a trusted repository metadata root")
+    anchor_path, anchor_identity, trusted_root_identity = _parser_open_trusted_repository_anchor(
+        pin, project_root, common_dir
+    )
+    trusted_root = pin.watch(common_dir.parent, "trusted repository metadata root", required=True)
+    if trusted_root.final_identity is None or trusted_root.final_identity[2] != stat.S_IFDIR:
+        raise ValueError("parser provenance trusted repository metadata root is not a directory")
+    if (
+        trusted_root.final_identity != trusted_root_identity
+        or anchor_path != common_dir
+        or anchor_identity != common_watcher.final_identity
+    ):
+        raise ValueError("parser provenance Git common directory is outside the trusted repository metadata root")
+
+
 def _parser_canonical_project_root(value: Path) -> Path:
     """Canonicalize the caller root while rejecting a symlinked root itself.
 
@@ -1339,9 +1444,7 @@ def _parser_prepare_git_pin(project_root: Path, budget: _ParserGitBudget) -> _Pa
         common_watcher = pin.watch(common_dir, "Git common directory", required=True)
         objects_dir = common_dir / "objects"
         objects_watcher = pin.watch(objects_dir, "Git objects directory", required=True)
-        anchor_watcher = pin.watch(common_dir.parent / ".git", "trusted repository metadata root", required=True)
-        if common_watcher.final_identity != anchor_watcher.final_identity:
-            raise ValueError("parser provenance Git common directory is not the trusted structural anchor")
+        _parser_validate_trusted_common_dir(pin, project_root, common_dir, common_watcher)
         if objects_watcher.final_identity is None:
             raise ValueError("parser provenance Git objects directory is missing")
         if git_watcher.final_identity is None or common_watcher.final_identity is None:
@@ -1406,9 +1509,7 @@ def _parser_pin_git_topology(
     git_dir = git_watcher.path
     common_dir = common_watcher.path
     objects_dir = objects_watcher.path
-    anchor_watcher = pin.watch(common_dir.parent / ".git", "trusted repository metadata root", required=True)
-    if common_watcher.final_identity != anchor_watcher.final_identity:
-        raise ValueError("parser provenance Git common directory is not the trusted structural anchor")
+    _parser_validate_trusted_common_dir(pin, project_root, common_dir, common_watcher)
     if objects_dir != common_dir / "objects" or objects_watcher.final_identity is None:
         raise ValueError("parser provenance Git metadata points outside the repository")
     if git_watcher.final_identity is None or common_watcher.final_identity is None:
