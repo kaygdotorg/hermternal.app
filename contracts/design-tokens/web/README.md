@@ -5,7 +5,8 @@
 ## Source and scope
 
 - Paper file: `01KZ6BB66KCWR2C4J2TSWQGDM7` (`Hermternal`)
-- Authentication page: `3-0`, `Web states — Authentication`, 34 artboards
+- Chat workspace page: `A-0`, `Chat workspace`, 34 artboards
+- Authentication page: `3-0`, `Web states — Authentication`, 48 artboards
 - Runtime page: `4-0`, `Web states — Runtime`, 68 artboards
 - Shared Chat–Terminal workspace page: `B-0`, 25 artboards
 - Terminal desktop lifecycle page: `E-0`, 22 artboards
@@ -19,7 +20,7 @@
 - Authentication and standalone Terminal desktop: `1440 × 900`
 - Narrow: `390 × 844`
 
-The generic inventory represents 102 artboards in 29 state records. The nested Terminal evidence inventory represents 78 artboards in 15 lifecycle, selector, accessibility, and continuity records. Every registered record is matched to the approved Paper snapshot; the manifest does not infer missing Paper evidence.
+The generic inventory represents 120 artboards in 30 state records. The nested Terminal evidence inventory represents 78 artboards in 15 lifecycle, selector, accessibility, and continuity records. Every registered record is matched to the approved Paper snapshot; the manifest does not infer missing Paper evidence.
 
 ## Evidence status
 
@@ -27,7 +28,7 @@ The generic inventory represents 102 artboards in 29 state records. The nested T
 - `blocked` means the state is relevant to v0.0.1 but one or more required variants are absent. The missing variant IDs are listed in `missing_variants`.
 - `deferred` means the UI family is retained as Paper reference evidence but excluded from v0.0.1 and targeted to v0.0.2.
 
-Private deep-link and Session Search records are deferred. They must not be treated as shipped v0.0.1 UI. No record is a production authentication, Hermes gateway, provider, or live-data claim.
+All 12 registered Authentication families now have complete four-variant Paper coverage. Private deep-link and Session Search records are deferred. They must not be treated as shipped v0.0.1 UI. No record is a production authentication, Hermes gateway, provider, or live-data claim.
 
 Terminal evidence is complete for the approved static Paper snapshot:
 
@@ -35,7 +36,7 @@ Terminal evidence is complete for the approved static Paper snapshot:
 - Selector evidence covers resting, hover, focused, pressed, selected, and keyboard sheets across light/dark desktop/narrow boards.
 - Accessibility evidence records keyboard focus, dark/narrow focus, zoom and text growth, reduced motion/transparency, forced colors, localization growth, touch targets, and focus order.
 - Continuity evidence records the static Chat → Terminal → Chat → Terminal sequence.
-- `paper_static_only` is `true`: Paper boards are static evidence and do not prove runtime interaction, focus transfer, motion, continuity, or error recovery.
+- `paper_static_only` is `true`: Paper boards are static evidence and do not prove runtime keyboard behavior, authentication behavior, focus transfer, motion, continuity, or error recovery.
 
 ## Validation
 

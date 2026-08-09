@@ -227,7 +227,10 @@ def state(
 # Expected state inventory is intentionally duplicated in code. The manifest is
 # user-facing data; this fixed table prevents a changed artboard ID/name from
 # authorizing a new implementation target without a validator change and review.
+# Authentication rows include the seven families that were previously blocked
+# for missing Paper variants; each now requires the approved four-variant set.
 EXPECTED_STATES = (
+    state("runtime.chat-workspace-resting", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "1-0", "Light / Desktop — Hermes workspace", 960), narrow("light.narrow", "66-0", "Light / Mobile — narrow workspace"), desktop("dark.desktop", "1KP-0", "Dark / Desktop — Hermes workspace", 960), narrow("dark.narrow", "1XV-0", "Dark / Mobile — narrow workspace")), ()),
     state("runtime.interrupted-response", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "59J-0", "Light / Desktop — interrupted response", 960), narrow("light.narrow", "5M9-0", "Light / Mobile — interrupted response"), desktop("dark.desktop", "5QL-0", "Dark / Desktop — interrupted response", 960), narrow("dark.narrow", "63B-0", "Dark / Mobile — interrupted response")), ()),
     state("runtime.loading-session", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "3RD-0", "Light / Desktop — loading session", 960), narrow("light.narrow", "BAX-0", "Light / Mobile — loading session"), desktop("dark.desktop", "3ZW-0", "Dark / Desktop — loading session", 960), narrow("dark.narrow", "BDA-0", "Dark / Mobile — loading session")), ()),
     state("runtime.offline", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "5FW-0", "Light / Desktop — offline", 960), narrow("light.narrow", "5OF-0", "Light / Mobile — offline"), desktop("dark.desktop", "5WY-0", "Dark / Desktop — offline", 960), narrow("dark.narrow", "65H-0", "Dark / Mobile — offline")), ()),
@@ -239,17 +242,17 @@ EXPECTED_STATES = (
     state("runtime.streaming-response", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "48F-0", "Light / Desktop — streaming response", 960), narrow("light.narrow", "BFN-0", "Light / Mobile — streaming response"), desktop("dark.desktop", "4PH-0", "Dark / Desktop — streaming response", 960), narrow("dark.narrow", "BI0-0", "Dark / Mobile — streaming response")), ()),
     state("runtime.reconnecting", "runtime", "ready", "v0.0.1", "runtime", (desktop("light.desktop", "4ES-0", "Light / Desktop — reconnecting", 960), narrow("light.narrow", "BKD-0", "Light / Mobile — reconnecting"), desktop("dark.desktop", "4VU-0", "Dark / Desktop — reconnecting", 960), narrow("dark.narrow", "BMQ-0", "Dark / Mobile — reconnecting")), ()),
     state("auth.provider-selection", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "3JJ-0", "Light / Desktop — provider selection", 900), narrow("light.narrow", "3JN-0", "Light / Mobile — provider selection"), desktop("dark.desktop", "3NU-0", "Dark / Desktop — provider selection", 900), narrow("dark.narrow", "3PU-0", "Dark / Mobile — provider selection")), ()),
-    state("auth.password-sign-in", "authentication", "blocked", "v0.0.1", "auth", (desktop("light.desktop", "3JK-0", "Light / Desktop — password sign in", 900), desktop("dark.desktop", "3OH-0", "Dark / Desktop — password sign in", 900)), ("light.narrow", "dark.narrow")),
-    state("auth.oauth-callback", "authentication", "blocked", "v0.0.1", "auth", (desktop("light.desktop", "3JL-0", "Light / Desktop — OAuth callback", 900), desktop("dark.desktop", "3P1-0", "Dark / Desktop — OAuth callback", 900)), ("light.narrow", "dark.narrow")),
-    state("auth.authentication-failure", "authentication", "blocked", "v0.0.1", "auth-gate", (desktop("light.desktop", "3JM-0", "Light / Desktop — authentication failure", 900), desktop("dark.desktop", "3PE-0", "Dark / Desktop — authentication failure", 900)), ("light.narrow", "dark.narrow")),
-    state("auth.session-expired", "authentication", "blocked", "v0.0.1", "auth-gate", (narrow("light.narrow", "3JO-0", "Light / Mobile — session expired"), narrow("dark.narrow", "3QO-0", "Dark / Mobile — session expired")), ("light.desktop", "dark.desktop")),
+    state("auth.password-sign-in", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "3JK-0", "Light / Desktop — password sign in", 900), narrow("light.narrow", "HJO-0", "Light / Mobile — password sign in"), desktop("dark.desktop", "3OH-0", "Dark / Desktop — password sign in", 900), narrow("dark.narrow", "HKK-0", "Dark / Mobile — password sign in")), ()),
+    state("auth.oauth-callback", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "3JL-0", "Light / Desktop — OAuth callback", 900), narrow("light.narrow", "HLG-0", "Light / Mobile — OAuth callback"), desktop("dark.desktop", "3P1-0", "Dark / Desktop — OAuth callback", 900), narrow("dark.narrow", "HLT-0", "Dark / Mobile — OAuth callback")), ()),
+    state("auth.authentication-failure", "authentication", "ready", "v0.0.1", "auth-gate", (desktop("light.desktop", "3JM-0", "Light / Desktop — authentication failure", 900), narrow("light.narrow", "HM6-0", "Light / Mobile — authentication failure"), desktop("dark.desktop", "3PE-0", "Dark / Desktop — authentication failure", 900), narrow("dark.narrow", "HMM-0", "Dark / Mobile — authentication failure")), ()),
+    state("auth.session-expired", "authentication", "ready", "v0.0.1", "auth-gate", (desktop("light.desktop", "HN2-0", "Light / Desktop — session expired", 900), narrow("light.narrow", "3JO-0", "Light / Mobile — session expired"), desktop("dark.desktop", "HNR-0", "Dark / Desktop — session expired", 900), narrow("dark.narrow", "3QO-0", "Dark / Mobile — session expired")), ()),
     state("auth.provider-discovery-retry", "authentication", "ready", "v0.0.1", "auth-gate", (desktop("light.desktop", "C2A-0", "Light / Desktop — provider discovery retry", 900), narrow("light.narrow", "C36-0", "Light / Mobile — provider discovery retry"), desktop("dark.desktop", "C2Q-0", "Dark / Desktop — provider discovery retry", 900), narrow("dark.narrow", "C40-0", "Dark / Mobile — provider discovery retry")), ()),
     state("auth.provider-unavailable-fail-closed", "authentication", "ready", "v0.0.1", "auth-gate", (desktop("light.desktop", "BZQ-0", "Light / Desktop — provider unavailable / fail closed", 900), narrow("light.narrow", "C0M-0", "Light / Mobile — provider unavailable / fail closed"), desktop("dark.desktop", "C06-0", "Dark / Desktop — provider unavailable / fail closed", 900), narrow("dark.narrow", "C1G-0", "Dark / Mobile — provider unavailable / fail closed")), ()),
     state("auth.provider-discovery-pending", "authentication", "ready", "v0.0.1", "auth-gate", (desktop("light.desktop", "BWS-0", "Light / Desktop — provider discovery pending", 900), narrow("light.narrow", "BY2-0", "Light / Mobile — provider discovery pending"), desktop("dark.desktop", "BXF-0", "Dark / Desktop — provider discovery pending", 900), narrow("dark.narrow", "BYW-0", "Dark / Mobile — provider discovery pending")), ()),
     state("auth.password-submitting", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "C94-0", "Light / Desktop — password submitting", 900), narrow("light.narrow", "C96-0", "Light / Mobile — password submitting"), desktop("dark.desktop", "C95-0", "Dark / Desktop — password submitting", 900), narrow("dark.narrow", "C97-0", "Dark / Mobile — password submitting")), ()),
-    state("auth.interaction-states", "authentication", "blocked", "v0.0.1", "auth", (desktop("light.desktop", "69V-0", "Light / Desktop — authentication interaction states", 900), desktop("dark.desktop", "69W-0", "Dark / Desktop — authentication interaction states", 900)), ("light.narrow", "dark.narrow")),
-    state("auth.provider-selection-200-percent-zoom", "authentication", "blocked", "v0.0.1", "auth", (narrow("light.narrow", "6G3-0", "Light / Mobile — provider selection at 200% zoom"), narrow("dark.narrow", "6HR-0", "Dark / Mobile — provider selection at 200% zoom")), ("light.desktop", "dark.desktop")),
-    state("auth.provider-localization-growth", "authentication", "blocked", "v0.0.1", "auth", (narrow("light.narrow", "6GX-0", "Light / Mobile — provider localization growth"), narrow("dark.narrow", "6IL-0", "Dark / Mobile — provider localization growth")), ("light.desktop", "dark.desktop")),
+    state("auth.interaction-states", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "69V-0", "Light / Desktop — authentication interaction states", 900), narrow("light.narrow", "HOG-0", "Light / Mobile — authentication interaction states"), desktop("dark.desktop", "69W-0", "Dark / Desktop — authentication interaction states", 900), narrow("dark.narrow", "HRD-0", "Dark / Mobile — authentication interaction states")), ()),
+    state("auth.provider-selection-200-percent-zoom", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "HUA-0", "Light / Desktop — provider selection at 200% zoom", 900), narrow("light.narrow", "6G3-0", "Light / Mobile — provider selection at 200% zoom"), desktop("dark.desktop", "HUX-0", "Dark / Desktop — provider selection at 200% zoom", 900), narrow("dark.narrow", "6HR-0", "Dark / Mobile — provider selection at 200% zoom")), ()),
+    state("auth.provider-localization-growth", "authentication", "ready", "v0.0.1", "auth", (desktop("light.desktop", "HVK-0", "Light / Desktop — provider localization growth", 900), narrow("light.narrow", "6GX-0", "Light / Mobile — provider localization growth"), desktop("dark.desktop", "HW7-0", "Dark / Desktop — provider localization growth", 900), narrow("dark.narrow", "6IL-0", "Dark / Mobile — provider localization growth")), ()),
     state("runtime.private-deep-link-primary", "runtime", "deferred", "v0.0.2", "deep-link-deferred", (desktop("light.desktop", "71F-0", "Light / Desktop — private deep link / primary", 960), narrow("light.narrow", "71J-0", "Light / Mobile — private deep link / primary"), desktop("dark.desktop", "71G-0", "Dark / Desktop — private deep link / primary", 960), narrow("dark.narrow", "71K-0", "Dark / Mobile — private deep link / primary")), ()),
     state("runtime.private-deep-link-failures", "runtime", "deferred", "v0.0.2", "deep-link-deferred", (desktop("light.desktop", "71H-0", "Light / Desktop — private deep link / failures", 960), narrow("light.narrow", "71L-0", "Light / Mobile — private deep link / failures"), desktop("dark.desktop", "71I-0", "Dark / Desktop — private deep link / failures", 960), narrow("dark.narrow", "71M-0", "Dark / Mobile — private deep link / failures")), ()),
     state("runtime.session-search-results", "runtime", "deferred", "v0.0.2", "search-deferred", (desktop("light.desktop", "71N-0", "Light / Desktop — Session Search · results", 960), narrow("light.narrow", "85I-0", "Light / Mobile — Session Search · results"), desktop("dark.desktop", "96O-0", "Dark / Desktop — Session Search · results", 960), narrow("dark.narrow", "9AG-0", "Dark / Mobile — Session Search · results")), ()),
@@ -314,6 +317,7 @@ TOKEN_RECORDS = (
     ("--color-search-light-success", "#0B6B4B", "deferred"),
     ("--color-search-light-signal", "#2348C7", "deferred"),
     ("--font-ui", "Instrument Sans", "shipped"),
+    ("--font-mono", "Geist Mono", "shipped"),
     ("--text-meta", "12px", "shipped"),
     ("--text-control", "14px", "shipped"),
     ("--text-body", "15px", "shipped"),
@@ -440,7 +444,7 @@ DEEPLINK_EXTRA = tuple(item[0] for item in TOKEN_RECORDS[36:50])
 SEARCH_EXTRA = tuple(item[0] for item in TOKEN_RECORDS[50:53])
 TOKEN_SETS = (
     ("runtime", COLOR_BASE_TOKENS + TYPOGRAPHY_TOKENS),
-    ("runtime-gate", COLOR_BASE_TOKENS + (TYPOGRAPHY_TOKENS[0],) + GATE_EXTRA + TYPOGRAPHY_TOKENS[1:]),
+    ("runtime-gate", COLOR_BASE_TOKENS + TYPOGRAPHY_TOKENS[:2] + GATE_EXTRA + TYPOGRAPHY_TOKENS[2:]),
     ("auth", COLOR_BASE_TOKENS + AUTH_EXTRA + TYPOGRAPHY_TOKENS),
     ("auth-gate", COLOR_BASE_TOKENS + AUTH_EXTRA + GATE_EXTRA + TYPOGRAPHY_TOKENS),
     ("deep-link-deferred", COLOR_BASE_TOKENS + DEEPLINK_EXTRA + TYPOGRAPHY_TOKENS),
@@ -599,9 +603,10 @@ def _validate_paper(document: dict[str, Any]) -> None:
         "pages": paper["pages"],
     })
     pages = paper["pages"]
-    require(type(pages) is list and len(pages) == 6)
+    require(type(pages) is list and len(pages) == 7)
     expected_pages = (
-        ("3-0", "Web states — Authentication", 34),
+        ("A-0", "Chat workspace", 34),
+        ("3-0", "Web states — Authentication", 48),
         ("4-0", "Web states — Runtime", 68),
         ("B-0", "Shared Chat–Terminal workspace", 25),
         ("E-0", "Terminal desktop lifecycle", 22),
@@ -781,7 +786,7 @@ def _validate_states(document: dict[str, Any]) -> tuple[int, int, int]:
         else:
             raise ValidationError()
     require(len(all_artboards) == len(set(all_artboards)))
-    require(len(all_artboards) == 102)
+    require(len(all_artboards) == 120)
     return ready, blocked, deferred
 
 
@@ -828,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
         "ready_state_count": ready,
         "blocked_state_count": blocked,
         "deferred_state_count": deferred,
-        "artboard_count": 102,
+        "artboard_count": 120,
         "terminal_state_count": TERMINAL_STATE_COUNT,
         "terminal_artboard_count": TERMINAL_ARTBOARD_COUNT,
     }

@@ -16,7 +16,7 @@
       {
         "id": "3-0",
         "name": "Web states — Authentication",
-        "artboard_count": 34
+        "artboard_count": 48
       },
       {
         "id": "4-0",
@@ -504,7 +504,7 @@
     },
     {
       "id": "runtime-gate",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--font-mono", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     },
     {
       "id": "auth",
@@ -707,54 +707,62 @@
     {
       "id": "auth.password-sign-in",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth",
       "variants": [
         {"id": "light.desktop", "artboard_id": "3JK-0", "name": "Light / Desktop — password sign in", "width": 1440, "height": 900},
-        {"id": "dark.desktop", "artboard_id": "3OH-0", "name": "Dark / Desktop — password sign in", "width": 1440, "height": 900}
+        {"id": "light.narrow", "artboard_id": "HJO-0", "name": "Light / Mobile — password sign in", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "3OH-0", "name": "Dark / Desktop — password sign in", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "HKK-0", "name": "Dark / Mobile — password sign in", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.narrow", "dark.narrow"],
-      "notes": "Blocked: Paper has desktop password sign-in boards but no narrow password sign-in boards."
+      "missing_variants": [],
+      "notes": "Paper provides the complete password sign-in coverage."
     },
     {
       "id": "auth.oauth-callback",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth",
       "variants": [
         {"id": "light.desktop", "artboard_id": "3JL-0", "name": "Light / Desktop — OAuth callback", "width": 1440, "height": 900},
-        {"id": "dark.desktop", "artboard_id": "3P1-0", "name": "Dark / Desktop — OAuth callback", "width": 1440, "height": 900}
+        {"id": "light.narrow", "artboard_id": "HLG-0", "name": "Light / Mobile — OAuth callback", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "3P1-0", "name": "Dark / Desktop — OAuth callback", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "HLT-0", "name": "Dark / Mobile — OAuth callback", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.narrow", "dark.narrow"],
-      "notes": "Blocked: Paper has desktop OAuth callback boards but no narrow callback boards."
+      "missing_variants": [],
+      "notes": "Paper provides the complete OAuth callback coverage."
     },
     {
       "id": "auth.authentication-failure",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth-gate",
       "variants": [
         {"id": "light.desktop", "artboard_id": "3JM-0", "name": "Light / Desktop — authentication failure", "width": 1440, "height": 900},
-        {"id": "dark.desktop", "artboard_id": "3PE-0", "name": "Dark / Desktop — authentication failure", "width": 1440, "height": 900}
+        {"id": "light.narrow", "artboard_id": "HM6-0", "name": "Light / Mobile — authentication failure", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "3PE-0", "name": "Dark / Desktop — authentication failure", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "HMM-0", "name": "Dark / Mobile — authentication failure", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.narrow", "dark.narrow"],
-      "notes": "Blocked: Paper has desktop authentication-failure boards but no narrow failure boards."
+      "missing_variants": [],
+      "notes": "Paper provides the complete authentication-failure coverage."
     },
     {
       "id": "auth.session-expired",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth-gate",
       "variants": [
+        {"id": "light.desktop", "artboard_id": "HN2-0", "name": "Light / Desktop — session expired", "width": 1440, "height": 900},
         {"id": "light.narrow", "artboard_id": "3JO-0", "name": "Light / Mobile — session expired", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "HNR-0", "name": "Dark / Desktop — session expired", "width": 1440, "height": 900},
         {"id": "dark.narrow", "artboard_id": "3QO-0", "name": "Dark / Mobile — session expired", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.desktop", "dark.desktop"],
-      "notes": "Blocked: Paper has narrow session-expired boards but no desktop session-expired boards."
+      "missing_variants": [],
+      "notes": "Paper provides the complete session-expired coverage."
     },
     {
       "id": "auth.provider-discovery-retry",
@@ -819,41 +827,47 @@
     {
       "id": "auth.interaction-states",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth",
       "variants": [
         {"id": "light.desktop", "artboard_id": "69V-0", "name": "Light / Desktop — authentication interaction states", "width": 1440, "height": 900},
-        {"id": "dark.desktop", "artboard_id": "69W-0", "name": "Dark / Desktop — authentication interaction states", "width": 1440, "height": 900}
+        {"id": "light.narrow", "artboard_id": "HOG-0", "name": "Light / Mobile — authentication interaction states", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "69W-0", "name": "Dark / Desktop — authentication interaction states", "width": 1440, "height": 900},
+        {"id": "dark.narrow", "artboard_id": "HRD-0", "name": "Dark / Mobile — authentication interaction states", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.narrow", "dark.narrow"],
-      "notes": "Blocked: Paper interaction-state sheets cover desktop only; narrow interaction-state evidence is not supplied."
+      "missing_variants": [],
+      "notes": "Paper provides the complete authentication interaction-state coverage."
     },
     {
       "id": "auth.provider-selection-200-percent-zoom",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth",
       "variants": [
+        {"id": "light.desktop", "artboard_id": "HUA-0", "name": "Light / Desktop — provider selection at 200% zoom", "width": 1440, "height": 900},
         {"id": "light.narrow", "artboard_id": "6G3-0", "name": "Light / Mobile — provider selection at 200% zoom", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "HUX-0", "name": "Dark / Desktop — provider selection at 200% zoom", "width": 1440, "height": 900},
         {"id": "dark.narrow", "artboard_id": "6HR-0", "name": "Dark / Mobile — provider selection at 200% zoom", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.desktop", "dark.desktop"],
-      "notes": "Blocked as a complete four-variant evidence group: Paper supplies narrow 200% zoom references only."
+      "missing_variants": [],
+      "notes": "Paper provides the complete 200% provider-selection coverage."
     },
     {
       "id": "auth.provider-localization-growth",
       "family": "authentication",
-      "status": "blocked",
+      "status": "ready",
       "release": "v0.0.1",
       "token_set": "auth",
       "variants": [
+        {"id": "light.desktop", "artboard_id": "HVK-0", "name": "Light / Desktop — provider localization growth", "width": 1440, "height": 900},
         {"id": "light.narrow", "artboard_id": "6GX-0", "name": "Light / Mobile — provider localization growth", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "HW7-0", "name": "Dark / Desktop — provider localization growth", "width": 1440, "height": 900},
         {"id": "dark.narrow", "artboard_id": "6IL-0", "name": "Dark / Mobile — provider localization growth", "width": 390, "height": 844}
       ],
-      "missing_variants": ["light.desktop", "dark.desktop"],
-      "notes": "Blocked as a complete four-variant evidence group: Paper supplies narrow localization-growth references only."
+      "missing_variants": [],
+      "notes": "Paper provides the complete provider-localization-growth coverage."
     },
     {
       "id": "runtime.private-deep-link-primary",
