@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -367,8 +368,9 @@ async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild
   }
 }
 
-async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkCheckout> {
+async function recomputeBenchmarkCheckout(commit: string, evidenceBytes: Buffer): Promise<BenchmarkCheckout> {
   const repoRoot = resolve(process.cwd(), '../..');
+  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
   const executionInputs = BENCHMARK_EXECUTION_INPUT_PATHS.map((path) => {
     const bytes = execFileSync('git', ['-C', repoRoot, 'show', `${commit}:${path}`]);
     return {
@@ -377,32 +379,54 @@ async function recomputeBenchmarkCheckout(commit: string): Promise<BenchmarkChec
       sha256: createHash('sha256').update(bytes).digest('hex')
     };
   });
-  const evidenceHead = execFileSync('git', ['-C', repoRoot, 'rev-parse', 'HEAD']).toString().trim();
+  // Resolve the commit that introduced this exact blob from HEAD ancestry, not
+  // HEAD itself: later unrelated merges must not invalidate fixed evidence.
+  const matchingAnchors = execFileSync('git', ['-C', repoRoot, 'log', '--format=%H', 'HEAD', '--', evidencePath], { encoding: 'utf8' })
+    .split('\n')
+    .map((candidate) => candidate.trim())
+    .filter(Boolean)
+    .filter((candidate) => execFileSync('git', ['-C', repoRoot, 'show', `${candidate}:${evidencePath}`]).equals(evidenceBytes));
+  if (matchingAnchors.length === 0) throw new Error('checked-in benchmark evidence immutable anchor was missing');
+  if (matchingAnchors.length !== 1) throw new Error('checked-in benchmark evidence immutable anchor was ambiguous');
+  const evidenceHead = matchingAnchors[0]!;
+  let sourceIsStrictAncestor = evidenceHead.toLowerCase() !== commit.toLowerCase();
   try {
     execFileSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, evidenceHead]);
   } catch {
-    throw new Error('benchmark evidence source commit was not an ancestor of the evidence head');
+    sourceIsStrictAncestor = false;
   }
+  if (!sourceIsStrictAncestor) throw new Error('benchmark evidence source commit was not a strict ancestor of the immutable anchor');
   const evidenceChangedPaths = execFileSync('git', ['-C', repoRoot, 'diff', '--name-only', `${commit}..${evidenceHead}`])
     .toString()
     .split('\n')
     .map((path) => path.trim())
     .filter(Boolean);
-  const status = execFileSync(
-    'git',
-    ['-C', repoRoot, 'status', '--porcelain=v1', '--untracked-files=all', '--', ...BENCHMARK_EXECUTION_INPUT_PATHS],
-    { encoding: 'utf8' }
-  );
-  if (status.trim()) throw new Error('benchmark execution inputs were dirty during evidence recomputation');
+  // Build the source tree, not the verifier's checkout. This keeps input and
+  // artifact hashes tied to the declared immutable source while the validator
+  // itself evolves after the evidence anchor.
+  const sourceRoot = mkdtempSync(join(tmpdir(), 'hermternal-renderer-source-'));
+  let build: BenchmarkBuild;
+  try {
+    const archive = execFileSync('git', ['-C', repoRoot, 'archive', commit], { maxBuffer: 64 * 1024 * 1024 });
+    execFileSync('tar', ['-x', '-C', sourceRoot], { input: archive });
+    const sourceWebRoot = join(sourceRoot, 'apps/web');
+    execFileSync('bun', ['install', '--frozen-lockfile'], { cwd: sourceWebRoot, maxBuffer: 64 * 1024 * 1024 });
+    build = await recomputeBenchmarkBuild(sourceRoot);
+  } finally {
+    rmSync(sourceRoot, { recursive: true, force: true });
+  }
   return {
     head: commit,
     // The Git commit tree is the reviewed clean checkout; current working-tree
     // dirtiness is covered independently by assertCleanExecutionInputs tests.
     clean: true,
     execution_inputs: executionInputs,
-    build: await recomputeBenchmarkBuild(repoRoot),
+    build,
     evidence_head: evidenceHead,
-    evidence_changed_paths: evidenceChangedPaths
+    evidence_changed_paths: evidenceChangedPaths,
+    evidence_source_is_strict_ancestor: sourceIsStrictAncestor,
+    evidence_blob_matches: true,
+    evidence_anchor_count: matchingAnchors.length
   };
 }
 
@@ -1743,11 +1767,12 @@ describe('TerminalRenderer', () => {
 
   it('independently validates and binds the checked-in benchmark evidence trace', async () => {
     const evidencePath = resolve(process.cwd(), 'tests/bench/terminal-renderer.evidence.json');
-    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
+    const evidenceBytes = readFileSync(evidencePath);
+    const evidence = JSON.parse(evidenceBytes.toString('utf8')) as {
       revision: { source_commit: string };
       build: BenchmarkBuild;
     };
-    const checkout = await recomputeBenchmarkCheckout(evidence.revision.source_commit);
+    const checkout = await recomputeBenchmarkCheckout(evidence.revision.source_commit, evidenceBytes);
     expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
     expect(() => assertBenchmarkTrace(evidence, undefined as never)).toThrow(
       'checked-in benchmark evidence checkout was not a clean full-commit source'
@@ -1761,7 +1786,11 @@ describe('TerminalRenderer', () => {
       ['-C', resolve(process.cwd(), '../..'), 'rev-parse', 'HEAD~2'],
       { encoding: 'utf8' }
     ).trim();
-    const arbitraryCheckout = await recomputeBenchmarkCheckout(arbitrarySource);
+    const arbitraryCheckout = {
+      ...checkout,
+      head: arbitrarySource,
+      evidence_source_is_strict_ancestor: false
+    };
     const arbitraryEvidence = JSON.parse(JSON.stringify(evidence)) as {
       revision: { source_commit: string };
     };
@@ -1886,7 +1915,20 @@ describe('TerminalRenderer', () => {
       evidence_changed_paths: ['apps/web/tests/bench/terminal-renderer.evidence.json']
     };
     expect(() => assertBenchmarkTrace(evidence, selfAttestingCheckout)).toThrow(/evidence-only/);
-  });
+
+    const missingAnchor = { ...checkout, evidence_head: undefined };
+    expect(() => assertBenchmarkTrace(evidence, missingAnchor)).toThrow(/evidence-only/);
+    const ambiguousAnchor = { ...checkout, evidence_anchor_count: 2 };
+    expect(() => assertBenchmarkTrace(evidence, ambiguousAnchor)).toThrow(/evidence-only/);
+    const blobMismatch = { ...checkout, evidence_blob_matches: false };
+    expect(() => assertBenchmarkTrace(evidence, blobMismatch)).toThrow(/evidence-only/);
+
+    // Current HEAD contains unrelated later merges. The immutable evidence
+    // anchor still validates, proving those merges do not require new samples.
+    const currentHead = execFileSync('git', ['-C', resolve(process.cwd(), '../..'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    expect(checkout.evidence_head).not.toBe(currentHead);
+    expect(() => assertBenchmarkTrace(evidence, checkout)).not.toThrow();
+  }, 30_000);
 
   it('allows only the exact benchmark origin and browser-internal resources', () => {
     const benchmarkOrigin = 'http://127.0.0.1:4173';

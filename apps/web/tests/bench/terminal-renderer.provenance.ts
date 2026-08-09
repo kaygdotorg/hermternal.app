@@ -71,6 +71,12 @@ export type BenchmarkCheckout = Readonly<{
   evidence_head?: string;
   /** The source-to-evidence range must contain this artifact and nothing else. */
   evidence_changed_paths?: readonly string[];
+  /** Git resolution independently proved source is a strict anchor ancestor. */
+  evidence_source_is_strict_ancestor?: boolean;
+  /** The immutable anchor tree contains the exact checked-in evidence blob. */
+  evidence_blob_matches?: boolean;
+  /** Exactly one historical evidence commit may contain this exact blob. */
+  evidence_anchor_count?: number;
 }>;
 
 const DISTRIBUTION_KEYS = ['min', 'p50', 'p95', 'p99', 'max', 'mean'] as const;
@@ -393,6 +399,9 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
       typeof checkout.evidence_head !== 'string' ||
       !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
       checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
+      checkout.evidence_source_is_strict_ancestor !== true ||
+      checkout.evidence_blob_matches !== true ||
+      checkout.evidence_anchor_count !== 1 ||
       !Array.isArray(checkout.evidence_changed_paths) ||
       checkout.evidence_changed_paths.length !== 1 ||
       checkout.evidence_changed_paths[0] !== evidencePath
