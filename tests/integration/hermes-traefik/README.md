@@ -225,8 +225,11 @@ execution. A supplied project root that is itself a symlink alias is rejected;
 harmless system aliases in its ancestors are canonicalized before pinning.
 A linked worktree's `gitdir`, `commondir`, and reciprocal `gitdir` must resolve
 back to the pinned marker and common directory. The common directory must also
-have the matching structural `.git` anchor at `common_dir.parent / ".git"`, which
-rejects the copied external-common topology covered by the regression suite.
+be the `.git` anchor opened and validated from the retained project-root
+boundary: it may be an ancestor repository root or a direct sibling repository
+under the linked checkout's parent. The anchor is never trusted merely because
+`common_dir.parent / ".git"` exists, which rejects copied metadata under an
+external attacker parent while preserving legitimate sibling linked worktrees.
 This is structural/content trust for the calculation, not proof of historical
 origin for a byte-for-byte copied Git database; the contract therefore does not
 claim an ambient external-path allowlist. Relative linked-worktree `gitdir:` is
