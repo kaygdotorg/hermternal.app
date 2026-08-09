@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createTerminalRenderer,
@@ -368,9 +368,103 @@ async function recomputeBenchmarkBuild(repoRoot: string): Promise<BenchmarkBuild
   }
 }
 
+const BENCHMARK_EVIDENCE_PATH = 'apps/web/tests/bench/terminal-renderer.evidence.json';
+
+type EvidenceHistory = Readonly<{
+  evidenceHead: string;
+  evidenceChangedPaths: readonly string[];
+  evidenceSourceIsStrictAncestor: boolean;
+  evidenceBlobMatches: boolean;
+  evidenceAnchorCount: number;
+}>;
+
+/**
+ * Inspect the immutable evidence commit one commit at a time. Endpoint tree
+ * diffs are insufficient because a source mutation can be reverted before the
+ * evidence commit, leaving only the evidence path in the final tree diff.
+ */
+function inspectEvidenceHistory(
+  repoRoot: string,
+  sourceCommit: string,
+  evidenceBytes: Buffer,
+  head = 'HEAD'
+): EvidenceHistory {
+  const matchingAnchors = execFileSync(
+    'git',
+    ['-C', repoRoot, 'log', '--format=%H', head, '--', BENCHMARK_EVIDENCE_PATH],
+    { encoding: 'utf8' }
+  )
+    .split('\n')
+    .map((candidate) => candidate.trim())
+    .filter(Boolean)
+    .filter((candidate) => {
+      try {
+        return execFileSync('git', ['-C', repoRoot, 'show', `${candidate}:${BENCHMARK_EVIDENCE_PATH}`]).equals(evidenceBytes);
+      } catch {
+        return false;
+      }
+    });
+  if (matchingAnchors.length === 0) throw new Error('checked-in benchmark evidence immutable anchor was missing');
+  if (matchingAnchors.length !== 1) throw new Error('checked-in benchmark evidence immutable anchor was ambiguous');
+  const evidenceHead = matchingAnchors[0]!;
+
+  let historyLines: string[];
+  try {
+    historyLines = execFileSync(
+      'git',
+      ['-C', repoRoot, 'rev-list', '--parents', '--topo-order', '--reverse', `${sourceCommit}..${evidenceHead}`],
+      { encoding: 'utf8' }
+    )
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    throw new Error('benchmark evidence source-to-anchor history was not an evidence-only immediate child');
+  }
+
+  if (historyLines.length === 0) {
+    throw new Error('benchmark evidence source-to-anchor history was not an evidence-only immediate child');
+  }
+  const history = historyLines.map((line) => {
+    const [commit, ...parents] = line.split(/\s+/u);
+    return { commit: commit ?? '', parents };
+  });
+  if (history.some((record) => record.parents.length !== 1)) {
+    throw new Error('benchmark evidence source-to-anchor history was not an evidence-only immediate child');
+  }
+
+  const changedPaths = history.flatMap((record) => {
+    const parent = record.parents[0];
+    if (!parent || !record.commit) return [];
+    return execFileSync(
+      'git',
+      ['-C', repoRoot, 'diff-tree', '--no-commit-id', '--name-only', '-r', parent, record.commit],
+      { encoding: 'utf8' }
+    )
+      .split('\n')
+      .map((path) => path.trim())
+      .filter(Boolean);
+  });
+  if (
+    changedPaths.length === 0 ||
+    changedPaths.some((path) => path !== BENCHMARK_EVIDENCE_PATH) ||
+    history.length !== 1 ||
+    history[0]?.parents[0]?.toLowerCase() !== sourceCommit.toLowerCase()
+  ) {
+    throw new Error('benchmark evidence source-to-anchor history was not an evidence-only immediate child');
+  }
+
+  return {
+    evidenceHead,
+    evidenceChangedPaths: changedPaths,
+    evidenceSourceIsStrictAncestor: true,
+    evidenceBlobMatches: true,
+    evidenceAnchorCount: matchingAnchors.length
+  };
+}
+
 async function recomputeBenchmarkCheckout(commit: string, evidenceBytes: Buffer): Promise<BenchmarkCheckout> {
   const repoRoot = resolve(process.cwd(), '../..');
-  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
   const executionInputs = BENCHMARK_EXECUTION_INPUT_PATHS.map((path) => {
     const bytes = execFileSync('git', ['-C', repoRoot, 'show', `${commit}:${path}`]);
     return {
@@ -379,28 +473,7 @@ async function recomputeBenchmarkCheckout(commit: string, evidenceBytes: Buffer)
       sha256: createHash('sha256').update(bytes).digest('hex')
     };
   });
-  // Resolve the commit that introduced this exact blob from HEAD ancestry, not
-  // HEAD itself: later unrelated merges must not invalidate fixed evidence.
-  const matchingAnchors = execFileSync('git', ['-C', repoRoot, 'log', '--format=%H', 'HEAD', '--', evidencePath], { encoding: 'utf8' })
-    .split('\n')
-    .map((candidate) => candidate.trim())
-    .filter(Boolean)
-    .filter((candidate) => execFileSync('git', ['-C', repoRoot, 'show', `${candidate}:${evidencePath}`]).equals(evidenceBytes));
-  if (matchingAnchors.length === 0) throw new Error('checked-in benchmark evidence immutable anchor was missing');
-  if (matchingAnchors.length !== 1) throw new Error('checked-in benchmark evidence immutable anchor was ambiguous');
-  const evidenceHead = matchingAnchors[0]!;
-  let sourceIsStrictAncestor = evidenceHead.toLowerCase() !== commit.toLowerCase();
-  try {
-    execFileSync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', commit, evidenceHead]);
-  } catch {
-    sourceIsStrictAncestor = false;
-  }
-  if (!sourceIsStrictAncestor) throw new Error('benchmark evidence source commit was not a strict ancestor of the immutable anchor');
-  const evidenceChangedPaths = execFileSync('git', ['-C', repoRoot, 'diff', '--name-only', `${commit}..${evidenceHead}`])
-    .toString()
-    .split('\n')
-    .map((path) => path.trim())
-    .filter(Boolean);
+  const evidenceHistory = inspectEvidenceHistory(repoRoot, commit, evidenceBytes);
   // Build the source tree, not the verifier's checkout. This keeps input and
   // artifact hashes tied to the declared immutable source while the validator
   // itself evolves after the evidence anchor.
@@ -422,11 +495,11 @@ async function recomputeBenchmarkCheckout(commit: string, evidenceBytes: Buffer)
     clean: true,
     execution_inputs: executionInputs,
     build,
-    evidence_head: evidenceHead,
-    evidence_changed_paths: evidenceChangedPaths,
-    evidence_source_is_strict_ancestor: sourceIsStrictAncestor,
-    evidence_blob_matches: true,
-    evidence_anchor_count: matchingAnchors.length
+    evidence_head: evidenceHistory.evidenceHead,
+    evidence_changed_paths: evidenceHistory.evidenceChangedPaths,
+    evidence_source_is_strict_ancestor: evidenceHistory.evidenceSourceIsStrictAncestor,
+    evidence_blob_matches: evidenceHistory.evidenceBlobMatches,
+    evidence_anchor_count: evidenceHistory.evidenceAnchorCount
   };
 }
 
@@ -1763,6 +1836,61 @@ describe('TerminalRenderer', () => {
     expect(() => assertBenchmarkSampleCounts(mismatchedDistribution, BENCHMARK_REPETITIONS)).toThrow(
       'benchmark distribution for cold_initialization did not match recomputed min'
     );
+  });
+
+  it('rejects an intermediate source mutation and revert hidden by endpoint diff', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'hermternal-evidence-history-'));
+    const rendererPath = join(fixtureRoot, 'apps/web/src/lib/terminal/renderer.ts');
+    const evidencePath = join(fixtureRoot, BENCHMARK_EVIDENCE_PATH);
+    const commitFixture = (message: string): string => {
+      execFileSync('git', ['-C', fixtureRoot, 'add', '--all'], { stdio: 'ignore' });
+      execFileSync(
+        'git',
+        [
+          '-C', fixtureRoot,
+          '-c', 'user.name=Hermternal fixture',
+          '-c', 'user.email=fixture@example.invalid',
+          'commit', '--quiet', '--no-gpg-sign', '-m', message
+        ],
+        { stdio: 'ignore' }
+      );
+      return execFileSync('git', ['-C', fixtureRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    };
+
+    try {
+      execFileSync('git', ['-C', fixtureRoot, 'init', '--quiet', '--initial-branch=main'], { stdio: 'ignore' });
+      mkdirSync(dirname(rendererPath), { recursive: true });
+      mkdirSync(dirname(evidencePath), { recursive: true });
+      writeFileSync(rendererPath, 'original renderer source\n');
+      writeFileSync(evidencePath, 'old evidence blob\n');
+      const sourceCommit = commitFixture('measured source');
+
+      writeFileSync(rendererPath, 'mutated renderer source\n');
+      commitFixture('intermediate source mutation');
+      writeFileSync(rendererPath, 'original renderer source\n');
+      commitFixture('intermediate source revert');
+
+      const evidenceBytes = Buffer.from('new evidence blob\n');
+      writeFileSync(evidencePath, evidenceBytes);
+      const evidenceHead = commitFixture('evidence child');
+
+      const endpointPaths = execFileSync(
+        'git',
+        ['-C', fixtureRoot, 'diff', '--name-only', `${sourceCommit}..${evidenceHead}`],
+        { encoding: 'utf8' }
+      )
+        .split('\n')
+        .map((path) => path.trim())
+        .filter(Boolean);
+      // The rejected endpoint-only implementation sees only this final tree
+      // difference and would accept the reverted source mutation.
+      expect(endpointPaths).toEqual([BENCHMARK_EVIDENCE_PATH]);
+      expect(() => inspectEvidenceHistory(fixtureRoot, sourceCommit, evidenceBytes, evidenceHead)).toThrow(
+        'evidence-only immediate child'
+      );
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 
   it('independently validates and binds the checked-in benchmark evidence trace', async () => {
