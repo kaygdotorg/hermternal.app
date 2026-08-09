@@ -211,7 +211,9 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
       try EvidenceValidator.validate(
         distributionDrift,
         workload: loaded.fixture,
-        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes)
+        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes),
+        workloadBytes: loaded.bytes,
+        traceBytes: result.traceBytes
       )
     )
 
@@ -249,7 +251,9 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
       try EvidenceValidator.validate(
         provenanceDrift,
         workload: loaded.fixture,
-        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes)
+        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes),
+        workloadBytes: loaded.bytes,
+        traceBytes: result.traceBytes
       )
     )
 
@@ -280,7 +284,9 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
       try EvidenceValidator.validate(
         redactionDrift,
         workload: loaded.fixture,
-        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes)
+        fixtureSHA256: BenchmarkHash.sha256(loaded.bytes),
+        workloadBytes: loaded.bytes,
+        traceBytes: result.traceBytes
       )
     )
   }
