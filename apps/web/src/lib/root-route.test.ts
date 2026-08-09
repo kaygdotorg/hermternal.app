@@ -19,6 +19,23 @@ const IDENTITY = {
   expires_at: 4_000_000_000
 };
 
+function createPtySocketHarness() {
+  const socket = {
+    onopen: null as (() => void) | null,
+    onmessage: null as ((event: { readonly data: unknown }) => void) | null,
+    onerror: null as (() => void) | null,
+    onclose: null as ((event?: { readonly code?: number; readonly reason?: string }) => void) | null,
+    readyState: 1,
+    send: vi.fn((_data: string | ArrayBuffer | ArrayBufferView) => undefined),
+    close: vi.fn((code?: number, reason?: string) => socket.onclose?.({ code, reason }))
+  };
+  return { socket, open: () => socket.onopen?.() };
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 16; index += 1) await Promise.resolve();
+}
+
 describe('root route composition', () => {
   it('keeps only closed valid scenario values in the deterministic fixture lane', () => {
     expect(resolveRootRoute('?scenario=success')).toEqual({ mode: 'fixture', scenario: 'success', delayMs: 0 });
@@ -110,6 +127,40 @@ describe('root route composition', () => {
     expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
   });
 
+  it('owns the PTY adapter at the root and releases its socket exactly once', async () => {
+    const harness = createPtySocketHarness();
+    const urls: string[] = [];
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/ws-ticket') {
+        return jsonResponse({ ticket: 'opaque-test-ticket', ttl_seconds: 30 });
+      }
+      throw new Error('unexpected request');
+    });
+    const createPtySocket = vi.fn((url: string) => {
+      urls.push(url);
+      return harness.socket;
+    });
+    const context = createLiveRootContext({ fetch, createPtySocket });
+    const terminal = context.workspace.terminal;
+    if (!terminal) throw new Error('terminal bridge was not composed');
+
+    const pending = terminal.attach('session-1', new AbortController().signal);
+    await flush();
+    harness.open();
+    await pending;
+
+    expect(createPtySocket).toHaveBeenCalledTimes(1);
+    const upgrade = new URL(urls[0] ?? 'http://invalid');
+    expect(upgrade.pathname).toBe('/api/pty');
+    expect(upgrade.searchParams.get('resume')).toBe('session-1');
+    expect(JSON.stringify(context.workspace.current)).not.toContain('opaque-test-ticket');
+
+    context.dispose();
+    context.dispose();
+
+    expect(harness.socket.close).toHaveBeenCalledTimes(1);
+  });
+
   it('reuses the root workspace when the authenticated view remounts after expiry', async () => {
     const fetch: LiveRestFetch = vi.fn(async (input) => {
       if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
@@ -118,6 +169,7 @@ describe('root route composition', () => {
     const context = createLiveRootContext({ fetch });
     const initialize = vi.spyOn(context.workspace, 'initialize').mockResolvedValue(undefined);
     const workspace = context.workspace;
+    const terminalBeforeExpiry = workspace.terminal;
 
     await context.auth.initialize();
     context.auth.expire();
@@ -129,6 +181,7 @@ describe('root route composition', () => {
 
     expect(context.auth.current.status).toBe('authenticated');
     expect(context.workspace).toBe(workspace);
+    expect(workspace.terminal).not.toBe(terminalBeforeExpiry);
     expect(initialize).toHaveBeenCalledTimes(1);
     unsubscribe();
     context.dispose();

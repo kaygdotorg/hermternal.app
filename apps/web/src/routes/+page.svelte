@@ -11,9 +11,8 @@
   let liveContext: LiveRootContext | undefined;
 
   function returnLiveWorkspaceToSignIn(): void {
-    // The rendered workspace only reports the semantic authentication-required
-    // boundary. It has no truthful PTY lifecycle lease, so ordinary expiry stays
-    // with BrowserAuthSession until #368 supplies that Terminal bridge contract.
+    // Chat or PTY may report the same semantic authentication boundary. Auth owns
+    // expiry and workspace invalidation; incompatible-origin failures stay local.
     liveContext?.auth.expire();
   }
 

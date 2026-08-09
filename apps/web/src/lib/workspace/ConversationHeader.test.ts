@@ -25,4 +25,26 @@ describe('ConversationHeader', () => {
     expect(titleButton).not.toHaveAttribute('aria-pressed');
     expect(chatButton).toHaveAttribute('aria-pressed', 'true');
   });
+
+  it('native-disables Terminal until the draft has a coordinator-owned session', async () => {
+    const onAction = vi.fn();
+    const view = render(ConversationHeader, { terminalModeEnabled: false, onAction });
+
+    const disabledTerminal = screen.getByRole('button', {
+      name: 'Terminal unavailable until the first message is saved'
+    });
+    expect(disabledTerminal).toBeDisabled();
+    expect(disabledTerminal).toHaveAttribute(
+      'title',
+      'Terminal is available after the first message is saved.'
+    );
+    await fireEvent.click(disabledTerminal);
+    expect(onAction).not.toHaveBeenCalled();
+
+    await view.rerender({ terminalModeEnabled: true });
+    const enabledTerminal = screen.getByRole('button', { name: 'Open terminal mode' });
+    expect(enabledTerminal).toBeEnabled();
+    await fireEvent.click(enabledTerminal);
+    expect(onAction).toHaveBeenCalledWith({ type: 'set-mode', mode: 'terminal' });
+  });
 });

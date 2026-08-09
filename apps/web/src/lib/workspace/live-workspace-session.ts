@@ -1,5 +1,7 @@
 import type { BrowserChatOptions } from '$lib/chat/browser-chat';
 import {
+  DASHBOARD_CONTRACT,
+  HERMES_SOURCE_SHA,
   JsonRpcChatError,
   type BoundedJsonValue,
   type JsonRpcChatEvent,
@@ -8,12 +10,28 @@ import {
   type JsonRpcCloseClassification,
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
+import {
+  createSessionCoordinator,
+  type ChatSessionPort,
+  type SessionCoordinator,
+  type SessionCoordinatorState,
+  type TerminalSettlement,
+  type WorkspaceMode
+} from '$lib/session/coordinator';
+import {
+  CurrentSessionTerminalBridge,
+  type CurrentSessionTerminalEvent,
+  type CurrentSessionTerminalState
+} from '$lib/terminal/current-session-terminal';
+import type { PtyTransport } from '$lib/terminal/pty-transport';
 import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/transport';
 import { mapLiveMessages, mapLiveSessions } from './live-workspace';
 import type { SessionSummary, TimelineItem, WorkspaceRuntimeState } from './types';
 
 export interface LiveWorkspaceSnapshot {
   readonly state: WorkspaceRuntimeState;
+  /** One durable Hermes session owns both Chat and Terminal presentation. */
+  readonly mode?: WorkspaceMode;
   readonly sessions: SessionSummary[];
   readonly activeSessionId?: string;
   readonly title: string;
@@ -21,11 +39,16 @@ export interface LiveWorkspaceSnapshot {
   readonly timeline: TimelineItem[];
   /** Semantic terminal cause retained separately from the broad UI state. */
   readonly permanentFailure?: LiveWorkspacePermanentFailure;
+  /** Sanitized lifecycle only; bytes and opaque PTY identities never enter snapshots. */
+  readonly terminal?: CurrentSessionTerminalState;
+  readonly coordinator?: SessionCoordinatorState;
 }
 
 export interface LiveWorkspaceSessionOptions {
   readonly rest: LiveRestTransport;
   readonly createChat: (options: BrowserChatOptions) => JsonRpcChatTransport;
+  /** Omitted by legacy test façades; the browser root supplies the live PTY factory. */
+  readonly createTerminal?: () => PtyTransport;
 }
 
 type LiveWorkspaceSubscriber = (snapshot: Readonly<LiveWorkspaceSnapshot>) => void;
@@ -85,6 +108,17 @@ interface PendingCompletionOwnership extends CommittedCompletionOwnership {
   deferredGenericFailure: boolean;
 }
 
+interface CoordinatorOwnership {
+  readonly workspaceGeneration: number;
+  readonly coordinatorGeneration: number;
+  readonly sessionId?: string;
+}
+
+interface TerminalEventOwnership {
+  readonly workspaceGeneration: number;
+  readonly sessionId?: string;
+}
+
 /**
  * Keeps only the opaque persisted session identity needed to route Retry back
  * through restore after history loading fails before the session is published.
@@ -114,6 +148,7 @@ interface CreatedDraftOwnership {
 export class LiveWorkspaceSession {
   private readonly rest: LiveRestTransport;
   private readonly createChat: LiveWorkspaceSessionOptions['createChat'];
+  private readonly createTerminal: LiveWorkspaceSessionOptions['createTerminal'];
   private readonly subscribers = new Set<LiveWorkspaceSubscriber>();
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly clarifications = new Map<string, PendingClarification>();
@@ -128,6 +163,17 @@ export class LiveWorkspaceSession {
   // is no transport-specific reconnect operation to abort.
   private factoryRetryGeneration: number | undefined;
   private generation = 0;
+  private lastChatState: Readonly<{ generation: number; state: JsonRpcConnectionState }> = {
+    generation: 0,
+    state: { status: 'offline', generation: 0 }
+  };
+  private coordinatorInstance: SessionCoordinator | undefined;
+  private terminalBridge: CurrentSessionTerminalBridge | undefined;
+  private terminalFactoryFailed = false;
+  private coordinatorState: SessionCoordinatorState | undefined;
+  private coordinatorOwnership: CoordinatorOwnership | undefined;
+  private terminalEventOwnership: TerminalEventOwnership = { workspaceGeneration: 0 };
+  private terminalUnsubscribe: (() => void) | undefined;
   // History reads are presentation-owned operations. A generation protects
   // session replacement, while this monotonic epoch also protects same-session
   // overlap: a newer prompt, reconnect, terminal connection state, or
@@ -149,15 +195,68 @@ export class LiveWorkspaceSession {
   private pendingCompletion: PendingCompletionOwnership | undefined;
   private failedRestore: FailedRestoreOwnership | undefined;
   private createdDraft: CreatedDraftOwnership | undefined;
+  // Cleanup callbacks may synchronously access lazy getters. Do not let them mint
+  // replacement coordinator or PTY resources across an invalidation boundary.
+  private cleanupInProgress = false;
   private disposed = false;
 
   constructor(options: LiveWorkspaceSessionOptions) {
     this.rest = options.rest;
     this.createChat = options.createChat;
+    this.createTerminal = options.createTerminal;
   }
 
   get current(): Readonly<LiveWorkspaceSnapshot> {
     return this.snapshot;
+  }
+
+  /** Resources are lazy so signed-out roots do not mint PTY tickets or sockets. */
+  get coordinator(): SessionCoordinator | undefined {
+    return this.ensureCoordinatorResources()?.coordinator;
+  }
+
+  /** The renderer receives the bridge, never a PTY ticket or attachment identity. */
+  get terminal(): CurrentSessionTerminalBridge | undefined {
+    return this.ensureCoordinatorResources()?.terminal;
+  }
+
+  async activateMode(mode: WorkspaceMode): Promise<void> {
+    const coordinator = this.coordinator;
+    if (!this.snapshot.activeSessionId) return;
+    if (!coordinator) {
+      if (this.terminalFactoryFailed) {
+        // Adapter construction has failed closed for this auth lifecycle. Keep
+        // mode selection truthful and publish the bounded failure so composition
+        // can present an accessible escape instead of leaving an enabled no-op.
+        this.publish({
+          ...this.snapshot,
+          mode,
+          terminal: terminalFactoryFailureState()
+        });
+      }
+      return;
+    }
+    try {
+      await coordinator.switchMode(mode, this.controller?.signal);
+    } catch {
+      // Sanitized coordinator and terminal snapshots own visible recovery state.
+    }
+  }
+
+  async reconnectTerminal(): Promise<void> {
+    try {
+      await this.coordinator?.reconnectTerminal(this.controller?.signal);
+    } catch {
+      // The bridge publishes a bounded failure without retaining the thrown payload.
+    }
+  }
+
+  detachTerminal(): void {
+    this.terminalBridge?.detach();
+  }
+
+  closeTerminal(): void {
+    this.terminalBridge?.close();
   }
 
   subscribe(subscriber: LiveWorkspaceSubscriber): () => void {
@@ -266,6 +365,9 @@ export class LiveWorkspaceSession {
         model,
         timeline: []
       });
+      // The stored ID is only a future durable identity until the first turn is
+      // confirmed by REST. Chat can send through its live draft, but coordinator
+      // adoption would restore that unpersisted ID and falsely enable Terminal.
     } catch (error) {
       this.publishLoadFailure(error, operation.generation);
     }
@@ -525,8 +627,17 @@ export class LiveWorkspaceSession {
   }
 
   invalidate(): void {
-    if (this.disposed) return;
-    this.resetForInvalidation(true);
+    if (this.disposed || this.cleanupInProgress) return;
+    // Logout cleanup can synchronously emit coordinator, PTY, or Chat callbacks.
+    // Revoke their generation and publication owners before closing any adapter.
+    this.cleanupInProgress = true;
+    try {
+      this.revokeCleanupPublicationOwnership();
+      this.disposeCoordinatorResources();
+      this.resetForInvalidation(true, true);
+    } finally {
+      this.cleanupInProgress = false;
+    }
   }
 
   dispose(): void {
@@ -536,7 +647,212 @@ export class LiveWorkspaceSession {
     // observe a still-active workspace during disposal.
     this.disposed = true;
     this.subscribers.clear();
-    this.resetForInvalidation(false);
+    this.revokeCleanupPublicationOwnership();
+    this.disposeCoordinatorResources();
+    this.resetForInvalidation(false, true);
+  }
+
+  private ensureCoordinatorResources():
+    | { readonly coordinator: SessionCoordinator; readonly terminal: CurrentSessionTerminalBridge }
+    | undefined {
+    if (
+      !this.createTerminal ||
+      this.disposed ||
+      this.cleanupInProgress ||
+      this.terminalFactoryFailed
+    )
+      return undefined;
+
+    if (!this.terminalBridge) {
+      let terminal: CurrentSessionTerminalBridge;
+      try {
+        terminal = new CurrentSessionTerminalBridge({ createTransport: this.createTerminal });
+      } catch {
+        // A missing browser origin, fetch, or WebSocket seam is fail-closed. Keep
+        // one stable sanitized failure for this auth lifecycle instead of retrying
+        // construction from every getter or retaining the thrown adapter payload.
+        this.terminalFactoryFailed = true;
+        this.snapshot = {
+          ...this.snapshot,
+          terminal: terminalFactoryFailureState()
+        };
+        return undefined;
+      }
+      this.terminalBridge = terminal;
+      this.terminalEventOwnership = { workspaceGeneration: this.generation };
+      this.terminalUnsubscribe = terminal.subscribe((event) => this.handleTerminalEvent(event));
+    }
+
+    if (!this.coordinatorInstance) {
+      const workspace = this;
+      const chatPort: ChatSessionPort = {
+        get state(): JsonRpcConnectionState {
+          if (workspace.chat) return workspace.chat.state;
+          return workspace.lastChatState.generation === workspace.generation
+            ? workspace.lastChatState.state
+            : { status: 'offline', generation: 0 };
+        },
+        get selectedSessionId(): string | undefined {
+          return workspace.chat?.selectedSessionId ?? workspace.snapshot.activeSessionId;
+        },
+        connect: (signal) => {
+          const chat = workspace.chat;
+          return chat ? chat.connect(signal) : Promise.reject(new Error('Chat transport is not initialized.'));
+        },
+        reconnect: (signal) => {
+          const chat = workspace.chat;
+          return chat ? chat.reconnect(signal) : Promise.reject(new Error('Chat transport is not initialized.'));
+        },
+        restore: (sessionId, signal) => {
+          const chat = workspace.chat;
+          return chat
+            ? chat.restore(sessionId, signal)
+            : Promise.reject(new Error('Chat transport is not initialized.'));
+        },
+        close: () => {
+          const chat = workspace.chat;
+          workspace.chat = undefined;
+          if (chat) closeChat(chat);
+        }
+      };
+      const coordinator = createSessionCoordinator({
+        chat: chatPort,
+        terminal: this.terminalBridge,
+        deployment: {
+          status: 'compatible',
+          contract: DASHBOARD_CONTRACT,
+          hermesSourceSha: HERMES_SOURCE_SHA
+        },
+        onStateChange: (state) => this.handleCoordinatorState(state)
+      });
+      this.coordinatorInstance = coordinator;
+      this.coordinatorState = coordinator.state;
+      this.coordinatorOwnership = {
+        workspaceGeneration: this.generation,
+        coordinatorGeneration: coordinator.state.sessionGeneration,
+        ...(coordinator.state.activeSessionId ? { sessionId: coordinator.state.activeSessionId } : {})
+      };
+      this.snapshot = { ...this.snapshot, mode: coordinator.mode, coordinator: coordinator.state };
+    }
+
+    return { coordinator: this.coordinatorInstance, terminal: this.terminalBridge };
+  }
+
+  private handleCoordinatorState(state: SessionCoordinatorState): void {
+    if (this.disposed) return;
+    const ownership = this.coordinatorOwnership;
+    if (
+      !ownership ||
+      ownership.workspaceGeneration !== this.generation ||
+      ownership.coordinatorGeneration !== state.sessionGeneration ||
+      ownership.sessionId !== state.activeSessionId ||
+      this.snapshot.activeSessionId !== ownership.sessionId
+    )
+      return;
+    this.coordinatorState = state;
+    this.publish({ ...this.snapshot, mode: state.mode, coordinator: state });
+  }
+
+  private handleTerminalEvent(event: CurrentSessionTerminalEvent): void {
+    if (this.disposed) return;
+    const terminal = this.terminalBridge;
+    const eventSessionId = event.type === 'state' ? event.state.sessionId : terminal?.state.sessionId;
+    const ownership = this.terminalEventOwnership;
+    const coordinator = this.coordinatorInstance;
+    const coordinatorState = this.coordinatorState;
+    const bootstrap =
+      this.generation === 0 &&
+      ownership.workspaceGeneration === 0 &&
+      this.snapshot.activeSessionId === undefined &&
+      coordinator?.activeSessionId === undefined;
+    const ownsEvent =
+      bootstrap ||
+      (ownership.workspaceGeneration === this.generation &&
+        ownership.sessionId === eventSessionId &&
+        this.snapshot.activeSessionId === eventSessionId &&
+        coordinator?.activeSessionId === eventSessionId &&
+        coordinatorState?.activeSessionId === eventSessionId);
+
+    if (!ownsEvent) {
+      if (eventSessionId && terminal) {
+        terminal.invalidateBindingForSession(eventSessionId, terminal.lifecycleIdentity);
+      }
+      return;
+    }
+    // PTY bytes have a direct renderer path. Workspace state never stores or decodes them.
+    if (event.type === 'bytes') return;
+    if (event.type === 'notice') {
+      if (this.snapshot.terminal) {
+        this.publish({
+          ...this.snapshot,
+          terminal: { ...this.snapshot.terminal, outputMayBeTruncated: true }
+        });
+      }
+      return;
+    }
+
+    if (isSettledTerminalState(event.state) && coordinator) {
+      const state = coordinator.state;
+      const settlement: TerminalSettlement = {
+        sessionId: event.state.sessionId ?? state.activeSessionId ?? '',
+        sessionGeneration: state.sessionGeneration,
+        ...(state.terminalLeaseSequence === undefined
+          ? {}
+          : { terminalLeaseSequence: state.terminalLeaseSequence })
+      };
+      if (settlement.sessionId) coordinator.invalidateTerminalBinding(settlement);
+    }
+    this.publish({ ...this.snapshot, terminal: event.state });
+  }
+
+  private async syncCoordinatorSession(
+    generation: number,
+    sessionId: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const resources = this.ensureCoordinatorResources();
+    const coordinator = resources?.coordinator;
+    if (!coordinator || !this.isCurrent(generation) || signal?.aborted) return;
+
+    const current = coordinator.state;
+    const expectedGeneration =
+      current.activeSessionId === sessionId ? current.sessionGeneration : current.sessionGeneration + 1;
+    this.terminalEventOwnership = { workspaceGeneration: generation, sessionId };
+    this.coordinatorOwnership = {
+      workspaceGeneration: generation,
+      coordinatorGeneration: expectedGeneration,
+      sessionId
+    };
+    try {
+      await coordinator.setSession(sessionId, signal);
+      if (
+        !this.isCurrent(generation) ||
+        signal?.aborted ||
+        this.coordinatorInstance !== coordinator ||
+        coordinator.state.sessionGeneration !== expectedGeneration ||
+        coordinator.activeSessionId !== sessionId
+      )
+        return;
+      this.coordinatorState = coordinator.state;
+    } catch {
+      // Chat remains authoritative; coordinator state carries bounded Terminal recovery.
+    }
+  }
+
+  private disposeCoordinatorResources(): void {
+    const coordinator = this.coordinatorInstance;
+    const terminal = this.terminalBridge;
+    this.coordinatorInstance = undefined;
+    this.terminalBridge = undefined;
+    this.coordinatorOwnership = undefined;
+    this.coordinatorState = undefined;
+    // A sanitized construction failure is non-retrying for this root-owned auth
+    // lifecycle. Invalidation/remount must not silently recreate the PTY adapter.
+    this.terminalEventOwnership = { workspaceGeneration: this.generation };
+    this.terminalUnsubscribe?.();
+    this.terminalUnsubscribe = undefined;
+    coordinator?.dispose();
+    terminal?.dispose();
   }
 
   private async openSession(
@@ -608,6 +924,7 @@ export class LiveWorkspaceSession {
     // erase the server-owned timeline that is already on screen.
     this.commitHistory(operation.generation, session.id, chat);
     this.publish({ ...this.snapshot, state: timeline.length === 0 ? 'empty' : 'ready' });
+    await this.syncCoordinatorSession(operation.generation, session.id, operation.signal);
   }
 
   private handleEvent(generation: number, event: JsonRpcChatEvent): void {
@@ -717,6 +1034,8 @@ export class LiveWorkspaceSession {
 
   private handleConnectionState(generation: number, state: JsonRpcConnectionState): void {
     if (!this.isCurrent(generation)) return;
+    // Only the callback's workspace generation may seed the coordinator fallback.
+    this.lastChatState = { generation, state };
 
     // Hermes can report a generic failed/uncertain callback after REST because
     // prompt events, acknowledgements, and socket close notifications are not
@@ -852,6 +1171,10 @@ export class LiveWorkspaceSession {
           // ID so stale completions cannot change a replacement's reconnect key.
           expectedChat.promoteSession(sessionId);
           this.createdDraft = undefined;
+          // Coordinator and Terminal may adopt the durable identity only after
+          // promotion. Before this point the ID is not a truthful restore target.
+          await this.syncCoordinatorSession(generation, sessionId, signal);
+          if (!this.ownsRefresh(generation, sessionId, expectedChat, signal, refreshEpoch)) return;
         }
         this.commitHistory(generation, sessionId, expectedChat);
         if (completionOwnership) {
@@ -1014,30 +1337,68 @@ export class LiveWorkspaceSession {
   private begin(): { readonly generation: number; readonly signal: AbortSignal } {
     this.assertActive();
     this.generation += 1;
+    const generation = this.generation;
     this.failedRestore = undefined;
     this.createdDraft = undefined;
+    // Revoke PTY publication before old transport cleanup can emit synchronously.
+    this.terminalEventOwnership = { workspaceGeneration: generation };
     this.advanceRefreshEpoch();
     this.supersedeRetry();
+    this.factoryRetryGeneration = undefined;
     this.controller?.abort();
+    this.controller = new AbortController();
+    const operation = { generation, signal: this.controller.signal };
     const chat = this.chat;
     this.chat = undefined;
     this.activeRequest = undefined;
     this.activePromptOwnership = undefined;
     this.approvals.clear();
     this.clarifications.clear();
-    chat?.close();
-    this.controller = new AbortController();
-    return { generation: this.generation, signal: this.controller.signal };
+    this.lastChatState = { generation, state: { status: 'offline', generation: 0 } };
+    closeChatIfPresent(chat);
+    if (!this.isCurrent(generation)) return operation;
+
+    // Session replacement invalidates the current Terminal lease before callers
+    // expose the replacement snapshot; setSession later adopts the new identity.
+    const coordinator = this.coordinatorInstance;
+    coordinator?.invalidateSession();
+    if (!this.isCurrent(generation) || this.coordinatorInstance !== coordinator) return operation;
+    const state = coordinator?.state;
+    if (state) {
+      this.coordinatorState = state;
+      this.coordinatorOwnership = {
+        workspaceGeneration: generation,
+        coordinatorGeneration: state.sessionGeneration,
+        ...(state.activeSessionId ? { sessionId: state.activeSessionId } : {})
+      };
+      this.snapshot = { ...this.snapshot, mode: state.mode, coordinator: state, terminal: undefined };
+    } else {
+      this.coordinatorOwnership = undefined;
+      this.coordinatorState = undefined;
+      this.snapshot = { ...this.snapshot, terminal: undefined };
+    }
+    return operation;
   }
 
-  private resetForInvalidation(publishSnapshot: boolean): void {
+  private revokeCleanupPublicationOwnership(): void {
     this.generation += 1;
+    this.coordinatorOwnership = undefined;
+    this.coordinatorState = undefined;
+    this.terminalEventOwnership = { workspaceGeneration: this.generation };
+  }
+
+  private resetForInvalidation(publishSnapshot: boolean, ownershipAlreadyRevoked = false): void {
+    if (!ownershipAlreadyRevoked) this.revokeCleanupPublicationOwnership();
+    const generation = this.generation;
     this.failedRestore = undefined;
     this.createdDraft = undefined;
+    this.terminalEventOwnership = { workspaceGeneration: generation };
     this.advanceRefreshEpoch();
     this.supersedeRetry();
+    this.factoryRetryGeneration = undefined;
     this.controller?.abort();
     this.controller = undefined;
+    this.lastChatState = { generation, state: { status: 'offline', generation: 0 } };
     const chat = this.chat;
     // Detach the identity before close so close callbacks cannot act on the
     // transport that is being invalidated or trigger a second close.
@@ -1046,7 +1407,9 @@ export class LiveWorkspaceSession {
     this.activePromptOwnership = undefined;
     this.approvals.clear();
     this.clarifications.clear();
-    chat?.close();
+    this.coordinatorOwnership = undefined;
+    this.coordinatorState = undefined;
+    closeChatIfPresent(chat);
     const cleared = initialSnapshot();
     if (publishSnapshot) this.publish(cleared);
     else this.snapshot = cleared;
@@ -1291,8 +1654,15 @@ export class LiveWorkspaceSession {
 
   private publish(snapshot: LiveWorkspaceSnapshot): void {
     if (this.disposed) return;
-    this.snapshot = snapshot;
-    this.subscribers.forEach((subscriber) => subscriber(snapshot));
+    // Factory failure is latched for one authentication lifecycle. Initialization
+    // and REST publications must not erase the sanitized failure and turn the
+    // Terminal control into a silent no-op.
+    const nextSnapshot =
+      this.terminalFactoryFailed && snapshot.terminal === undefined
+        ? { ...snapshot, terminal: terminalFactoryFailureState() }
+        : snapshot;
+    this.snapshot = nextSnapshot;
+    this.subscribers.forEach((subscriber) => subscriber(nextSnapshot));
   }
 
   private assertActive(): void {
@@ -1307,6 +1677,16 @@ function initialSnapshot(): LiveWorkspaceSnapshot {
     title: 'Hermes',
     model: 'Hermes',
     timeline: []
+  };
+}
+
+function terminalFactoryFailureState(): CurrentSessionTerminalState {
+  return {
+    status: 'failed',
+    generation: 0,
+    outputMayBeTruncated: false,
+    explicitlyClosed: false,
+    reconnectSupported: false
   };
 }
 
@@ -1339,6 +1719,15 @@ function payloadStringArray(payload: BoundedJsonValue, key: string): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
 }
 
+function isSettledTerminalState(state: CurrentSessionTerminalState): boolean {
+  return (
+    state.status === 'detached' ||
+    state.status === 'failed' ||
+    state.status === 'exited' ||
+    state.status === 'closed'
+  );
+}
+
 function isTerminalConnectionStatus(status: JsonRpcConnectionState['status']): boolean {
   return (
     status === 'offline' ||
@@ -1352,6 +1741,10 @@ function isTerminalConnectionStatus(status: JsonRpcConnectionState['status']): b
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
+}
+
+function closeChatIfPresent(chat: JsonRpcChatTransport | undefined): void {
+  if (chat) closeChat(chat);
 }
 
 function closeChat(chat: JsonRpcChatTransport): void {
