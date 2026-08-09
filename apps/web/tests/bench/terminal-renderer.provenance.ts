@@ -296,6 +296,8 @@ function assertBrowserEnvironment(environment: Record<string, unknown>): void {
   if (environment.cross_origin_isolated !== 'true' && environment.cross_origin_isolated !== 'false') {
     throw new Error('checked-in benchmark evidence browser isolation metadata was invalid');
   }
+  // The route records every request outside the exact local origin. A missing
+  // value cannot prove the policy ran, and any nonzero count proves it failed.
   if (environment.disallowed_network_requests !== '0') {
     throw new Error('checked-in benchmark evidence browser network policy was invalid');
   }
@@ -499,7 +501,8 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   const redaction = value.redaction;
   const redactionKeys = [
     'synthetic_only',
-    'network_access',
+    'loopback_http_access',
+    'external_network_access',
     'provider_access',
     'credentials',
     'cookies',
@@ -509,9 +512,13 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   ];
   if (
     !isRecord(redaction) ||
+    // `network_access: false` was contradictory: this harness loads its local
+    // HTTP server. Keep loopback use and external/provider isolation explicit.
+    Object.prototype.hasOwnProperty.call(redaction, 'network_access') ||
     redactionKeys.some((key) => typeof redaction[key] !== 'boolean') ||
     redaction.synthetic_only !== true ||
-    redaction.network_access !== false ||
+    redaction.loopback_http_access !== true ||
+    redaction.external_network_access !== false ||
     redaction.provider_access !== false ||
     redaction.credentials !== false ||
     redaction.cookies !== false ||
@@ -536,8 +543,12 @@ export function isAllowedBenchmarkRequest(requestUrl: string, localOrigin: strin
     if (parsed.protocol === 'about:' || parsed.protocol === 'blob:' || parsed.protocol === 'data:') {
       return true;
     }
+    // Origin omits userinfo, so compare it only after rejecting credentials.
+    // Otherwise a credential-bearing URL could masquerade as the local server.
     return (
       (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+      parsed.username === '' &&
+      parsed.password === '' &&
       parsed.origin === localOrigin
     );
   } catch {

@@ -30,7 +30,7 @@ These packages are presentation-only and transport-independent. Do not add provi
 
 ## Terminal lease boundary
 
-`src/lib/terminal/current-session-terminal.ts` gives a coordinator lease to one settled attach only. Concurrent same-session attaches share that result; input and resize require its active lease. Unsolicited terminal states invalidate the lease. A reconnect keeps the coordinator lease rather than inventing a replacement, while a lease-less reconnect remains input-ineligible. Late detached work stays quarantined; close or disposal escalates its cleanup to close. Adapter errors are reconstructed from allowlisted code and non-negative safe generation only, so injected messages, causes, and foreign properties never cross the bridge.
+`src/lib/terminal/current-session-terminal.ts` gives a coordinator lease to one settled attach only. Concurrent same-session attaches share that result; input and resize require its active lease. Unsolicited terminal states invalidate the lease. A reconnect keeps the coordinator lease rather than inventing a replacement, while a lease-less reconnect remains input-ineligible. `TerminalSurface` owns renderer readiness for the current renderer/session sink: readiness closes before every ownership loss, and the following undefined-to-session publication claims the fresh sink without remounting it after attach passes the gate. Late detached work stays quarantined; close or disposal escalates its cleanup to close. Adapter errors are reconstructed from allowlisted code and non-negative safe generation only, so injected messages, causes, and foreign properties never cross the bridge.
 
 Internal stable session and message IDs remain allowed. Required authentication callback routing also remains allowed.
 

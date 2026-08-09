@@ -235,7 +235,8 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
 
   /**
    * TerminalSurface enables this gate before first attach so PTY replay cannot
-   * outrun the lazy renderer. Headless coordinator consumers leave it disabled.
+   * outrun the lazy renderer. Readiness belongs to one renderer/session sink and
+   * closes before that sink loses ownership; headless consumers leave it disabled.
    */
   setRendererReady(ready: boolean): void {
     if (this.disposed) return;
