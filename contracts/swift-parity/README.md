@@ -23,9 +23,12 @@ The runner mirrors the C-20 representative semantic projection for:
 - matching and missing deployment attestation, plus the blocked aggregate
   compatibility record.
 
-The result compares semantic `expected` outcomes, not platform-specific wire
-bytes. The registry's `pending` rows become `blocked` results and can never be
-promoted to proof. Unknown fixture roots, case selectors, platform values,
+The result compares independently derived Web and Apple semantic projections,
+not the fixture's `expected` dictionary or platform-specific wire bytes. Web
+projection reads browser response and transport fields; Apple projection reads
+native state, persistence, and platform-gate fields. A divergence is a parity
+failure rather than evidence. The registry's `pending` rows become `blocked`
+results and can never be promoted to proof. Unknown fixture roots, case selectors, platform values,
 statuses, unsafe paths, and unregistered representative artifacts fail closed.
 Every read is rooted at a held repository descriptor. Directory and regular-file
 components use no-follow opens; regular-file metadata is checked before and

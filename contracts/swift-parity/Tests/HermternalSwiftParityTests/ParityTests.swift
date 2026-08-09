@@ -94,6 +94,34 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testWebAndAppleProjectionsDetectIndependentSemanticDivergence() throws {
+        let registry = try loadRegistry(at: repoRoot)
+        let fixtureCase = try loadCase(
+            at: repoRoot,
+            registry: registry,
+            rootID: "deployment-security-browser-auth",
+            caseID: "login-success"
+        )
+        let web = try project(family: .auth, platform: .web, fixtureCase: fixtureCase)
+        let apple = try project(family: .auth, platform: .ios, fixtureCase: fixtureCase)
+        XCTAssertEqual(web.decision, "authenticated")
+        XCTAssertEqual(apple.decision, "authenticated")
+        XCTAssertEqual(web.semantic, apple.semantic)
+
+        var mutatedExpected = fixtureCase.expected
+        mutatedExpected["state"] = .string("blocked")
+        let mutatedCase = FixtureCase(
+            id: fixtureCase.id,
+            expected: mutatedExpected,
+            raw: fixtureCase.raw
+        )
+        let mutatedWeb = try project(family: .auth, platform: .web, fixtureCase: mutatedCase)
+        let mutatedApple = try project(family: .auth, platform: .ios, fixtureCase: mutatedCase)
+        XCTAssertEqual(mutatedWeb.decision, "authenticated")
+        XCTAssertEqual(mutatedApple.decision, "blocked")
+        XCTAssertNotEqual(mutatedWeb.semantic, mutatedApple.semantic)
+    }
+
     func testRejectsUnknownFixtureCaseAndNonCanonicalCaseID() throws {
         let registry = try loadRegistry(at: repoRoot)
 

@@ -325,7 +325,7 @@ private struct Representative {
     let caseIDs: [String]
 }
 
-private struct ProjectedOutcome {
+struct ProjectedOutcome {
     let decision: String
     let semantic: [String: JSONValue]
 }
@@ -1212,13 +1212,265 @@ private func decision(from expected: [String: JSONValue]) throws -> String {
     throw reject(.malformedInput, "representative expected result has no semantic decision")
 }
 
-private func project(family: FixtureFamily, platform: Platform, fixtureCase: FixtureCase) throws -> ProjectedOutcome {
-    _ = family
-    _ = platform
-    return ProjectedOutcome(
-        decision: try decision(from: fixtureCase.expected),
-        semantic: fixtureCase.expected
-    )
+private func projectedString(
+    _ expected: [String: JSONValue],
+    key: String,
+    family: FixtureFamily,
+    caseID: String
+) throws -> String {
+    guard case .string(let value)? = expected[key],
+          !value.isEmpty,
+          value.count <= ParityBounds.maxJSONStringLength else {
+        throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.\(key) is not a bounded string")
+    }
+    return value
+}
+
+private func projectedBoolean(
+    _ expected: [String: JSONValue],
+    key: String,
+    family: FixtureFamily,
+    caseID: String
+) throws -> Bool {
+    guard case .boolean(let value)? = expected[key] else {
+        throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.\(key) is not a boolean")
+    }
+    return value
+}
+
+private func projectedInteger(
+    _ expected: [String: JSONValue],
+    key: String,
+    family: FixtureFamily,
+    caseID: String
+) throws -> Int {
+    guard case .number(let value)? = expected[key],
+          value.isFinite,
+          value.rounded() == value,
+          value >= Double(Int.min),
+          value <= Double(Int.max) else {
+        throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.\(key) is not an integer")
+    }
+    return Int(value)
+}
+
+private func projectedOptionalString(
+    _ expected: [String: JSONValue],
+    key: String,
+    family: FixtureFamily,
+    caseID: String
+) throws -> String? {
+    switch expected[key] {
+    case .null?:
+        return nil
+    case .string(let value)?:
+        guard !value.isEmpty, value.count <= ParityBounds.maxJSONStringLength else {
+            throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.\(key) is not bounded")
+        }
+        return value
+    default:
+        throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.\(key) is not text or null")
+    }
+}
+
+private func projectedEffects(
+    _ expected: [String: JSONValue],
+    family: FixtureFamily,
+    caseID: String
+) throws -> Set<String> {
+    guard case .array(let values)? = expected["effects"] else {
+        throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.effects is not an array")
+    }
+    let effects = try values.map { value -> String in
+        guard case .string(let effect) = value,
+              !effect.isEmpty,
+              effect.count <= ParityBounds.maxJSONStringLength else {
+            throw reject(.malformedInput, "\(family.rawValue).\(caseID).expected.effects contains an invalid value")
+        }
+        return effect
+    }
+    return Set(effects)
+}
+
+private func normalizedSemantic(_ decision: String) -> [String: JSONValue] {
+    ["decision": .string(decision)]
+}
+
+/// The Web projection follows browser-visible response and transport fields.
+/// It does not reuse the fixture's expected dictionary as proof output.
+private func projectWeb(family: FixtureFamily, fixtureCase: FixtureCase) throws -> ProjectedOutcome {
+    let expected = fixtureCase.expected
+    let caseID = fixtureCase.id
+    let decision: String
+
+    switch family {
+    case .auth:
+        let status = try projectedInteger(expected, key: "status", family: family, caseID: caseID)
+        let redirect = try projectedOptionalString(expected, key: "redirect", family: family, caseID: caseID)
+        let sessionCookie = try projectedString(expected, key: "session_cookie", family: family, caseID: caseID)
+        if status == 302, redirect != nil, sessionCookie == "present" {
+            decision = "authenticated"
+        } else if status >= 400, redirect == nil, sessionCookie == "absent" {
+            decision = "blocked"
+        } else {
+            throw reject(.parityMismatch, "Web auth response does not satisfy the reviewed outcome")
+        }
+    case .connection:
+        switch try projectedString(expected, key: "final_state", family: family, caseID: caseID) {
+        case "ready": decision = "restored"
+        case "delivery_uncertain": decision = "delivery_uncertain"
+        default: throw reject(.parityMismatch, "Web connection state is outside the reviewed outcome")
+        }
+    case .session:
+        switch try projectedString(expected, key: "final_state", family: family, caseID: caseID) {
+        case "ready": decision = "session_persisted"
+        case "delivery_uncertain": decision = "delivery_uncertain"
+        case "incompatible": decision = "automatic_prompt_retry_blocked"
+        default: throw reject(.parityMismatch, "Web session state is outside the reviewed outcome")
+        }
+    case .chat:
+        switch try projectedString(expected, key: "final_state", family: family, caseID: caseID) {
+        case "delivery_uncertain": decision = "delivery_uncertain"
+        case "incompatible": decision = "automatic_prompt_retry_blocked"
+        default: throw reject(.parityMismatch, "Web chat state is outside the reviewed outcome")
+        }
+    case .image:
+        let attachmentState = try projectedString(expected, key: "attachment_state", family: family, caseID: caseID)
+        let uploadStarted = try projectedBoolean(expected, key: "upload_started", family: family, caseID: caseID)
+        switch attachmentState {
+        case "empty" where !uploadStarted: decision = "no_attachment"
+        case "failed" where !uploadStarted: decision = "rejected"
+        case "uploaded" where uploadStarted: decision = "accepted"
+        default: throw reject(.parityMismatch, "Web attachment state is outside the reviewed outcome")
+        }
+    case .pty:
+        if case .boolean(let logged)? = expected["pty_bytes_logged"] {
+            decision = logged ? "logged" : "redacted"
+        } else if case .boolean(let logged)? = expected["raw_bytes_logged"] {
+            decision = logged ? "logged" : "redacted"
+        } else {
+            throw reject(.parityMismatch, "Web PTY result has no logging decision")
+        }
+    case .deepLink:
+        let valid = try projectedBoolean(expected, key: "valid", family: family, caseID: caseID)
+        let kind = try projectedString(expected, key: "kind", family: family, caseID: caseID)
+        guard case .array(let values)? = expected["reasons"] else {
+            throw reject(.malformedInput, "deep-link.\(caseID).expected.reasons is not an array")
+        }
+        if valid, kind == "web", values.isEmpty {
+            decision = "valid"
+        } else if !valid, !values.isEmpty {
+            decision = "blocked"
+        } else {
+            throw reject(.parityMismatch, "Web deep-link result is outside the reviewed outcome")
+        }
+    case .compatibility:
+        switch try projectedString(expected, key: "attestation_result", family: family, caseID: caseID) {
+        case "verified": decision = "verified"
+        case "blocked": decision = "blocked"
+        default: throw reject(.parityMismatch, "Web compatibility result is outside the reviewed outcome")
+        }
+    }
+
+    return ProjectedOutcome(decision: decision, semantic: normalizedSemantic(decision))
+}
+
+/// The Apple projection follows native state, persistence, and platform-gate
+/// fields. It is intentionally a separate derivation from the Web projection.
+private func projectApple(family: FixtureFamily, fixtureCase: FixtureCase) throws -> ProjectedOutcome {
+    let expected = fixtureCase.expected
+    let caseID = fixtureCase.id
+    let decision: String
+
+    switch family {
+    case .auth:
+        let state = try projectedString(expected, key: "state", family: family, caseID: caseID)
+        let cleanup = try projectedString(expected, key: "cookie_cleanup", family: family, caseID: caseID)
+        let exchange = try projectedString(expected, key: "provider_exchange", family: family, caseID: caseID)
+        switch state {
+        case "authenticated":
+            decision = cleanup == "clear_ephemeral" && exchange == "called" ? "authenticated" : "blocked"
+        case "blocked":
+            decision = "blocked"
+        default:
+            throw reject(.parityMismatch, "Apple auth state is outside the reviewed outcome")
+        }
+    case .connection, .session, .chat:
+        let effects = try projectedEffects(expected, family: family, caseID: caseID)
+        switch family {
+        case .connection:
+            if effects.contains("server_session_restored") {
+                decision = "restored"
+            } else if effects.contains("prompt_delivery_uncertain") {
+                decision = "delivery_uncertain"
+            } else {
+                throw reject(.parityMismatch, "Apple connection effects are outside the reviewed outcome")
+            }
+        case .session:
+            if effects.contains("session_row_persisted") {
+                decision = "session_persisted"
+            } else if effects.contains("delivery_uncertain") {
+                decision = "delivery_uncertain"
+            } else if effects.contains("automatic_prompt_retry_blocked") {
+                decision = "automatic_prompt_retry_blocked"
+            } else {
+                throw reject(.parityMismatch, "Apple session effects are outside the reviewed outcome")
+            }
+        case .chat:
+            if effects.contains("prompt_delivery_uncertain") || effects.contains("delivery_uncertain") {
+                decision = "delivery_uncertain"
+            } else if effects.contains("automatic_prompt_retry_blocked") {
+                decision = "automatic_prompt_retry_blocked"
+            } else {
+                throw reject(.parityMismatch, "Apple chat effects are outside the reviewed outcome")
+            }
+        default:
+            throw reject(.parityMismatch, "Apple state projection received an unsupported family")
+        }
+    case .image:
+        let attachmentState = try projectedString(expected, key: "attachment_state", family: family, caseID: caseID)
+        let attempts = try projectedInteger(expected, key: "upload_attempts", family: family, caseID: caseID)
+        let transcriptReference = try projectedOptionalString(expected, key: "transcript_reference", family: family, caseID: caseID)
+        switch attachmentState {
+        case "empty" where attempts == 0 && transcriptReference == nil: decision = "no_attachment"
+        case "failed" where attempts == 0: decision = "rejected"
+        case "uploaded": decision = attempts == 1 && transcriptReference != nil ? "accepted" : "rejected"
+        default: throw reject(.parityMismatch, "Apple attachment state is outside the reviewed outcome")
+        }
+    case .pty:
+        throw reject(.incompatibleInput, "Apple PTY projection is blocked by contract")
+    case .deepLink:
+        let valid = try projectedBoolean(expected, key: "valid", family: family, caseID: caseID)
+        let sessionID = try projectedString(expected, key: "session_id", family: family, caseID: caseID)
+        let messageID = try projectedOptionalString(expected, key: "message_id", family: family, caseID: caseID)
+        guard case .array(let values)? = expected["reasons"] else {
+            throw reject(.malformedInput, "deep-link.\(caseID).expected.reasons is not an array")
+        }
+        if valid, !sessionID.isEmpty, messageID == nil, values.isEmpty {
+            decision = "valid"
+        } else if !valid, !sessionID.isEmpty, messageID == nil, !values.isEmpty {
+            decision = "blocked"
+        } else {
+            throw reject(.parityMismatch, "Apple deep-link result is outside the reviewed outcome")
+        }
+    case .compatibility:
+        switch try projectedString(expected, key: "runtime_gate", family: family, caseID: caseID) {
+        case "separate_probe_gate": decision = "verified"
+        case "blocked_incompatible": decision = "blocked"
+        default: throw reject(.parityMismatch, "Apple compatibility result is outside the reviewed outcome")
+        }
+    }
+
+    return ProjectedOutcome(decision: decision, semantic: normalizedSemantic(decision))
+}
+
+func project(family: FixtureFamily, platform: Platform, fixtureCase: FixtureCase) throws -> ProjectedOutcome {
+    switch platform {
+    case .web:
+        return try projectWeb(family: family, fixtureCase: fixtureCase)
+    case .ios, .ipados, .macos:
+        return try projectApple(family: family, fixtureCase: fixtureCase)
+    }
 }
 
 private func runRepresentative(
