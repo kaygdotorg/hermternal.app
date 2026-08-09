@@ -20,7 +20,9 @@ locale, non-1 DPR or zoom, unexpected theme or reduced-motion inputs, and UI
 states outside the bounded `empty`/`ready` set. Ordinary Vitest remains
 independent of the browser cache and Python child: only genuinely browser-
 dependent tests are skipped, and filesystem publication tests inject the
-controlled pinned provenance seam. The browser-dependent lane is explicit and
+controlled pinned provenance seam. Real-Chromium DOM/storage scrub tests first
+navigate to an approved local HTTP origin before setting page content or
+accessing origin-scoped browser state. The browser-dependent lane is explicit and
 requires `HERMTERNAL_LIVE_SCREENSHOT_BROWSER_PREREQUISITE=1`; it is never
 enabled by ordinary test commands. The opt-in live project forces headless mode
 and resolves the regular Playwright Chromium executable from the exact

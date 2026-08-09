@@ -375,9 +375,11 @@ describe('deterministic live Chat screenshot capture', () => {
       headless: true,
       executablePath: getLiveScreenshotChromiumProvenance().executablePath
     });
+    const origin = await startTestOrigin();
     try {
       const context = await browser.newContext();
       const page = await context.newPage();
+      await page.goto(origin.url);
       await page.setContent(`
         <section data-testid="runtime-preview">
           <section data-live-content="conversation-timeline">
@@ -412,6 +414,7 @@ describe('deterministic live Chat screenshot capture', () => {
       await context.close();
     } finally {
       await browser.close();
+      await new Promise<void>((resolve) => origin.server.close(() => resolve()));
     }
   });
 
