@@ -836,6 +836,11 @@ class CliTests(unittest.TestCase):
                         elif bound in control_reserved_names:
                             bind_name(bindings, scope_name, bound, control_invalid)
                 elif isinstance(node, ast.ImportFrom):
+                    # Mirror production: wildcard exports have no finite,
+                    # source-visible inventory, so they must fail closed rather
+                    # than allowing an untracked constructor into the model.
+                    if any(imported.name == "*" for imported in node.names):
+                        raise validate.ValidationError()
                     scope_name = scope(parents, node)
                     module = node.module or ""
                     for imported in node.names:
@@ -1186,6 +1191,21 @@ class CliTests(unittest.TestCase):
             "connection-restoration/validate.py",
             source,
         )
+
+    def test_wildcard_constructor_imports_reject_in_both_modes(self) -> None:
+        """Wildcard exports cannot escape the finite constructor inventory."""
+
+        sources = (
+            b'from binascii import *\nunhexlify("00")\n',
+            b'from codecs import *\ndecode("00", "hex")\n',
+            b'from unreviewed_helpers import *\nunhexlify("00")\n',
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source,
+                )
 
     def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
         repo_root = self._copy_fixture_repo()
