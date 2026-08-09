@@ -668,6 +668,7 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            cwd=ROOT,
         )
 
     def test_git_provenance_rejects_nonzero_timeout_and_malformed_output(self) -> None:
@@ -871,6 +872,24 @@ class CaddyProofEvidenceCliTests(unittest.TestCase):
             {"mode": caddy_proof.BROWSER_NON_EXECUTION_MODE, "status": "not_proven"},
         )
 
+    def test_cli_rejects_relative_retained_input_path(self) -> None:
+        relative = EVIDENCE_PATH.relative_to(ROOT)
+        result = self._run_cli("--retained-input", str(relative))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("canonical committed evidence path", result.stderr)
+
+    def test_readme_retained_example_constructs_absolute_canonical_path(self) -> None:
+        readme = (ROOT / "scripts/README.md").read_text(encoding="utf-8")
+        self.assertIn('REPO_ROOT="$(git rev-parse --show-toplevel)"', readme)
+        self.assertIn(
+            '--retained-input "$REPO_ROOT/tests/integration/hermes-caddy/caddy-proof-evidence.json"',
+            readme,
+        )
+        self.assertNotIn(
+            "--retained-input tests/integration/hermes-caddy/caddy-proof-evidence.json",
+            readme,
+        )
+
     def test_cli_rejects_changed_retained_copy_before_consuming_browser_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             copied = Path(directory) / "caddy-proof-evidence.json"
@@ -1067,6 +1086,71 @@ class CaddyProofStaticDigestBoundaryTests(unittest.TestCase):
                 mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: next(ticks, 1.0)),
             ):
                 with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_scandir_that_finishes_after_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            clock = [0.0]
+
+            class SlowEmptyScan:
+                def __enter__(self):
+                    clock[0] = 1.0
+                    return iter(())
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    return False
+
+            with (
+                mock.patch.object(caddy_proof, "STATIC_BUILD_DEADLINE_SECONDS", 0.5),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(caddy_proof.os, "scandir", return_value=SlowEmptyScan()),
+            ):
+                with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_slow_final_eof_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            self._write(root, "file.txt", b"content")
+            real_read = caddy_proof.os.read
+            clock = [0.0]
+            reads = [0]
+
+            def slow_eof_read(descriptor: int, size: int) -> bytes:
+                reads[0] += 1
+                chunk = real_read(descriptor, size)
+                if not chunk:
+                    clock[0] = 1.0
+                return chunk
+
+            with (
+                mock.patch.object(caddy_proof, "STATIC_BUILD_DEADLINE_SECONDS", 0.5),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(caddy_proof.os, "read", side_effect=slow_eof_read),
+            ):
+                with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+            self.assertGreaterEqual(reads[0], 2)
+
+    def test_static_digest_rejects_same_size_in_place_mutation_during_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            path = self._write(root, "file.txt", b"AAAA")
+            real_read = caddy_proof.os.read
+            mutated = [False]
+
+            def racing_read(descriptor: int, size: int) -> bytes:
+                if not mutated[0]:
+                    path.write_bytes(b"BBBB")
+                    mutated[0] = True
+                return real_read(descriptor, size)
+
+            with mock.patch.object(caddy_proof.os, "read", side_effect=racing_read):
+                with self.assertRaisesRegex(ValueError, "changed|identity|content"):
                     caddy_proof._build_static_digest(root)
 
     def test_static_digest_rejects_fifo_and_unix_socket(self) -> None:
@@ -1287,6 +1371,59 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
             self.assertTrue((shallow / ".git" / "shallow").is_file())
             with self.assertRaisesRegex(ValueError, "shallow|history|repository"):
                 verifier(shallow)
+
+    def _init_repository(self, root: Path) -> Path:
+        subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+        self.assertTrue((root / ".git").is_dir())
+        return root
+
+    def test_promisor_and_partial_clone_config_are_rejected(self) -> None:
+        verifier = caddy_proof._verify_git_repository
+        for key in ("extensions.partialClone", "remote.origin.promisor"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                repository = self._init_repository(Path(directory) / "repo")
+                subprocess.run(
+                    ["git", "-C", str(repository), "config", key, "true"],
+                    check=True,
+                    capture_output=True,
+                )
+                with self.assertRaisesRegex(ValueError, "promisor|lazy|partial"):
+                    verifier(repository)
+
+    def test_clean_repository_remains_accepted_by_metadata_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            caddy_proof._verify_git_repository(repository)
+
+    def test_packed_replacement_refs_are_rejected_without_loose_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            git_dir = repository / ".git"
+            packed_refs = git_dir / "packed-refs"
+            packed_refs.write_text(
+                f"{'0' * 40} refs/replace/{'1' * 40}\n",
+                encoding="ascii",
+            )
+            self.assertFalse((git_dir / "refs" / "replace").exists())
+            with self.assertRaisesRegex(ValueError, "replacement refs|packed"):
+                caddy_proof._validate_git_metadata(repository)
+
+    def test_promisor_pack_sidecar_is_rejected_without_promisor_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            pack_directory = repository / ".git" / "objects" / "pack"
+            pack_directory.mkdir(parents=True, exist_ok=True)
+            (pack_directory / "pack-deadbeef.promisor").write_bytes(b"")
+            with self.assertRaisesRegex(ValueError, "promisor|sidecar|pack"):
+                caddy_proof._verify_git_repository(repository)
+
+    def test_non_promisor_pack_entry_remains_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            pack_directory = repository / ".git" / "objects" / "pack"
+            pack_directory.mkdir(parents=True, exist_ok=True)
+            (pack_directory / "pack-deadbeef.pack").write_bytes(b"")
+            caddy_proof._verify_git_repository(repository)
 
 
 class CaddyBlackBoxToolAvailabilityTests(unittest.TestCase):
