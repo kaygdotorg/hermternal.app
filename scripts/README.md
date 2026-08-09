@@ -391,11 +391,13 @@ nested symlink escapes, include/includeIf directives, and every promisor or
 partial-clone selector, including key-only booleans and active
 `config.worktree`; external Git configuration is disabled. The checkout root is pinned by descriptor identity and every Git command
 fchdirs from that retained descriptor; no command uses pathname-based `git -C`
-rediscovery. A bounded recursive descriptor-relative snapshot covers `HEAD`,
-all nested refs, loose objects, pack metadata, and their nested type/symlink
-topology. Each entry compares device, inode, type, size, and bounded content;
-the walker keeps only O(depth) directory descriptors open and retains explicit
-absence pins for missing metadata. Every provenance command asserts the root
+rediscovery. Both the metadata link scan and the bounded recursive
+descriptor-relative snapshot use DFS frames that close exhausted subtrees,
+keeping live directory descriptors O(depth), not O(directory count). The
+snapshot covers `HEAD`, all nested refs, loose objects, pack metadata, and
+nested type/symlink topology. Each entry compares device, inode, type, size,
+and bounded content, and retains explicit absence pins for missing metadata.
+Every provenance command asserts the root
 and complete metadata snapshot immediately before and after execution and
 fails closed on any swap or same-inode byte rewrite. A closed stdout/stderr
 pair that leaves Git running is normalized to the same bounded proof timeout;
