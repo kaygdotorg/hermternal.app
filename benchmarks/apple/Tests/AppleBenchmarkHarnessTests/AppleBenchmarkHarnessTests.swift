@@ -278,6 +278,35 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         )
     }
 
+    func testRunnerRejectsForgedWorkloadBytesAtTrustBoundary() throws {
+        let loaded = try WorkloadFixtureLoader.load()
+        var forgedBytes = loaded.bytes
+        forgedBytes[0] ^= 0x01
+        let runner = AppleBenchmarkRunner(
+            enforceReleaseConfiguration: false,
+            now: { DispatchTime.now().uptimeNanoseconds + 1_000_000 }
+        )
+        let build = ReleaseBuildMetadata(
+            mode: "release",
+            optimization: "swiftc -O",
+            compiler: "swiftc",
+            sdk: "not_recorded",
+            target: "apple-synthetic",
+            metadataStatus: "scaffold_only"
+        )
+
+        XCTAssertThrowsError(
+            try runner.run(
+                workload: loaded.fixture,
+                workloadBytes: forgedBytes,
+                sourceCommitSHA: "not_collected",
+                build: build
+            )
+        ) { error in
+            XCTAssertEqual(error as? AppleBenchmarkError, .workloadDrift)
+        }
+    }
+
     func testEvidenceRejectsForgedArtifactMetadata() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()

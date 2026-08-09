@@ -33,6 +33,11 @@ public struct AppleBenchmarkRunner: Sendable {
         build: ReleaseBuildMetadata = ReleaseBuildMetadataFactory.current()
     ) throws -> BenchmarkRunResult {
         try WorkloadValidator.validate(workload)
+        guard workloadBytes.count == WorkloadFixtureLoader.expectedWorkloadByteCount,
+              BenchmarkHash.sha256(workloadBytes) == WorkloadFixtureLoader.expectedWorkloadSHA256
+        else {
+            throw AppleBenchmarkError.workloadDrift
+        }
         guard !enforceReleaseConfiguration || !ReleaseBuildConfiguration.debugAssertionsEnabled,
               build.mode == "release",
               build.optimization == "swiftc -O"
