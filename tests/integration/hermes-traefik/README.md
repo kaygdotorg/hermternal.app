@@ -216,7 +216,11 @@ before a source predecessor can be selected. The preflight also rejects grafts,
 replacement refs, local or HTTP alternates, promisor/partial-clone metadata,
 lazy-fetch controls, and unsafe Git indirection. Normal repositories and validated
 linked worktrees are supported; their common directory, object directory, gitfile,
-and worktree metadata must resolve inside the expected repository context.
+and worktree metadata must resolve inside the expected repository context. A
+relative linked-worktree `gitdir:` is resolved against the containing `.git` file,
+then checked against the common worktree directory; escapes fail closed. The
+preflight returns a bounded topology snapshot and repeats it after traversal so
+forbidden metadata created mid-calculation cannot authorize a result.
 
 It treats the implementation/test blob pair as the source identity, ignores
 mode-only commits (`100644` versus `100755`) and descendants that do not change
@@ -226,7 +230,10 @@ incomparable equal-byte candidates fails closed instead of inheriting Git log
 order. The selected commit is then checked against the exact working-tree bytes
 and both Git blobs before evidence is emitted; the source and focused test files
 are reread after traversal so a concurrent mutation cannot be reported as the
-historical source.
+historical source. Source files are opened through component-wise directory
+file descriptors with `O_NOFOLLOW`; ancestor and leaf identities are checked
+before, during, and after each bounded read, so a symlinked `scripts` ancestor
+cannot redirect provenance outside the repository.
 
 Topology is read once with bounded `git log` output. Unique source subtrees are
 resolved with one `cat-file --batch-check` and one `cat-file --batch` operation,
@@ -237,7 +244,10 @@ Git calls, parsing, candidate scans, ancestry traversal, and final rereads.
 Each individual Git command remains limited to five seconds; stdout and stderr
 are streamed under caps, and timeout, overflow, or failure kills and reaps the
 whole Git process group. Exhausting either aggregate budget rejects provenance
-instead of continuing through an arbitrarily large history.
+instead of continuing through an arbitrarily large history. The objects/pack
+metadata scan is incremental, shares the same deadline, and rejects more than
+4,096 entries before retaining them; a 10,000-entry pack-directory regression
+proves the scan cannot become an unbounded filesystem walk.
 
 Repository commit and blob IDs are validated against
 `git rev-parse --show-object-format`; `sha1` and `sha256` repositories are
