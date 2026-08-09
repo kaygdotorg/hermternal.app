@@ -1856,6 +1856,22 @@ describe('TerminalRenderer', () => {
     tamperedNetwork.browser.environment.disallowed_network_requests = '1';
     expect(() => assertBenchmarkTrace(tamperedNetwork, checkout)).toThrow(/network policy/);
 
+    const missingNetworkCount = clonePerformanceEvidence();
+    delete missingNetworkCount.browser.environment.disallowed_network_requests;
+    expect(() => assertBenchmarkTrace(missingNetworkCount, checkout)).toThrow(/network policy/);
+
+    const cloneRedactionEvidence = (): { redaction: Record<string, boolean> } =>
+      JSON.parse(JSON.stringify(evidence)) as { redaction: Record<string, boolean> };
+    const falseLoopbackClaim = cloneRedactionEvidence();
+    falseLoopbackClaim.redaction.loopback_http_access = false;
+    expect(() => assertBenchmarkTrace(falseLoopbackClaim, checkout)).toThrow(/redaction metadata/);
+
+    const oldContradictoryRedaction = cloneRedactionEvidence();
+    delete oldContradictoryRedaction.redaction.loopback_http_access;
+    delete oldContradictoryRedaction.redaction.external_network_access;
+    oldContradictoryRedaction.redaction.network_access = false;
+    expect(() => assertBenchmarkTrace(oldContradictoryRedaction, checkout)).toThrow(/redaction metadata/);
+
     const nonEvidenceDescendant = {
       ...checkout,
       evidence_changed_paths: ['apps/web/src/lib/terminal/renderer.ts']
@@ -1872,12 +1888,17 @@ describe('TerminalRenderer', () => {
     expect(() => assertBenchmarkTrace(evidence, selfAttestingCheckout)).toThrow(/evidence-only/);
   });
 
-  it('fails closed for outbound benchmark requests', () => {
-    expect(isAllowedBenchmarkRequest('http://127.0.0.1:4173/assets/entry.js', 'http://127.0.0.1:4173')).toBe(true);
-    expect(isAllowedBenchmarkRequest('data:text/javascript,export default 1', 'http://127.0.0.1:4173')).toBe(true);
-    expect(isAllowedBenchmarkRequest('blob:http://127.0.0.1:4173/id', 'http://127.0.0.1:4173')).toBe(true);
-    expect(isAllowedBenchmarkRequest('https://example.com/collect', 'http://127.0.0.1:4173')).toBe(false);
-    expect(isAllowedBenchmarkRequest('http://127.0.0.2:4173/other-loopback', 'http://127.0.0.1:4173')).toBe(false);
+  it('allows only the exact benchmark origin and browser-internal resources', () => {
+    const benchmarkOrigin = 'http://127.0.0.1:4173';
+    expect(isAllowedBenchmarkRequest(`${benchmarkOrigin}/assets/entry.js`, benchmarkOrigin)).toBe(true);
+    expect(isAllowedBenchmarkRequest('data:text/javascript,export default 1', benchmarkOrigin)).toBe(true);
+    expect(isAllowedBenchmarkRequest('blob:http://127.0.0.1:4173/id', benchmarkOrigin)).toBe(true);
+    expect(isAllowedBenchmarkRequest('http://127.0.0.2:4173/other-loopback', benchmarkOrigin)).toBe(false);
+    expect(isAllowedBenchmarkRequest('http://localhost:4173/other-loopback', benchmarkOrigin)).toBe(false);
+    expect(isAllowedBenchmarkRequest('http://example.com/collect', benchmarkOrigin)).toBe(false);
+    expect(isAllowedBenchmarkRequest('https://example.com/collect', benchmarkOrigin)).toBe(false);
+    expect(isAllowedBenchmarkRequest('http://user:pass@127.0.0.1:4173/collect', benchmarkOrigin)).toBe(false);
+    expect(isAllowedBenchmarkRequest('https://user:pass@example.com/collect', benchmarkOrigin)).toBe(false);
     expect(() => assertNoDisallowedNetworkRequests(0)).not.toThrow();
     expect(() => assertNoDisallowedNetworkRequests(1)).toThrow('disallowed network request');
   });
