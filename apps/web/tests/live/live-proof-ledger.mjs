@@ -1,3 +1,5 @@
+import { createHmac, randomBytes } from 'node:crypto';
+
 export const LIVE_PROOF_PROMPT = 'Reply with exactly: Hermternal live proof complete.';
 export const LIVE_PROOF_ASSISTANT_MARKER = 'Hermternal live proof complete.';
 
@@ -8,6 +10,9 @@ const MAX_METHOD_LENGTH = 64;
 const MAX_EVENT_NAME_LENGTH = 96;
 const MAX_STATUS_LENGTH = 32;
 const MAX_MESSAGE_COUNT = 10_000;
+export const LIVE_PROOF_HISTORY_LIMIT = 500;
+const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
+const RAW_ID_KEYS = Object.freeze(['requestId', 'sessionId', 'storedSessionId']);
 const LIVE_PROOF_CAPTURE_KEYS = Object.freeze([
   'ordered',
   'websocketOpen',
@@ -26,10 +31,39 @@ const LIVE_PROOF_CAPTURE_KEYS = Object.freeze([
 ]);
 
 /** @param {unknown} value */
-function boundedId(value) {
+function boundedRawId(value) {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_ID_LENGTH) {
     throw new Error('live proof ledger received an unsafe identity');
+  }
+  return value;
+}
+
+/** @param {unknown} value */
+function boundedTag(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string' || !HMAC_TAG_PATTERN.test(value)) {
+    throw new Error('live proof ledger received an unsafe identity tag');
+  }
+  return value;
+}
+
+/** @param {unknown} value */
+function requiredTag(value) {
+  const tag = boundedTag(value);
+  if (!tag) throw new Error('live proof history identity tag was not produced');
+  return tag;
+}
+
+/** @param {Uint8Array} key @param {string} domain @param {string} value */
+function hmacTag(key, domain, value) {
+  return `h1:${createHmac('sha256', key).update(domain).update('\0').update(value).digest('hex')}`;
+}
+
+/** @param {unknown} value */
+function boundedMessageId(value) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('live proof history message identity is invalid');
   }
   return value;
 }
@@ -74,18 +108,42 @@ function boundedCount(value) {
   return value;
 }
 
+/** @param {unknown} value */
+function boundedHistoryPhase(value) {
+  if (value !== 'pre-send' && value !== 'post-completion') {
+    throw new Error('live proof ledger received an unsafe history phase');
+  }
+  return value;
+}
+
 /**
- * Keep only typed, assertion-local projections. No Page, Request, Response,
- * WebSocket, raw frame, prompt, transcript, cookie, URL, or response body is
- * retained by this ledger.
+ * Keep only typed, assertion-local projections. Raw session/request identities
+ * are HMAC-tagged with a fresh attempt key before they enter this ledger. The
+ * key never appears in a snapshot, reporter annotation, artifact, or error.
  */
 export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
   if (!Number.isInteger(maxEvents) || maxEvents < 16 || maxEvents > 1024) {
     throw new Error('live proof ledger capacity is not bounded');
   }
+  const attemptKey = randomBytes(32);
   /** @type {Array<Record<string, unknown>>} */
   const events = [];
   let nextSequence = 0;
+
+  /** @param {unknown} value */
+  const identityTag = (value) => {
+    const raw = boundedRawId(value);
+    return raw === undefined ? undefined : hmacTag(attemptKey, 'identity', raw);
+  };
+
+  /** @param {unknown} values */
+  const messageIdTag = (values) => {
+    if (!Array.isArray(values) || values.length > LIVE_PROOF_HISTORY_LIMIT) {
+      throw new Error('live proof history message identity sequence is not bounded');
+    }
+    const ids = values.map(boundedMessageId);
+    return hmacTag(attemptKey, 'message-id-sequence', ids.join(','));
+  };
 
   /** @param {Record<string, unknown>} event */
   function append(event) {
@@ -99,6 +157,10 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
   }
 
   return Object.freeze({
+    /** Tag one transient raw identity without retaining it. */
+    identityTag,
+    /** Tag one transient ordered message-id sequence without retaining ids. */
+    messageIdTag,
     /** @param {{ method: string, route: string }} event */
     recordHttpRequest(event) {
       return append({
@@ -132,8 +194,8 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
       return append({
         kind: 'ws.sent',
         method: boundedMethod(event.method),
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId)
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId)
       });
     },
     /** @param {{ event: string, requestId?: string, sessionId?: string }} event */
@@ -141,13 +203,13 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
       return append({
         kind: 'ws.received',
         event: boundedEventName(event.event),
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId)
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId)
       });
     },
     /** @param {{ sessionId?: string }} [event] */
     recordGatewayReady(event = {}) {
-      return append({ kind: 'gateway.ready', sessionId: boundedId(event.sessionId) });
+      return append({ kind: 'gateway.ready', sessionTag: identityTag(event.sessionId) });
     },
     /** @param {{ method: 'session.create' | 'session.resume', requestId?: string, sessionId?: string, storedSessionId?: string }} event */
     recordSessionAction(event) {
@@ -157,17 +219,17 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
       return append({
         kind: 'session.action',
         method: event.method,
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId),
-        storedSessionId: boundedId(event.storedSessionId)
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId),
+        storedSessionTag: identityTag(event.storedSessionId)
       });
     },
     /** @param {{ requestId?: string, sessionId?: string, promptMatches: boolean }} event */
     recordPrompt(event) {
       return append({
         kind: 'prompt.submit',
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId),
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId),
         promptMatches: event.promptMatches === true
       });
     },
@@ -175,32 +237,62 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
     recordDelta(event) {
       return append({
         kind: 'message.delta',
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId)
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId)
       });
     },
     /** @param {{ requestId?: string, sessionId?: string, status: string, markerMatches: boolean }} event */
     recordCompletion(event) {
       return append({
         kind: 'message.complete',
-        requestId: boundedId(event.requestId),
-        sessionId: boundedId(event.sessionId),
+        requestTag: identityTag(event.requestId),
+        sessionTag: identityTag(event.sessionId),
         status: boundedStatus(event.status),
         markerMatches: event.markerMatches === true
       });
     },
-    /** @param {{ status: number, sessionId?: string, promptMatches: boolean, assistantMarkerMatches: boolean, messageCount: number }} event */
+    /**
+     * Store only the bounded canonical-history projection. The watermark and
+     * raw message rows stay transient in the one-shot read; sequence tags are
+     * the only retained message-identity evidence.
+     *
+     * @param {{
+     *   phase: 'pre-send'|'post-completion',
+     *   status: number,
+     *   sessionId?: string,
+     *   historyComplete: boolean,
+     *   watermarkEstablished: boolean,
+     *   prefixStable: boolean,
+     *   postFenceMatched: boolean,
+     *   promptMatches: boolean,
+     *   assistantMarkerMatches: boolean,
+     *   candidateUserCount: number,
+     *   candidateAssistantCount: number,
+     *   messageCount: number,
+     *   historyIdTag?: string,
+     *   prefixIdTag?: string
+     * }} event
+     */
     recordHistoryResponse(event) {
       if (!Number.isInteger(event.status) || event.status < 100 || event.status > 599) {
         throw new Error('live proof ledger received an unsafe history status');
       }
       return append({
         kind: 'history.response',
+        phase: boundedHistoryPhase(event.phase),
         status: event.status,
-        sessionId: boundedId(event.sessionId),
+        sessionTag: identityTag(event.sessionId),
+        historyComplete: event.historyComplete === true,
+        watermarkEstablished: event.watermarkEstablished === true,
+        prefixStable: event.prefixStable === true,
+        postFenceMatched: event.postFenceMatched === true,
         promptMatches: event.promptMatches === true,
         assistantMarkerMatches: event.assistantMarkerMatches === true,
-        messageCount: boundedCount(event.messageCount)
+        candidateUserCount: boundedCount(event.candidateUserCount),
+        candidateAssistantCount: boundedCount(event.candidateAssistantCount),
+        messageCount: boundedCount(event.messageCount),
+        historyIdTag: boundedTag(event.historyIdTag),
+        prefixIdTag: boundedTag(event.prefixIdTag)
       });
     },
     /** @param {{ status: number, cookieJarCleared: boolean, storageCleared: boolean }} event */
@@ -248,59 +340,187 @@ function isEventList(value) {
   });
 }
 
+/** @param {Record<string, unknown>} event */
+function hasRawIdentityField(event) {
+  return RAW_ID_KEYS.some((key) => Object.prototype.hasOwnProperty.call(event, key));
+}
+
+/** @param {unknown} value @returns {value is Record<string, any>} */
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 /**
- * Match the exact history contract without returning message content. The
- * caller may pass the raw response only inside the assertion process; this
- * function returns fixed booleans and a bounded message count.
- *
- * @param {unknown} response
- * @param {{ sessionId: string, prompt: string, assistantMarker: string }} expected
+ * @param {unknown} value
+ * @returns {{ id: number, role: 'user'|'assistant'|'system'|'tool', content: string|null }}
  */
-export function matchLiveProofHistory(response, expected) {
-  const candidate = response !== null && typeof response === 'object' && !Array.isArray(response)
-    ? /** @type {Record<string, unknown>} */ (response)
-    : undefined;
-  const sessionId = candidate?.session_id ?? candidate?.sessionId;
-  const messages = Array.isArray(candidate?.messages) ? candidate.messages : [];
-  if (messages.length > MAX_MESSAGE_COUNT) {
+function parseHistoryMessage(value) {
+  if (!isRecord(value)) throw new Error('live proof history message is invalid');
+  const role = value.role;
+  if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') {
+    throw new Error('live proof history message role is invalid');
+  }
+  const content = value.content;
+  if (content !== null && (typeof content !== 'string' || content.length > 8_192)) {
+    throw new Error('live proof history message content is invalid');
+  }
+  return { id: boundedMessageId(value.id), role, content };
+}
+
+/** @param {unknown} value */
+function requireHistoryResponse(value) {
+  if (!isRecord(value)) throw new Error('live proof history response is invalid');
+  if (!('session_id' in value) || !('messages' in value) || !('pagination' in value)) {
+    throw new Error('live proof history response is incomplete');
+  }
+  if (!Array.isArray(value.messages) || value.messages.length > LIVE_PROOF_HISTORY_LIMIT) {
     throw new Error('live proof history exceeded its bound');
   }
-  let promptMatches = false;
-  let assistantMarkerMatches = false;
-  for (const message of messages) {
-    if (message === null || typeof message !== 'object' || Array.isArray(message)) continue;
-    const record = /** @type {Record<string, unknown>} */ (message);
-    const role = record.role;
-    const content = record.content;
-    if (role === 'user' && content === expected.prompt) promptMatches = true;
-    if (role === 'assistant' && typeof content === 'string' && content.includes(expected.assistantMarker)) {
-      assistantMarkerMatches = true;
+  if (!isRecord(value.pagination)) throw new Error('live proof history pagination is incomplete');
+  if (!('limit' in value.pagination) || !('offset' in value.pagination) || !('returned' in value.pagination)) {
+    throw new Error('live proof history pagination is incomplete');
+  }
+  return /** @type {Record<string, any>} */ (value);
+}
+
+/**
+ * Parse one bounded canonical history response. Raw rows and IDs exist only for
+ * this call. The returned projection contains HMAC sequence tags, booleans, and
+ * counts; `watermark` is the transient pre-send high-water mark and must not be
+ * written to the ledger.
+ *
+ * @param {unknown} response
+ * @param {{
+ *   phase: 'pre-send'|'post-completion',
+ *   sessionId: string,
+ *   prompt: string,
+ *   assistantMarker: string,
+ *   messageIdTagger: (ids: number[]) => string,
+ *   fence?: number,
+ *   preHistoryIdTag?: string
+ * }} expected
+ */
+export function matchLiveProofHistory(response, expected) {
+  if (
+    !isRecord(expected) ||
+    (expected.phase !== 'pre-send' && expected.phase !== 'post-completion') ||
+    typeof expected.sessionId !== 'string' ||
+    expected.sessionId.length === 0 ||
+    expected.prompt !== LIVE_PROOF_PROMPT ||
+    expected.assistantMarker !== LIVE_PROOF_ASSISTANT_MARKER ||
+    typeof expected.messageIdTagger !== 'function'
+  ) {
+    throw new Error('live proof history matcher input is not approved');
+  }
+  const candidate = requireHistoryResponse(response);
+  const rawMessages = /** @type {unknown[]} */ (candidate.messages);
+  const messages = rawMessages.map(parseHistoryMessage);
+  const ids = messages.map((message) => message.id);
+  for (let index = 1; index < ids.length; index += 1) {
+    if (ids[index] <= ids[index - 1]) {
+      throw new Error('live proof history message ordering is invalid');
     }
   }
+  const pagination = candidate.pagination;
+  const historyComplete =
+    pagination.limit === LIVE_PROOF_HISTORY_LIMIT &&
+    pagination.offset === 0 &&
+    pagination.returned === messages.length &&
+    messages.length < LIVE_PROOF_HISTORY_LIMIT;
+  const sessionMatches = candidate.session_id === expected.sessionId;
+  const historyIdTag = requiredTag(expected.messageIdTagger(ids));
+  const watermark = ids.length === 0 ? 0 : ids[ids.length - 1];
+  const watermarkEstablished = expected.phase === 'pre-send' && historyComplete && sessionMatches;
+
+  if (expected.phase === 'pre-send') {
+    return Object.freeze({
+      sessionMatches,
+      historyComplete,
+      watermarkEstablished,
+      prefixStable: false,
+      postFenceMatched: false,
+      promptMatches: false,
+      assistantMarkerMatches: false,
+      candidateUserCount: 0,
+      candidateAssistantCount: 0,
+      messageCount: messages.length,
+      historyIdTag,
+      prefixIdTag: historyIdTag,
+      watermark,
+      matched: watermarkEstablished
+    });
+  }
+
+  const fence = expected.fence;
+  const fenceValid = typeof fence === 'number' && Number.isSafeInteger(fence) && fence >= 0;
+  const fenceValue = fenceValid ? /** @type {number} */ (fence) : 0;
+  const prefixMessages = fenceValid ? messages.filter((message) => message.id <= fenceValue) : [];
+  const prefixIds = prefixMessages.map((message) => message.id);
+  const prefixIdTag = requiredTag(expected.messageIdTagger(prefixIds));
+  const prefixStable =
+    fenceValid &&
+    typeof expected.preHistoryIdTag === 'string' &&
+    HMAC_TAG_PATTERN.test(expected.preHistoryIdTag) &&
+    prefixIdTag === expected.preHistoryIdTag;
+  const postFenceMessages = fenceValid ? messages.filter((message) => message.id > fenceValue) : [];
+  const candidateUsers = postFenceMessages.filter((message) => message.role === 'user');
+  const candidateAssistants = postFenceMessages.filter((message) => message.role === 'assistant');
+  const promptMatches =
+    candidateUsers.length === 1 && candidateUsers[0].content === expected.prompt;
+  const assistantMarkerMatches =
+    candidateAssistants.length === 1 && candidateAssistants[0].content === expected.assistantMarker;
+  const promptIndex = promptMatches ? postFenceMessages.indexOf(candidateUsers[0]) : -1;
+  const assistantIndex = assistantMarkerMatches
+    ? postFenceMessages.indexOf(candidateAssistants[0])
+    : -1;
+  const postFenceMatched =
+    promptIndex >= 0 &&
+    assistantIndex > promptIndex &&
+    candidateUsers.length === 1 &&
+    candidateAssistants.length === 1;
+
   return Object.freeze({
-    sessionMatches: sessionId === expected.sessionId,
+    sessionMatches,
+    historyComplete,
+    watermarkEstablished: false,
+    prefixStable,
+    postFenceMatched,
     promptMatches,
     assistantMarkerMatches,
+    candidateUserCount: candidateUsers.length,
+    candidateAssistantCount: candidateAssistants.length,
     messageCount: messages.length,
-    matched: sessionId === expected.sessionId && promptMatches && assistantMarkerMatches
+    historyIdTag,
+    prefixIdTag,
+    watermark: undefined,
+    matched:
+      historyComplete &&
+      sessionMatches &&
+      prefixStable &&
+      postFenceMatched &&
+      promptMatches &&
+      assistantMarkerMatches
   });
 }
 
 /**
  * Assert the causal proof chain. The result is fixed-shape and safe to use in
- * Playwright expectations; it never includes diagnostic payloads or IDs.
+ * Playwright expectations; it never includes diagnostic payloads or identities.
+ * Expected identity values are attempt-local HMAC tags, never raw IDs.
  *
  * @param {Array<Record<string, unknown>>} events
- * @param {{ sessionId: string, promptRequestId?: string, promptSessionId?: string, completionStatus?: string }} expected
+ * @param {{ sessionTag?: string, promptRequestTag?: string, promptSessionTag?: string, completionStatus?: string }} expected
  */
 export function matchLiveProofLedger(events, expected) {
   if (!isEventList(events)) {
     throw new Error('live proof ledger sequence is not bounded');
   }
-  const expectedSessionId =
-    typeof expected.sessionId === 'string' && expected.sessionId.length > 0
-      ? expected.sessionId
-      : undefined;
+  if (events.some(hasRawIdentityField)) {
+    throw new Error('live proof ledger retained a raw identity');
+  }
+  const expectedSessionTag = boundedTag(expected?.sessionTag);
+  const expectedPromptRequestTag = boundedTag(expected?.promptRequestTag);
+  const expectedPromptSessionTag = boundedTag(expected?.promptSessionTag);
   const websocketOpens = events.filter((event) => event.kind === 'ws.open');
   const websocket = websocketOpens.length === 1 &&
     websocketOpens[0].route === '/api/ws' &&
@@ -316,54 +536,70 @@ export function matchLiveProofLedger(events, expected) {
   const session = events.find((event) =>
     event.kind === 'session.action' &&
     (event.method === 'session.create' || event.method === 'session.resume') &&
-    !!expectedSessionId &&
-    (event.sessionId === expectedSessionId || event.storedSessionId === expectedSessionId)
+    !!expectedSessionTag &&
+    (event.sessionTag === expectedSessionTag || event.storedSessionTag === expectedSessionTag)
   );
   const prompts = events.filter((event) => event.kind === 'prompt.submit');
   const prompt = prompts.find((event) =>
-    typeof event.requestId === 'string' &&
-    event.requestId.length > 0 &&
-    typeof event.sessionId === 'string' &&
-    event.sessionId.length > 0 &&
+    typeof event.requestTag === 'string' &&
+    typeof event.sessionTag === 'string' &&
     event.promptMatches === true &&
-    (!expected.promptRequestId || event.requestId === expected.promptRequestId) &&
-    (!expected.promptSessionId || event.sessionId === expected.promptSessionId)
+    (!expectedPromptRequestTag || event.requestTag === expectedPromptRequestTag) &&
+    (!expectedPromptSessionTag || event.sessionTag === expectedPromptSessionTag)
   );
   const acknowledgement = events.find((event) =>
     !!prompt &&
     event.kind === 'ws.received' &&
     event.event === 'response' &&
-    event.requestId === prompt.requestId
+    event.requestTag === prompt.requestTag
   );
   const deltas = events.filter((event) => event.kind === 'message.delta');
   const delta = deltas.find((event) =>
     !!prompt &&
-    typeof event.requestId === 'string' &&
-    typeof event.sessionId === 'string' &&
-    event.requestId === prompt.requestId &&
-    event.sessionId === prompt.sessionId
+    event.requestTag === undefined &&
+    typeof event.sessionTag === 'string' &&
+    event.sessionTag === prompt.sessionTag
   );
   const completions = events.filter((event) => event.kind === 'message.complete');
   const complete = completions.find((event) =>
     event.markerMatches === true &&
-    event.status === (expected.completionStatus ?? 'ok') &&
+    event.status === (expected?.completionStatus ?? 'complete') &&
     !!prompt &&
-    typeof event.requestId === 'string' &&
-    typeof event.sessionId === 'string' &&
-    event.requestId === prompt.requestId &&
-    event.sessionId === prompt.sessionId
+    event.requestTag === undefined &&
+    typeof event.sessionTag === 'string' &&
+    event.sessionTag === prompt.sessionTag
   );
-  const history = events.find((event) =>
-    event.kind === 'history.response' &&
+  const histories = events.filter((event) => event.kind === 'history.response');
+  const preHistories = histories.filter((event) =>
+    event.phase === 'pre-send' &&
     event.status === 200 &&
-    !!expectedSessionId &&
-    event.sessionId === expectedSessionId &&
-    event.promptMatches === true &&
-    event.assistantMarkerMatches === true
+    !!expectedSessionTag &&
+    event.sessionTag === expectedSessionTag &&
+    event.historyComplete === true &&
+    event.watermarkEstablished === true &&
+    typeof event.historyIdTag === 'string'
   );
+  const postHistories = histories.filter((event) =>
+    event.phase === 'post-completion' &&
+    event.status === 200 &&
+    !!expectedSessionTag &&
+    event.sessionTag === expectedSessionTag &&
+    event.historyComplete === true &&
+    event.prefixStable === true &&
+    event.postFenceMatched === true &&
+    event.promptMatches === true &&
+    event.assistantMarkerMatches === true &&
+    event.candidateUserCount === 1 &&
+    event.candidateAssistantCount === 1
+  );
+  const preHistory = preHistories.length === 1 ? preHistories[0] : undefined;
+  const history = preHistories.length === 1 && postHistories.length === 1
+    ? postHistories[0]
+    : undefined;
   const websocketSequence = sequenceOf(websocket);
   const readySequence = sequenceOf(ready);
   const sessionSequence = sequenceOf(session);
+  const preHistorySequence = sequenceOf(preHistory);
   const promptSequence = sequenceOf(prompt);
   const acknowledgementSequence = sequenceOf(acknowledgement);
   const deltaSequence = sequenceOf(delta);
@@ -373,6 +609,7 @@ export function matchLiveProofLedger(events, expected) {
     typeof websocketSequence === 'number' &&
     typeof readySequence === 'number' &&
     typeof sessionSequence === 'number' &&
+    typeof preHistorySequence === 'number' &&
     typeof promptSequence === 'number' &&
     typeof acknowledgementSequence === 'number' &&
     typeof deltaSequence === 'number' &&
@@ -380,7 +617,8 @@ export function matchLiveProofLedger(events, expected) {
     typeof historySequence === 'number' &&
     websocketSequence < readySequence &&
     readySequence < sessionSequence &&
-    sessionSequence < promptSequence &&
+    sessionSequence < preHistorySequence &&
+    preHistorySequence < promptSequence &&
     promptSequence < acknowledgementSequence &&
     acknowledgementSequence < deltaSequence &&
     deltaSequence < completeSequence &&

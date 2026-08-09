@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LIVE_PROOF_ASSISTANT_MARKER,
+  LIVE_PROOF_HISTORY_LIMIT,
   LIVE_PROOF_PROMPT,
   assertLiveProofHappensBefore,
   assertLiveProofLedgerCaptureReady,
@@ -9,37 +10,87 @@ import {
   matchLiveProofLedger
 } from '../../tests/live/live-proof-ledger.mjs';
 
+function expectedTags(ledger: ReturnType<typeof createLiveProofLedger>) {
+  return {
+    sessionTag: ledger.identityTag('stored-1'),
+    promptRequestTag: ledger.identityTag('prompt-1'),
+    promptSessionTag: ledger.identityTag('ephemeral-1')
+  };
+}
+
+function historyEvent(
+  ledger: ReturnType<typeof createLiveProofLedger>,
+  phase: 'pre-send' | 'post-completion',
+  ids: number[],
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    phase,
+    status: 200,
+    sessionId: 'stored-1',
+    historyComplete: true,
+    watermarkEstablished: phase === 'pre-send',
+    prefixStable: phase === 'post-completion',
+    postFenceMatched: phase === 'post-completion',
+    promptMatches: phase === 'post-completion',
+    assistantMarkerMatches: phase === 'post-completion',
+    candidateUserCount: phase === 'post-completion' ? 1 : 0,
+    candidateAssistantCount: phase === 'post-completion' ? 1 : 0,
+    messageCount: ids.length,
+    historyIdTag: ledger.messageIdTag(ids),
+    prefixIdTag: ledger.messageIdTag(phase === 'pre-send' ? ids : ids.slice(0, 2)),
+    ...overrides
+  };
+}
+
 function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}) {
   const ledger = createLiveProofLedger();
+  const preIds = [10, 11];
+  const postIds = [10, 11, 12, 13];
   ledger.recordWebSocketOpen({
     route: options.route ?? '/api/ws',
     ticketOnly: options.ticketOnly ?? true
   });
-  ledger.recordWebSocketReceived({ event: 'gateway.ready', sessionId: 'ephemeral-1' });
-  ledger.recordGatewayReady({ sessionId: 'ephemeral-1' });
+  ledger.recordWebSocketReceived({ event: 'gateway.ready' });
+  ledger.recordGatewayReady();
   ledger.recordSessionAction({
-    method: 'session.create',
+    method: 'session.resume',
     requestId: 'create-1',
     sessionId: 'ephemeral-1',
     storedSessionId: 'stored-1'
   });
+  ledger.recordHistoryResponse(historyEvent(ledger, 'pre-send', preIds));
   ledger.recordPrompt({ requestId: 'prompt-1', sessionId: 'ephemeral-1', promptMatches: true });
   ledger.recordWebSocketReceived({ event: 'response', requestId: 'prompt-1' });
-  ledger.recordDelta({ requestId: 'prompt-1', sessionId: 'ephemeral-1' });
+  ledger.recordDelta({ sessionId: 'ephemeral-1' });
   ledger.recordCompletion({
-    requestId: 'prompt-1',
     sessionId: 'ephemeral-1',
-    status: 'ok',
+    status: 'complete',
     markerMatches: true
   });
-  ledger.recordHistoryResponse({
-    status: 200,
-    sessionId: 'stored-1',
-    promptMatches: true,
-    assistantMarkerMatches: true,
-    messageCount: 2
+  ledger.recordHistoryResponse(historyEvent(ledger, 'post-completion', postIds));
+  return { ledger, events: ledger.snapshot(), expected: expectedTags(ledger) };
+}
+
+function historyResponse(
+  sessionId: string,
+  messages: Array<Record<string, unknown>>,
+  limit = LIVE_PROOF_HISTORY_LIMIT
+) {
+  return {
+    session_id: sessionId,
+    messages,
+    pagination: { limit, offset: 0, returned: messages.length }
+  };
+}
+
+function proofMessages(ids: number[] = [10, 11, 12, 13]) {
+  return ids.map((id) => {
+    if (id === 10) return { id, role: 'system', content: null };
+    if (id === 11) return { id, role: 'assistant', content: 'prior answer' };
+    if (id === 12) return { id, role: 'user', content: LIVE_PROOF_PROMPT };
+    return { id, role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER };
   });
-  return ledger.snapshot();
 }
 
 describe('bounded live proof ledger', () => {
@@ -54,42 +105,10 @@ describe('bounded live proof ledger', () => {
     );
   });
 
-  it('matches the exact ordered session, prompt, completion, and history chain', () => {
-    const ledger = createLiveProofLedger();
-    ledger.recordHttpRequest({ method: 'GET', route: 'auth.me' });
-    ledger.recordHttpResponse({ method: 'GET', route: 'auth.me', status: 200 });
-    ledger.recordWebSocketOpen({ route: '/api/ws', ticketOnly: true });
-    ledger.recordWebSocketReceived({ event: 'gateway.ready', sessionId: 'ephemeral-1' });
-    ledger.recordGatewayReady({ sessionId: 'ephemeral-1' });
-    ledger.recordSessionAction({
-      method: 'session.create',
-      requestId: 'create-1',
-      sessionId: 'ephemeral-1',
-      storedSessionId: 'stored-1'
-    });
-    ledger.recordPrompt({ requestId: 'prompt-1', sessionId: 'ephemeral-1', promptMatches: true });
-    ledger.recordWebSocketReceived({ event: 'response', requestId: 'prompt-1' });
-    ledger.recordDelta({ requestId: 'prompt-1', sessionId: 'ephemeral-1' });
-    ledger.recordCompletion({
-      requestId: 'prompt-1',
-      sessionId: 'ephemeral-1',
-      status: 'ok',
-      markerMatches: true
-    });
-    ledger.recordHistoryResponse({
-      status: 200,
-      sessionId: 'stored-1',
-      promptMatches: true,
-      assistantMarkerMatches: true,
-      messageCount: 2
-    });
-
-    const events = ledger.snapshot();
-    expect(matchLiveProofLedger(events, {
-      sessionId: 'stored-1',
-      promptRequestId: 'prompt-1',
-      promptSessionId: 'ephemeral-1'
-    })).toEqual({
+  it('matches the exact ordered session, fence, prompt, completion, and history chain', () => {
+    const valid = validProofEvents();
+    const proof = matchLiveProofLedger(valid.events, valid.expected);
+    expect(proof).toEqual({
       ordered: true,
       websocketOpen: true,
       gatewayReady: true,
@@ -101,14 +120,9 @@ describe('bounded live proof ledger', () => {
       completion: true,
       history: true,
       historyStatusOk: true,
-      messageCount: 2,
+      messageCount: 4,
       promptCount: 1,
       completionCount: 1
-    });
-    const proof = matchLiveProofLedger(events, {
-      sessionId: 'stored-1',
-      promptRequestId: 'prompt-1',
-      promptSessionId: 'ephemeral-1'
     });
     expect(assertLiveProofLedgerCaptureReady(proof)).toBe(true);
     expect(() => assertLiveProofLedgerCaptureReady({ ...proof, ordered: false })).toThrow(
@@ -116,136 +130,274 @@ describe('bounded live proof ledger', () => {
     );
   });
 
+  it('retains HMAC identity tags but never raw session or request IDs', () => {
+    const valid = validProofEvents();
+    const serialized = JSON.stringify(valid.events);
+    expect(serialized).not.toContain('stored-1');
+    expect(serialized).not.toContain('ephemeral-1');
+    expect(serialized).not.toContain('prompt-1');
+    expect(valid.events.every((event) => !('sessionId' in event) && !('requestId' in event))).toBe(true);
+    expect(serialized).toContain('h1:');
+  });
+
   it('rejects mismatched identity or re-ordered completion evidence', () => {
-    const ledger = createLiveProofLedger();
-    ledger.recordGatewayReady();
-    ledger.recordCompletion({
-      requestId: 'prompt-1',
-      sessionId: 'wrong-session',
-      status: 'ok',
-      markerMatches: true
-    });
-    ledger.recordPrompt({ requestId: 'prompt-1', sessionId: 'ephemeral-1', promptMatches: true });
-    ledger.recordHistoryResponse({
-      status: 200,
-      sessionId: 'stored-1',
-      promptMatches: true,
-      assistantMarkerMatches: true,
-      messageCount: 2
-    });
-    expect(matchLiveProofLedger(ledger.snapshot(), {
-      sessionId: 'stored-1',
-      promptRequestId: 'prompt-1',
-      promptSessionId: 'ephemeral-1'
-    }).ordered).toBe(false);
-    expect(() => assertLiveProofHappensBefore(ledger.snapshot(), 'prompt.submit', 'message.complete')).toThrow(
+    const valid = validProofEvents();
+    const completion = valid.events.find((event) => event.kind === 'message.complete');
+    expect(completion).toBeTruthy();
+    const mismatched = valid.events.map((event) =>
+      event === completion
+        ? { ...event, sessionTag: valid.ledger.identityTag('wrong-session') }
+        : event
+    );
+    expect(matchLiveProofLedger(mismatched, valid.expected).completion).toBe(false);
+
+    const reordered = valid.events.map((event) =>
+      event === completion ? { ...event, sequence: 1 } : event
+    );
+    expect(matchLiveProofLedger(reordered, valid.expected).ordered).toBe(false);
+    expect(() => assertLiveProofHappensBefore(reordered, 'prompt.submit', 'message.complete')).toThrow(
       'ordering assertion failed'
     );
   });
 
   it('rejects completion before delta or prompt acknowledgement', () => {
     const valid = validProofEvents();
-    const acknowledgement = valid.find(
+    const acknowledgement = valid.events.find(
       (event) => event.kind === 'ws.received' && event.event === 'response'
     );
-    const delta = valid.find((event) => event.kind === 'message.delta');
-    const completion = valid.find((event) => event.kind === 'message.complete');
+    const delta = valid.events.find((event) => event.kind === 'message.delta');
+    const completion = valid.events.find((event) => event.kind === 'message.complete');
     expect(acknowledgement && delta && completion).toBeTruthy();
 
-    const completionBeforeDelta = valid.map((event) => {
+    const completionBeforeDelta = valid.events.map((event) => {
       if (event === completion) return { ...event, sequence: Number(delta?.sequence) - 1 };
       return event;
     });
-    expect(matchLiveProofLedger(completionBeforeDelta, { sessionId: 'stored-1' }).ordered).toBe(false);
+    expect(matchLiveProofLedger(completionBeforeDelta, valid.expected).ordered).toBe(false);
 
-    const completionBeforeAcknowledgement = valid.map((event) => {
+    const completionBeforeAcknowledgement = valid.events.map((event) => {
       if (event === completion) return { ...event, sequence: Number(acknowledgement?.sequence) - 1 };
       return event;
     });
-    expect(matchLiveProofLedger(completionBeforeAcknowledgement, { sessionId: 'stored-1' }).ordered).toBe(false);
+    expect(matchLiveProofLedger(completionBeforeAcknowledgement, valid.expected).ordered).toBe(false);
   });
 
-  it('rejects request-ID-free completion, wrong status, and missing canonical history identity', () => {
-    const requestlessCompletion = validProofEvents().map((event) =>
-      event.kind === 'message.complete' ? { ...event, requestId: undefined } : event
-    );
-    expect(matchLiveProofLedger(requestlessCompletion, { sessionId: 'stored-1' }).completion).toBe(false);
+  it('uses source session correlation and complete status, never a fabricated event request ID', () => {
+    const valid = validProofEvents();
+    expect(matchLiveProofLedger(valid.events, valid.expected).completion).toBe(true);
 
-    const wrongStatus = validProofEvents().map((event) =>
+    const wrongStatus = valid.events.map((event) =>
       event.kind === 'message.complete' ? { ...event, status: 'error' } : event
     );
-    expect(matchLiveProofLedger(wrongStatus, { sessionId: 'stored-1' }).completion).toBe(false);
+    expect(matchLiveProofLedger(wrongStatus, valid.expected).completion).toBe(false);
 
-    const missingCanonicalHistory = validProofEvents().map((event) =>
-      event.kind === 'history.response' ? { ...event, sessionId: undefined } : event
+    const wrongSession = valid.events.map((event) =>
+      event.kind === 'message.complete'
+        ? { ...event, sessionTag: valid.ledger.identityTag('wrong-session') }
+        : event
     );
-    expect(matchLiveProofLedger(missingCanonicalHistory, { sessionId: 'stored-1' }).history).toBe(false);
+    expect(matchLiveProofLedger(wrongSession, valid.expected).completion).toBe(false);
+
+    const fabricatedRequest = valid.events.map((event) =>
+      event.kind === 'message.complete'
+        ? { ...event, requestTag: valid.ledger.identityTag('prompt-1') }
+        : event
+    );
+    expect(matchLiveProofLedger(fabricatedRequest, valid.expected).completion).toBe(false);
   });
 
   it('rejects duplicate prompts, gateway readiness, sockets, and completions', () => {
     const valid = validProofEvents();
-    const prompt = valid.find((event) => event.kind === 'prompt.submit');
-    const ready = valid.find((event) => event.kind === 'gateway.ready');
-    const socket = valid.find((event) => event.kind === 'ws.open');
-    const completion = valid.find((event) => event.kind === 'message.complete');
+    const prompt = valid.events.find((event) => event.kind === 'prompt.submit');
+    const ready = valid.events.find((event) => event.kind === 'gateway.ready');
+    const socket = valid.events.find((event) => event.kind === 'ws.open');
+    const completion = valid.events.find((event) => event.kind === 'message.complete');
     expect(prompt && ready && socket && completion).toBeTruthy();
 
-    expect(matchLiveProofLedger([...valid, { ...prompt, sequence: 100 }], { sessionId: 'stored-1' }).prompt).toBe(false);
-    expect(matchLiveProofLedger([...valid, { ...ready, sequence: 101 }], { sessionId: 'stored-1' }).gatewayReady).toBe(false);
-    expect(matchLiveProofLedger([...valid, { ...socket, sequence: 102 }], { sessionId: 'stored-1' }).websocketOpen).toBe(false);
-    expect(matchLiveProofLedger([...valid, { ...completion, sequence: 103 }], { sessionId: 'stored-1' }).completion).toBe(false);
+    expect(matchLiveProofLedger([...valid.events, { ...prompt, sequence: 100 }], valid.expected).prompt).toBe(false);
+    expect(matchLiveProofLedger([...valid.events, { ...ready, sequence: 101 }], valid.expected).gatewayReady).toBe(false);
+    expect(matchLiveProofLedger([...valid.events, { ...socket, sequence: 102 }], valid.expected).websocketOpen).toBe(false);
+    expect(matchLiveProofLedger([...valid.events, { ...completion, sequence: 103 }], valid.expected).completion).toBe(false);
   });
 
   it('rejects wrong WebSocket route, missing ticket-only flag, and non-server-first readiness', () => {
-    expect(matchLiveProofLedger(validProofEvents({ route: '/wrong' }), { sessionId: 'stored-1' }).ordered).toBe(false);
-    expect(matchLiveProofLedger(validProofEvents({ ticketOnly: false }), { sessionId: 'stored-1' }).ordered).toBe(false);
+    expect(matchLiveProofLedger(validProofEvents({ route: '/wrong' }).events, validProofEvents().expected).ordered).toBe(false);
+    expect(matchLiveProofLedger(validProofEvents({ ticketOnly: false }).events, validProofEvents().expected).ordered).toBe(false);
 
     const nonServerFirst = [
       { sequence: 0, kind: 'ws.received', event: 'notice' },
-      ...validProofEvents()
+      ...validProofEvents().events
     ];
-    expect(matchLiveProofLedger(nonServerFirst, { sessionId: 'stored-1' }).serverFirstReady).toBe(false);
-    expect(matchLiveProofLedger(nonServerFirst, { sessionId: 'stored-1' }).ordered).toBe(false);
+    const valid = validProofEvents();
+    expect(matchLiveProofLedger(nonServerFirst, valid.expected).serverFirstReady).toBe(false);
+    expect(matchLiveProofLedger(nonServerFirst, valid.expected).ordered).toBe(false);
   });
 
   it('rejects a missing prompt acknowledgement', () => {
-    const withoutAcknowledgement = validProofEvents().filter(
+    const valid = validProofEvents();
+    const withoutAcknowledgement = valid.events.filter(
       (event) => !(event.kind === 'ws.received' && event.event === 'response')
     );
-    const proof = matchLiveProofLedger(withoutAcknowledgement, { sessionId: 'stored-1' });
+    const proof = matchLiveProofLedger(withoutAcknowledgement, valid.expected);
     expect(proof.promptAcknowledgement).toBe(false);
     expect(proof.ordered).toBe(false);
   });
 
-  it('matches only the exact canonical session and user/assistant pair', () => {
-    expect(matchLiveProofHistory({
-      session_id: 'stored-1',
-      messages: [
-        { role: 'user', content: LIVE_PROOF_PROMPT },
-        { role: 'assistant', content: `prefix ${LIVE_PROOF_ASSISTANT_MARKER}` }
-      ]
-    }, {
-      sessionId: 'stored-1',
-      prompt: LIVE_PROOF_PROMPT,
-      assistantMarker: LIVE_PROOF_ASSISTANT_MARKER
-    })).toEqual({
-      sessionMatches: true,
+  it('requires an exact post-watermark pair and rejects stale-only history', () => {
+    const ledger = createLiveProofLedger();
+    const pre = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 11, role: 'assistant', content: 'prior answer' }
+      ]),
+      {
+        phase: 'pre-send',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageIdTagger: ledger.messageIdTag
+      }
+    );
+    expect(pre.matched).toBe(true);
+    expect(pre.watermark).toBe(11);
+
+    const stale = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'user', content: LIVE_PROOF_PROMPT },
+        { id: 11, role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+      ]),
+      {
+        phase: 'post-completion',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageIdTagger: ledger.messageIdTag,
+        fence: pre.watermark,
+        preHistoryIdTag: pre.historyIdTag
+      }
+    );
+    expect(stale.prefixStable).toBe(true);
+    expect(stale.postFenceMatched).toBe(false);
+    expect(stale.matched).toBe(false);
+
+    const post = matchLiveProofHistory(
+      historyResponse('stored-1', proofMessages()),
+      {
+        phase: 'post-completion',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageIdTagger: ledger.messageIdTag,
+        fence: pre.watermark,
+        preHistoryIdTag: pre.historyIdTag
+      }
+    );
+    expect(post).toMatchObject({
+      historyComplete: true,
+      prefixStable: true,
+      postFenceMatched: true,
       promptMatches: true,
       assistantMarkerMatches: true,
-      messageCount: 2,
+      candidateUserCount: 1,
+      candidateAssistantCount: 1,
       matched: true
     });
+  });
 
-    expect(matchLiveProofHistory({
-      session_id: 'wrong-session',
-      messages: [
-        { role: 'user', content: LIVE_PROOF_PROMPT },
-        { role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
-      ]
-    }, {
+  it('rejects prefix or suffix marker text, extra candidates, and session mismatch', () => {
+    const ledger = createLiveProofLedger();
+    const pre = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 11, role: 'assistant', content: 'prior answer' }
+      ]),
+      {
+        phase: 'pre-send',
+        sessionId: 'stored-1',
+        prompt: LIVE_PROOF_PROMPT,
+        assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+        messageIdTagger: ledger.messageIdTag
+      }
+    );
+    const baseExpected = {
+      phase: 'post-completion' as const,
       sessionId: 'stored-1',
       prompt: LIVE_PROOF_PROMPT,
-      assistantMarker: LIVE_PROOF_ASSISTANT_MARKER
-    }).matched).toBe(false);
+      assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+      messageIdTagger: ledger.messageIdTag,
+      fence: pre.watermark,
+      preHistoryIdTag: pre.historyIdTag
+    };
+
+    const suffix = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 11, role: 'assistant', content: 'prior answer' },
+        { id: 12, role: 'user', content: LIVE_PROOF_PROMPT },
+        { id: 13, role: 'assistant', content: `${LIVE_PROOF_ASSISTANT_MARKER} extra` }
+      ]),
+      baseExpected
+    );
+    expect(suffix.matched).toBe(false);
+    expect(suffix.assistantMarkerMatches).toBe(false);
+
+    const extra = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        ...proofMessages(),
+        { id: 14, role: 'assistant', content: 'another answer' }
+      ]),
+      baseExpected
+    );
+    expect(extra.candidateAssistantCount).toBe(2);
+    expect(extra.matched).toBe(false);
+
+    const wrongSession = matchLiveProofHistory(
+      historyResponse('wrong-session', proofMessages()),
+      baseExpected
+    );
+    expect(wrongSession.sessionMatches).toBe(false);
+    expect(wrongSession.matched).toBe(false);
+
+    const prefixChanged = matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 12, role: 'assistant', content: 'replacement' },
+        { id: 13, role: 'user', content: LIVE_PROOF_PROMPT },
+        { id: 14, role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+      ]),
+      baseExpected
+    );
+    expect(prefixChanged.prefixStable).toBe(false);
+    expect(prefixChanged.matched).toBe(false);
+  });
+
+  it('fails closed on duplicate IDs, incomplete pagination, and an unbounded page', () => {
+    const ledger = createLiveProofLedger();
+    const expected = {
+      phase: 'pre-send' as const,
+      sessionId: 'stored-1',
+      prompt: LIVE_PROOF_PROMPT,
+      assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+      messageIdTagger: ledger.messageIdTag
+    };
+    expect(() => matchLiveProofHistory(
+      historyResponse('stored-1', [
+        { id: 10, role: 'system', content: null },
+        { id: 10, role: 'assistant', content: 'duplicate' }
+      ]),
+      expected
+    )).toThrow('ordering');
+
+    expect(matchLiveProofHistory(
+      historyResponse('stored-1', [{ id: 10, role: 'system', content: null }], 499),
+      expected
+    ).historyComplete).toBe(false);
+
+    const fullPage = Array.from({ length: LIVE_PROOF_HISTORY_LIMIT }, (_, index) => ({
+      id: index + 1,
+      role: 'system',
+      content: null
+    }));
+    expect(matchLiveProofHistory(historyResponse('stored-1', fullPage), expected).matched).toBe(false);
   });
 });

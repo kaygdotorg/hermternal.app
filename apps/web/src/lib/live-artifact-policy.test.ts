@@ -1681,7 +1681,7 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(reconciliationSource).not.toContain("Message Hermes");
 
     const emptyLedger = createLiveProofLedger();
-    expect(matchLiveProofLedger(emptyLedger.snapshot(), { sessionId: 'unattributed' })).toMatchObject({
+    expect(matchLiveProofLedger(emptyLedger.snapshot(), {})).toMatchObject({
       promptCount: 0,
       completionCount: 0
     });

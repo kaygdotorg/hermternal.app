@@ -37,7 +37,7 @@ describe('reconciliation test selection contract', () => {
       ]);
       expect(config.testMatch).not.toContain('official-hermes');
       expect(config.testMatch).not.toContain('capture');
-      expect(matchLiveProofLedger(createLiveProofLedger().snapshot(), { sessionId: 'unattributed' })).toMatchObject({
+      expect(matchLiveProofLedger(createLiveProofLedger().snapshot(), {})).toMatchObject({
         promptCount: 0,
         completionCount: 0
       });

@@ -30,8 +30,6 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   let websocketUpgradeCount = 0;
   let websocketQueryIsTicketOnly = false;
   let websocketCloseCount = 0;
-  let historyMatched = false;
-  let latestHistoryProjection = Promise.resolve();
 
   // Playwright exposes frames but not a browser WebSocket close operation. Track
   // only the live proof sockets in the page realm so teardown can close the same
@@ -72,17 +70,6 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     const route = trackedRoute(request.url());
     if (!route) return;
     ledger.recordHttpResponse({ method: request.method(), route, status: response.status() });
-    if (promptRequestId && request.method() === 'GET' && route.endsWith('/messages')) {
-      const responseSessionId = expectedStoredSessionId;
-      latestHistoryProjection = projectHistoryResponse(
-        response,
-        responseSessionId,
-        ledger,
-        (matched) => {
-          historyMatched = matched;
-        }
-      );
-    }
   });
 
   page.on('websocket', (socket) => {
@@ -141,36 +128,30 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
         if (!type) return;
         const payloadValue = params.payload;
         const payloadRecord = isRecord(payloadValue) ? payloadValue : undefined;
-        const sessionId =
-          stringValue(params.session_id) ??
-          stringValue(params.sessionId) ??
-          stringValue(payloadRecord?.session_id) ??
-          stringValue(payloadRecord?.sessionId);
+        // Hermes message events carry only the source-provided session_id in
+        // their event envelope. Never infer a session or fabricate a request
+        // identity from the prompt RPC; the completion contract is session-
+        // correlated and one-submission only.
+        const sessionId = stringValue(params.session_id);
         const requestId =
-          stringValue(params.request_id) ??
-          stringValue(params.requestId) ??
-          ((type === 'message.delta' || type === 'message.complete' || type === 'error')
-            ? promptRequestId
-            : undefined);
+          type === 'message.delta' || type === 'message.complete' || type === 'error'
+            ? undefined
+            : stringValue(params.request_id) ?? stringValue(params.requestId);
         ledger.recordWebSocketReceived({ event: type, requestId, sessionId });
 
         if (type === 'gateway.ready') {
-          ledger.recordGatewayReady({ sessionId });
+          ledger.recordGatewayReady();
         } else if (type === 'message.delta') {
-          ledger.recordDelta({
-            requestId,
-            sessionId: sessionId ?? promptSessionId
-          });
+          ledger.recordDelta({ sessionId });
         } else if (type === 'message.complete') {
           const status =
             stringValue(payloadRecord?.status) ??
             stringValue(payloadRecord?.outcome) ??
             'unknown';
           ledger.recordCompletion({
-            requestId,
-            sessionId: sessionId ?? promptSessionId,
+            sessionId,
             status,
-            markerMatches: containsText(payloadValue, LIVE_PROOF_ASSISTANT_MARKER)
+            markerMatches: hasExactText(payloadValue, LIVE_PROOF_ASSISTANT_MARKER)
           });
         }
         return;
@@ -211,21 +192,60 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
 
   const hasExistingSession = (await page.locator('.session-items button').count()) > 0;
   if (!hasExistingSession) {
-    // A fresh disposable instance has no durable history. New chat creates the
-    // source-owned ephemeral draft; its response supplies the durable ID.
-    await page.getByRole('button', { name: 'Start a new chat' }).click();
-    await expect.poll(() => hasEvent(ledger, 'session.action')).toBe(true);
-    await expect(workspace).toHaveAttribute('data-state', 'empty');
-  } else {
-    await expect.poll(() => hasEvent(ledger, 'session.action')).toBe(true);
+    // session.create persists lazily on the first prompt in the pinned Hermes
+    // source, so a fresh draft cannot establish a pre-send REST fence safely.
+    // Refuse before any prompt rather than weakening the causal boundary.
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof requires an existing canonical session');
   }
+  await expect.poll(() => hasEvent(ledger, 'session.action')).toBe(true);
 
   await expect.poll(() => hasEvent(ledger, 'gateway.ready')).toBe(true);
   expect(websocketUpgradeCount).toBe(1);
   expect(websocketQueryIsTicketOnly).toBe(true);
   setLiveProofStatus(testInfo, { phase: 'ready-no-submit', delivery: 'not-submitted' });
 
-  const initialMessageReadCount = countHttpRequests(ledger, 'GET', '/messages');
+  const canonicalSessionId = expectedStoredSessionId;
+  if (!canonicalSessionId) {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof canonical session identity was unavailable');
+  }
+  let preSendHistory: Awaited<ReturnType<typeof readCanonicalProofHistory>>;
+  try {
+    preSendHistory = await readCanonicalProofHistory(page, canonicalSessionId, ledger, {
+      phase: 'pre-send'
+    });
+  } catch {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof pre-send history read failed');
+  }
+  ledger.recordHistoryResponse({
+    phase: 'pre-send',
+    status: preSendHistory.status,
+    sessionId: canonicalSessionId,
+    historyComplete: preSendHistory.historyComplete,
+    watermarkEstablished: preSendHistory.watermarkEstablished,
+    prefixStable: preSendHistory.prefixStable,
+    postFenceMatched: preSendHistory.postFenceMatched,
+    promptMatches: preSendHistory.promptMatches,
+    assistantMarkerMatches: preSendHistory.assistantMarkerMatches,
+    candidateUserCount: preSendHistory.candidateUserCount,
+    candidateAssistantCount: preSendHistory.candidateAssistantCount,
+    messageCount: preSendHistory.messageCount,
+    historyIdTag: preSendHistory.historyIdTag,
+    prefixIdTag: preSendHistory.prefixIdTag
+  });
+  if (!preSendHistory.matched || preSendHistory.watermark === undefined) {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof pre-send history fence was not established');
+  }
+  const fence = preSendHistory.watermark;
+  const preHistoryIdTag = preSendHistory.historyIdTag;
+  if (!preHistoryIdTag) {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof pre-send history identity was unavailable');
+  }
+
   await page.getByLabel('Message Hermes').fill(LIVE_PROOF_PROMPT);
   await page.getByRole('button', { name: 'Send message' }).click();
   setLiveProofStatus(testInfo, { phase: 'submitted', delivery: 'submitted' });
@@ -238,13 +258,38 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   await expect.poll(() => countEvents(ledger, 'message.complete'), { timeout: 90_000 }).toBe(1);
   setLiveProofStatus(testInfo, { phase: 'completed', delivery: 'completed' });
   await expect(workspace).toHaveAttribute('data-state', /^(empty|ready)$/);
-  await expect.poll(
-    () => countHttpRequests(ledger, 'GET', '/messages'),
-    { timeout: 30_000 }
-  ).toBeGreaterThan(initialMessageReadCount);
-  await expect.poll(() => countEvents(ledger, 'history.response'), { timeout: 30_000 }).toBeGreaterThan(0);
-  await latestHistoryProjection;
-  expect(historyMatched).toBe(true);
+
+  let postCompletionHistory: Awaited<ReturnType<typeof readCanonicalProofHistory>>;
+  try {
+    postCompletionHistory = await readCanonicalProofHistory(page, canonicalSessionId, ledger, {
+      phase: 'post-completion',
+      fence,
+      preHistoryIdTag
+    });
+  } catch {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof post-completion history read failed');
+  }
+  ledger.recordHistoryResponse({
+    phase: 'post-completion',
+    status: postCompletionHistory.status,
+    sessionId: canonicalSessionId,
+    historyComplete: postCompletionHistory.historyComplete,
+    watermarkEstablished: postCompletionHistory.watermarkEstablished,
+    prefixStable: postCompletionHistory.prefixStable,
+    postFenceMatched: postCompletionHistory.postFenceMatched,
+    promptMatches: postCompletionHistory.promptMatches,
+    assistantMarkerMatches: postCompletionHistory.assistantMarkerMatches,
+    candidateUserCount: postCompletionHistory.candidateUserCount,
+    candidateAssistantCount: postCompletionHistory.candidateAssistantCount,
+    messageCount: postCompletionHistory.messageCount,
+    historyIdTag: postCompletionHistory.historyIdTag,
+    prefixIdTag: postCompletionHistory.prefixIdTag
+  });
+  if (!postCompletionHistory.matched) {
+    setLiveProofStatus(testInfo, { phase: 'uncertain', delivery: 'uncertain' });
+    throw new Error('live proof post-completion history did not match the fence');
+  }
   setLiveProofStatus(testInfo, { phase: 'history-reconciled', delivery: 'completed' });
 
   const captureState = await workspace.getAttribute('data-state');
@@ -258,10 +303,10 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
   expect(typeof promptRequestId).toBe('string');
   expect(typeof promptSessionId).toBe('string');
   const proof = matchLiveProofLedger(eventsBeforeLogout, {
-    sessionId: expectedSession!,
-    promptRequestId,
-    promptSessionId,
-    completionStatus: 'ok'
+    sessionTag: ledger.identityTag(expectedSession),
+    promptRequestTag: ledger.identityTag(promptRequestId),
+    promptSessionTag: ledger.identityTag(promptSessionId),
+    completionStatus: 'complete'
   });
   expect(proof).toEqual({
     ordered: true,
@@ -427,12 +472,12 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= 256 ? value : undefined;
 }
 
-function containsText(value: unknown, marker: string, depth = 0): boolean {
+function hasExactText(value: unknown, marker: string, depth = 0): boolean {
   if (depth > 8) return false;
-  if (typeof value === 'string') return value.includes(marker);
+  if (typeof value === 'string') return value === marker;
   if (Array.isArray(value)) {
     for (const item of value.slice(0, 128)) {
-      if (containsText(item, marker, depth + 1)) return true;
+      if (hasExactText(item, marker, depth + 1)) return true;
     }
     return false;
   }
@@ -441,7 +486,7 @@ function containsText(value: unknown, marker: string, depth = 0): boolean {
   for (const item of Object.values(value)) {
     if (inspected >= 128) break;
     inspected += 1;
-    if (containsText(item, marker, depth + 1)) return true;
+    if (hasExactText(item, marker, depth + 1)) return true;
   }
   return false;
 }
@@ -454,19 +499,6 @@ function countEvents(ledger: ReturnType<typeof createLiveProofLedger>, kind: str
   return ledger.snapshot().filter((event) => event.kind === kind).length;
 }
 
-function countHttpRequests(
-  ledger: ReturnType<typeof createLiveProofLedger>,
-  method: string,
-  routeSuffix: string
-): number {
-  return ledger.snapshot().filter((event) =>
-    event.kind === 'http.request' &&
-    event.method === method &&
-    typeof event.route === 'string' &&
-    (routeSuffix === '/messages' ? event.route.endsWith(routeSuffix) : event.route === routeSuffix)
-  ).length;
-}
-
 function findEventSequence(
   events: Array<Record<string, unknown>>,
   predicate: (event: Record<string, unknown>) => boolean
@@ -474,46 +506,116 @@ function findEventSequence(
   return events.find((event) => predicate(event))?.sequence as number | undefined;
 }
 
-async function projectHistoryResponse(
-  response: import('@playwright/test').Response,
-  expectedSessionId: string | undefined,
+async function readCanonicalProofHistory(
+  page: import('@playwright/test').Page,
+  sessionId: string,
   ledger: ReturnType<typeof createLiveProofLedger>,
-  onMatched: (matched: boolean) => void
-): Promise<void> {
-  const status = response.status();
-  try {
-    const body: unknown = await response.json();
-    const match = expectedSessionId
-      ? matchLiveProofHistory(body, {
-          sessionId: expectedSessionId,
-          prompt: LIVE_PROOF_PROMPT,
-          assistantMarker: LIVE_PROOF_ASSISTANT_MARKER
-        })
-      : {
-          sessionMatches: false,
-          promptMatches: false,
-          assistantMarkerMatches: false,
-          messageCount: 0,
-          matched: false
-        };
-    ledger.recordHistoryResponse({
-      status,
-      sessionId: expectedSessionId,
-      promptMatches: match.promptMatches,
-      assistantMarkerMatches: match.assistantMarkerMatches,
-      messageCount: match.messageCount
-    });
-    onMatched(match.matched);
-  } catch {
-    ledger.recordHistoryResponse({
-      status,
-      sessionId: undefined,
-      promptMatches: false,
-      assistantMarkerMatches: false,
-      messageCount: 0
-    });
-    onMatched(false);
+  options: {
+    phase: 'pre-send' | 'post-completion';
+    fence?: number;
+    preHistoryIdTag?: string;
   }
+): Promise<ReturnType<typeof matchLiveProofHistory> & { status: number }> {
+  const body = await page.evaluate(async (value) => {
+    const maxBytes = 256 * 1024;
+    const maxChunks = 4096;
+    const deadline = Date.now() + 30_000;
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const encodedSessionId = encodeURIComponent(value.sessionId);
+      const response = await fetch(
+        `/api/sessions/${encodedSessionId}/messages?limit=500&offset=0`,
+        {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          credentials: 'include',
+          cache: 'no-store',
+          redirect: 'error',
+          signal: controller.signal
+        }
+      );
+      if (
+        response.status !== 200 ||
+        response.headers.get('content-type')?.toLowerCase().includes('application/json') !== true
+      ) {
+        throw new Error('live proof history response was not approved');
+      }
+      const contentLength = response.headers.get('content-length');
+      if (contentLength !== null) {
+        if (!/^(?:0|[1-9][0-9]*)$/u.test(contentLength) || Number(contentLength) > maxBytes) {
+          throw new Error('live proof history response exceeded its bound');
+        }
+      }
+      if (!response.body) throw new Error('live proof history response was not streamable');
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      let chunkCount = 0;
+      const readChunk = async () => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('live proof history read timed out');
+        let readTimer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+          readTimer = setTimeout(() => reject(new Error('live proof history read timed out')), remaining);
+        });
+        try {
+          return await Promise.race([reader.read(), timeout]);
+        } finally {
+          if (readTimer) clearTimeout(readTimer);
+        }
+      };
+      try {
+        while (true) {
+          const next = await readChunk();
+          if (next.done) break;
+          if (!(next.value instanceof Uint8Array)) {
+            throw new Error('live proof history response chunk was invalid');
+          }
+          chunkCount += 1;
+          if (chunkCount > maxChunks || next.value.byteLength > maxBytes - bytes) {
+            throw new Error('live proof history response exceeded its bound');
+          }
+          chunks.push(next.value);
+          bytes += next.value.byteLength;
+        }
+      } catch {
+        void Promise.resolve(reader.cancel()).catch(() => undefined);
+        controller.abort();
+        throw new Error('live proof canonical history read failed');
+      }
+      const raw = new Uint8Array(bytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        raw.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(new TextDecoder().decode(raw));
+      } catch {
+        throw new Error('live proof history response was malformed');
+      }
+      return { status: response.status, body: parsed };
+    } catch {
+      controller.abort();
+      throw new Error('live proof canonical history read failed');
+    } finally {
+      clearTimeout(abortTimer);
+    }
+  }, { sessionId });
+  return {
+    status: body.status,
+    ...matchLiveProofHistory(body.body, {
+      phase: options.phase,
+      sessionId,
+      prompt: LIVE_PROOF_PROMPT,
+      assistantMarker: LIVE_PROOF_ASSISTANT_MARKER,
+      messageIdTagger: ledger.messageIdTag,
+      fence: options.fence,
+      preHistoryIdTag: options.preHistoryIdTag
+    })
+  };
 }
 
 async function authenticatedIdentityShape(response: import('@playwright/test').APIResponse): Promise<boolean> {

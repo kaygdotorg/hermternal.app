@@ -66,17 +66,39 @@ command, and the SHA-256 of the returned PNG. It never attaches or writes
 prompt text, transcripts, provider payloads, tickets, cookies, credentials,
 WebSocket frames, PTY bytes, stdout/stderr, traces, or test results.
 
-The live proof uses a bounded typed in-memory ledger. It retains only assertion-
-local method, route, event, request/session identity, status, boolean-match,
-and bounded-count projections. It requires login/auth/ticket/upgrade, one
-server-first `gateway.ready`, session create/resume identity, exactly one prompt
-and acknowledgement, correlated delta/completion, and a `200` REST history
-response whose canonical `session_id` and exact user/assistant pair match. It
-rejects duplicate sockets/events, wrong routes, missing ticket-only state,
-request-ID-free completions, reordered events, status mismatches, and missing
-canonical history identity. Logout is a separate same-context `302`/`401`
-check followed by cookie, IndexedDB, Cache Storage, service-worker cache, and
-Web Storage absence verification.
+The live proof uses a bounded typed in-memory ledger. Raw request and session
+identities are never retained: a fresh attempt-local HMAC key converts each
+transient identity to an `h1:` tag before it enters the ledger. The ledger keeps
+only fixed method/route/event projections, HMAC tags, statuses, booleans, and
+bounded counts; the HMAC key, message rows, message IDs, prompt, response body,
+frames, and watermark are discarded outside the one-shot assertion step.
+
+The proof must resume an existing durable canonical session. The pinned Hermes
+source persists a newly created session lazily on its first prompt, so a fresh
+`session.create` cannot establish the required pre-send REST boundary without
+weakening the contract. After server-first `gateway.ready` and session identity,
+the lane performs exactly one bounded
+`GET /api/sessions/:sessionId/messages?limit=500&offset=0` read before the prompt.
+It requires `session_id`, `limit`, `offset`, and `returned` to prove one complete
+page, rejects a page at the cap because the route has no total/cursor, validates
+strictly increasing safe integer message IDs, and computes the transient
+watermark as `max(messages[].id)`, or zero for an empty history. The ordered
+pre-send ID sequence is retained only as an attempt-local HMAC tag.
+
+The lane submits exactly one exact prompt and never retries after any uncertain
+transport or assertion state. Hermes message events are correlated only by the
+source-provided event-envelope `session_id`; no request ID is fabricated from
+the prompt acknowledgement. Successful completion is the source status
+`complete`. After that completion, the lane performs one explicit canonical
+history read and accepts only one exact post-watermark user prompt followed in
+order by one exact post-watermark assistant marker. Any stale-only match,
+missing or changed pre-fence ID prefix, duplicate/extra user or assistant
+candidate, invalid/duplicate ID, session mismatch, incomplete page, or
+transport failure remains uncertain and fails closed. It rejects prefix/suffix
+marker text and does not use counts, timestamps, local nonces, metadata, or an
+unreviewed cursor as causal evidence. Logout is a separate same-context
+`302`/`401` check followed by cookie, IndexedDB, Cache Storage, service-worker
+cache, and Web Storage absence verification.
 
 The default capture result stays in memory and is removed with the test
 process. Repository retention is a separate manual gate:
@@ -219,7 +241,7 @@ report, or terminal output. The default Vitest, Playwright, no-network, and
 static lanes do not execute this live proof; the live Playwright configuration
 is an explicit opt-in.
 
-The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, `session.resume` or fresh `session.create`, one `prompt.submit`, streaming, completion, REST history reconciliation, and no automatic prompt replay. The historical issue-327 material in `tests/integration/hermes-chat` is synthetic-only fixture evidence and is not a live Hermes proof for this change. No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here, so no live completion, delta, or history result is claimed.
+The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, an existing `session.resume`, one `prompt.submit`, streaming, source-correlated completion, one pre-send and one post-completion canonical history read, and no automatic prompt replay. A fresh `session.create` is rejected before submission because the pinned source persists it lazily and cannot provide the pre-send REST fence. The historical issue-327 material in `tests/integration/hermes-chat` is synthetic-only fixture evidence and is not a live Hermes proof for this change. No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here, so no live completion, delta, or history result is claimed.
 
 The legacy browser composition has no client-visible PTY attach identity, so its `/api/pty` upgrade sends no `attach` and cannot claim true reattach evidence. The host accepts the optional field for the reviewed future contract but does not invent or persist a handle. True reattach remains blocked until the reviewed client-visible identity work in issue #349.
 
