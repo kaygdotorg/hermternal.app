@@ -78,9 +78,9 @@ GIT_TIMEOUT_SECONDS = 10.0
 # Packed clones need a separate bound. The refreshed trusted four-ref bundle
 # produces a 22,263,667-byte pack in a fresh no-local single-head clone on
 # macOS. Seeding its 18,506,515-byte trusted bundle retains two packs plus
-# metadata and checkout records (42,438,656 bytes total). Twenty-three MiB caps
-# each pack with 1,854,781 bytes of measured headroom; forty-one MiB leaves
-# 552,960 aggregate bytes while preserving independent file-count, output, and
+# metadata and checkout records (42,209,280 bytes total). Twenty-three MiB caps
+# each pack with 1,852,079 bytes of measured headroom; forty-one MiB leaves
+# 782,336 aggregate bytes while preserving independent file-count, output, and
 # timeout limits.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
 MAX_SNAPSHOT_PACK_FILE_BYTES = 23 * 1024 * 1024
