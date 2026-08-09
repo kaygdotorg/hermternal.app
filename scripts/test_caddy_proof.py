@@ -1559,6 +1559,51 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "promisor|partial|lazy|worktree"):
                 caddy_proof._verify_git_repository(repository)
 
+    def test_git_loose_replacement_ref_is_rejected(self) -> None:
+        """A valid loose refs/replace entry must fail before Git execution."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            original_sha = self._commit_fixture(repository, "original.txt", "original\n")
+            replacement_sha = self._commit_fixture(repository, "replacement.txt", "replacement\n")
+            subprocess.run(
+                ["git", "-C", str(repository), "replace", original_sha, replacement_sha],
+                check=True,
+                capture_output=True,
+            )
+            loose_ref = repository / ".git" / "refs" / "replace" / original_sha
+            self.assertTrue(loose_ref.is_file())
+            self.assertEqual(loose_ref.read_text(encoding="ascii"), f"{replacement_sha}\n")
+            with self.assertRaisesRegex(ValueError, "replacement refs|metadata"):
+                caddy_proof._verify_git_repository(repository)
+
+    def test_git_loose_replacement_ref_topology_variants_are_rejected(self) -> None:
+        """Nested replacement files and links fail in the descriptor scan."""
+
+        variants = ("nested-file", "namespace-link", "nested-link")
+        for variant in variants:
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                parent = Path(directory)
+                repository = self._init_repository(parent / "repo")
+                original_sha = self._commit_fixture(repository, "fixture.txt", "fixture\n")
+                refs = repository / ".git" / "refs"
+                replace = refs / "replace"
+                outside = parent / "outside"
+                if variant == "nested-file":
+                    target = replace / original_sha / "nested"
+                    target.parent.mkdir(parents=True)
+                    target.write_text(f"{original_sha}\n", encoding="ascii")
+                elif variant == "namespace-link":
+                    outside.mkdir()
+                    (outside / original_sha).write_text(f"{original_sha}\n", encoding="ascii")
+                    replace.symlink_to(outside, target_is_directory=True)
+                else:
+                    replace.mkdir(parents=True)
+                    outside.write_text(f"{original_sha}\n", encoding="ascii")
+                    (replace / original_sha).symlink_to(outside)
+                with self.assertRaisesRegex(ValueError, "replacement refs|symlink|metadata"):
+                    caddy_proof._verify_git_repository(repository)
+
     def test_git_whole_root_replacement_is_descriptor_bound_and_rejected(self) -> None:
         mutation = (
             "from pathlib import Path; import sys; "
