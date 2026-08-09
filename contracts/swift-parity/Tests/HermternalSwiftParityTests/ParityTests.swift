@@ -6,6 +6,55 @@ import Darwin
 @testable import HermternalSwiftParity
 
 final class ParityTests: XCTestCase {
+    private static let allowedC19BlockedCodes: Set<String> = [
+        "c19_validator_timeout",
+        "c19_validator_blocked",
+    ]
+    private static let blockedParityReportKeys: Set<String> = [
+        "ok",
+        "status",
+        "errorCode",
+        "contract",
+        "hermesSourceSHA",
+        "syntheticOnly",
+        "liveClaim",
+        "networkCalls",
+        "readyCaseCount",
+        "blockedCoverageIDs",
+        "cases",
+        "compatibility",
+    ]
+    private static let compatibilityRecordKeys: Set<String> = [
+        "compatible",
+        "liveRun",
+        "deploymentAttestation",
+        "behavioralProbe",
+        "proxyProof",
+        "parityEvidence",
+        "benchmarkEvidence",
+    ]
+    private static let approvedSourceParentSHA =
+        "221620c04bb051f2597c52bdeb16ccc55c5b2e9c"
+    private static let fastBlockedValidatorSource = """
+    import json
+    import sys
+    if __file__ != sys.argv[0]:
+        raise RuntimeError("validator bootstrap context mismatch")
+    print(json.dumps({
+        "ok": False,
+        "complete": False,
+        "evidence_status": "blocked",
+        "compatible": False,
+        "live_claim": False,
+        "error": {"code": "fixture_index_invalid", "message": "blocked"},
+    }, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(1)
+    """
+    private static let timeoutValidatorSource = """
+    import time
+    time.sleep(6.0)
+    """
+
     private let packageRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()
@@ -52,12 +101,23 @@ final class ParityTests: XCTestCase {
 
     func testC19BlockedPreflightCannotProduceParityEvidence() throws {
         let report = try runParity(at: repoRoot)
-        XCTAssertFalse(report.ok)
-        XCTAssertEqual(report.status, "blocked")
-        XCTAssertEqual(report.errorCode, "c19_validator_blocked")
-        XCTAssertEqual(report.readyCaseCount, 0)
-        XCTAssertTrue(report.cases.isEmpty)
-        XCTAssertFalse(report.liveClaim)
+        assertBlockedParityReport(report)
+    }
+
+    func testC19BlockedClassificationHelperAcceptsOnlySafeValues() {
+        XCTAssertTrue(isAllowedC19BlockedCode("c19_validator_timeout"))
+        XCTAssertTrue(isAllowedC19BlockedCode("c19_validator_blocked"))
+
+        for rejectedCode in [
+            nil,
+            "",
+            "c19_validator_failed",
+            "c19_validator_output_contract",
+            "c19_validator_timeout ",
+            "C19_VALIDATOR_BLOCKED",
+        ] as [String?] {
+            XCTAssertFalse(isAllowedC19BlockedCode(rejectedCode))
+        }
     }
 
     func testPublicParityAPIOwnsC19Preflight() throws {
@@ -634,22 +694,66 @@ final class ParityTests: XCTestCase {
     }
 
 #if os(macOS)
+    func testApprovedParentFastBlockedValidatorCompatibilityHarness() throws {
+        let sourceURL = packageRoot
+            .appendingPathComponent("Sources", isDirectory: true)
+            .appendingPathComponent("HermternalSwiftParity", isDirectory: true)
+            .appendingPathComponent("Parity.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        // Keep this anchor tied to the approved parent. Its nonzero-process
+        // branch is the compatibility seam: a reviewed blocked marker is safe,
+        // but it is not required to run until the five-second deadline.
+        for anchor in [
+            "if process.terminationStatus != 0 {",
+            "return evidenceStatus == \"blocked\"",
+            "? .blocked(\"c19_validator_blocked\")",
+            ": .blocked(\"c19_validator_failed\")",
+        ] {
+            XCTAssertTrue(
+                source.contains(anchor),
+                "approved source parent \(Self.approvedSourceParentSHA) changed at anchor: \(anchor)"
+            )
+        }
+
+        let temporaryRoot = try makeTemporaryCLIRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let validatorURL = try makeValidatorDirectory(at: temporaryRoot)
+            .appendingPathComponent("validate.py")
+        try Data(Self.fastBlockedValidatorSource.utf8).write(to: validatorURL, options: .atomic)
+
+        let report = try runParity(at: temporaryRoot)
+        assertBlockedParityReport(report)
+        // The fast, valid blocked marker must take the parent's blocked branch;
+        // the guarded-core rehearsal's timeout-only assertion would reject this
+        // deterministic result.
+        XCTAssertEqual(report.errorCode, "c19_validator_blocked")
+
+        let cli = try runCLI(at: temporaryRoot)
+        try assertBlockedCLIResult(cli)
+    }
+
+    func testSlowValidatorTimeoutUsesSameBlockedReportContract() throws {
+        let temporaryRoot = try makeTemporaryCLIRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let validatorURL = try makeValidatorDirectory(at: temporaryRoot)
+            .appendingPathComponent("validate.py")
+        try Data(Self.timeoutValidatorSource.utf8).write(to: validatorURL, options: .atomic)
+
+        let report = try runParity(at: temporaryRoot)
+        assertBlockedParityReport(report)
+        // The exact approved parent 221620c04bb051f2597c52bdeb16ccc55c5b2e9c
+        // had a blocked-only expectation. A slow host therefore produced a
+        // false test failure even though the blocked report was still safe.
+        XCTAssertEqual(report.errorCode, "c19_validator_timeout")
+    }
+
     func testCLIBlockedStatusIsNonzeroAndOutputIsStable() throws {
         let first = try runCLI(at: repoRoot)
         let second = try runCLI(at: repoRoot)
-        XCTAssertFalse(first.timedOut)
-        XCTAssertFalse(second.timedOut)
-        XCTAssertEqual(first.status, 1)
-        XCTAssertEqual(second.status, 1)
         XCTAssertEqual(first.stdout, second.stdout)
-        XCTAssertTrue(first.stderr.isEmpty)
-        XCTAssertLessThanOrEqual(Data(first.stdout.utf8).count, ParityBounds.maxOutputBytes)
-        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(first.stdout.utf8), options: []) as? [String: Any])
-        XCTAssertEqual(value["ok"] as? Bool, false)
-        XCTAssertEqual(value["status"] as? String, "blocked")
-        XCTAssertEqual(value["errorCode"] as? String, "c19_validator_blocked")
-        XCTAssertEqual(value["readyCaseCount"] as? Int, 0)
-        XCTAssertEqual(value["liveClaim"] as? Bool, false)
+        try assertBlockedCLIResult(first)
+        try assertBlockedCLIResult(second)
     }
 
     private func runCLI(
@@ -789,6 +893,105 @@ final class ParityTests: XCTestCase {
     }
 
     #endif
+
+    private func isAllowedC19BlockedCode(_ code: String?) -> Bool {
+        guard let code else { return false }
+        return Self.allowedC19BlockedCodes.contains(code)
+    }
+
+    private func assertAllowedC19BlockedCode(
+        _ code: String?,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            isAllowedC19BlockedCode(code),
+            "unexpected C-19 blocked classification: \(code ?? "nil")",
+            file: file,
+            line: line
+        )
+    }
+
+    private func assertBlockedParityReport(
+        _ report: ParityReport,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertFalse(report.ok, file: file, line: line)
+        XCTAssertEqual(report.status, "blocked", file: file, line: line)
+        assertAllowedC19BlockedCode(report.errorCode, file: file, line: line)
+        XCTAssertEqual(report.contract, dashboardContract, file: file, line: line)
+        XCTAssertEqual(report.hermesSourceSHA, hermesSourceSHA, file: file, line: line)
+        XCTAssertTrue(report.syntheticOnly, file: file, line: line)
+        XCTAssertFalse(report.liveClaim, file: file, line: line)
+        XCTAssertEqual(report.networkCalls, 0, file: file, line: line)
+        XCTAssertEqual(report.readyCaseCount, 0, file: file, line: line)
+        XCTAssertTrue(report.blockedCoverageIDs.isEmpty, file: file, line: line)
+        XCTAssertTrue(report.cases.isEmpty, file: file, line: line)
+        XCTAssertFalse(report.compatibility.compatible, file: file, line: line)
+        XCTAssertFalse(report.compatibility.liveRun, file: file, line: line)
+        XCTAssertEqual(report.compatibility.deploymentAttestation, "not_available", file: file, line: line)
+        XCTAssertEqual(report.compatibility.behavioralProbe, "not_available", file: file, line: line)
+        XCTAssertEqual(report.compatibility.proxyProof, "not_available", file: file, line: line)
+        XCTAssertEqual(report.compatibility.parityEvidence, "not_available", file: file, line: line)
+        XCTAssertEqual(report.compatibility.benchmarkEvidence, "not_available", file: file, line: line)
+    }
+
+#if os(macOS)
+    private func assertBlockedCLIResult(
+        _ result: (status: Int32, stdout: String, stderr: String, timedOut: Bool),
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        XCTAssertFalse(result.timedOut, file: file, line: line)
+        XCTAssertEqual(result.status, 1, file: file, line: line)
+        XCTAssertTrue(result.stderr.isEmpty, file: file, line: line)
+        XCTAssertEqual(result.stdout.filter { $0 == "\n" }.count, 1, file: file, line: line)
+        XCTAssertTrue(result.stdout.hasSuffix("\n"), file: file, line: line)
+        XCTAssertLessThanOrEqual(
+            Data(result.stdout.utf8).count,
+            ParityBounds.maxOutputBytes,
+            file: file,
+            line: line
+        )
+
+        let value = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8), options: []) as? [String: Any],
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(Set(value.keys), Self.blockedParityReportKeys, file: file, line: line)
+        XCTAssertEqual(value["ok"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(value["status"] as? String, "blocked", file: file, line: line)
+        assertAllowedC19BlockedCode(value["errorCode"] as? String, file: file, line: line)
+        XCTAssertEqual(value["contract"] as? String, dashboardContract, file: file, line: line)
+        XCTAssertEqual(value["hermesSourceSHA"] as? String, hermesSourceSHA, file: file, line: line)
+        XCTAssertEqual(value["syntheticOnly"] as? Bool, true, file: file, line: line)
+        XCTAssertEqual(value["liveClaim"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(value["networkCalls"] as? Int, 0, file: file, line: line)
+        XCTAssertEqual(value["readyCaseCount"] as? Int, 0, file: file, line: line)
+        XCTAssertTrue((value["blockedCoverageIDs"] as? [Any])?.isEmpty == true, file: file, line: line)
+        XCTAssertTrue((value["cases"] as? [Any])?.isEmpty == true, file: file, line: line)
+
+        let compatibility = try XCTUnwrap(
+            value["compatibility"] as? [String: Any],
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(Set(compatibility.keys), Self.compatibilityRecordKeys, file: file, line: line)
+        XCTAssertEqual(compatibility["compatible"] as? Bool, false, file: file, line: line)
+        XCTAssertEqual(compatibility["liveRun"] as? Bool, false, file: file, line: line)
+        for key in [
+            "deploymentAttestation",
+            "behavioralProbe",
+            "proxyProof",
+            "parityEvidence",
+            "benchmarkEvidence",
+        ] {
+            XCTAssertEqual(compatibility[key] as? String, "not_available", file: file, line: line)
+        }
+    }
+#endif
 
     private func assertInputCode(
         _ expected: ContractInputCode,

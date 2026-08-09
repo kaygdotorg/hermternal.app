@@ -58,8 +58,23 @@ evidence status, and bounded non-negative counts. `PYTHONDONTWRITEBYTECODE=1`, b
 stdin/stdout/stderr, and one five-second deadline remain enforced. A blocked,
 unavailable, malformed, truncated, timed-out, failed, contract-invalid, or
 live-claiming validator result returns a blocked report with a specific
-`errorCode`, zero proven cases, and `liveClaim: false`. On iOS and other
-non-host builds, the public runner always fails closed with
+`errorCode`, zero proven cases, and `liveClaim: false`.
+
+On macOS, the safe host-speed classification set for a blocked real validator
+is exactly `{c19_validator_timeout, c19_validator_blocked}`. The timeout code
+means the process was still running at the five-second deadline. The blocked
+code means the reviewed validator emitted its valid nonzero blocked marker and
+finished before that deadline. The result therefore does not depend on whether
+this host schedules the validator quickly or slowly. Both classifications are
+safe because the report remains `ok: false`, contains no cases or compatibility
+evidence, has `readyCaseCount: 0`, `networkCalls: 0`, and `liveClaim: false`.
+`c19_validator_failed`, output-contract, output-bound, and unavailable results
+are not interchangeable with this safe set. The checked-in
+`../fixtures/validator/validation-baseline.json` records 30 Darwin arm64
+samples ranging from 724.392ms to 791.332ms; those measurements describe
+runtime, not a new semantic outcome.
+
+On iOS and other non-host builds, the public runner always fails closed with
 `c19_validator_unavailable`; no caller-supplied preflight status or evidence can
 replace the host validator. The internal `@testable`
 `runParityForTests(at:)` helper exists only for synthetic projection tests and is
@@ -76,10 +91,14 @@ swift run hermternal-swift-parity --repo-root ../..
 
 The CLI emits one bounded JSON line with sorted object keys and canonical case,
 platform, and coverage ordering. A ready report exits zero. A blocked report is
-still emitted as JSON on stdout but exits nonzero; the current host registry is
-expected to return `status: "blocked"` with `errorCode: "c19_validator_blocked"`
-until the authoritative aggregate validator passes. `networkCalls` is always
-zero and `liveClaim` is always false.
+still emitted as JSON on stdout but exits nonzero. On macOS, the current host
+registry may return either `errorCode: "c19_validator_timeout"` or
+`errorCode: "c19_validator_blocked"`; these are the only interchangeable
+speed-dependent classifications. The report still has `ok: false`,
+`status: "blocked"`, `readyCaseCount: 0`, no cases or compatibility evidence,
+`networkCalls: 0`, and `liveClaim: false`. Other error codes remain distinct
+failure or availability conditions. The authoritative aggregate validator must
+pass before this package can produce parity evidence.
 
 ## Exact limitations
 
