@@ -1061,7 +1061,7 @@ describe('deterministic live Chat screenshot capture', () => {
           destinationDirectory: destination,
           review: 'independent-approved',
           provenance: CONTROLLED_TEST_PROVENANCE,
-          beforeStagingCleanup: async (stagingDirectory) => {
+          beforeStagingCleanup: async (stagingDirectory: string) => {
             racedStagingDirectory = stagingDirectory;
             await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
             await fsPromises.symlink(replacement, stagingDirectory);
@@ -1099,7 +1099,7 @@ describe('deterministic live Chat screenshot capture', () => {
           destinationDirectory: destination,
           review: 'independent-approved',
           provenance: CONTROLLED_TEST_PROVENANCE,
-          beforeAtomicPublish: async (stagingDirectory) => {
+          beforeAtomicPublish: async (stagingDirectory: string) => {
             racedStagingDirectory = stagingDirectory;
             replacementParent = dirname(stagingDirectory);
             await fsPromises.rm(stagingDirectory, { recursive: true, force: true });
@@ -1129,7 +1129,7 @@ describe('deterministic live Chat screenshot capture', () => {
         destinationDirectory: destination,
         review: 'independent-approved',
         provenance: CONTROLLED_TEST_PROVENANCE,
-        beforeAtomicPublish: async (stagingDirectory) => {
+        beforeAtomicPublish: async (stagingDirectory: string) => {
           stagingParent = dirname(stagingDirectory);
           await fsPromises.rm(stagingParent, { recursive: true, force: true });
           await fsPromises.symlink(replacementParent, stagingParent);

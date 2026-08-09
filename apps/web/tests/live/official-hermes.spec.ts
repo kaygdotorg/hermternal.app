@@ -121,7 +121,7 @@ function setLiveProofStatus(
 test.skip(reconciliationOnly, 'official Hermes prompt lane is disabled during read-only reconciliation');
 test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
 
-test('browser UI reaches official Hermes, reconciles exact history, and logs out', async ({
+test('browser UI reaches the official Hermes gateway through completion', async ({
   page,
   context
 }, testInfo) => {

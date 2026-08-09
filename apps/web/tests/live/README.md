@@ -70,6 +70,20 @@ node apps/web/tests/live/live-proof-parent-compat.mjs
 It uses only the local Git object database and does not start Hermes, open a
 network connection, install dependencies, or retain source rows.
 
+Task #422 adds only the support surfaces required by the approved correction
+suite: the delegated Playwright factory, the screenshot capture helper, the
+shared read-only reconciliation parser, its bounded page transport and cleanup
+helpers, proof-status projection, and the no-submit reconciliation spec. These
+files are compatible e5-lineage support ports; they do not alter the production
+client or enable a live run by default. `live-support-parent-compat.mjs` proves
+against exact parent `77c6701c652a6bbd23d2c32227dcd61c34dd8c33` that the correction
+test imports were unresolved there, that the old screenshot command selected no
+test, and that the repaired tree restores the support set and one exact title
+match. The unchanged `LIVE_SCREENSHOT_COMMAND` remains authoritative; the
+official spec title is kept equal to its exact `--grep` value rather than mixing
+it with the broader modern command metadata. The three screenshot-test cleanup
+callbacks are explicitly typed as `string` for strict TypeScript checking.
+
 The proof must resume an existing durable canonical session. The pinned Hermes
 source persists a newly created session lazily on its first prompt, so a fresh
 `session.create` cannot establish the required pre-send REST boundary without
