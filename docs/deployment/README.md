@@ -62,7 +62,9 @@ locally with Caddy and a recording mock upstream, and asserts the actual
 upstream path, body, prefix, query policy, and rebuilt headers. It does not
 contact the disposable VM during correction work. Local Caddy plus the recording
 mock proves the edge/upstream boundary only; it does not prove live Hermes or
-browser execution.
+browser execution. The black-box check requires an available `caddy` tool and
+`openssl`; missing tools are a hard failure, not a skip, and a skipped check is
+not evidence.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
 browser proof has two explicit input workflows. A standalone browser map is a
@@ -74,19 +76,33 @@ root must contain `index.html`, `200.html`, `manifest.webmanifest`, and
 `service-worker.js`, and the temporary browser map must remain outside that
 root so it cannot alter the bytes being hashed.
 
+Current product/static/Git provenance is separate from the historical task-244
+parity fixtures referenced by the retained manifest. Those fixtures are not a
+current product identity, and task-244 parity binding remains a blocker until
+an independent check verifies it; retaining their digests must not silently
+claim parity. Static-tree and Git trust boundaries have explicit resource and
+special-file limits: static provenance is bounded to regular-file data and
+rejects symlinks and other special files, while Git provenance uses timed
+commands with bounded output and diagnostics. Any limit, identity,
+malformed-output, or command failure fails closed.
+
 The retained workflow must use the complete evidence file at the canonical
-committed path `tests/integration/hermes-caddy/caddy-proof-evidence.json`. It
-verifies the exact committed anchor bytes in
-`tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt`, checks the
-historical build pair, and reconstructs the deterministic runtime inputs; it
+committed path `tests/integration/hermes-caddy/caddy-proof-evidence.json`.
+Retained evidence uses a descriptor-verified canonical path and identity: it
+checks the exact committed bytes against
+`tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt` before parsing
+any field. Copies, aliases, replacements, symlinks, and anchor mismatches fail
+closed. It then checks the historical build pair and reconstructs the
+deterministic runtime inputs; it
 does not require the historical static build to exist locally. The fixed browser
 schema binds either workflow's declared status to the verified build, static
 manifest, rendered Caddyfile, and runtime-input digests. Browser JSON is
 bounded to 4096 bytes, requires UTF-8, rejects duplicate object keys and
 non-finite numbers at every nesting level, and fails closed on malformed Git
-output. These caller-authored standalone and retained JSON maps
-are historical/non-execution observations, not browser execution attestations;
-they cannot satisfy `browser_journey=passed`. Passed release proof requires a
+output. These caller-authored standalone and retained JSON maps are labeled
+`historical_non_execution`/`not_proven`; they are historical non-execution
+observations, not browser execution attestations, and cannot satisfy
+`browser_journey=passed`. Passed release proof requires a
 verifier-controlled browser harness or a separately trusted signed attestation;
 neither is present in this no-live-VM/Hermes lane. The current retained map is
 `blocked_provider` with only `provider_unavailable`; no browser event payload or
