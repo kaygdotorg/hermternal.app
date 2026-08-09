@@ -137,9 +137,11 @@ budgets:
   captures one immutable normalized projection and the workspace never reads
   the adapter's raw object again. `captureLiveSessionProjection(value)` is
   exported as the reusable `Readonly<LiveSession> | undefined` projection
-  seam for a later `initialize()` list-normalization change; this transport
-  does not normalize session lists yet. The exact transport instance created
-  here is
+  seam for both detail and initial-list boundaries. `initialize()` uses it to
+  normalize every structural/custom-adapter list item once; strict JSON REST
+  responses cannot contain accessors or Proxy wrappers, so this guard protects
+  extension and custom-adapter integrity rather than describing a raw network
+  exploit. The exact transport instance created here is
   registered in a module-private `WeakMap`; when that instance resolves an
   alias, the exact workspace instance, requested alias, canonical ID, and exact
   frozen projection are recorded in workspace-scoped private state. The helper
