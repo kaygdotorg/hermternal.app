@@ -24,8 +24,15 @@
   /** Terminal 4401 must carry the registered opaque lease; chat has its own path. */
   export let onTerminalAuthenticationFailure: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
 
+  function initialSystemAppearance(): Appearance {
+    // SSR has no media query. Client instances read the preference before their
+    // first render so a dark production route does not paint a light frame.
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'light';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
-  let systemAppearance: Appearance = 'light';
+  let systemAppearance: Appearance = initialSystemAppearance();
   let resolvedAppearance: Appearance;
   let unsubscribeAppearance: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;

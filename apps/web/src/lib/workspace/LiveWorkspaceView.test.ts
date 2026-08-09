@@ -357,6 +357,37 @@ describe('LiveWorkspaceView', () => {
     expect(getComputedStyle(scope).getPropertyValue('--canvas').trim()).toBe('#0d1117');
   });
 
+  it('uses the initial dark system preference before the first client render', () => {
+    const addEventListener = vi.fn();
+    const removeEventListener = vi.fn();
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      media: '(prefers-color-scheme: dark)',
+      onchange: null,
+      addEventListener,
+      removeEventListener,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    })));
+    const session = createSession({
+      state: 'ready',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: []
+    });
+
+    try {
+      render(LiveWorkspaceView, { session });
+      expect(screen.getByTestId('runtime-preview')).toHaveAttribute('data-appearance', 'dark');
+      expect(addEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('renders truthful live empty state and disables input without a server session', async () => {
     const session = createSession({
       state: 'empty',
