@@ -377,6 +377,9 @@ public enum WorkloadFixtureLoader {
       bytes = resource
     }
 
+    guard bytes.count <= BenchmarkJSON.maximumInputBytes else {
+      throw AppleBenchmarkError.workloadMalformed
+    }
     guard BenchmarkHash.sha256(bytes) == expectedWorkloadSHA256 else {
       throw AppleBenchmarkError.workloadDrift
     }
