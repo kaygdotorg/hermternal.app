@@ -259,8 +259,13 @@ and `postCloseBytesRejected`. On applicable runs, the counts must be exactly
 `1`/`1` and every delayed-Blob boolean must be true: a synthetic
 `Blob.arrayBuffer()` is dispatched and conversion starts before cleanup, its
 completion resolves only after cleanup, and it publishes no bytes, state, or
-notice. All sink ledgers and delayed-Blob assertions are required proof fields
-and remain outside the timed interval.
+notice. `postCloseBytesRejected` is derived by the validator from the raw event
+sequence, `postCloseBytesEvents`, and the `bytesCount` of all three raw
+publication ledgers. A producer claim that disagrees with that derivation is
+rejected in `validateDelayedBlob`; the retained assertion is then recomputed
+from the same raw ledgers rather than accepted as a producer claim. All sink
+ledgers and delayed-Blob assertions are required proof fields and remain outside
+the timed interval.
 
 The validator recomputes every distribution from rounded raw samples and every
 total from the raw run counters. It enforces exact schema-specific run,

@@ -1354,13 +1354,27 @@ function validateDelayedBlob(
   label: string,
   applicable: boolean,
   optimized: boolean,
+  stalePublications: RecordLike,
+  stalePublicationsLabel: string,
+  postCloseBytesEvents: number,
 ): boolean {
   const delayedBlob = asRecord(value, label);
   assertExactKeys(delayedBlob, DELAYED_BLOB_KEYS, label);
   if (optimized) assertCanonicalKeys(delayedBlob, DELAYED_BLOB_KEYS, label);
   const expectedCount = applicable ? 1 : 0;
-  for (const counter of ["scheduledCount", "completionCount"] as const) {
-    if (asCounter(delayedBlob[counter], `${label}.${counter}`) !== expectedCount) {
+  const scheduledCount = asCounter(
+    delayedBlob.scheduledCount,
+    `${label}.scheduledCount`,
+  );
+  const completionCount = asCounter(
+    delayedBlob.completionCount,
+    `${label}.completionCount`,
+  );
+  for (const [counter, actual] of [
+    ["scheduledCount", scheduledCount],
+    ["completionCount", completionCount],
+  ] as const) {
+    if (actual !== expectedCount) {
       throw new Error(`${label}.${counter} did not match callback applicability`);
     }
   }
@@ -1381,12 +1395,49 @@ function validateDelayedBlob(
       throw new Error(`${label}.${proof} was not derived from the raw Blob event ledger`);
     }
   }
+
+  // Derive the post-close byte result here, from the event sequence, raw
+  // post-close byte count, and every publication sink. The producer boolean is
+  // only a checked summary; it cannot authorize an otherwise failed ledger.
+  const publicationBytesRejected = SINK_PUBLICATION_KEYS.every((sink) => {
+    const counters = asRecord(
+      stalePublications[sink],
+      `${stalePublicationsLabel}.${sink}`,
+    );
+    assertExactKeys(
+      counters,
+      SINK_COUNTER_KEYS,
+      `${stalePublicationsLabel}.${sink}`,
+    );
+    if (optimized) {
+      assertCanonicalKeys(
+        counters,
+        SINK_COUNTER_KEYS,
+        `${stalePublicationsLabel}.${sink}`,
+      );
+    }
+    return (
+      asCounter(
+        counters.bytesCount,
+        `${stalePublicationsLabel}.${sink}.bytesCount`,
+      ) === 0
+    );
+  });
+  const expectedPostCloseBytesRejected =
+    applicable &&
+    scheduledCount === 1 &&
+    completionCount === 1 &&
+    temporalOrder &&
+    postCloseBytesEvents === 0 &&
+    publicationBytesRejected;
   const postCloseBytesRejected = asBoolean(
     delayedBlob.postCloseBytesRejected,
     `${label}.postCloseBytesRejected`,
   );
-  if (!applicable && postCloseBytesRejected) {
-    throw new Error(`${label}.postCloseBytesRejected was true without a Blob proof`);
+  if (postCloseBytesRejected !== expectedPostCloseBytesRejected) {
+    throw new Error(
+      `${label}.postCloseBytesRejected was not derived from the raw Blob event and publication ledgers`,
+    );
   }
   return applicable && temporalOrder;
 }
@@ -1455,47 +1506,24 @@ function validateCallbackBindingProof(
   if (run.allCallbacksNullAfterClose !== allCallbacksNullAfterClose) {
     throw new Error(`${label}.allCallbacksNullAfterClose was not derived from callback bindings`);
   }
-  validateStalePublications(
-    run.stalePublications,
-    `${label}.stalePublications`,
-    optimized,
-  );
-  const delayedBlobProof = validateDelayedBlob(
-    run.delayedBlob,
-    `${label}.delayedBlob`,
-    applicable,
-    optimized,
-  );
   const stalePublications = asRecord(
     run.stalePublications,
     `${label}.stalePublications`,
   );
-  const delayedBlobPostCloseBytesRejected =
-    delayedBlobProof &&
-    asCounter(run.postCloseBytesEvents, `${label}.postCloseBytesEvents`) === 0 &&
-    SINK_PUBLICATION_KEYS.every((sink) => {
-      const counters = asRecord(
-        stalePublications[sink],
-        `${label}.stalePublications.${sink}`,
-      );
-      return (
-        asCounter(
-          counters.bytesCount,
-          `${label}.stalePublications.${sink}.bytesCount`,
-        ) === 0
-      );
-    });
-  const delayedBlob = asRecord(run.delayedBlob, `${label}.delayedBlob`);
-  if (
-    asBoolean(
-      delayedBlob.postCloseBytesRejected,
-      `${label}.delayedBlob.postCloseBytesRejected`,
-    ) !== delayedBlobPostCloseBytesRejected
-  ) {
-    throw new Error(
-      `${label}.delayedBlob.postCloseBytesRejected was not derived from the publication ledger`,
-    );
-  }
+  validateDelayedBlob(
+    run.delayedBlob,
+    `${label}.delayedBlob`,
+    applicable,
+    optimized,
+    stalePublications,
+    `${label}.stalePublications`,
+    asCounter(run.postCloseBytesEvents, `${label}.postCloseBytesEvents`),
+  );
+  validateStalePublications(
+    stalePublications,
+    `${label}.stalePublications`,
+    optimized,
+  );
   return applicable;
 }
 

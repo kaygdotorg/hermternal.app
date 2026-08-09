@@ -761,6 +761,26 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
     expectCliFailure(inapplicable, /delayedBlob/iu);
   }, 30_000);
 
+  it("derives delayed Blob rejection from raw events and publication ledgers", () => {
+    const falseClaim = cloneArtifact(reconnectArtifactPath);
+    const falseClaimRun = falseClaim.results[0].runs[0];
+    expect(falseClaimRun.assertions.delayedBlobPostClosePublicationRejected).toBe(true);
+    falseClaimRun.delayedBlob.postCloseBytesRejected = false;
+    expectCliFailure(
+      falseClaim,
+      /postCloseBytesRejected was not derived from the raw Blob event and publication ledgers/iu,
+    );
+
+    const inverseClaim = cloneArtifact(reconnectArtifactPath);
+    const inverseClaimRun = inverseClaim.results[0].runs[0];
+    expect(inverseClaimRun.assertions.delayedBlobPostClosePublicationRejected).toBe(true);
+    inverseClaimRun.stalePublications.onEvent.bytesCount = 1;
+    expectCliFailure(
+      inverseClaim,
+      /postCloseBytesRejected was not derived from the raw Blob event and publication ledgers/iu,
+    );
+  }, 30_000);
+
   it("rejects totals, distributions, repetition, and warmup drift", () => {
     const totals = cloneArtifact(reconnectArtifactPath);
     totals.results[0].totals.ticketRequests += 1;
