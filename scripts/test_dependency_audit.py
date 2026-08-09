@@ -522,6 +522,156 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(blocking, {"gt-major", "gt-minor", "gt-wildcard"}, result)
         self.assertEqual(result["lockfile"]["peer_dependency_gaps"], [], result)
 
+    def test_tilde_wildcard_ranges_match_npm_wildcard_semantics(self) -> None:
+        cases = (
+            ("1.2.3", "~*"),
+            ("1.2.3", "~x"),
+            ("1.2.3", "~X"),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [True, True, True])
+        self.assertEqual([audit._range_matches(version, specification) for version, specification in cases], [True, True, True])
+
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "dependencies": {
+                "tilde-star": "~*",
+                "tilde-x": "~x",
+                "tilde-X": "~X",
+            },
+            "peerDependencies": {"required-peer-tilde": "~*"},
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "tilde-star": package_record("tilde-star", "1.2.3"),
+                "tilde-x": package_record("tilde-x", "1.2.3"),
+                "tilde-X": package_record("tilde-X", "1.2.3"),
+                "required-peer-tilde": package_record("required-peer-tilde", "1.2.3"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "review", result)
+        self.assertEqual(result["lockfile"]["peer_dependency_gaps"], [], result)
+        self.assertEqual(
+            {item["name"] for item in result["inventory"]["transitive"]},
+            {"tilde-star", "tilde-x", "tilde-X", "required-peer-tilde"},
+            result,
+        )
+
+    def test_prerelease_tuple_admission_is_per_and_arm_before_or_aggregation(self) -> None:
+        cases = (
+            ("0.0.0-alpha.1", ">=0.0.0 <0.0.0-beta.1", True),
+            ("0.0.0-alpha.1", "<0.0.0-beta.1 || >=0.0.0", False),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+
+        def peer_result(specification: str) -> dict[str, Any]:
+            metadata = {"peerDependencies": {"peer": specification}}
+            lockfile = synthetic_lock(
+                {"alpha": "1.0.0"},
+                {},
+                {
+                    "alpha": package_record("alpha", "1.0.0", metadata),
+                    "peer": package_record("peer", "0.0.0-alpha.1"),
+                },
+            )
+            return audit.audit_bytes(
+                manifest,
+                lockfile,
+                manifest_label="fixture/package.json",
+                lockfile_label="fixture/bun.lock",
+            )
+
+        admitted_peer = peer_result(">=0.0.0 <0.0.0-beta.1")
+        self.assertEqual(admitted_peer["status"], "review", admitted_peer)
+        self.assertFalse(
+            any(item["code"] == "package-resolution-missing" for item in admitted_peer["findings"]),
+            admitted_peer,
+        )
+        self.assertEqual(admitted_peer["lockfile"]["peer_dependency_gaps"], [], admitted_peer)
+
+        rejected_peer = peer_result("<0.0.0-beta.1 || >=0.0.0")
+        self.assertEqual(rejected_peer["status"], "fail", rejected_peer)
+        self.assertIn("package-resolution-missing", self.finding_codes(rejected_peer), rejected_peer)
+        self.assertEqual(
+            rejected_peer["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": "peer",
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+            ],
+            rejected_peer,
+        )
+
+        metadata = {
+            "dependencies": {
+                "admitted": ">=0.0.0 <0.0.0-beta.1",
+                "rejected": "<0.0.0-beta.1 || >=0.0.0",
+            },
+            "peerDependencies": {
+                "required-peer-admitted": ">=0.0.0 <0.0.0-beta.1",
+                "required-peer-rejected": "<0.0.0-beta.1 || >=0.0.0",
+            },
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "admitted": package_record("admitted", "0.0.0-alpha.1"),
+                "rejected": package_record("rejected", "0.0.0-alpha.1"),
+                "required-peer-admitted": package_record("required-peer-admitted", "0.0.0-alpha.1"),
+                "required-peer-rejected": package_record("required-peer-rejected", "0.0.0-alpha.1"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "fail", result)
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(blocking, {"rejected", "required-peer-rejected"}, result)
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": "required-peer-rejected",
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+            ],
+            result,
+        )
+
     def test_prerelease_admission_requires_an_exact_comparator_core(self) -> None:
         cases = (
             ("1.2.3-beta.1", "^1.0.0-beta.1", False),

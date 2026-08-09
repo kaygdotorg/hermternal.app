@@ -704,6 +704,8 @@ def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
             "<=": comparison <= 0,
         }[term.operator]
     if term.operator in {"^", "~"}:
+        if term.operator == "~" and all(term.wildcards):
+            return True
         if term.operator == "^" and term.wildcards[0]:
             return True
         lower = _compare_semver(actual, term.version) >= 0
@@ -736,7 +738,33 @@ def _range_matches(version: str, specification: str) -> bool:
             # A union is only supported when every arm is understood. Do not
             # accept a valid arm while silently ignoring unsupported syntax.
             return False
+
+    # npm treats a standalone ``>=0.0.0`` comparator as the universal stable
+    # range. When it is combined with another AND comparator it is redundant;
+    # remove it before tuple admission so a same-core prerelease comparator can
+    # admit the candidate. If it appears in any OR arm by itself, the universal
+    # arm wins for stable versions and suppresses prerelease admission globally.
+    universal_stable_arm = False
+    normalized_alternatives: list[list[RangeTerm]] = []
     for terms in parsed_alternatives:
+        zero_floor = [
+            term
+            for term in terms
+            if term.operator == ">="
+            and term.version.core == (0, 0, 0)
+            and not term.version.prerelease
+            and not any(term.wildcards)
+        ]
+        if zero_floor and len(terms) == 1:
+            universal_stable_arm = True
+            continue
+        if zero_floor:
+            terms = [term for term in terms if term not in zero_floor]
+        normalized_alternatives.append(terms)
+    if universal_stable_arm:
+        return not actual.prerelease
+
+    for terms in normalized_alternatives:
         if actual.prerelease:
             admitted_cores = {
                 term.version.core for term in terms if term.version.prerelease

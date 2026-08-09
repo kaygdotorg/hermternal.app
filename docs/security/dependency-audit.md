@@ -102,11 +102,15 @@ unsatisfied transitive and peer specifications fail closed. Its bounded npm
 subset requires canonical numeric components, rejects leading-zero and repeated
 `v` forms, validates every union arm, and excludes prerelease candidates from
 caret, tilde, comparator, and wildcard ranges unless the range arm contains a
-prerelease comparator with the candidate's exact major, minor, and patch tuple.
-Comparator operands with omitted or wildcard components
+prerelease comparator with the candidate's exact major, minor, and patch tuple;
+that admission is evaluated within each AND comparator arm before OR aggregation.
+The npm universal stable floor `>=0.0.0` is redundant inside a constrained AND
+arm but makes an OR range universal for stable versions and does not admit
+prereleases. Comparator operands with omitted or wildcard components
 use npm partial expansion: `>1` becomes `>=2.0.0`, `>1.2.x` becomes
 `>=1.3.0`, and `<=1.2.x` becomes `<1.3.0`; comparator operands that are only a
-wildcard are rejected. Partial caret bounds follow npm's zero-major rules:
+wildcard are rejected. Tilde wildcard forms `~*`, `~x`, and `~X` are treated
+as the npm wildcard range. Partial caret bounds follow npm's zero-major rules:
 `^0` and `^0.x` include `0.2.0` below `<1.0.0`, while `^0.0` and `^0.0.x`
 include `0.0.1` below `<0.1.0`. The same rules apply to required peer ranges.
 An `npm:` alias must match both the dependency-name lock key and the descriptor's
