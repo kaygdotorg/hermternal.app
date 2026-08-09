@@ -68,7 +68,7 @@ Pending provider or callback state is scoped to the current server connection an
 
 Hermes remains the source of truth for session history and messages. The browser transport and session coordinator retain only bounded opaque identifiers, lifecycle state, counters, owner markers, and active promise state. They do not retain prompt text, response text, credentials, cookies, WebSocket tickets, provider payloads, raw URLs, deep-link state, or an event-history copy.
 
-Session restoration re-reads server-owned history. The client does not automatically replay a prompt after uncertain delivery. The session coordinator holds only one bounded opaque active session identity in memory. Terminal handling has no local PTY byte store. This boundary is documented in [`json-rpc-chat.md`](../../apps/web/src/lib/chat/json-rpc-chat.md) and [`apps/web/src/lib/session/README.md`](../../apps/web/src/lib/session/README.md).
+Session restoration re-reads server-owned history. The client does not automatically replay a prompt after uncertain delivery. The session coordinator holds only one bounded opaque active session identity in memory. The application has no application-level transcript mirror or diagnostic byte store; renderer-local Ghostty scrollback is bounded to 64 KiB by default and clamped to a 1 MiB maximum. This boundary is documented in [`json-rpc-chat.md`](../../apps/web/src/lib/chat/json-rpc-chat.md), [`apps/web/src/lib/session/README.md`](../../apps/web/src/lib/session/README.md), and [`terminal/README.md`](../../apps/web/src/lib/terminal/README.md).
 
 ## Ephemeral WebSocket tickets
 
