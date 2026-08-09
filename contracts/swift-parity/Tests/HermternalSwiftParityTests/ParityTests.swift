@@ -309,6 +309,30 @@ final class ParityTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("artifact_integrity"))
     }
 
+    func testValidatorExecutesReviewedBytesAfterPathSwap() throws {
+        let temporaryRoot = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let validatorURL = try makeValidatorDirectory(at: temporaryRoot)
+            .appendingPathComponent("validate.py")
+        let safeValidator = """
+        import json
+        import sys
+        if __file__ != sys.argv[0]:
+            raise RuntimeError("validator bootstrap context mismatch")
+        print(json.dumps({"ok": False, "evidence_status": "blocked", "live_claim": False}))
+        """
+        let maliciousValidator = """
+        import json
+        print(json.dumps({"ok": True, "evidence_status": "ready", "live_claim": False}))
+        """
+        try Data(safeValidator.utf8).write(to: validatorURL, options: .atomic)
+
+        let result = runC19ValidatorForTests(at: temporaryRoot) { reviewedURL in
+            try Data(maliciousValidator.utf8).write(to: reviewedURL, options: .atomic)
+        }
+        XCTAssertFalse(result.passed)
+        XCTAssertEqual(result.errorCode, "c19_validator_blocked")
+    }
     #endif
 
     func testStrictJSONRejectsDuplicateKeysAndBoundsErrors() throws {
@@ -551,6 +575,15 @@ final class ParityTests: XCTestCase {
         print(json.dumps({"ok": True, "evidence_status": "ready", "live_claim": False}))
         """
         try Data(source.utf8).write(to: validatorURL, options: .atomic)
+    }
+
+    private func makeValidatorDirectory(at root: URL) throws -> URL {
+        let validatorURL = root
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("validator", isDirectory: true)
+        try FileManager.default.createDirectory(at: validatorURL, withIntermediateDirectories: true)
+        return validatorURL
     }
 
     private func makeFIFO(at url: URL) throws {

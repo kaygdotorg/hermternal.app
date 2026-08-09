@@ -1666,27 +1666,99 @@ private func collectBoundedOutput(
     var truncated = false
     defer { group.leave() }
     while true {
-        let chunk = handle.readData(ofLength: 4 * 1024)
-        if chunk.isEmpty { break }
-        if data.count < limit {
-            let remaining = limit - data.count
-            data.append(chunk.prefix(remaining))
+        let chunk: Data
+        do {
+            chunk = try handle.read(upToCount: 4 * 1024) ?? Data()
+        } catch {
+            break
         }
-        if data.count >= limit || chunk.count > limit {
+        if chunk.isEmpty { break }
+        let remaining = max(0, limit - data.count)
+        if chunk.count > remaining {
             truncated = true
+        }
+        if remaining > 0 {
+            data.append(chunk.prefix(remaining))
         }
     }
     return BoundedPipeResult(data: data, truncated: truncated)
 }
 
-private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
+private final class InputWriteBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var writeFailed = false
+
+    func markFailed() {
+        lock.lock()
+        writeFailed = true
+        lock.unlock()
+    }
+
+    var failed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return writeFailed
+    }
+}
+
+private func feedValidator(
+    _ data: Data,
+    to handle: FileHandle,
+    box: InputWriteBox,
+    group: DispatchGroup
+) {
+    defer { group.leave() }
+    do {
+        try handle.write(contentsOf: data)
+    } catch {
+        box.markFailed()
+    }
+    try? handle.close()
+}
+
+private func closeValidatorPipes(_ stdin: Pipe, _ stdout: Pipe, _ stderr: Pipe) {
+    try? stdin.fileHandleForWriting.close()
+    try? stdout.fileHandleForReading.close()
+    try? stderr.fileHandleForReading.close()
+}
+
+private func waitForDrain(_ group: DispatchGroup, until deadline: UInt64) -> Bool {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now < deadline else { return false }
+    let remaining = deadline - now
+    return group.wait(
+        timeout: DispatchTime.now() + .nanoseconds(Int(min(remaining, UInt64(Int.max))))
+    ) == .success
+}
+
+private func stopValidator(
+    _ process: Process,
+    stdin: Pipe,
+    stdout: Pipe,
+    stderr: Pipe,
+    group: DispatchGroup,
+    deadline: UInt64
+) {
+    process.terminate()
+    if process.isRunning {
+        kill(process.processIdentifier, SIGKILL)
+    }
+    closeValidatorPipes(stdin, stdout, stderr)
+    process.waitUntilExit()
+    _ = waitForDrain(group, until: deadline)
+}
+
+private func runC19Validator(
+    at repoRoot: URL,
+    beforeLaunch: ((URL) throws -> Void)? = nil
+) -> C19PreflightOutcome {
     do {
         let root = repoRoot.standardizedFileURL
         let scriptRelativePath = "contracts/fixtures/validator/validate.py"
         // Read the script through the same descriptor boundary before asking the
         // host interpreter to execute it. The validator remains authoritative;
         // Swift never reimplements its aggregate inventory or trust anchor.
-        _ = try readRegularFile(
+        let scriptData = try readRegularFile(
             repoRoot: root,
             relativePath: scriptRelativePath,
             label: "C-19 validator",
@@ -1694,17 +1766,34 @@ private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
         )
 
         let scriptURL = root.appendingPathComponent(scriptRelativePath)
+        try beforeLaunch?(scriptURL)
+        let bootstrap = """
+        import sys
+        reviewed_path = sys.argv[1]
+        sys.argv[:] = [reviewed_path]
+        __file__ = reviewed_path
+        reviewed_source = sys.stdin.buffer.read()
+        reviewed_code = compile(reviewed_source, reviewed_path, "exec")
+        reviewed_globals = {
+            "__name__": "__main__",
+            "__file__": reviewed_path,
+            "__builtins__": __builtins__,
+        }
+        exec(reviewed_code, reviewed_globals, reviewed_globals)
+        """
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = ["-B", scriptURL.path]
+        process.arguments = ["-B", "-c", bootstrap, scriptURL.path]
         process.currentDirectoryURL = root
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PATH"] = "/usr/bin:/bin"
         process.environment = environment
 
+        let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
+        process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
@@ -1712,6 +1801,16 @@ private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
         let group = DispatchGroup()
         let stdoutBox = BoundedPipeBox()
         let stderrBox = BoundedPipeBox()
+        let inputBox = InputWriteBox()
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            feedValidator(
+                scriptData,
+                to: stdin.fileHandleForWriting,
+                box: inputBox,
+                group: group
+            )
+        }
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             stdoutBox.store(collectBoundedOutput(
@@ -1732,18 +1831,31 @@ private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
         let deadline = DispatchTime.now().uptimeNanoseconds + ParityBounds.maxPreflightDurationNanoseconds
         while process.isRunning {
             guard DispatchTime.now().uptimeNanoseconds <= deadline else {
-                process.terminate()
-                if process.isRunning {
-                    kill(process.processIdentifier, SIGKILL)
-                }
-                group.wait()
+                stopValidator(
+                    process,
+                    stdin: stdin,
+                    stdout: stdout,
+                    stderr: stderr,
+                    group: group,
+                    deadline: deadline
+                )
                 return .blocked("c19_validator_timeout")
             }
             usleep(10_000)
         }
-        group.wait()
+        guard DispatchTime.now().uptimeNanoseconds <= deadline else {
+            closeValidatorPipes(stdin, stdout, stderr)
+            process.waitUntilExit()
+            return .blocked("c19_validator_timeout")
+        }
+        guard waitForDrain(group, until: deadline) else {
+            closeValidatorPipes(stdin, stdout, stderr)
+            process.waitUntilExit()
+            return .blocked("c19_validator_timeout")
+        }
         guard let stdoutResult = stdoutBox.result,
               let stderrResult = stderrBox.result,
+              !inputBox.failed,
               !stdoutResult.truncated, !stderrResult.truncated,
               stdoutResult.data.count <= ParityBounds.maxPreflightOutputBytes else {
             return .blocked("c19_validator_output_bound")
@@ -1776,6 +1888,20 @@ private func runC19Preflight(at repoRoot: URL) -> C19PreflightOutcome {
     return .blocked("c19_validator_unavailable")
     #endif
 }
+
+#if os(macOS)
+func runC19ValidatorForTests(
+    at repoRoot: URL,
+    beforeLaunch: @escaping (URL) throws -> Void
+) -> (passed: Bool, errorCode: String?) {
+    switch runC19Validator(at: repoRoot, beforeLaunch: beforeLaunch) {
+    case .passed:
+        return (true, nil)
+    case .blocked(let code):
+        return (false, code)
+    }
+}
+#endif
 
 private func unavailableCompatibilityRecord() -> CompatibilityRecord {
     CompatibilityRecord(
