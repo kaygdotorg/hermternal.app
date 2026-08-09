@@ -8,6 +8,99 @@ The host rejects HTTPS, userinfo, non-loopback names, IPv4-mapped IPv6, decimal/
 
 The host is test-only. It is not a deployment server and does not add authentication, retries, transcript storage, or response logging. The live Playwright configuration creates one unique OS-temporary 0700 output root with an owner marker and token, sets `preserveOutput: 'never'`, disables traces, videos, automatic screenshots, and uses the safe status-only reporter. The only screenshot path is the explicit issue #353 capture helper after completion and REST reconciliation. It first writes raw pixels inside the owned temporary root, requires a separate scrub hook to create a new PNG, requires an independent human-visual review hook to approve that exact SHA-256, rejects ancillary PNG metadata, and only then publishes the approved 1440×960 and 390×844 files with their closed public manifest. `tests/live/live-ipc-guard.cjs` is preloaded through `NODE_OPTIONS --require` before worker fixtures or test bodies. `PW_RUNNER_DEBUG` is incompatible with this lane: the live config and credential launcher reject any truthy value before a worker can start because Playwright otherwise inherits worker stderr directly. The guard captures immutable credential variants once at preload and pins `process.send`, never mutates `Object.prototype`, `Array.prototype`, or `testInfo.errors`, and detaches/redacts every worker-to-parent payload, including step, test-end, fatal, attachment, stdio, produced-environment, and response messages. The Node-side policy also captures every primordial it uses before test code runs—including object, reflection, array, string, regular-expression, Set/Map, and Buffer helpers—and invokes those references through captured `Reflect.apply`; the browser-realm DOM scrub remains a separate page-boundary operation. Playwright stdio buffers and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget values are replaced or not forwarded, preventing Playwright's JSON fallback from serializing an unsafe source graph. The configured Playwright project output is a disposable child below the immutable run root because Playwright clears that project directory before a run; each worker adopts the inherited root only after validating its marker and token, so retries and sequential workers cannot create a second root. Per-test finalization validates every lstat/realpath ancestor from that root to the requested output directory and fails closed on a replaceable symlink ancestor before quarantine. Per-test finalization only accepts strict descendants of the owned root and quarantines those child directories; it never removes or recreates the shared root, owner marker, or root-level artifacts. The config routes Playwright's post-teardown `LastRunReporter` to `/dev/null`, preventing it from recreating a markerless `.last-run.json` directory after teardown. Global teardown alone removes the complete root through atomic quarantine and bounded known-entry non-recursive `unlink`/`rmdir` operations. It rechecks device/inode identity and the owner marker at each handoff, preserves unrelated replacements and unknown/raced remnants, and never recursively deletes a replaceable pathname. Prefix-collision directories, descendants, unrelated output, and symlink roots are preserved. The live fixture scrubs input, textarea, select, and every editable DOM mode (`true`, empty, and `plaintext-only`) before page close. It builds detached, trusted plain snapshots for known synthetic credentials and serialized form values without mutating source diagnostics. Snapshot arrays retain normal Playwright push/map/iterator behavior and safe own serialization/species behavior. The bounded walk includes non-enumerable native Error message/stack/cause fields, the string `TestInfoError.errorContext`, matcher results, logs, and ARIA snapshots. Descriptor shape and observable read-back are checked, while incomplete, spoofed, stateful, or inconsistent properties, throwing accessors, own `toJSON` hooks, cycles, and over-budget values fail closed without retaining the source graph. Serialized contenteditable markup, raw-text textarea bodies, select/option nesting, and actual `value` attributes are parsed structurally; malformed text, comments, nested or mismatched form markup, unclosed containers, unknown markup, duplicate or ambiguous attributes, unknown editable modes, unquoted `value` attributes, and encoded credentials fail closed instead of allowing a later editable element to be skipped. Attachment references and safe temporary output cleanup run in `finally` even when redaction fails. A scrub evaluator failure is suppressed only when `page.isClosed()` returns `true`; generic error text such as `page crashed` is never treated as proof of termination. These layers are deliberate: a failed live assertion must not leave a password in a trace, screenshot, report, error context, DOM dump, or the repository's retained `test-results` directory. The spec records only HTTP method/path pairs and JSON-RPC method or event names. It never records the WebSocket ticket, credential value, prompt response, cookie, or raw frame payload.
 
+The live proof uses a bounded typed in-memory ledger with a deliberate page/Node
+retention boundary. The page bridge creates one attempt-local, nonextractable
+Web Crypto HMAC-SHA-256 key in the browser realm and turns each transient request
+or session identity into an `h1:` tag before the projection crosses to Playwright.
+The key cannot be exported and is never sent to Node. In the approved production
+path the Node ledger receives only bounded page-produced tags through its
+`{ kind: 'page' }` signer; the Node module has no HMAC key, does not create or
+verify a tag, and cannot derive one from a raw identity. The deterministic Node
+signer exists only behind an explicit unit-test opt-in. The ledger keeps
+only fixed method/route/event projections, HMAC tags, statuses, booleans, and
+bounded counts; dynamic session paths are reduced to fixed route templates. The
+page key, message rows, message IDs, prompt, response body, frames, and
+watermark are discarded outside the one-shot assertion step. Before any
+WebSocket open, frame, or close observation, the page bridge proves an absolute
+same-origin `ws`/`wss` URL by mapping it to the page's `http`/`https` security
+scheme and matching the exact hostname and effective port. It rejects userinfo,
+fragments, malformed or encoded query grammar, wrong paths, duplicate or extra
+keys, empty tickets, and ticket values outside the bounded
+`^[A-Za-z0-9_-]+$` contract. The cumulative open bound is checked before native
+construction, so an exhausted observation budget never sends another ticket to
+an upstream socket. Any post-construction registration failure removes the
+socket and best-effort closes or cancels it before returning a fixed error. The
+URL and ticket remain page-local and never enter Node projections or error text.
+A response projection also carries a fixed
+successful-result boolean; JSON-RPC errors, resultless or malformed responses,
+and unstable or extra-field response objects cannot satisfy the prompt
+acknowledgement. The ledger requires that page-validated bit before delta,
+completion, and post-fence history matching.
+
+Canonical history projections are strict on both shape and value. They snapshot
+plain own data properties, reject accessors, inconsistent proxy-backed
+observations, symbol or unknown keys, extra optional-wrapper properties,
+ambiguous raw/canonical aliases, and
+malformed `{ present, value }` descriptors. Omitted and explicit-null optional
+fields remain distinct. Reviewed timestamps must be non-negative safe integers
+no greater than `2^32 - 1`; fractional, non-finite, or otherwise malformed
+values fail closed before a projection tag is produced. This prevents a lenient
+Node-side parser from widening the page-produced canonical boundary.
+
+`live-proof-parent-compat.mjs` is intentionally a focused offline migration
+probe. It loads only the ledger from exact parent commit
+`a7d43f636424dcd02bf65743966db30e5aeb30f0` and the working-tree child, then
+loads the exact bridge parent `4c1cd74f6d703a99a29ef85a08142df45234e9f5` in an
+isolated fake browser realm. It proves that the ledger parent accepts
+attacker-origin fixed projections and treats resultless, JSON-RPC error, and
+malformed-result same-ID responses as prompt acknowledgements. It also proves
+that exact `4c1` constructs the 513th approved socket after 512 completed
+open/close cycles, while the child rejects before construction, and that the
+child closes a socket when registration fails. The child requires the
+page-validated URL and successful-result acknowledgement projections. The
+parent and child retain the same strict history projection contract; this probe
+is limited to the changed origin, acknowledgement, and socket-lifetime gates.
+It does not import the live host, reporter, capture, browser, or reconciliation
+surfaces. Run it directly with Node:
+
+```sh
+node apps/web/tests/live/live-proof-parent-compat.mjs
+```
+
+It uses only the local Git object database and does not start Hermes, open a
+network connection, install dependencies, or retain source rows.
+
+The proof must resume an existing durable canonical session. The pinned Hermes
+source persists a newly created session lazily on its first prompt, so a fresh
+`session.create` cannot establish the required pre-send REST boundary without
+weakening the contract. After server-first `gateway.ready` and session identity,
+the lane performs exactly one bounded
+`GET /api/sessions/:sessionId/messages?limit=500&offset=0` read before the prompt.
+It requires `session_id`, `limit`, `offset`, and `returned` to prove one complete
+page, rejects a page at the cap because the route has no total/cursor, validates
+strictly increasing safe integer message IDs, and computes the transient
+watermark as `max(messages[].id)`, or zero for an empty history. The ordered
+pre-send canonical message projection (ID, role, content, and reviewed tool or
+timestamp fields) is retained only as an attempt-local HMAC tag; route events
+use fixed `/api/sessions/:sessionId/...` templates rather than raw IDs.
+
+The lane submits exactly one exact prompt and never retries after any uncertain
+transport or assertion state. Hermes message events are correlated only by the
+source-provided event-envelope `session_id`; no request ID is fabricated from
+the prompt acknowledgement. A prompt acknowledgement is accepted only when
+its response has exactly one bounded JSON-RPC `result`, no `error`, no extra
+response fields, and a stable descriptor-first page projection. Successful
+completion is the source status `complete`. After that completion, the lane performs one explicit canonical
+history read and accepts only one exact post-watermark user prompt followed in
+order by one exact post-watermark assistant marker. Any stale-only match,
+missing or changed pre-fence message projection, duplicate/extra user or assistant
+candidate, invalid/duplicate ID, session mismatch, incomplete page, or
+transport failure remains uncertain and fails closed. It rejects prefix/suffix
+marker text and does not use counts, timestamps, local nonces, metadata, or an
+unreviewed cursor as causal evidence. Logout is a separate same-context
+`302`/`401` check followed by cookie, IndexedDB, Cache Storage, service-worker
+cache, and Web Storage absence verification.
+
 Run the lane only against the authorized disposable VM. From the repository root,
 parse the selected launcher result before starting Playwright:
 
@@ -56,7 +149,7 @@ state, exact client commit, official Hermes image digest, command, issue, hook
 hashes, and image hashes. The narrow image is retained only if its independent
 review also approves it; otherwise the whole publication fails closed.
 
-The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, `session.resume` or fresh `session.create`, one `prompt.submit`, streaming, completion, REST history reconciliation, and no automatic prompt replay. The executed authorized live proof reached authentication, ticket acquisition, `/api/ws`, `gateway.ready`, session restoration/creation, and `prompt.submit`. The disposable instance had no authenticated inference provider, so it stopped at the source `error` event before `message.delta`/`message.complete`; REST history reconciliation is therefore unproven. These live claims are not mocked, and no completion, delta, or history result is claimed. A source `error` event is recorded only by event name and never retains its payload.
+The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, an existing `session.resume`, one `prompt.submit`, streaming, source-correlated completion, one pre-send and one post-completion canonical history read, and no automatic prompt replay. A fresh `session.create` is rejected before submission because the pinned source persists it lazily and cannot provide the pre-send REST fence. The historical issue-327 material in `tests/integration/hermes-chat` is synthetic-only fixture evidence and is not a live Hermes proof for this change. No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here, so no live completion, delta, or history result is claimed.
 
 The legacy browser composition has no client-visible PTY attach identity, so its `/api/pty` upgrade sends no `attach` and cannot claim true reattach evidence. The host accepts the optional field for the reviewed future contract but does not invent or persist a handle. True reattach remains blocked until the reviewed client-visible identity work in issue #349.
 

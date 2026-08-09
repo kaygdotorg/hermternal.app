@@ -6,8 +6,18 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createLivePlaywrightConfig,
+  getLivePlaywrightPaths,
+  isLiveReconciliationEnabled
+} from '../../tests/live/live-playwright-config.mjs';
+import {
+  createLiveProofLedger,
+  createLiveProofTestSigner,
+  matchLiveProofLedger
+} from '../../tests/live/live-proof-ledger.mjs';
 import {
   LIVE_ARTIFACT_REDACTION,
   assertLiveRunnerDebugDisabled,
@@ -98,6 +108,7 @@ export default class SyntheticReporter {
 `;
   const configSource = `
 import { defineConfig } from ${JSON.stringify(playwrightEntryUrl)};
+import { devNull } from 'node:os';
 import { join } from 'node:path';
 import {
   assertLiveRunnerDebugDisabled,
@@ -107,7 +118,7 @@ import {
 assertLiveRunnerDebugDisabled();
 // Keep Playwright's post-teardown LastRunReporter from recreating a markerless
 // project-output directory after global teardown removes the owned root.
-process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null';
+process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = devNull;
 const outputDir = liveArtifactOutputDirectory();
 const projectOutputDir = join(outputDir, '.playwright-output');
 process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR = outputDir;
@@ -277,11 +288,14 @@ describe('live Playwright artifact policy', () => {
     expect(liveCredentialValues({})).toContain('hermternal-test');
   });
 
-  it('rejects Playwright debug mode before the live worker can start', () => {
+  it('rejects Playwright runner and UI debug modes before the live worker can start', () => {
     expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: '1' })).toThrow(
       'PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane'
     );
-    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined })).not.toThrow();
+    expect(() => assertLiveRunnerDebugDisabled({ PWDEBUG: '1' })).toThrow(
+      'PWDEBUG is incompatible with the deterministic headless live lane'
+    );
+    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined, PWDEBUG: undefined })).not.toThrow();
   });
 
   it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
@@ -1003,7 +1017,7 @@ import { test } from ${JSON.stringify(playwrightEntryUrl)};
 import { finalizeLiveTest } from '__POLICY_URL__';
 const secret = 'synthetic-password';
 test.afterEach(async ({}, testInfo) => {
-  await finalizeLiveTest({ testInfo, secrets: [secret] });
+  await finalizeLiveTest({ testInfo });
 });
 test('preload credential capture', async () => {
   test.fail();
@@ -1130,6 +1144,95 @@ test('debug mode must be rejected', async () => {
     expect(await exists(outputRoot)).toBe(true);
   });
 
+  it('aggregates redaction and attachment cleanup failures without exposing raw errors', async () => {
+    const attachmentTarget = [{ name: 'hostile' }];
+    const attachments = new Proxy(attachmentTarget, {
+      set(target, property, value) {
+        if (property === 'length') throw new Error('hostile attachment setter');
+        return Reflect.set(target, property, value);
+      }
+    });
+    const throwingDiagnostic = {};
+    Object.defineProperty(throwingDiagnostic, 'message', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        throw new Error('raw diagnostic getter leaked');
+      }
+    });
+    const testInfo = {
+      attachments,
+      errors: [throwingDiagnostic],
+      outputDir: join(tmpdir(), 'hermternal-unowned-finalization-output')
+    };
+
+    let failure: unknown;
+    try {
+      await finalizeLiveTest({ testInfo, secrets: ['synthetic-password'] });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe('live test finalization failed');
+    expect(JSON.stringify((failure as AggregateError).errors)).not.toContain('raw diagnostic getter leaked');
+    expect(attachments).toHaveLength(1);
+  });
+
+  it('uses preloaded aggregate and array intrinsics when globals are poisoned', async () => {
+    const policyUrl = pathToFileURL(policyPath).href;
+    const probe = `
+      const policy = await import(${JSON.stringify(policyUrl)});
+      const root = policy.liveArtifactOutputDirectory();
+      const attachments = new Proxy([{ name: 'hostile' }], {
+        set(target, property, value) {
+          if (property === 'length') throw new Error('hostile attachment setter');
+          return Reflect.set(target, property, value);
+        }
+      });
+      const originalPush = Array.prototype.push;
+      const originalAggregateError = globalThis.AggregateError;
+      Array.prototype.push = () => { throw new Error('poisoned Array.push'); };
+      Object.defineProperty(globalThis, 'AggregateError', {
+        configurable: true,
+        writable: true,
+        value: function PoisonedAggregateError() {
+          throw new Error('poisoned AggregateError');
+        }
+      });
+      let failure;
+      try {
+        await policy.finalizeLiveTest({
+          testInfo: {
+            attachments,
+            errors: [],
+            outputDir: '/private/tmp/hermternal-unowned-poisoned-output'
+          },
+          scrubError: new Error('safe scrub failure')
+        });
+      } catch (error) {
+        failure = error;
+      } finally {
+        Array.prototype.push = originalPush;
+        Object.defineProperty(globalThis, 'AggregateError', {
+          configurable: true,
+          writable: true,
+          value: originalAggregateError
+        });
+      }
+      if (!failure || failure.message !== 'live test finalization failed')
+        throw new Error('captured finalization intrinsics were not used');
+      await policy.removeLiveArtifacts(root);
+      process.stdout.write('POISON_INTRINSICS_OK');
+    `;
+    const result = await execFileAsync(process.execPath, ['-e', probe], {
+      cwd: appRoot,
+      env: { ...process.env, HERMES_TEST_PASSWORD: undefined },
+      maxBuffer: 2 * 1024 * 1024,
+      encoding: 'utf8'
+    });
+    expect(result.stdout).toContain('POISON_INTRINSICS_OK');
+  }, 30_000);
+
   it('binds cleanup to the owned inode across an initial replacement race', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     const ownedArtifact = join(outputRoot, 'owned-only.txt');
@@ -1167,6 +1270,7 @@ test('debug mode must be rejected', async () => {
     let finalTombstone = '';
     let replacementRoot = '';
     let originalBackup = '';
+    let quarantineParentTombstone = '';
     let replaced = false;
     let recursiveRmCalled = false;
     await mkdir(outputRoot, { recursive: true });
@@ -1178,6 +1282,11 @@ test('debug mode must be rejected', async () => {
     fsPromises.rm = async (...args) => {
       recursiveRmCalled = true;
       return originalRm(...args);
+    };
+    fsPromises.rename = async (source, target) => {
+      const result = await originalRename(source, target);
+      if (String(target).includes('-parent-delete-')) quarantineParentTombstone = String(target);
+      return result;
     };
     fsPromises.rmdir = async (target) => {
       const targetPath = String(target);
@@ -1194,20 +1303,22 @@ test('debug mode must be rejected', async () => {
     };
 
     try {
-      await removeLiveArtifacts(outputRoot);
+      await expect(removeLiveArtifacts(outputRoot)).rejects.toThrow('quarantine remnant');
     } finally {
+      fsPromises.rename = originalRename;
       fsPromises.rmdir = originalRmdir;
       fsPromises.rm = originalRm;
     }
 
     expect(replaced).toBe(true);
     expect(finalTombstone).not.toBe('');
-    expect(await exists(join(replacementRoot, 'replacement.txt'))).toBe(true);
-    expect(await exists(originalBackup)).toBe(true);
+    expect(quarantineParentTombstone).not.toBe('');
+    expect(await exists(join(quarantineParentTombstone, basename(replacementRoot), 'replacement.txt'))).toBe(true);
+    expect(await exists(join(quarantineParentTombstone, basename(originalBackup)))).toBe(true);
     expect(await exists(outputRoot)).toBe(false);
     expect(recursiveRmCalled).toBe(false);
 
-    await rm(resolve(replacementRoot, '..'), { recursive: true, force: true });
+    await rm(quarantineParentTombstone, { recursive: true, force: true });
   });
 
   it('cleans an empty quarantine parent after verification fails closed', async () => {
@@ -1230,7 +1341,7 @@ test('debug mode must be rejected', async () => {
     };
 
     try {
-      await removeLiveArtifacts(outputRoot);
+      await expect(removeLiveArtifacts(outputRoot)).rejects.toThrow('identity changed');
     } finally {
       fsPromises.rename = originalRename;
     }
@@ -1239,6 +1350,39 @@ test('debug mode must be rejected', async () => {
     expect(quarantinePath).not.toBe('');
     expect(await exists(quarantinePath)).toBe(false);
     expect(await exists(resolve(quarantinePath, '..'))).toBe(false);
+  });
+
+  it('preserves a tampered quarantine-parent tombstone instead of removing its replacement', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    let parentTombstone = '';
+    let originalParent = '';
+    await mkdir(outputRoot, { recursive: true });
+    await writeFile(join(outputRoot, 'owned-only.txt'), 'owned-content', 'utf8');
+
+    const originalRename = fsPromises.rename;
+    fsPromises.rename = async (source, target) => {
+      const result = await originalRename(source, target);
+      if (String(target).includes('-parent-delete-')) {
+        parentTombstone = String(target);
+        originalParent = `${parentTombstone}-original`;
+        await originalRename(parentTombstone, originalParent);
+        await mkdir(parentTombstone);
+        await writeFile(join(parentTombstone, 'replacement-survives.txt'), 'keep me', 'utf8');
+      }
+      return result;
+    };
+
+    try {
+      await expect(removeLiveArtifacts(outputRoot)).rejects.toThrow('quarantine identity changed');
+    } finally {
+      fsPromises.rename = originalRename;
+    }
+
+    expect(parentTombstone).not.toBe('');
+    expect(await readFile(join(parentTombstone, 'replacement-survives.txt'), 'utf8')).toBe('keep me');
+    expect(await exists(originalParent)).toBe(true);
+    await rm(parentTombstone, { recursive: true, force: true });
+    await rm(originalParent, { recursive: true, force: true });
   });
 
   it('keeps live output outside retained test-results and removes the complete run root', async () => {
@@ -1447,32 +1591,139 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     }
   }, 30_000);
 
-  it('pins the live config to no media artifacts, no retained output, and safe reporting', async () => {
-    const config = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
+  it('pins the delegated live config to no media artifacts, safe reporting, and fixed paths', async () => {
+    const configSource = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
+    expect(configSource).toContain('getLivePlaywrightPaths');
+    expect(configSource).toContain('createLivePlaywrightConfig');
+    expect(configSource).toContain('getLiveScreenshotChromiumLaunchOptions');
+    expect(configSource).toContain('devNull');
+    expect(configSource).toContain('assertLiveRunnerDebugDisabled');
 
-    expect(config).toContain('outputDir: livePlaywrightOutputDirectory');
-    expect(config).toContain("join(liveOutputDirectory, '.playwright-output')");
-    expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
-    expect(config).toContain("preserveOutput: 'never'");
-    expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
-    expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
-    expect(config).toContain("process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null'");
-    expect(config).toContain('live-ipc-guard.cjs');
-    expect(config).toContain('assertLiveRunnerDebugDisabled');
-    expect(config).toContain('NODE_OPTIONS');
-    expect(config).toContain("trace: 'off'");
-    expect(config).toContain("video: 'off'");
-    expect(config).toContain("screenshot: 'off'");
-    expect(config).toContain("reducedMotion: 'reduce'");
-    expect(config).toContain("locale: 'en-US'");
-    expect(config).toContain("timezoneId: 'UTC'");
-    expect(config).toContain('viewport: { width: 1440, height: 960 }');
-    expect(config).toContain('deviceScaleFactor: 1');
-    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
-    expect(capture).toContain("route: '/'");
-    expect(capture).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
-    expect(capture).toContain("fullPage: false");
-    expect(capture).toContain("animations: 'disabled'");
-    expect(capture).toContain("caret: 'hide'");
+    const paths = getLivePlaywrightPaths(pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href);
+    const outputDirectory = join(tmpdir(), 'hermternal-config-contract');
+    const config = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory,
+      launchOptions: { headless: true },
+      desktopChrome: {}
+    });
+    expect(config.testDir).toBe(paths.liveTestsDirectory);
+    expect(config.outputDir).toBe(join(outputDirectory, '.playwright-output'));
+    expect(config.preserveOutput).toBe('never');
+    expect(config.reporter).toEqual([[paths.safeReporterFile]]);
+    expect(config.globalTeardown).toBe(paths.teardownFile);
+    expect(config.use).toMatchObject({
+      viewport: { width: 1440, height: 960 },
+      deviceScaleFactor: 1,
+      locale: 'en-US',
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      launchOptions: { headless: true }
+    });
+    expect(config.projects[0].use).toMatchObject({
+      viewport: { width: 1440, height: 960 },
+      deviceScaleFactor: 1,
+      locale: 'en-US',
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      launchOptions: { headless: true }
+    });
   });
+
+  it('selects exactly the no-submit reconciliation lane and keeps its prompt ledger empty', async () => {
+    expect(() => isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: 'true' })).toThrow(
+      'must equal exactly 1'
+    );
+    expect(() => isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: 'yes' })).toThrow(
+      'must equal exactly 1'
+    );
+
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...process.env,
+      HERMTERNAL_LIVE_RECONCILIATION: '1'
+    };
+    delete childEnvironment.HERMTERNAL_LIVE_SCREENSHOT_CAPTURE;
+    delete childEnvironment.HERMES_TEST_PASSWORD;
+    delete childEnvironment.PW_RUNNER_DEBUG;
+    delete childEnvironment.PWDEBUG;
+    const configUrl = pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href;
+    const policyUrl = pathToFileURL(policyPath).href;
+    const probe = `
+      import { removeLiveArtifacts } from ${JSON.stringify(policyUrl)};
+      let root;
+      try {
+        const loaded = await import(${JSON.stringify(configUrl)} + '?selection=' + Date.now());
+        root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+        const config = loaded.default;
+        if (config.testMatch !== '**/reconcile-live-proof.spec.ts') throw new Error('wrong reconciliation test match');
+        const ignored = config.testIgnore;
+        if (!Array.isArray(ignored) || !ignored.includes('**/official-hermes.spec.ts') || !ignored.includes('**/*capture*.spec.ts'))
+          throw new Error('wrong reconciliation test ignore set');
+        process.stdout.write('CONFIG_SELECTION_OK');
+      } finally {
+        if (root) await removeLiveArtifacts(root);
+      }
+    `;
+    const result = await execFileAsync(process.execPath, ['-e', probe], {
+      cwd: appRoot,
+      env: childEnvironment,
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 30_000,
+      encoding: 'utf8'
+    });
+    const output = result.stdout + result.stderr;
+    expect(output).toContain('CONFIG_SELECTION_OK');
+    expect(await exists(resolve(appRoot, 'tests/live/reconcile-live-proof.spec.ts'))).toBe(true);
+    const reconciliationSource = await readFile(
+      resolve(appRoot, 'tests/live/reconcile-live-proof.spec.ts'),
+      'utf8'
+    );
+    expect(reconciliationSource).not.toContain("prompt.submit");
+    expect(reconciliationSource).not.toContain("Message Hermes");
+
+    const emptyLedger = createLiveProofLedger(256, {
+      signer: createLiveProofTestSigner(),
+      allowTestSigner: true
+    });
+    expect(matchLiveProofLedger(emptyLedger.snapshot(), {})).toMatchObject({
+      promptCount: 0,
+      completionCount: 0
+    });
+  });
+
+  it('executes the actual live config guard and path injection in an isolated child', async () => {
+    const configUrl = pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href;
+    const policyUrl = pathToFileURL(policyPath).href;
+    const probe = `
+      import { devNull } from 'node:os';
+      import { removeLiveArtifacts } from ${JSON.stringify(policyUrl)};
+      let root;
+      try {
+        const loaded = await import(${JSON.stringify(configUrl)});
+        root = process.env.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+        if (!root || !process.env.PLAYWRIGHT_LIVE_OUTPUT_TOKEN) throw new Error('missing live output injection');
+        if (!process.env.NODE_OPTIONS?.includes('live-ipc-guard.cjs')) throw new Error('missing actual IPC guard injection');
+        if (process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE !== devNull) throw new Error('missing null sink');
+        if (loaded.default.outputDir !== root + '/.playwright-output') throw new Error('wrong delegated output path');
+        process.stdout.write('CONFIG_PROBE_OK');
+      } finally {
+        if (root) await removeLiveArtifacts(root);
+      }
+    `;
+    const childEnvironment: NodeJS.ProcessEnv = { ...process.env, NODE_OPTIONS: '' };
+    delete childEnvironment.HERMES_TEST_USERNAME;
+    delete childEnvironment.HERMES_TEST_PASSWORD;
+    delete childEnvironment.PW_RUNNER_DEBUG;
+    delete childEnvironment.PWDEBUG;
+    const result = await execFileAsync(process.execPath, ['-e', probe], {
+      cwd: appRoot,
+      env: childEnvironment,
+      maxBuffer: 2 * 1024 * 1024,
+      encoding: 'utf8'
+    });
+    expect(result.stdout).toContain('CONFIG_PROBE_OK');
+  }, 30_000);
 });
