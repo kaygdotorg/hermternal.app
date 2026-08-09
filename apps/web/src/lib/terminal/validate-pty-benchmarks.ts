@@ -1,11 +1,17 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   PTY_BENCHMARK_PROVENANCE_SOURCE,
   PTY_BENCHMARK_SOURCES,
   REVIEWED_PTY_BENCHMARK_ENVIRONMENT,
 } from "./pty-benchmark-provenance";
+import {
+  PTY_BENCHMARK_TRUST_PIN_SOURCE,
+  REVIEWED_PTY_BENCHMARK_TRUST_PIN,
+} from "./pty-benchmark-trust-pin";
 
 const TRANSPORT_SOURCE = "apps/web/src/lib/terminal/pty-transport.ts";
 const PACKAGE_SOURCE = "apps/web/package.json";
@@ -61,6 +67,20 @@ const PROVENANCE_KEYS = [
 const ALLOWED_EVIDENCE_CHANGE_PATHS = new Set([
   "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json",
   "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
+]);
+const TRUSTED_REVIEW_CHANGE_PATHS = new Set([
+  PTY_BENCHMARK_TRUST_PIN_SOURCE,
+  ...REVIEWED_PTY_BENCHMARK_TRUST_PIN.trustedCode.map((entry) => entry.path),
+  "apps/web/src/lib/terminal/pty-benchmark-validator.test.ts",
+  "apps/web/src/lib/terminal/pty-transport.md",
+]);
+const TRUSTED_REPOSITORY_ROOT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../..",
+);
+const LEGACY_V1_FOUR_BLOB_ARTIFACTS = new Set([
+  "hermternal.pty-retry-authorization-benchmark.v1|apps/web/src/lib/terminal/pty-retry-authorization.bench.ts",
+  "hermternal.pty-error-retention-benchmark.v1|apps/web/src/lib/terminal/pty-error-retention.bench.ts",
 ]);
 const REVIEWED_HELPER_IDENTITIES = [
   {
@@ -517,22 +537,145 @@ function expectSocketClosures(
   }
 }
 
-function git(args: readonly string[]): string {
+function git(args: readonly string[], cwd = process.cwd()): string {
   try {
-    return execFileSync("git", [...args], { encoding: "utf8" }).trim();
+    return execFileSync("git", [...args], { cwd, encoding: "utf8" }).trim();
   } catch (error) {
     const detail = error instanceof Error ? `: ${error.message}` : "";
     throw new Error(`git ${args.join(" ")} failed${detail}`);
   }
 }
 
-function gitBytes(args: readonly string[]): Uint8Array {
+function gitBytes(args: readonly string[], cwd = process.cwd()): Uint8Array {
   try {
-    return execFileSync("git", [...args]);
+    return execFileSync("git", [...args], { cwd });
   } catch (error) {
     const detail = error instanceof Error ? `: ${error.message}` : "";
     throw new Error(`git ${args.join(" ")} failed${detail}`);
   }
+}
+
+export function parseGitChangedPaths(bytes: Uint8Array): readonly string[] {
+  if (bytes.length === 0) return [];
+  if (bytes[bytes.length - 1] !== 0) {
+    throw new Error("git changed-path output was not NUL terminated");
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    if (index === start) {
+      throw new Error("git changed-path output contained an empty path");
+    }
+    let path: string;
+    try {
+      path = decoder.decode(bytes.slice(start, index));
+    } catch {
+      throw new Error("git changed path was not valid UTF-8");
+    }
+    if (/^\s|\s$/u.test(path)) {
+      throw new Error(`git changed path had leading or trailing whitespace: ${path}`);
+    }
+    if (/[\p{Cc}]/u.test(path)) {
+      throw new Error(`git changed path contained a control character: ${path}`);
+    }
+    if (seen.has(path)) {
+      throw new Error(`git changed path was duplicated: ${path}`);
+    }
+    seen.add(path);
+    paths.push(path);
+    start = index + 1;
+  }
+  return paths;
+}
+
+function assertStrictAncestor(
+  ancestor: string,
+  descendant: string,
+  cwd: string,
+  label: string,
+): void {
+  if (ancestor === descendant) {
+    throw new Error(`${label} must be a strict descendant of the reviewed source`);
+  }
+  try {
+    execFileSync(
+      "git",
+      ["merge-base", "--is-ancestor", ancestor, descendant],
+      { cwd, stdio: "ignore" },
+    );
+  } catch {
+    throw new Error(`${label} was not descended from the reviewed source`);
+  }
+}
+
+function validateReviewedTrustPin(
+  evidenceCwd: string,
+  sourceRevision: string,
+): { readonly trustedCwd: string; readonly trustedHead: string } {
+  const trustedCwd = TRUSTED_REPOSITORY_ROOT;
+  const trustedHead = git(["rev-parse", "HEAD"], trustedCwd);
+  assertStrictAncestor(
+    REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceRevision,
+    trustedHead,
+    trustedCwd,
+    "trusted PTY pin checkout",
+  );
+  if (sourceRevision !== REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceRevision) {
+    throw new Error(
+      "provenance.sourceRevision did not match the immutable reviewed PTY source pin",
+    );
+  }
+  const trustedChangedPaths = parseGitChangedPaths(
+    gitBytes(
+      [
+        "diff",
+        "--name-only",
+        "-z",
+        `${REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceRevision}..${trustedHead}`,
+      ],
+      trustedCwd,
+    ),
+  );
+  if (trustedChangedPaths.some((path) => !TRUSTED_REVIEW_CHANGE_PATHS.has(path))) {
+    throw new Error(
+      "trusted PTY pin checkout contained an unreviewed source or validator change",
+    );
+  }
+  for (const entry of REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceBlobs) {
+    if (
+      git(["rev-parse", `${sourceRevision}:${entry.path}`], evidenceCwd) !==
+      entry.gitBlobSha
+    ) {
+      throw new Error(`reviewed PTY source blob drift for ${entry.path}`);
+    }
+    if (
+      sha256(gitBytes(["show", `${sourceRevision}:${entry.path}`], evidenceCwd)) !==
+      entry.sha256
+    ) {
+      throw new Error(`reviewed PTY source hash drift for ${entry.path}`);
+    }
+  }
+  for (const entry of REVIEWED_PTY_BENCHMARK_TRUST_PIN.trustedCode) {
+    const trustedBlob = git(
+      ["rev-parse", `${trustedHead}:${entry.path}`],
+      trustedCwd,
+    );
+    if (trustedBlob !== entry.gitBlobSha) {
+      throw new Error(`reviewed PTY validator blob drift for ${entry.path}`);
+    }
+    if (
+      sha256(gitBytes(["show", `${trustedHead}:${entry.path}`], trustedCwd)) !==
+      entry.sha256
+    ) {
+      throw new Error(`reviewed PTY validator hash drift for ${entry.path}`);
+    }
+  }
+  const evidenceHead = git(["rev-parse", "HEAD"], evidenceCwd);
+  assertStrictAncestor(trustedHead, evidenceHead, evidenceCwd, "evidence checkout");
+  return { trustedCwd, trustedHead };
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -583,11 +726,12 @@ function assertCanonicalKeys(
 
 function validateReviewedProvenanceHelper(
   sourceRevision: string,
+  cwd: string,
 ): (typeof REVIEWED_HELPER_IDENTITIES)[number] {
   const path = `${sourceRevision}:${PTY_BENCHMARK_PROVENANCE_SOURCE}`;
   const identity = {
-    gitBlobSha: git(["rev-parse", path]),
-    sha256: sha256(gitBytes(["show", path])),
+    gitBlobSha: git(["rev-parse", path], cwd),
+    sha256: sha256(gitBytes(["show", path], cwd)),
   };
   const reviewed = REVIEWED_HELPER_IDENTITIES.find(
     (candidate) =>
@@ -786,6 +930,7 @@ function validateProvenance(
   root: RecordLike,
   schema: BenchmarkSchema,
   optimized: boolean,
+  evidenceCwd: string,
 ): void {
   const spec = BENCHMARK_SPECS[schema];
   const sourcePath = asString(root.sourcePath, `${schema}.sourcePath`);
@@ -826,43 +971,33 @@ function validateProvenance(
   if (!/^[0-9a-f]{40}$/u.test(sourceTree)) {
     throw new Error("provenance.sourceTree must be a full 40-hex tree SHA");
   }
-  git(["cat-file", "-e", `${sourceRevision}^{commit}`]);
-  if (git(["rev-parse", `${sourceRevision}^{tree}`]) !== sourceTree) {
+  const { trustedHead } = validateReviewedTrustPin(evidenceCwd, sourceRevision);
+  git(["cat-file", "-e", `${sourceRevision}^{commit}`], evidenceCwd);
+  if (
+    git(["rev-parse", `${sourceRevision}^{tree}`], evidenceCwd) !==
+    sourceTree
+  ) {
     throw new Error("provenance.sourceTree does not match sourceRevision");
   }
-  const helperIdentity = validateReviewedProvenanceHelper(sourceRevision);
-  const evidenceHead = git(["rev-parse", "HEAD"]);
-  if (sourceRevision === evidenceHead) {
-    throw new Error(
-      "provenance.sourceRevision must be a strict predecessor of the evidence checkout",
-    );
+  if (sourceTree !== REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceTree) {
+    throw new Error("provenance.sourceTree did not match the immutable reviewed PTY source pin");
   }
-  try {
-    execFileSync(
-      "git",
-      ["merge-base", "--is-ancestor", sourceRevision, evidenceHead],
-      {
-        stdio: "ignore",
-      },
-    );
-  } catch {
-    throw new Error(
-      "provenance.sourceRevision was not an ancestor of the evidence checkout",
-    );
-  }
-  const evidenceChangedPaths = git([
-    "diff",
-    "--name-only",
-    `${sourceRevision}..${evidenceHead}`,
-  ])
-    .split("\n")
-    .map((path) => path.trim())
-    .filter(Boolean);
+  const helperIdentity = validateReviewedProvenanceHelper(
+    sourceRevision,
+    evidenceCwd,
+  );
+  const evidenceHead = git(["rev-parse", "HEAD"], evidenceCwd);
+  const evidenceChangedPaths = parseGitChangedPaths(
+    gitBytes(
+      ["diff", "--name-only", "-z", `${trustedHead}..${evidenceHead}`],
+      evidenceCwd,
+    ),
+  );
   if (
     evidenceChangedPaths.some((path) => !ALLOWED_EVIDENCE_CHANGE_PATHS.has(path))
   ) {
     throw new Error(
-      "provenance.sourceRevision was not followed only by evidence changes",
+      "evidence checkout was not followed only by the two retained evidence JSON paths",
     );
   }
   if (provenance.cleanCheckout !== true || provenance.detachedHead !== true) {
@@ -894,22 +1029,25 @@ function validateProvenance(
     ...legacyPaths,
     PTY_BENCHMARK_PROVENANCE_SOURCE,
   ] as const;
-  const expectedPaths =
-    Array.isArray(blobs) && blobs.length === currentPaths.length
-      ? currentPaths
-      : legacyPaths;
-  if (
-    !Array.isArray(blobs) ||
-    (blobs.length !== legacyPaths.length && blobs.length !== currentPaths.length)
-  ) {
+  const legacyFourBlobArtifact = LEGACY_V1_FOUR_BLOB_ARTIFACTS.has(
+    `${schema}|${sourcePath}`,
+  );
+  const expectedPaths = legacyFourBlobArtifact ? legacyPaths : currentPaths;
+  if (!Array.isArray(blobs) || blobs.length !== expectedPaths.length) {
     throw new Error(
-      "provenance.sourceBlobs must pin the benchmark, transport, package, lockfile, and reviewed helper inputs",
+      legacyFourBlobArtifact
+        ? "legacy v1 provenance.sourceBlobs must pin exactly four legacy inputs"
+        : `${schema} v2 provenance.sourceBlobs must pin exactly five current inputs, including the reviewed helper`,
     );
   }
-  if (blobs.length === legacyPaths.length && !helperIdentity.legacySourceBlobs) {
-    throw new Error(
-      "provenance.sourceBlobs must include the reviewed helper for new evidence",
-    );
+  if (!legacyFourBlobArtifact && !helperIdentity.legacySourceBlobs) {
+    // Current v2 evidence must carry the helper even when a legacy helper blob
+    // identity remains reviewed for explicitly scoped v1 artifacts.
+    if (blobs.length !== currentPaths.length) {
+      throw new Error(
+        `${schema} v2 provenance.sourceBlobs must include the reviewed helper`,
+      );
+    }
   }
   const seen = new Set<string>();
   for (const [index, rawBlob] of blobs.entries()) {
@@ -949,17 +1087,31 @@ function validateProvenance(
     ) {
       throw new Error(`invalid provenance hash for ${path}`);
     }
-    if (git(["rev-parse", `${sourceRevision}:${path}`]) !== gitBlobSha) {
+    const pinned = REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceBlobs.find(
+      (entry) => entry.path === path,
+    );
+    if (
+      pinned === undefined ||
+      pinned.gitBlobSha !== gitBlobSha ||
+      pinned.sha256 !== fileSha256
+    ) {
+      throw new Error(`provenance hash was not bound to the reviewed PTY pin for ${path}`);
+    }
+    if (
+      git(["rev-parse", `${sourceRevision}:${path}`], evidenceCwd) !==
+      gitBlobSha
+    ) {
       throw new Error(`git blob drift for ${path}`);
     }
     if (
-      sha256(gitBytes(["show", `${sourceRevision}:${path}`])) !== fileSha256
+      sha256(gitBytes(["show", `${sourceRevision}:${path}`], evidenceCwd)) !==
+      fileSha256
     ) {
       throw new Error(`file hash drift for ${path}`);
     }
     if (path.endsWith(".bench.ts")) {
       const source = new TextDecoder().decode(
-        gitBytes(["show", `${sourceRevision}:${path}`]),
+        gitBytes(["show", `${sourceRevision}:${path}`], evidenceCwd),
       );
       if (/Promise\.all\s*\(/u.test(source)) {
         throw new Error(
@@ -987,7 +1139,7 @@ function validateProvenance(
 
   const packageSource = JSON.parse(
     new TextDecoder().decode(
-      gitBytes(["show", `${sourceRevision}:${PACKAGE_SOURCE}`]),
+      gitBytes(["show", `${sourceRevision}:${PACKAGE_SOURCE}`], evidenceCwd),
     ),
   ) as {
     readonly packageManager?: unknown;
@@ -1397,8 +1549,12 @@ function validateOptimizedShape(
     PTY_BENCHMARK_PROVENANCE_SOURCE,
   ];
   const legacyExpectedPaths = expectedPaths.slice(0, -1);
-  const canonicalPaths =
-    blobs.length === expectedPaths.length ? expectedPaths : legacyExpectedPaths;
+  const legacyFourBlobArtifact = LEGACY_V1_FOUR_BLOB_ARTIFACTS.has(
+    `${schema}|${spec.source.path}`,
+  );
+  const canonicalPaths = legacyFourBlobArtifact
+    ? legacyExpectedPaths
+    : expectedPaths;
   if (
     blobs.length !== canonicalPaths.length ||
     blobs.some(
@@ -1412,9 +1568,10 @@ function validateOptimizedShape(
   }
 }
 
-export function validatePtyBenchmarkArtifact(
+function validatePtyBenchmarkArtifactInCheckout(
   artifact: unknown,
-  options: PtyBenchmarkValidationOptions = {},
+  options: PtyBenchmarkValidationOptions,
+  evidenceCwd: string,
 ): void {
   const root = asRecord(artifact, "benchmark artifact");
   const schema = asString(root.schema, "benchmark.schema");
@@ -1433,9 +1590,16 @@ export function validatePtyBenchmarkArtifact(
   // over misleading metric or root-shape errors.
   validateRootMetadata(root, benchmarkSchema, optimized);
   validateOperationAndMetric(root, benchmarkSchema, optimized);
-  validateProvenance(root, benchmarkSchema, optimized);
+  validateProvenance(root, benchmarkSchema, optimized, evidenceCwd);
   validateResults(root, benchmarkSchema, optimized);
   if (optimized) validateOptimizedShape(root, benchmarkSchema);
+}
+
+export function validatePtyBenchmarkArtifact(
+  artifact: unknown,
+  options: PtyBenchmarkValidationOptions = {},
+): void {
+  validatePtyBenchmarkArtifactInCheckout(artifact, options, process.cwd());
 }
 
 function parseJsonWithoutDuplicateKeys(source: string): unknown {
@@ -1548,12 +1712,17 @@ function parseJsonWithoutDuplicateKeys(source: string): unknown {
   }
 }
 
+function gitRootForPath(path: string): string {
+  return git(["rev-parse", "--show-toplevel"], dirname(resolve(path)));
+}
+
 export function validatePtyBenchmarkFile(
   path: string,
   options: PtyBenchmarkValidationOptions = {},
 ): void {
-  validatePtyBenchmarkArtifact(
+  validatePtyBenchmarkArtifactInCheckout(
     parseJsonWithoutDuplicateKeys(readFileSync(path, "utf8")),
     options,
+    gitRootForPath(path),
   );
 }

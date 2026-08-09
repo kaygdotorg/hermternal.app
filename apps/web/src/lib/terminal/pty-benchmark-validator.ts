@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import {
   validatePtyBenchmarkFile,
   type PtyBenchmarkValidationOptions,
@@ -50,12 +50,19 @@ const RETAINED_ARTIFACT_SCHEMAS = {
 type RetainedArtifactPath = keyof typeof RETAINED_ARTIFACT_SCHEMAS;
 
 function assertRetainedArtifactPath(path: string): RetainedArtifactPath {
-  const repoRoot = execFileSync(
-    "git",
-    ["rev-parse", "--show-toplevel"],
-    { cwd: process.cwd(), encoding: "utf8" },
-  ).trim();
   const resolvedPath = realpathSync(resolve(process.cwd(), path));
+  let repoRoot: string;
+  try {
+    repoRoot = execFileSync(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      { cwd: dirname(resolvedPath), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+  } catch {
+    throw new Error(
+      `artifact path ${path} is not one of the retained PTY benchmark JSON identities`,
+    );
+  }
   const relativePath = relative(repoRoot, resolvedPath);
   const appRelativePath = relativePath.startsWith("apps/web/")
     ? relativePath.slice("apps/web/".length)
