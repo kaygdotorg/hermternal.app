@@ -1534,6 +1534,10 @@ describe("PTY transport", () => {
     const staleClose = first.onclose;
     harness.transport.close();
     harness.transport.detach();
+    expect(harness.transport.state).toMatchObject({
+      status: "detached",
+      reconnectSupported: false,
+    });
     await expect(harness.transport.reconnect()).rejects.toMatchObject({
       code: "closed",
     });

@@ -37,9 +37,10 @@ operations:
   exact integers to `1..2000` columns and `1..1000` rows.
 - `detach()` and `close()` remove every socket callback before closing. Attach
   mode enters `detached`; legacy mode enters `exited` because its bridge owns
-  the child process lifetime. Explicit `close()` latches the reconnect denial;
-  later cleanup such as `detach()` cannot weaken it. Only a new `connect()` call
-  makes replacement user intent current again.
+  the child process lifetime. Public `reconnectSupported` derives from both the
+  transient `userClosed` state and sticky `explicitlyClosed` latch, so explicit
+  `close()` keeps reconnect denied even after later `detach()` cleanup. Only a
+  new `connect()` call makes replacement user intent current again.
 - An established attach socket that reports `onerror` without `onclose` enters
   `detached` and remains eligible for explicit reconnect. Before its callbacks
   are removed, that error records one write-once local retention anchor for the

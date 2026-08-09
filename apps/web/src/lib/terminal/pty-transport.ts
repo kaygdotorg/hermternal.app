@@ -394,10 +394,13 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // A failed handshake is not evidence that a detached PTY exists. Only an
     // established attachment or exact retained identity may advertise explicit
     // reconnect; this keeps 4401/4403 pre-open failures out of the retry UI.
+    // Public capability reflects both latches: detach clears userClosed, but
+    // explicit Close leaves explicitlyClosed set and reconnect() blocked.
     const reconnectSupported =
       mode === "attach" &&
       reattachBlocked === undefined &&
       !userClosed &&
+      !explicitlyClosed &&
       (status !== "failed" && status !== "exited" && status !== "closed" || retainedAttachment);
     const nextState = Object.freeze({
       status,
