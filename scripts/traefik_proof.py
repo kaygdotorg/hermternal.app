@@ -484,6 +484,7 @@ PARSER_GIT_OUTPUT_MAX_BYTES = 1 << 20
 PARSER_GIT_INPUT_MAX_BYTES = 8 << 20
 PARSER_GIT_METADATA_MAX_ENTRIES = 4096
 PARSER_GIT_REF_MAX_BYTES = 1 << 20
+PARSER_GIT_REF_MAX_DEPTH = 32
 PARSER_GIT_HEAD_MAX_BYTES = 4096
 PARSER_GIT_EXECUTABLE = Path("/usr/bin/git")
 PARSER_GIT_HELPER_PATH = "/usr/bin:/bin"
@@ -1164,13 +1165,44 @@ def _resolve_git_metadata_reference(base: Path, value: str, label: str) -> Path:
         _parser_close_fds(opened.descriptors)
 
 
+def _parser_validate_symbolic_ref(reference: str, label: str) -> str:
+    """Validate one local branch ref before descriptor-relative pinning."""
+
+    if not reference.startswith("refs/heads/") or len(reference) <= len("refs/heads/"):
+        raise ValueError(f"parser provenance {label} symbolic ref is unsupported")
+    try:
+        encoded = reference.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"parser provenance {label} symbolic ref is malformed") from exc
+    if len(encoded) > PARSER_GIT_REF_MAX_BYTES:
+        raise ValueError(f"parser provenance {label} symbolic ref exceeds its bounded input")
+    components = reference.split("/")
+    if any(
+        not component
+        or component in {".", ".."}
+        or component.endswith(".")
+        or component.endswith(".lock")
+        for component in components[2:]
+    ):
+        raise ValueError(f"parser provenance {label} symbolic ref is malformed")
+    if any(
+        character in reference
+        for character in ("\\", ":", "?", "[", "*", "~", "^")
+    ) or ".." in reference or "@{" in reference:
+        raise ValueError(f"parser provenance {label} symbolic ref is malformed")
+    if any(ord(character) < 0x21 or ord(character) == 0x7F for character in reference):
+        raise ValueError(f"parser provenance {label} symbolic ref is malformed")
+    return reference
+
+
 def _parser_head_ref(head_bytes: bytes) -> str | None:
     """Parse the bounded HEAD file without asking Git to resolve it.
 
     The first Git command must not be allowed to choose a branch after source
-    snapshots have started.  Restrict symbolic HEAD to a local branch ref so
-    the exact loose ref and packed-ref database can be pinned descriptor-first.
-    Detached OIDs remain supported for both repository object formats.
+    snapshots have started. Restrict symbolic HEAD to a local branch ref so
+    its full bounded loose-ref chain and packed-ref database can be pinned
+    descriptor-first. Detached OIDs remain supported for both repository object
+    formats.
     """
 
     if len(head_bytes) > PARSER_GIT_HEAD_MAX_BYTES:
@@ -1183,35 +1215,65 @@ def _parser_head_ref(head_bytes: bytes) -> str | None:
         raise ValueError("parser provenance Git HEAD is malformed")
     line = lines[0]
     if line.startswith("ref: "):
-        reference = line[5:]
-        if not reference.startswith("refs/heads/") or len(reference) <= len("refs/heads/"):
-            raise ValueError("parser provenance Git HEAD symbolic ref is unsupported")
-        try:
-            encoded = reference.encode("ascii")
-        except UnicodeEncodeError as exc:
-            raise ValueError("parser provenance Git HEAD symbolic ref is malformed") from exc
-        if len(encoded) > PARSER_GIT_REF_MAX_BYTES:
-            raise ValueError("parser provenance Git HEAD symbolic ref exceeds its bounded input")
-        components = reference.split("/")
-        if any(
-            not component
-            or component in {".", ".."}
-            or component.endswith(".")
-            or component.endswith(".lock")
-            for component in components[2:]
-        ):
-            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
-        if any(
-            character in reference
-            for character in ("\\", ":", "?", "[", "*", "~", "^")
-        ) or ".." in reference or "@{" in reference:
-            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
-        if any(ord(character) < 0x21 or ord(character) == 0x7F for character in reference):
-            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
-        return reference
+        return _parser_validate_symbolic_ref(line[5:], "Git HEAD")
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", line):
         raise ValueError("parser provenance Git HEAD is malformed")
     return None
+
+
+def _parser_loose_ref_value(content: bytes, label: str) -> tuple[str, str]:
+    """Parse one exact loose-ref record without allowing hidden whitespace."""
+
+    if len(content) > PARSER_GIT_REF_MAX_BYTES:
+        raise ValueError(f"parser provenance {label} exceeds its bounded input")
+    if not content.endswith(b"\n") or b"\n" in content[:-1] or b"\r" in content[:-1]:
+        raise ValueError(f"parser provenance {label} is malformed")
+    line = content[:-1]
+    try:
+        text = line.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"parser provenance {label} is malformed") from exc
+    if text.startswith("ref: "):
+        return "ref", _parser_validate_symbolic_ref(text[5:], label)
+    if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", text):
+        # The repository object format is checked by _git_object_format before
+        # this OID is used. Keeping both supported widths here preserves
+        # SHA-1 and SHA-256 repositories without running an unpinned Git query.
+        return "oid", text
+    raise ValueError(f"parser provenance {label} is not a canonical loose ref")
+
+
+def _parser_pin_loose_ref_chain(
+    pin: _ParserGitMetadataPin,
+    common_dir: Path,
+    reference: str,
+) -> None:
+    """Pin every bounded no-follow loose-ref hop Git can consult."""
+
+    visited: set[str] = set()
+    for _depth in range(PARSER_GIT_REF_MAX_DEPTH):
+        if reference in visited:
+            raise ValueError("parser provenance Git HEAD loose ref chain contains a loop")
+        visited.add(reference)
+        path = common_dir / reference
+        watcher = pin.watch(
+            path,
+            "Git HEAD loose ref",
+            required=False,
+            byte_limit=PARSER_GIT_REF_MAX_BYTES,
+        )
+        if not watcher.exists:
+            # Git may resolve the missing loose ref from packed-refs, which is
+            # pinned by the caller before any process can read it.
+            return
+        kind, value = _parser_loose_ref_value(
+            pin.read_bytes(path, "Git HEAD loose ref"),
+            "Git HEAD loose ref",
+        )
+        if kind == "oid":
+            return
+        reference = value
+    raise ValueError("parser provenance Git HEAD loose ref chain exceeds its bounded depth")
 
 
 def _parser_pin_head_refs(
@@ -1222,10 +1284,11 @@ def _parser_pin_head_refs(
     """Pin HEAD and every ref database consulted to resolve symbolic HEAD.
 
     Git resolves a linked-worktree HEAD from the per-worktree git directory,
-    then reads the target branch from the shared common directory.  Pin both
-    the loose ref and bounded packed-refs bytes before any Git process starts;
-    otherwise a replacement between source snapshots and the first rev-parse
-    could silently become the calculation's initial baseline.
+    then follows bounded symbolic loose refs in the shared common directory.
+    Pin every no-follow hop, including the final OID-bearing ref, and the
+    bounded packed-refs bytes before any Git process starts; otherwise a
+    replacement between source snapshots and the first rev-parse could
+    silently become the calculation's initial baseline.
     """
 
     head_path = git_dir / "HEAD"
@@ -1235,17 +1298,12 @@ def _parser_pin_head_refs(
     if reference is None:
         return
     pin.watch(
-        common_dir / reference,
-        "Git HEAD loose ref",
-        required=False,
-        byte_limit=PARSER_GIT_HEAD_MAX_BYTES,
-    )
-    pin.watch(
         common_dir / "packed-refs",
         "Git packed refs",
         required=False,
         byte_limit=PARSER_GIT_REF_MAX_BYTES,
     )
+    _parser_pin_loose_ref_chain(pin, common_dir, reference)
 
 
 def _parser_open_trusted_repository_anchor(
