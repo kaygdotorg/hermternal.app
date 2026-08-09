@@ -97,7 +97,9 @@ keeping live directory descriptors O(depth), not O(directory count). The
 snapshot covers `HEAD`, all nested refs including the loose
 `refs/replace/<object-id>` namespace, loose objects, pack metadata, and nested
 type/symlink topology. Each entry compares device, inode, type, size, and
-bounded content, and retains explicit absence pins for missing metadata.
+bounded content, and retains explicit absence pins for missing metadata. One
+aggregate metadata-content budget is reused across every pre/post root scan;
+it is never reset for an individual root.
 Every provenance command asserts the root and
 complete metadata snapshot immediately before and after execution and fails
 closed on any swap or same-inode byte rewrite. A closed stdout/stderr pair that
