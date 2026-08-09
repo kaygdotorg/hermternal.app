@@ -335,9 +335,9 @@ python3 -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scrip
 python3 -O -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 15-test marker and 46-test launcher suites use local synthetic files and a
+The 15-test marker and 47-test launcher suites use local synthetic files and a
 fake Podman boundary. The 11-test credential handoff and 6-test launcher-result
-suites use only synthetic bytes and mocked local process boundaries (78 tests in
+suites use only synthetic bytes and mocked local process boundaries (79 tests in
 this focused command). None of these suites starts Hermes, contacts an endpoint,
 or reads a real credential. The suites cover strict closed schemas, private
 atomic files, exact marker selection, run-ID/container binding, private cidfile

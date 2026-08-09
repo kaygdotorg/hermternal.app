@@ -179,8 +179,49 @@ class LiveRunMarkerTests(unittest.TestCase):
         self.assertTrue(replaced)
         self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
 
-    def test_replace_marker_rejects_a_replacement_after_final_publish(self) -> None:
+    def test_replace_marker_rejects_temporary_and_final_publish_replacements(self) -> None:
         value = self.make_marker()
+        marker.create_marker(value)
+        original_rename = marker._rename_noreplace
+        replaced = False
+        temporary_path: Path | None = None
+        foreign_bytes = b"foreign temporary slot"
+
+        def race_temporary(parent_fd: int, source_name: str, target_name: str) -> None:
+            nonlocal replaced, temporary_path
+            if target_name == self.marker_path.name and source_name.startswith(".replace-tmp-") and not replaced:
+                replaced = True
+                temporary_path = self.runs / source_name
+                temporary_path.unlink()
+                temporary_path.write_bytes(foreign_bytes)
+                temporary_path.chmod(marker.MARKER_MODES)
+            original_rename(parent_fd, source_name, target_name)
+
+        with mock.patch.object(marker, "_rename_noreplace", side_effect=race_temporary):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertTrue(replaced)
+        self.assertIsNotNone(temporary_path)
+        assert temporary_path is not None
+        self.assertEqual(temporary_path.read_bytes(), foreign_bytes)
+        self.assertFalse(self.marker_path.exists())
+        quarantined = [
+            self.runs / name
+            for name in marker.quarantine_slot_names("replace")
+            if (self.runs / name).exists()
+        ]
+        self.assertEqual(len(quarantined), 1)
+        self.assertEqual(quarantined[0].read_bytes(), marker._marker_bytes(value))
+
+        # Reset only this synthetic directory so the existing final-publish
+        # replacement check remains covered in the same focused test.
+        for kind in ("replace", "replace-tmp"):
+            for name in marker.quarantine_slot_names(kind):
+                path = self.runs / name
+                if path.exists():
+                    path.unlink()
+        self.marker_path.unlink(missing_ok=True)
         marker.create_marker(value)
         replacement = marker.new_marker(
             self.marker_path,
@@ -192,10 +233,9 @@ class LiveRunMarkerTests(unittest.TestCase):
             endpoint=value.endpoint,
             credential_identity=value.credential_identity,
         )
-        original_rename = marker._rename_noreplace
         replaced = False
 
-        def race(parent_fd: int, source_name: str, target_name: str) -> None:
+        def race_final(parent_fd: int, source_name: str, target_name: str) -> None:
             nonlocal replaced
             original_rename(parent_fd, source_name, target_name)
             if target_name == self.marker_path.name and source_name.startswith(".replace-tmp-") and not replaced:
@@ -203,7 +243,7 @@ class LiveRunMarkerTests(unittest.TestCase):
                 self.marker_path.unlink()
                 marker.create_marker(replacement)
 
-        with mock.patch.object(marker, "_rename_noreplace", side_effect=race):
+        with mock.patch.object(marker, "_rename_noreplace", side_effect=race_final):
             with self.assertRaises(marker.MarkerError) as raised:
                 marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
         self.assertEqual(raised.exception.code, "marker_replaced")

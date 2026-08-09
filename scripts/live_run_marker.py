@@ -750,9 +750,18 @@ def _rename_exact_noreplace(
     source_name: str,
     target_name: str,
     expected: MarkerFileIdentity,
+    *,
+    source_fd: int | None = None,
 ) -> None:
-    """Validate the source again inside the no-replace syscall boundary."""
+    """Validate a held source and its pathname inside the no-replace boundary."""
 
+    if source_fd is not None:
+        try:
+            held_identity = _marker_file_identity(os.fstat(source_fd))
+        except (MarkerError, OSError):
+            _fail("marker_replaced")
+        if held_identity != expected:
+            _fail("marker_replaced")
     token = _MARKER_RENAME_EXPECTED.set((parent_fd, source_name, target_name, expected))
     try:
         _rename_noreplace(parent_fd, source_name, target_name)
@@ -831,8 +840,8 @@ def replace_marker(
         os.fchmod(temporary_fd, MARKER_MODES)
         os.fsync(temporary_fd)
         temporary_identity = _marker_file_identity(os.fstat(temporary_fd))
-        os.close(temporary_fd)
-        temporary_fd = -1
+        # Keep the exact temporary inode held through final publication. A
+        # swapped replace-tmp pathname must never become the published marker.
 
         assert source_identity is not None
         for _ in range(QUARANTINE_SLOT_COUNT):
@@ -867,7 +876,15 @@ def replace_marker(
             _fail("marker_replaced")
 
         assert temporary_name is not None
-        _rename_noreplace(parent_fd, temporary_name, path.name)
+        assert temporary_fd >= 0
+        assert temporary_identity is not None
+        _rename_exact_noreplace(
+            parent_fd,
+            temporary_name,
+            path.name,
+            temporary_identity,
+            source_fd=temporary_fd,
+        )
         try:
             final_fd = os.open(
                 path.name,
@@ -881,10 +898,15 @@ def replace_marker(
             _fail("marker_replaced")
         try:
             final_identity = _marker_file_identity(os.fstat(final_fd))
+            temporary_current = _marker_file_identity(os.fstat(temporary_fd))
             moved_current = _marker_file_identity(os.fstat(moved_fd))
-        except MarkerError:
+        except (MarkerError, OSError):
             _fail("marker_replaced")
-        if final_identity != temporary_identity or moved_current != moved_identity:
+        if (
+            final_identity != temporary_identity
+            or final_identity != temporary_current
+            or moved_current != moved_identity
+        ):
             _fail("marker_replaced")
         # The old marker remains in one of the finite private quarantine slots.
         try:
