@@ -278,6 +278,29 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         )
     }
 
+    func testCLIOutputPolicyRequiresTraceAndRejectsCollisions() throws {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let evidence = temporaryDirectory.appendingPathComponent("evidence.json")
+        let trace = temporaryDirectory.appendingPathComponent("trace.json")
+
+        XCTAssertThrowsError(
+            try CLIOutputPolicy.canonicalize(evidencePath: evidence, tracePath: nil)
+        ) { error in
+            XCTAssertEqual(error as? AppleBenchmarkError, .traceOutputRequired)
+        }
+        XCTAssertThrowsError(
+            try CLIOutputPolicy.canonicalize(evidencePath: evidence, tracePath: evidence)
+        ) { error in
+            XCTAssertEqual(error as? AppleBenchmarkError, .outputPathCollision)
+        }
+
+        let destinations = try CLIOutputPolicy.canonicalize(
+            evidencePath: evidence,
+            tracePath: trace
+        )
+        XCTAssertNotEqual(destinations.evidence, destinations.trace)
+    }
+
     func testRunnerRejectsForgedWorkloadBytesAtTrustBoundary() throws {
         let loaded = try WorkloadFixtureLoader.load()
         var forgedBytes = loaded.bytes
