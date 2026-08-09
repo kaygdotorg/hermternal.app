@@ -1127,7 +1127,14 @@ export function installLiveProofPageBridge(config) {
         const approvedHref = validateWebSocketUrl(argumentsList[0]);
         if (sockets.size >= MAX_SOCKETS) fail('WebSocket count exceeded its bound');
         const constructorArguments = [approvedHref, ...argumentsList.slice(1)];
-        const socket = Reflect.construct(target, constructorArguments, newTarget);
+        let socket;
+        try {
+          socket = Reflect.construct(target, constructorArguments, newTarget);
+        } catch {
+          // Do not let a native constructor diagnostic echo the validated URL or
+          // opaque ticket beyond the page realm.
+          fail('WebSocket construction failed');
+        }
         if (websocketOpenCount >= MAX_QUEUE_EVENTS) fail('WebSocket open count exceeded its bound');
         sockets.add(socket);
         websocketOpenCount += 1;
