@@ -19,6 +19,46 @@ const STORAGE_EVIDENCE_CONTEXT_LIMIT = 1_024;
 const STORAGE_EVIDENCE_DATABASE_LIMIT = 256;
 const STORAGE_EVIDENCE_STORE_LIMIT = 256;
 
+// Capture the object-inspection primordials once. Evidence is untrusted input;
+// validation must not invoke attacker-controlled getters, inherited methods, or
+// monkeypatched inspection functions before the shape is known to be safe.
+const CAPTURED_OBJECT_CREATE = Object.create;
+const CAPTURED_OBJECT_GET_PROTOTYPE_OF = Object.getPrototypeOf;
+const CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR = Object.getOwnPropertyDescriptor;
+const CAPTURED_REFLECT_OWN_KEYS = Reflect.ownKeys;
+const CAPTURED_OBJECT_PROTOTYPE = Object.prototype;
+const CAPTURED_STRUCTURED_CLONE = typeof structuredClone === 'function'
+  ? structuredClone.bind(globalThis)
+  : undefined;
+const STORAGE_EVIDENCE_KEYS = [
+  'cryptoSupported',
+  'status',
+  'truncated',
+  'readFailure',
+  'recordCount',
+  'digestCount',
+  'recordLimit',
+  'cookieCount',
+  'localStorageEntryCount',
+  'sessionStorageEntryCount',
+  'indexedDbSupported',
+  'indexedDbRecordCount',
+  'indexedDbUnexpectedDatabaseCount',
+  'indexedDbDatabaseCount',
+  'indexedDbStoreCount',
+  'cookieTruncated',
+  'localStorageTruncated',
+  'sessionStorageTruncated',
+  'indexedDbTruncated',
+  'truncation',
+  'fingerprint'
+] as const;
+const STORAGE_TRUNCATION_KEYS = ['any', 'cookie', 'localStorage', 'sessionStorage', 'indexedDb'] as const;
+
+type CapturedRecord = {
+  values: Record<string, unknown>;
+};
+
 /**
  * Storage evidence is a page-local, keyed digest. Raw values and failures never
  * cross the page boundary. A truncated or unsupported snapshot is never proof of
@@ -216,6 +256,7 @@ type CookieDigestResult = {
 
 type CookieHmacKey = Awaited<ReturnType<typeof webcrypto.subtle.importKey>>;
 const cookieHmacKeys = new WeakMap<Page, Promise<CookieHmacKey>>();
+const hmacOwnershipPages = new WeakSet<Page>();
 const COOKIE_HMAC_CONTEXT = 'hermternal-storage-evidence:cookie:v2';
 const MAX_COOKIE_FIELD_LENGTH = 4_096;
 
@@ -389,6 +430,9 @@ async function readScopedCookieDigests(
 }
 
 async function primeStorageHmac(page: Page, options: StorageEvidenceReadOptions): Promise<void> {
+  // Mark ownership before evaluation so a failure after publication remains
+  // eligible for identity-guarded cleanup on the next teardown attempt.
+  hmacOwnershipPages.add(page);
   await page.evaluate(
     async ({ hmacKeyGlobal, hmacStateKind, hmacProbe, injectFailure }) => {
       if (injectFailure === 'crypto-unavailable' || injectFailure === 'random' || injectFailure === 'import-key') {
@@ -406,9 +450,40 @@ async function primeStorageHmac(page: Page, options: StorageEvidenceReadOptions)
         throw new Error('crypto');
       }
       const globals = globalThis as typeof globalThis & Record<string, unknown>;
-      const existingState = globals[hmacKeyGlobal];
+      const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+      const defineProperty = Object.defineProperty;
+      const freeze = Object.freeze;
+      const previousDescriptor = getOwnPropertyDescriptor(globals, hmacKeyGlobal);
+      const previousValueDescriptor = previousDescriptor
+        ? getOwnPropertyDescriptor(previousDescriptor, 'value')
+        : undefined;
+      const isDataDescriptor = previousValueDescriptor !== undefined;
+      const existingState = isDataDescriptor ? previousDescriptor?.value : undefined;
       let key: CryptoKey;
-      if (existingState === undefined) {
+      if (
+        isDataDescriptor &&
+        existingState !== undefined &&
+        typeof existingState === 'object' &&
+        existingState !== null
+      ) {
+        const state = existingState as Record<string, unknown>;
+        if (
+          state.kind !== hmacStateKind ||
+          state.ownerToken !== existingState ||
+          typeof state.key !== 'object' ||
+          state.key === null
+        ) {
+          throw new Error('crypto-state');
+        }
+        key = state.key as CryptoKey;
+      } else {
+        if (
+          previousDescriptor &&
+          previousDescriptor.configurable !== true &&
+          (!isDataDescriptor || previousDescriptor.writable !== true)
+        ) {
+          throw new Error('crypto-global');
+        }
         const material = new Uint8Array(32);
         try {
           cryptoApi.getRandomValues(material);
@@ -422,17 +497,66 @@ async function primeStorageHmac(page: Page, options: StorageEvidenceReadOptions)
         } finally {
           material.fill(0);
         }
-        Object.defineProperty(globals, hmacKeyGlobal, {
-          configurable: true,
+        const priorDescriptor = previousDescriptor
+          ? freeze({ ...previousDescriptor }) as PropertyDescriptor
+          : undefined;
+        const state = {} as {
+          kind: string;
+          key: CryptoKey;
+          priorDescriptor: PropertyDescriptor | undefined;
+          ownerToken: object;
+        };
+        defineProperty(state, 'kind', {
+          configurable: false,
           enumerable: false,
           writable: false,
-          value: { kind: hmacStateKind, key }
+          value: hmacStateKind
         });
-      } else {
-        if (typeof existingState !== 'object' || existingState === null) throw new Error('crypto-state');
-        const state = existingState as Record<string, unknown>;
-        if (state.kind !== hmacStateKind || typeof state.key !== 'object' || state.key === null) throw new Error('crypto-state');
-        key = state.key as CryptoKey;
+        defineProperty(state, 'key', {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: key
+        });
+        defineProperty(state, 'priorDescriptor', {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: priorDescriptor
+        });
+        defineProperty(state, 'ownerToken', {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: state
+        });
+        try {
+          if (!previousDescriptor) {
+            defineProperty(globals, hmacKeyGlobal, {
+              configurable: true,
+              enumerable: false,
+              writable: false,
+              value: state
+            });
+          } else if (previousDescriptor.configurable === true) {
+            defineProperty(globals, hmacKeyGlobal, {
+              configurable: true,
+              enumerable: false,
+              writable: false,
+              value: state
+            });
+          } else {
+            defineProperty(globals, hmacKeyGlobal, { ...previousDescriptor, value: state });
+          }
+        } catch (error) {
+          try {
+            if (previousDescriptor) defineProperty(globals, hmacKeyGlobal, previousDescriptor);
+            else delete globals[hmacKeyGlobal];
+          } catch {
+            // Do not replace a failed publication error with rollback noise.
+          }
+          throw error;
+        }
       }
       const algorithm = key.algorithm as unknown as Record<string, unknown>;
       const hash = algorithm.hash as { name?: unknown } | undefined;
@@ -579,6 +703,28 @@ export async function readStorageEvidence(
           if (!Number.isSafeInteger(value) || value < 0) throw new Error('count');
           return value;
         };
+        // Capture inspection primordials before canonicalization. Storage values
+        // are untrusted and must not be read through monkeypatched accessors or
+        // Proxy traps while their shape is being checked.
+        const capturedObjectGetPrototypeOf = Object.getPrototypeOf;
+        const capturedObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+        const capturedReflectOwnKeys = Reflect.ownKeys;
+        const capturedArrayIsArray = Array.isArray;
+        const capturedArrayPrototype = Array.prototype;
+        const capturedObjectPrototype = Object.prototype;
+        const capturedStructuredClone = typeof structuredClone === 'function'
+          ? structuredClone.bind(globalThis)
+          : undefined;
+        const isDataDescriptor = (descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor =>
+          descriptor !== undefined &&
+          capturedObjectGetOwnPropertyDescriptor(descriptor, 'value') !== undefined &&
+          capturedObjectGetOwnPropertyDescriptor(descriptor, 'get') === undefined &&
+          capturedObjectGetOwnPropertyDescriptor(descriptor, 'set') === undefined;
+        const isCanonicalArrayIndex = (key: string): boolean => {
+          if (key === '') return false;
+          const index = Number(key);
+          return Number.isSafeInteger(index) && index >= 0 && index < 4_294_967_295 && String(index) === key;
+        };
         const canonicalBudget = {
           bytes: 0,
           nodes: 0,
@@ -639,17 +785,51 @@ export async function readStorageEvidence(
               if (bytes.byteLength > 65_536) throw new Error('canonical-bytes');
               return charge(`view:${JSON.stringify(view.constructor.name ?? 'unknown')}:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`);
             }
-            if (Array.isArray(value)) {
+            if (capturedArrayIsArray(value)) {
               canonicalBudget.arrays += 1;
-              if (canonicalBudget.arrays > 4_096 || value.length > 2_048) throw new Error('canonical-array');
-              const entries: string[] = [];
-              for (let index = 0; index < value.length; index += 1) {
-                if (Object.prototype.hasOwnProperty.call(value, index)) {
-                  entries.push(canonicalize(value[index], seen, depth + 1));
-                } else {
-                  entries.push('hole');
-                }
+              if (canonicalBudget.arrays > 4_096) throw new Error('canonical-array');
+              const prototype = capturedObjectGetPrototypeOf(value);
+              if (prototype !== capturedArrayPrototype) throw new Error('array-prototype');
+
+              // Read the intrinsic length descriptor before any element. All
+              // own keys and descriptors are then validated before descriptor
+              // values are consumed, preserving sparse holes without `value[index]`.
+              const ownKeys = capturedReflectOwnKeys(value);
+              const lengthDescriptor = capturedObjectGetOwnPropertyDescriptor(value, 'length');
+              if (
+                !isDataDescriptor(lengthDescriptor) ||
+                lengthDescriptor.enumerable !== false ||
+                lengthDescriptor.configurable !== false ||
+                lengthDescriptor.writable !== true ||
+                !Number.isSafeInteger(lengthDescriptor.value) ||
+                lengthDescriptor.value < 0 ||
+                lengthDescriptor.value > 2_048
+              ) {
+                throw new Error('canonical-array-length');
               }
+              const length = lengthDescriptor.value;
+              const elementDescriptors = new Map<number, PropertyDescriptor>();
+              for (const key of ownKeys) {
+                if (typeof key !== 'string') throw new Error('array-symbol-key');
+                if (key === 'length') continue;
+                if (!isCanonicalArrayIndex(key)) throw new Error('array-extra-key');
+                const index = Number(key);
+                if (index >= length) throw new Error('array-index');
+                const descriptor = capturedObjectGetOwnPropertyDescriptor(value, key);
+                if (!isDataDescriptor(descriptor) || descriptor.enumerable !== true) throw new Error('array-accessor');
+                elementDescriptors.set(index, descriptor);
+              }
+              if (ownKeys.length !== elementDescriptors.size + 1) throw new Error('array-keys');
+
+              const entries: string[] = [];
+              for (let index = 0; index < length; index += 1) {
+                const descriptor = elementDescriptors.get(index);
+                entries.push(descriptor ? canonicalize(descriptor.value, seen, depth + 1) : 'hole');
+              }
+              // A Proxy can mimic the validated shape until structuredClone;
+              // reject it after all descriptor values are safely canonicalized.
+              if (!capturedStructuredClone) throw new Error('array-clone');
+              capturedStructuredClone(value);
               return charge(`array:[${entries.join(',')}]`);
             }
             if (value instanceof Map) {
@@ -670,9 +850,9 @@ export async function readStorageEvidence(
               return charge(`set:[${entries.join(',')}]`);
             }
 
-            const prototype = Object.getPrototypeOf(value);
-            if (prototype !== Object.prototype && prototype !== null) throw new Error('prototype');
-            const ownKeys = Reflect.ownKeys(value);
+            const prototype = capturedObjectGetPrototypeOf(value);
+            if (prototype !== capturedObjectPrototype && prototype !== null) throw new Error('prototype');
+            const ownKeys = capturedReflectOwnKeys(value);
             if (ownKeys.some((key): key is symbol => typeof key === 'symbol')) throw new Error('symbol-key');
             const keys = (ownKeys as string[]).sort(compareStrings);
             canonicalBudget.keys += keys.length;
@@ -680,10 +860,12 @@ export async function readStorageEvidence(
             const parts: string[] = [];
             for (const key of keys) {
               if (key.length > 4_096) throw new Error('canonical-key');
-              const descriptor = Object.getOwnPropertyDescriptor(value, key);
-              if (!descriptor || !('value' in descriptor)) throw new Error('accessor');
+              const descriptor = capturedObjectGetOwnPropertyDescriptor(value, key);
+              if (!isDataDescriptor(descriptor)) throw new Error('accessor');
               parts.push(`${JSON.stringify(key)}:${canonicalize(descriptor.value, seen, depth + 1)}`);
             }
+            if (!capturedStructuredClone) throw new Error('object-clone');
+            capturedStructuredClone(value);
             return charge(`object:{${parts.join(',')}}`);
           } finally {
             seen.delete(objectValue);
@@ -902,9 +1084,40 @@ export async function readStorageEvidence(
             throw new Error('crypto');
           }
           const globals = globalThis as typeof globalThis & Record<string, unknown>;
-          const existingState = globals[hmacKeyGlobal];
+          const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+          const defineProperty = Object.defineProperty;
+          const freeze = Object.freeze;
+          const previousDescriptor = getOwnPropertyDescriptor(globals, hmacKeyGlobal);
+          const previousValueDescriptor = previousDescriptor
+            ? getOwnPropertyDescriptor(previousDescriptor, 'value')
+            : undefined;
+          const isDataDescriptor = previousValueDescriptor !== undefined;
+          const existingState = isDataDescriptor ? previousDescriptor?.value : undefined;
           let key: CryptoKey;
-          if (existingState === undefined) {
+          if (
+            isDataDescriptor &&
+            existingState !== undefined &&
+            typeof existingState === 'object' &&
+            existingState !== null
+          ) {
+            const state = existingState as Record<string, unknown>;
+            if (
+              state.kind !== STORAGE_HMAC_STATE_KIND ||
+              state.ownerToken !== existingState ||
+              typeof state.key !== 'object' ||
+              state.key === null
+            ) {
+              throw new Error('crypto-state');
+            }
+            key = state.key as CryptoKey;
+          } else {
+            if (
+              previousDescriptor &&
+              previousDescriptor.configurable !== true &&
+              (!isDataDescriptor || previousDescriptor.writable !== true)
+            ) {
+              throw new Error('crypto-global');
+            }
             const material = new Uint8Array(32);
             try {
               cryptoApi.getRandomValues(material);
@@ -918,19 +1131,66 @@ export async function readStorageEvidence(
             } finally {
               material.fill(0);
             }
-            Object.defineProperty(globals, hmacKeyGlobal, {
-              configurable: true,
+            const priorDescriptor = previousDescriptor
+              ? freeze({ ...previousDescriptor }) as PropertyDescriptor
+              : undefined;
+            const state = {} as {
+              kind: string;
+              key: CryptoKey;
+              priorDescriptor: PropertyDescriptor | undefined;
+              ownerToken: object;
+            };
+            defineProperty(state, 'kind', {
+              configurable: false,
               enumerable: false,
               writable: false,
-              value: { kind: STORAGE_HMAC_STATE_KIND, key }
+              value: STORAGE_HMAC_STATE_KIND
             });
-          } else {
-            if (typeof existingState !== 'object' || existingState === null) throw new Error('crypto-state');
-            const state = existingState as Record<string, unknown>;
-            if (state.kind !== STORAGE_HMAC_STATE_KIND || typeof state.key !== 'object' || state.key === null) {
-              throw new Error('crypto-state');
+            defineProperty(state, 'key', {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: key
+            });
+            defineProperty(state, 'priorDescriptor', {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: priorDescriptor
+            });
+            defineProperty(state, 'ownerToken', {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: state
+            });
+            try {
+              if (!previousDescriptor) {
+                defineProperty(globals, hmacKeyGlobal, {
+                  configurable: true,
+                  enumerable: false,
+                  writable: false,
+                  value: state
+                });
+              } else if (previousDescriptor.configurable === true) {
+                defineProperty(globals, hmacKeyGlobal, {
+                  configurable: true,
+                  enumerable: false,
+                  writable: false,
+                  value: state
+                });
+              } else {
+                defineProperty(globals, hmacKeyGlobal, { ...previousDescriptor, value: state });
+              }
+            } catch (error) {
+              try {
+                if (previousDescriptor) defineProperty(globals, hmacKeyGlobal, previousDescriptor);
+                else delete globals[hmacKeyGlobal];
+              } catch {
+                // Preserve the publication failure without exposing rollback detail.
+              }
+              throw error;
             }
-            key = state.key as CryptoKey;
           }
           const algorithm = key.algorithm as unknown as Record<string, unknown>;
           const hash = algorithm.hash as { name?: unknown } | undefined;
@@ -1092,51 +1352,182 @@ export async function readStorageEvidence(
     .catch(() => emptyStorageEvidence());
 }
 
+type CapturedStorageEvidence = {
+  kind: 'supported' | 'truncated' | 'unsupported';
+  values: Record<string, unknown>;
+  truncation: Record<string, unknown>;
+};
+
+function captureExactRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+  rejectProxy: boolean
+): CapturedRecord | undefined {
+  try {
+    if (typeof value !== 'object' || value === null) return undefined;
+    const prototype = CAPTURED_OBJECT_GET_PROTOTYPE_OF(value);
+    if (prototype !== CAPTURED_OBJECT_PROTOTYPE && prototype !== null) return undefined;
+
+    const ownKeys = CAPTURED_REFLECT_OWN_KEYS(value);
+    if (ownKeys.length !== expectedKeys.length) return undefined;
+    const seenKeys = CAPTURED_OBJECT_CREATE(null) as Record<string, boolean>;
+    for (const key of ownKeys) {
+      if (typeof key !== 'string' || seenKeys[key] === true) return undefined;
+      seenKeys[key] = true;
+    }
+    for (const key of expectedKeys) {
+      if (seenKeys[key] !== true) return undefined;
+    }
+
+    const descriptors = CAPTURED_OBJECT_CREATE(null) as Record<string, PropertyDescriptor>;
+    for (const key of expectedKeys) {
+      const descriptor = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(value, key);
+      if (!descriptor || descriptor.enumerable !== true) return undefined;
+      const valueMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'value');
+      const getterMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'get');
+      const setterMarker = CAPTURED_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR(descriptor, 'set');
+      if (!valueMarker || getterMarker || setterMarker) return undefined;
+      descriptors[key] = descriptor;
+    }
+    const values = CAPTURED_OBJECT_CREATE(null) as Record<string, unknown>;
+    for (const key of expectedKeys) values[key] = descriptors[key].value;
+
+    // structuredClone rejects Proxy objects in browser and Node runtimes. Run
+    // it only after descriptor checks and value snapshotting so untrusted
+    // accessors, symbols, inherited fields, and extra own fields fail closed.
+    if (rejectProxy) {
+      if (!CAPTURED_STRUCTURED_CLONE) return undefined;
+      CAPTURED_STRUCTURED_CLONE(value);
+    }
+    return { values };
+  } catch {
+    return undefined;
+  }
+}
+
+function isSafeEvidenceCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function captureStorageEvidence(value: unknown): CapturedStorageEvidence | undefined {
+  const top = captureExactRecord(value, STORAGE_EVIDENCE_KEYS, true);
+  if (!top) return undefined;
+  const truncation = captureExactRecord(top.values.truncation, STORAGE_TRUNCATION_KEYS, true);
+  if (!truncation) return undefined;
+
+  try {
+    const fields = top.values;
+    const flags = truncation.values;
+    const allNull = (keys: readonly string[]): boolean => keys.every((key) => fields[key] === null);
+    const allFalse = (): boolean =>
+      flags.any === false &&
+      flags.cookie === false &&
+      flags.localStorage === false &&
+      flags.sessionStorage === false &&
+      flags.indexedDb === false;
+    const supported =
+      fields.cryptoSupported === true &&
+      fields.status === 'supported' &&
+      fields.truncated === false &&
+      fields.readFailure === false &&
+      isSafeEvidenceCount(fields.recordCount) &&
+      isSafeEvidenceCount(fields.digestCount) &&
+      fields.recordLimit === STORAGE_EVIDENCE_RECORD_LIMIT &&
+      isSafeEvidenceCount(fields.cookieCount) &&
+      isSafeEvidenceCount(fields.localStorageEntryCount) &&
+      isSafeEvidenceCount(fields.sessionStorageEntryCount) &&
+      fields.indexedDbSupported === true &&
+      isSafeEvidenceCount(fields.indexedDbRecordCount) &&
+      fields.indexedDbUnexpectedDatabaseCount === 0 &&
+      isSafeEvidenceCount(fields.indexedDbDatabaseCount) &&
+      isSafeEvidenceCount(fields.indexedDbStoreCount) &&
+      fields.cookieTruncated === false &&
+      fields.localStorageTruncated === false &&
+      fields.sessionStorageTruncated === false &&
+      fields.indexedDbTruncated === false &&
+      allFalse() &&
+      typeof fields.fingerprint === 'string' &&
+      /^[0-9a-f]{64}$/.test(fields.fingerprint);
+    if (supported) return { kind: 'supported', values: fields, truncation: flags };
+
+    const truncated =
+      fields.cryptoSupported === true &&
+      fields.status === 'truncated' &&
+      fields.truncated === true &&
+      fields.readFailure === false &&
+      fields.recordCount === null &&
+      fields.digestCount === null &&
+      fields.recordLimit === STORAGE_EVIDENCE_RECORD_LIMIT &&
+      fields.cookieCount === null &&
+      fields.localStorageEntryCount === null &&
+      fields.sessionStorageEntryCount === null &&
+      fields.indexedDbSupported === null &&
+      fields.indexedDbRecordCount === null &&
+      fields.indexedDbUnexpectedDatabaseCount === null &&
+      fields.indexedDbDatabaseCount === null &&
+      fields.indexedDbStoreCount === null &&
+      typeof fields.cookieTruncated === 'boolean' &&
+      typeof fields.localStorageTruncated === 'boolean' &&
+      typeof fields.sessionStorageTruncated === 'boolean' &&
+      typeof fields.indexedDbTruncated === 'boolean' &&
+      typeof flags.any === 'boolean' &&
+      typeof flags.cookie === 'boolean' &&
+      typeof flags.localStorage === 'boolean' &&
+      typeof flags.sessionStorage === 'boolean' &&
+      typeof flags.indexedDb === 'boolean' &&
+      flags.any === (flags.cookie || flags.localStorage || flags.sessionStorage || flags.indexedDb) &&
+      fields.cookieTruncated === flags.cookie &&
+      fields.localStorageTruncated === flags.localStorage &&
+      fields.sessionStorageTruncated === flags.sessionStorage &&
+      fields.indexedDbTruncated === flags.indexedDb &&
+      fields.fingerprint === null;
+    if (truncated) return { kind: 'truncated', values: fields, truncation: flags };
+
+    const unsupported =
+      fields.cryptoSupported === false &&
+      fields.status === 'unsupported' &&
+      fields.truncated === null &&
+      fields.readFailure === true &&
+      allNull([
+        'recordCount',
+        'digestCount',
+        'recordLimit',
+        'cookieCount',
+        'localStorageEntryCount',
+        'sessionStorageEntryCount',
+        'indexedDbSupported',
+        'indexedDbRecordCount',
+        'indexedDbUnexpectedDatabaseCount',
+        'indexedDbDatabaseCount',
+        'indexedDbStoreCount',
+        'cookieTruncated',
+        'localStorageTruncated',
+        'sessionStorageTruncated',
+        'indexedDbTruncated',
+        'fingerprint'
+      ]) &&
+      flags.any === null &&
+      flags.cookie === null &&
+      flags.localStorage === null &&
+      flags.sessionStorage === null &&
+      flags.indexedDb === null;
+    return unsupported ? { kind: 'unsupported', values: fields, truncation: flags } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function storageEvidenceEqual(left: StorageEvidence, right: StorageEvidence): boolean {
-  const isSafeCount = (value: unknown): value is number =>
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-  const isSupported = (value: unknown): value is SupportedStorageEvidence => {
-    try {
-      if (!value || typeof value !== 'object') return false;
-      const evidence = value as Record<string, unknown>;
-      const truncation = evidence.truncation;
-      if (!truncation || typeof truncation !== 'object') return false;
-      const truncationRecord = truncation as Record<string, unknown>;
-      return (
-        evidence.status === 'supported' &&
-        evidence.cryptoSupported === true &&
-        evidence.truncated === false &&
-        evidence.readFailure === false &&
-        evidence.recordLimit === STORAGE_EVIDENCE_RECORD_LIMIT &&
-        /^[0-9a-f]{64}$/.test(typeof evidence.fingerprint === 'string' ? evidence.fingerprint : '') &&
-        evidence.indexedDbSupported === true &&
-        evidence.indexedDbUnexpectedDatabaseCount === 0 &&
-        evidence.cookieTruncated === false &&
-        evidence.localStorageTruncated === false &&
-        evidence.sessionStorageTruncated === false &&
-        evidence.indexedDbTruncated === false &&
-        truncationRecord.any === false &&
-        truncationRecord.cookie === false &&
-        truncationRecord.localStorage === false &&
-        truncationRecord.sessionStorage === false &&
-        truncationRecord.indexedDb === false &&
-        isSafeCount(evidence.recordCount) &&
-        isSafeCount(evidence.digestCount) &&
-        isSafeCount(evidence.cookieCount) &&
-        isSafeCount(evidence.localStorageEntryCount) &&
-        isSafeCount(evidence.sessionStorageEntryCount) &&
-        isSafeCount(evidence.indexedDbRecordCount) &&
-        isSafeCount(evidence.indexedDbDatabaseCount) &&
-        isSafeCount(evidence.indexedDbStoreCount)
-      );
-    } catch {
+  try {
+    const leftEvidence = captureStorageEvidence(left);
+    const rightEvidence = captureStorageEvidence(right);
+    if (!leftEvidence || !rightEvidence || leftEvidence.kind !== 'supported' || rightEvidence.kind !== 'supported') {
       return false;
     }
-  };
-  try {
-    if (!isSupported(left) || !isSupported(right)) return false;
-    const leftRecord = left as SupportedStorageEvidence;
-    const rightRecord = right as SupportedStorageEvidence;
+    const leftRecord = leftEvidence.values;
+    const rightRecord = rightEvidence.values;
+    const leftTruncation = leftEvidence.truncation;
+    const rightTruncation = rightEvidence.truncation;
     return (
       leftRecord.recordCount === rightRecord.recordCount &&
       leftRecord.digestCount === rightRecord.digestCount &&
@@ -1153,11 +1544,11 @@ export function storageEvidenceEqual(left: StorageEvidence, right: StorageEviden
       leftRecord.localStorageTruncated === rightRecord.localStorageTruncated &&
       leftRecord.sessionStorageTruncated === rightRecord.sessionStorageTruncated &&
       leftRecord.indexedDbTruncated === rightRecord.indexedDbTruncated &&
-      leftRecord.truncation.any === rightRecord.truncation.any &&
-      leftRecord.truncation.cookie === rightRecord.truncation.cookie &&
-      leftRecord.truncation.localStorage === rightRecord.truncation.localStorage &&
-      leftRecord.truncation.sessionStorage === rightRecord.truncation.sessionStorage &&
-      leftRecord.truncation.indexedDb === rightRecord.truncation.indexedDb &&
+      leftTruncation.any === rightTruncation.any &&
+      leftTruncation.cookie === rightTruncation.cookie &&
+      leftTruncation.localStorage === rightTruncation.localStorage &&
+      leftTruncation.sessionStorage === rightTruncation.sessionStorage &&
+      leftTruncation.indexedDb === rightTruncation.indexedDb &&
       leftRecord.fingerprint === rightRecord.fingerprint
     );
   } catch {
@@ -1252,49 +1643,141 @@ export async function overwriteNativeStorage(page: Page): Promise<void> {
 }
 
 export async function clearNativeStorage(page: Page): Promise<void> {
-  await page
-    .evaluate(
-      async ({ cookieName, databaseName, localKey, hmacKeyGlobal, hmacStateKind, sessionKey }) => {
+  let result: { failures: string[] };
+  try {
+    result = await page.evaluate(
+      async ({ cookieName, databaseName, localKey, hmacKeyGlobal, hmacStateKind, restoreHmac, sessionKey }) => {
+        const failures: string[] = [];
+        const markFailure = (name: string): void => {
+          if (!failures.includes(name)) failures.push(name);
+        };
+        const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+        const defineProperty = Object.defineProperty;
+        const isDataDescriptor = (descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor =>
+          descriptor !== undefined &&
+          getOwnPropertyDescriptor(descriptor, 'value') !== undefined &&
+          getOwnPropertyDescriptor(descriptor, 'get') === undefined &&
+          getOwnPropertyDescriptor(descriptor, 'set') === undefined;
+        const sameDescriptor = (
+          actual: PropertyDescriptor | undefined,
+          expected: PropertyDescriptor | undefined
+        ): boolean => {
+          if (actual === undefined || expected === undefined) return actual === expected;
+          if (
+            actual.enumerable !== expected.enumerable ||
+            actual.configurable !== expected.configurable ||
+            isDataDescriptor(actual) !== isDataDescriptor(expected)
+          ) {
+            return false;
+          }
+          if (isDataDescriptor(actual) && isDataDescriptor(expected)) {
+            return actual.writable === expected.writable && actual.value === expected.value;
+          }
+          return actual.get === expected.get && actual.set === expected.set;
+        };
+
         try {
           document.cookie = `${cookieName}=; Max-Age=0; Path=/; SameSite=Lax`;
-          localStorage.removeItem(localKey);
-          sessionStorage.removeItem(sessionKey);
-
-          if (typeof indexedDB !== 'undefined') {
-            try {
-              await new Promise<void>((resolve) => {
-                let settled = false;
-                const finish = (): void => {
-                  if (settled) return;
-                  settled = true;
-                  resolve();
-                };
-                const request = indexedDB.deleteDatabase(databaseName);
-                request.onsuccess = finish;
-                request.onerror = finish;
-                request.onblocked = finish;
-              });
-            } catch {
-              // Cleanup is best effort when a browser closes the page during teardown.
-            }
+          if (document.cookie.split(';').some((entry) => entry.trim().startsWith(`${cookieName}=`))) {
+            markFailure('cookie-remaining');
           }
-        } finally {
+        } catch {
+          markFailure('cookie-clear');
+        }
+        try {
+          localStorage.removeItem(localKey);
+          if (localStorage.getItem(localKey) !== null) markFailure('local-storage-remaining');
+        } catch {
+          markFailure('local-storage-clear');
+        }
+        try {
+          sessionStorage.removeItem(sessionKey);
+          if (sessionStorage.getItem(sessionKey) !== null) markFailure('session-storage-remaining');
+        } catch {
+          markFailure('session-storage-clear');
+        }
+
+        if (typeof indexedDB !== 'undefined') {
           try {
-            const globals = globalThis as typeof globalThis & Record<string, unknown>;
-            const descriptor = Object.getOwnPropertyDescriptor(globals, hmacKeyGlobal);
-            const state = descriptor?.value;
-            if (
-              descriptor?.configurable === true &&
-              state &&
-              typeof state === 'object' &&
-              (state as Record<string, unknown>).kind === hmacStateKind
-            ) {
-              delete globals[hmacKeyGlobal];
-            }
+            const deleted = await new Promise<boolean>((resolve) => {
+              let settled = false;
+              const finish = (success: boolean): void => {
+                if (settled) return;
+                settled = true;
+                resolve(success);
+              };
+              let request: IDBOpenDBRequest;
+              try {
+                request = indexedDB.deleteDatabase(databaseName);
+              } catch {
+                finish(false);
+                return;
+              }
+              request.onsuccess = () => finish(true);
+              request.onerror = () => finish(false);
+              request.onblocked = () => finish(false);
+            });
+            if (!deleted) markFailure('indexed-db-clear');
           } catch {
-            // Key deletion remains best effort during page teardown.
+            markFailure('indexed-db-clear');
           }
         }
+
+        // Restore only the exact state object installed by this helper. A
+        // replacement global, even with the same kind string, is never touched.
+        if (restoreHmac) {
+          try {
+            const globals = globalThis as typeof globalThis & Record<string, unknown>;
+            const descriptor = getOwnPropertyDescriptor(globals, hmacKeyGlobal);
+            if (descriptor) {
+              if (!isDataDescriptor(descriptor)) {
+                markFailure('hmac-global');
+              } else {
+                const state = descriptor.value;
+                if (typeof state !== 'object' || state === null) {
+                  markFailure('hmac-global');
+                } else {
+                  const kindDescriptor = getOwnPropertyDescriptor(state, 'kind');
+                  const ownerDescriptor = getOwnPropertyDescriptor(state, 'ownerToken');
+                  const priorDescriptorDescriptor = getOwnPropertyDescriptor(state, 'priorDescriptor');
+                  if (
+                    !isDataDescriptor(kindDescriptor) ||
+                    !isDataDescriptor(ownerDescriptor) ||
+                    !isDataDescriptor(priorDescriptorDescriptor) ||
+                    kindDescriptor.value !== hmacStateKind ||
+                    ownerDescriptor.value !== state
+                  ) {
+                    markFailure('hmac-global');
+                  } else {
+                    const priorDescriptor = priorDescriptorDescriptor.value as PropertyDescriptor | undefined;
+                    if (priorDescriptor !== undefined && typeof priorDescriptor !== 'object') {
+                      markFailure('hmac-global');
+                    } else {
+                      try {
+                        if (priorDescriptor) {
+                          defineProperty(globals, hmacKeyGlobal, priorDescriptor);
+                        } else if (descriptor.configurable === true) {
+                          if (!delete globals[hmacKeyGlobal]) markFailure('hmac-global');
+                        } else {
+                          markFailure('hmac-global');
+                        }
+                      } catch {
+                        markFailure('hmac-global');
+                      }
+                      if (!sameDescriptor(getOwnPropertyDescriptor(globals, hmacKeyGlobal), priorDescriptor)) {
+                        markFailure('hmac-global');
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch {
+            markFailure('hmac-global');
+          }
+        }
+
+        return { failures };
       },
       {
         cookieName: STORAGE_COOKIE,
@@ -1302,11 +1785,18 @@ export async function clearNativeStorage(page: Page): Promise<void> {
         localKey: STORAGE_LOCAL_KEY,
         hmacKeyGlobal: STORAGE_HMAC_KEY_GLOBAL,
         hmacStateKind: STORAGE_HMAC_STATE_KIND,
+        restoreHmac: hmacOwnershipPages.has(page),
         sessionKey: STORAGE_SESSION_KEY
       }
-    )
-    .catch(() => undefined);
+    );
+  } catch {
+    throw new Error('Native storage cleanup failed: page-evaluate');
+  }
+  if (result.failures.length > 0) {
+    throw new Error(`Native storage cleanup failed: ${result.failures.join(',')}`);
+  }
   cookieHmacKeys.delete(page);
+  hmacOwnershipPages.delete(page);
 }
 
 export type NativeCredentialProofInstallOptions = {
@@ -1384,91 +1874,136 @@ export async function installNativeCredentialProof(
         username: HTMLInputElement;
         password: HTMLInputElement;
         state: typeof state;
-        cleanup: () => void;
+        cleanup: () => string[];
       };
-      const cleanup = (): void => {
-        try {
-          controls.username.value = '';
-        } catch {
-          // Continue independent cleanup when a hostile setter rejects a write.
-        }
-        try {
-          controls.username.defaultValue = '';
-        } catch {
-          // Continue independent cleanup when a hostile default setter rejects a write.
-        }
-        try {
-          controls.username.removeAttribute('value');
-        } catch {
-          // Continue independent cleanup when a hostile attribute surface throws.
-        }
-        try {
-          controls.password.value = '';
-        } catch {
-          // Continue independent cleanup when a hostile setter rejects a write.
-        }
-        try {
-          controls.password.defaultValue = '';
-        } catch {
-          // Continue independent cleanup when a hostile default setter rejects a write.
-        }
-        try {
-          controls.password.removeAttribute('value');
-        } catch {
-          // Continue independent cleanup when a hostile attribute surface throws.
-        }
+      const cleanup = (): string[] => {
+        const failures: string[] = [];
+        const markFailure = (name: string): void => {
+          if (!failures.includes(name)) failures.push(name);
+        };
+        const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+        const isDataDescriptor = (descriptor: PropertyDescriptor | undefined): descriptor is PropertyDescriptor =>
+          descriptor !== undefined &&
+          getOwnPropertyDescriptor(descriptor, 'value') !== undefined &&
+          getOwnPropertyDescriptor(descriptor, 'get') === undefined &&
+          getOwnPropertyDescriptor(descriptor, 'set') === undefined;
+        const sameDescriptor = (
+          actual: PropertyDescriptor | undefined,
+          expected: PropertyDescriptor | undefined
+        ): boolean => {
+          if (actual === undefined || expected === undefined) return actual === expected;
+          if (
+            actual.enumerable !== expected.enumerable ||
+            actual.configurable !== expected.configurable ||
+            isDataDescriptor(actual) !== isDataDescriptor(expected)
+          ) {
+            return false;
+          }
+          if (isDataDescriptor(actual) && isDataDescriptor(expected)) {
+            return actual.writable === expected.writable && actual.value === expected.value;
+          }
+          return actual.get === expected.get && actual.set === expected.set;
+        };
+        const clearControl = (name: string, control: HTMLInputElement): void => {
+          try {
+            control.value = '';
+            if (control.value !== '') markFailure(`${name}-live`);
+          } catch {
+            markFailure(`${name}-live`);
+          }
+          try {
+            control.defaultValue = '';
+            if (control.defaultValue !== '') markFailure(`${name}-default`);
+          } catch {
+            markFailure(`${name}-default`);
+          }
+          try {
+            control.removeAttribute('value');
+            if (control.hasAttribute('value')) markFailure(`${name}-serialized`);
+          } catch {
+            markFailure(`${name}-serialized`);
+          }
+        };
+
+        clearControl('username', controls.username);
+        clearControl('password', controls.password);
 
         const listener = state.formDataListener;
-        state.formDataListener = undefined;
         if (listener) {
           try {
             form.removeEventListener('formdata', listener);
+            state.formDataListener = undefined;
           } catch {
-            // Listener cleanup is best effort and must not mask the install error.
+            // Keep the listener reference so a later scrub can retry removal.
+            markFailure('formdata-listener');
           }
         }
 
         try {
           state.username = '';
+          if (state.username !== '') markFailure('username-state');
         } catch {
-          // Keep the remaining cleanup independent from state mutation failures.
+          markFailure('username-state');
         }
         try {
           state.password = '';
+          if (state.password !== '') markFailure('password-state');
         } catch {
-          // Keep the remaining cleanup independent from state mutation failures.
+          markFailure('password-state');
         }
 
-        try {
-          if (state.formDataProxy && window.FormData === state.formDataProxy) {
-            if (originalFormDataDescriptor) {
-              Object.defineProperty(window, 'FormData', originalFormDataDescriptor);
-            } else {
-              delete windowRecord.FormData;
-            }
-          }
-        } catch {
-          // The outer scrub retries the exact identity-guarded restoration.
-        }
-
-        try {
-          if (windowRecord[globalName] === proof) {
-            if (previousGlobalDescriptor) {
-              Object.defineProperty(window, globalName, previousGlobalDescriptor);
-            } else {
-              delete windowRecord[globalName];
-              if (windowRecord[globalName] === proof) windowRecord[globalName] = undefined;
-            }
-          }
-        } catch {
+        if (state.formDataProxy) {
           try {
-            if (!previousGlobalDescriptor && windowRecord[globalName] === proof) {
-              windowRecord[globalName] = undefined;
+            const currentFormData = window.FormData;
+            if (currentFormData === state.formDataProxy) {
+              if (originalFormDataDescriptor) {
+                Object.defineProperty(window, 'FormData', originalFormDataDescriptor);
+              } else if (!delete windowRecord.FormData) {
+                markFailure('formdata-global');
+              }
+              if (!sameDescriptor(getOwnPropertyDescriptor(window, 'FormData'), originalFormDataDescriptor)) {
+                markFailure('formdata-global');
+              } else {
+                state.formDataProxy = undefined;
+              }
+            } else if (currentFormData === originalFormData &&
+              sameDescriptor(getOwnPropertyDescriptor(window, 'FormData'), originalFormDataDescriptor)) {
+              state.formDataProxy = undefined;
+            } else {
+              // Never clobber a replacement constructor; retain ownership for retry.
+              markFailure('formdata-replaced');
             }
           } catch {
-            // A non-configurable hostile global is left untouched rather than clobbered.
+            markFailure('formdata-global');
           }
         }
+
+        // Keep the published proof handle until every earlier cleanup step has
+        // succeeded. This preserves listener and descriptor ownership for retry.
+        if (failures.length === 0) {
+          try {
+            const currentDescriptor = getOwnPropertyDescriptor(window, globalName);
+            const currentValue = currentDescriptor && isDataDescriptor(currentDescriptor)
+              ? currentDescriptor.value
+              : undefined;
+            if (currentValue === proof) {
+              if (previousGlobalDescriptor) {
+                Object.defineProperty(window, globalName, previousGlobalDescriptor);
+              } else if (!delete windowRecord[globalName]) {
+                markFailure('proof-global');
+              }
+              if (!sameDescriptor(getOwnPropertyDescriptor(window, globalName), previousGlobalDescriptor)) {
+                markFailure('proof-global');
+              }
+            } else if (!sameDescriptor(currentDescriptor, previousGlobalDescriptor)) {
+              // Do not remove or overwrite a replacement global.
+              markFailure('proof-global-replaced');
+            }
+          } catch {
+            markFailure('proof-global');
+          }
+        }
+        return failures;
       };
 
       // Publish the cleanup handle before any listener or constructor mutation.
@@ -1541,7 +2076,8 @@ export async function installNativeCredentialProof(
         controls.username.dispatchEvent(new Event('input', { bubbles: true }));
         controls.password.dispatchEvent(new Event('input', { bubbles: true }));
       } catch (error) {
-        cleanup();
+        const cleanupFailures = cleanup();
+        if (cleanupFailures.length > 0) throw new Error('Native auth proof install cleanup failed.');
         throw error;
       }
     },
@@ -1624,8 +2160,13 @@ export async function readNativeCredentialEvidence(page: Page): Promise<NativeCr
 }
 
 export async function scrubNativeCredentialProof(page: Page): Promise<void> {
-  await page
-    .evaluate((globalName) => {
+  let result: { failures: string[] };
+  try {
+    result = await page.evaluate((globalName) => {
+      const failures: string[] = [];
+      const markFailure = (name: string): void => {
+        if (!failures.includes(name)) failures.push(name);
+      };
       const windowRecord = window as unknown as Record<string, unknown>;
       const proof = windowRecord[globalName] as
         | {
@@ -1633,107 +2174,60 @@ export async function scrubNativeCredentialProof(page: Page): Promise<void> {
             form?: HTMLFormElement;
             username?: HTMLInputElement;
             password?: HTMLInputElement;
-            cleanup?: () => void;
-            state?: {
-              username: string;
-              password: string;
-              originalFormDataDescriptor?: PropertyDescriptor;
-              previousGlobalDescriptor?: PropertyDescriptor;
-              formDataProxy?: typeof FormData;
-              formDataListener?: (event: Event) => void;
-            };
+            cleanup?: () => string[];
           }
         | undefined;
       const activeProof = proof?.kind === 'native-auth-proof' ? proof : undefined;
 
-      // Prefer the page-published transaction handle. It remains available even
-      // when installation failed after the listener or constructor was changed.
-      try {
-        activeProof?.cleanup?.();
-      } catch {
-        // Continue with independent fallback cleanup below.
-      }
-
-      const form = activeProof?.form ?? document.querySelector('form[aria-label="Hermes password sign in"]');
-      const fallbackUsername = form?.querySelector(
-        'input[autocomplete="username"], input[data-fixture-field="username"]'
-      ) as HTMLInputElement | null;
-      const fallbackPassword = form?.querySelector(
-        'input[autocomplete="current-password"], input[data-fixture-field="password"]'
-      ) as HTMLInputElement | null;
-      const controls = [activeProof?.username ?? fallbackUsername, activeProof?.password ?? fallbackPassword].filter(
-        (control): control is HTMLInputElement => control !== null && control !== undefined
-      );
-      for (const control of controls) {
+      // Prefer the page-published transaction handle. Its cleanup retains any
+      // unresolved listener or descriptor ownership for a later retry.
+      if (activeProof?.cleanup) {
         try {
-          control.value = '';
+          for (const failure of activeProof.cleanup()) markFailure(failure);
         } catch {
-          // Continue when a hostile setter rejects a clear.
-        }
-        try {
-          control.defaultValue = '';
-        } catch {
-          // Continue when a hostile default setter rejects a clear.
-        }
-        try {
-          control.removeAttribute('value');
-        } catch {
-          // Continue when a hostile attribute surface rejects a clear.
+          markFailure('proof-cleanup');
         }
       }
 
-      const state = activeProof?.state;
-      const listener = state?.formDataListener;
-      if (state) state.formDataListener = undefined;
-      if (listener && form) {
-        try {
-          form.removeEventListener('formdata', listener);
-        } catch {
-          // Best effort; the installer has already attempted this path once.
-        }
-      }
-      if (state) {
-        try {
-          state.username = '';
-        } catch {
-          // Keep descriptor and global cleanup independent.
-        }
-        try {
-          state.password = '';
-        } catch {
-          // Keep descriptor and global cleanup independent.
-        }
-        try {
-          if (state.formDataProxy && window.FormData === state.formDataProxy) {
-            if (state.originalFormDataDescriptor) {
-              Object.defineProperty(window, 'FormData', state.originalFormDataDescriptor);
-            } else {
-              delete windowRecord.FormData;
-            }
+      if (!activeProof) {
+        const form = document.querySelector('form[aria-label="Hermes password sign in"]');
+        const fallbackUsername = form?.querySelector(
+          'input[autocomplete="username"], input[data-fixture-field="username"]'
+        ) as HTMLInputElement | null;
+        const fallbackPassword = form?.querySelector(
+          'input[autocomplete="current-password"], input[data-fixture-field="password"]'
+        ) as HTMLInputElement | null;
+        const controls = [fallbackUsername, fallbackPassword].filter(
+          (control): control is HTMLInputElement => control !== null
+        );
+        for (const [index, control] of controls.entries()) {
+          const name = index === 0 ? 'username' : 'password';
+          try {
+            control.value = '';
+            if (control.value !== '') markFailure(`${name}-live`);
+          } catch {
+            markFailure(`${name}-live`);
           }
-        } catch {
-          // Do not mask teardown failures or clobber an unrelated constructor.
-        }
-      }
-
-      try {
-        if (activeProof && windowRecord[globalName] === activeProof) {
-          if (state?.previousGlobalDescriptor) {
-            Object.defineProperty(window, globalName, state.previousGlobalDescriptor);
-          } else {
-            delete windowRecord[globalName];
-            if (windowRecord[globalName] === proof) windowRecord[globalName] = undefined;
+          try {
+            control.defaultValue = '';
+            if (control.defaultValue !== '') markFailure(`${name}-default`);
+          } catch {
+            markFailure(`${name}-default`);
+          }
+          try {
+            control.removeAttribute('value');
+            if (control.hasAttribute('value')) markFailure(`${name}-serialized`);
+          } catch {
+            markFailure(`${name}-serialized`);
           }
         }
-      } catch {
-        try {
-          if (proof && !state?.previousGlobalDescriptor && windowRecord[globalName] === proof) {
-            windowRecord[globalName] = undefined;
-          }
-        } catch {
-          // A non-configurable pre-existing global is left untouched.
-        }
       }
-    }, AUTH_PROOF_GLOBAL)
-    .catch(() => undefined);
+      return { failures };
+    }, AUTH_PROOF_GLOBAL);
+  } catch {
+    throw new Error('Native auth proof cleanup failed: page-evaluate');
+  }
+  if (result.failures.length > 0) {
+    throw new Error(`Native auth proof cleanup failed: ${result.failures.join(',')}`);
+  }
 }
