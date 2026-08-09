@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  parseGitChangedPaths,
   validatePtyBenchmarkArtifact,
   validatePtyBenchmarkFile,
 } from "./validate-pty-benchmarks";
+import { REVIEWED_PTY_BENCHMARK_TRUST_PIN } from "./pty-benchmark-trust-pin";
 
 const CHECKED_IN_RECONNECT_ARTIFACT =
   "src/lib/terminal/pty-reconnect-supersession-benchmark.json";
@@ -17,7 +19,7 @@ const RECONNECT_BENCHMARK =
   "src/lib/terminal/pty-reconnect-supersession.bench.ts";
 const CONNECTING_BENCHMARK =
   "src/lib/terminal/pty-connecting-ownership.bench.ts";
-const CLI = "src/lib/terminal/pty-benchmark-validator.ts";
+const CLI = join(process.cwd(), "src/lib/terminal/pty-benchmark-validator.ts");
 
 let reconnectArtifactPath = CHECKED_IN_RECONNECT_ARTIFACT;
 let connectingArtifactPath = CHECKED_IN_CONNECTING_ARTIFACT;
@@ -76,7 +78,9 @@ function generateHarnessArtifacts(): void {
   let sourceAdded = false;
   let evidenceAdded = false;
   try {
-    const sourceRevision = git(repoRoot, ["rev-parse", "HEAD"]);
+    const sourceRevision = REVIEWED_PTY_BENCHMARK_TRUST_PIN.sourceRevision;
+    const trustedRevision = git(repoRoot, ["rev-parse", "HEAD"]);
+    expect(trustedRevision).not.toBe(sourceRevision);
     execFileSync(
       "git",
       ["worktree", "add", "--detach", "--quiet", sourceCheckout, sourceRevision],
@@ -99,7 +103,7 @@ function generateHarnessArtifacts(): void {
 
     execFileSync(
       "git",
-      ["worktree", "add", "--detach", "--quiet", evidenceCheckout, sourceRevision],
+      ["worktree", "add", "--detach", "--quiet", evidenceCheckout, trustedRevision],
       { cwd: repoRoot, stdio: ["ignore", "ignore", "pipe"] },
     );
     evidenceAdded = true;
@@ -136,6 +140,11 @@ function generateHarnessArtifacts(): void {
     execFileSync(
       "git",
       ["merge-base", "--is-ancestor", sourceRevision, evidenceRevision],
+      { cwd: evidenceCheckout, stdio: "ignore" },
+    );
+    execFileSync(
+      "git",
+      ["merge-base", "--is-ancestor", trustedRevision, evidenceRevision],
       { cwd: evidenceCheckout, stdio: "ignore" },
     );
     removeWorktree(repoRoot, sourceCheckout);
@@ -268,7 +277,7 @@ function expectCliFailure(
   });
 }
 
-describe("PTY benchmark evidence validator", () => {
+describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
   it("validates detached source generation in an evidence-only successor", () => {
     expect(harnessSourceRevision).toMatch(/^[0-9a-f]{40}$/u);
     expect(harnessEvidenceRevision).toMatch(/^[0-9a-f]{40}$/u);
@@ -291,10 +300,10 @@ describe("PTY benchmark evidence validator", () => {
 
   it("keeps intentionally stale checked-in evidence out of the positive path", () => {
     expect(() => validatePtyBenchmarkFile(CHECKED_IN_RECONNECT_ARTIFACT)).toThrow(
-      /followed only by evidence changes|schema-specific contract/iu,
+      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract/iu,
     );
     expect(() => validatePtyBenchmarkFile(CHECKED_IN_CONNECTING_ARTIFACT)).toThrow(
-      /followed only by evidence changes|schema-specific contract/iu,
+      /reviewed PTY source pin|followed only by evidence changes|schema-specific contract/iu,
     );
   });
 
@@ -335,6 +344,66 @@ describe("PTY benchmark evidence validator", () => {
       expect(() => validatePtyBenchmarkArtifact(candidate)).toThrow(
         new RegExp(`^unsupported PTY benchmark schema ${schema}$`, "iu"),
       );
+    }
+  });
+
+  it("rejects exact changed-path parser hazards without trimming", () => {
+    expect(parseGitChangedPaths(new TextEncoder().encode("safe/path\0"))).toEqual([
+      "safe/path",
+    ]);
+    for (const bytes of [
+      new TextEncoder().encode(" leading/path\0"),
+      new TextEncoder().encode("trailing/path \0"),
+      new TextEncoder().encode("line\nfeed/path\0"),
+      new TextEncoder().encode("duplicate/path\0duplicate/path\0"),
+      new Uint8Array([0xff, 0x00]),
+      new TextEncoder().encode("unterminated/path"),
+    ]) {
+      expect(() => parseGitChangedPaths(bytes)).toThrow(
+        /changed path|changed-path output|NUL terminated/iu,
+      );
+    }
+  });
+
+  it("rejects unsafe names from actual NUL-delimited Git output", () => {
+    const directory = mkdtempSync(join(tmpdir(), "hermternal-pty-paths-"));
+    const names = [" leading.json", "trailing.json ", "line\nfeed.json"];
+    try {
+      execFileSync("git", ["-c", "init.defaultBranch=main", "init", "--quiet"], {
+        cwd: directory,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["config", "user.name", "Hermternal PTY Test"], {
+        cwd: directory,
+        stdio: "ignore",
+      });
+      execFileSync(
+        "git",
+        ["config", "user.email", "hermternal-pty-test@example.invalid"],
+        { cwd: directory, stdio: "ignore" },
+      );
+      for (const name of names) writeFileSync(join(directory, name), "base\\n");
+      execFileSync("git", ["add", "--", ...names], {
+        cwd: directory,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["commit", "--quiet", "-m", "base"], {
+        cwd: directory,
+        stdio: "ignore",
+      });
+      for (const name of names) {
+        writeFileSync(join(directory, name), "base\\nchanged\\n");
+        const changedPaths = execFileSync(
+          "git",
+          ["diff", "--name-only", "-z", "HEAD", "--", name],
+          { cwd: directory },
+        );
+        expect(() => parseGitChangedPaths(changedPaths)).toThrow(
+          /whitespace|control/iu,
+        );
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
@@ -438,7 +507,7 @@ describe("PTY benchmark evidence validator", () => {
         expect(runCli(path).ok).toBe(true);
       });
     }
-  });
+  }, 30_000);
 
   it(
     "enforces exact root, method, result, distribution, and nested metadata keys",
@@ -480,6 +549,12 @@ describe("PTY benchmark evidence validator", () => {
     30_000,
   );
 
+  it("rejects four-blob legacy provenance on every current v2 artifact", () => {
+    const legacyV2 = cloneArtifact(reconnectArtifactPath);
+    legacyV2.provenance.sourceBlobs = legacyV2.provenance.sourceBlobs.slice(0, 4);
+    expectCliFailure(legacyV2, /v2.*exactly five|reviewed helper/iu);
+  });
+
   it("rejects arbitrary tracked blobs and source or command drift", () => {
     const arbitraryBlob = cloneArtifact(reconnectArtifactPath);
     arbitraryBlob.provenance.sourceBlobs[0].path =
@@ -520,7 +595,7 @@ describe("PTY benchmark evidence validator", () => {
     const connecting = cloneArtifact(connectingArtifactPath);
     delete connecting.results[0].runs[0].assertions.connectingGuard;
     expectCliFailure(connecting, /keys did not match/iu);
-  });
+  }, 30_000);
 
   it("binds proof assertions to validator counts, owners, cleanup, and late-event suppression", () => {
     const validatorCount = cloneArtifact(reconnectArtifactPath);
@@ -541,7 +616,7 @@ describe("PTY benchmark evidence validator", () => {
     const lateEventProof = cloneArtifact(connectingArtifactPath);
     lateEventProof.results[3].runs[0].postCloseBytesEvents = 1;
     expectCliFailure(lateEventProof, /expected ownership ledger/iu);
-  });
+  }, 30_000);
 
   it("rejects owner tuple, socket ID, and callback-proof applicability drift", () => {
     const ownerTuple = cloneArtifact(reconnectArtifactPath);
@@ -575,6 +650,7 @@ describe("PTY benchmark evidence validator", () => {
     for (const [field, value] of [
       ["repetitions", 29],
       ["repetitions", 30.5],
+      ["warmups", 0],
       ["warmups", 4],
       ["warmups", 4.5],
     ] as const) {
@@ -582,7 +658,11 @@ describe("PTY benchmark evidence validator", () => {
       metadata[field] = value;
       expectCliFailure(metadata, /repetition metadata/iu);
     }
-  });
+
+    const zeroRequiredCounter = cloneArtifact(reconnectArtifactPath);
+    zeroRequiredCounter.results[0].runs[0].validatorCalls = 0;
+    expectCliFailure(zeroRequiredCounter, /expected ownership ledger/iu);
+  }, 30_000);
 
   it("rejects source/evidence HEAD equality and accepts a strict successor in both modes", () => {
     const artifact = readArtifact(reconnectArtifactPath);
@@ -600,7 +680,9 @@ describe("PTY benchmark evidence validator", () => {
           cwd,
         );
         expect(result.ok).toBe(false);
-        expect(result.output).toMatch(/strict predecessor/iu);
+        expect(result.output).toMatch(
+          /strict predecessor|trusted PTY pin|evidence checkout/iu,
+        );
       }
     });
 
@@ -619,15 +701,15 @@ describe("PTY benchmark evidence validator", () => {
 
     const blob = cloneArtifact(reconnectArtifactPath);
     blob.provenance.sourceBlobs[0].gitBlobSha = "0".repeat(40);
-    expectCliFailure(blob, /git blob drift/iu);
+    expectCliFailure(blob, /git blob drift|reviewed PTY pin/iu);
 
     const fileHash = cloneArtifact(reconnectArtifactPath);
     fileHash.provenance.sourceBlobs[0].sha256 = "0".repeat(64);
-    expectCliFailure(fileHash, /file hash drift/iu);
+    expectCliFailure(fileHash, /file hash drift|reviewed PTY pin/iu);
 
     const helper = cloneArtifact(reconnectArtifactPath);
     helper.provenance.sourceBlobs[4].gitBlobSha = "0".repeat(40);
-    expectCliFailure(helper, /git blob drift/iu);
+    expectCliFailure(helper, /git blob drift|reviewed PTY pin/iu);
 
     const outside = mkdtempSync(join(tmpdir(), "hermternal-pty-outside-"));
     const outsidePath = join(outside, "artifact.json");
@@ -654,7 +736,7 @@ describe("PTY benchmark evidence validator", () => {
       revision,
       nonAncestor.provenance.sourceBlobs.map((blob: MutableArtifact) => blob.path),
     );
-    expectCliFailure(nonAncestor, /not an ancestor/iu);
+    expectCliFailure(nonAncestor, /not an ancestor|immutable reviewed PTY source pin/iu);
 
     expect(harnessEvidenceRevision).toBeDefined();
     withDetachedCheckout(harnessEvidenceRevision!, (checkout) => {
@@ -683,8 +765,119 @@ describe("PTY benchmark evidence validator", () => {
         join(checkout, "apps/web"),
       );
       expect(result.ok).toBe(false);
-      expect(result.output).toMatch(/followed only by evidence changes/iu);
+      expect(result.output).toMatch(
+        /followed only by (?:the two retained evidence JSON paths|evidence changes)/iu,
+      );
     });
+  });
+
+  it("rejects unreviewed source M forgery and validator or CLI drift before evidence E", () => {
+    const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+    const directory = mkdtempSync(join(tmpdir(), "hermternal-pty-unreviewed-") );
+    const maliciousCheckout = join(directory, "malicious");
+    const evidenceCheckout = join(directory, "evidence");
+    let maliciousAdded = false;
+    let evidenceAdded = false;
+    try {
+      execFileSync(
+        "git",
+        ["worktree", "add", "--detach", "--quiet", maliciousCheckout, git(repoRoot, ["rev-parse", "HEAD"])],
+        { cwd: repoRoot, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      maliciousAdded = true;
+      const changedPaths = [
+        "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
+        "apps/web/src/lib/terminal/pty-transport.ts",
+        "apps/web/package.json",
+        "apps/web/bun.lock",
+        "apps/web/src/lib/terminal/pty-benchmark-validator.ts",
+        "apps/web/src/lib/terminal/validate-pty-benchmarks.ts",
+      ];
+      for (const path of changedPaths) {
+        writeFileSync(join(maliciousCheckout, path), `${readFileSync(join(maliciousCheckout, path), "utf8")}\n// unreviewed M\n`);
+      }
+      execFileSync("git", ["add", "--", ...changedPaths], {
+        cwd: maliciousCheckout,
+        stdio: "ignore",
+      });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Hermternal PTY Test",
+          "-c",
+          "user.email=hermternal-pty-test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "test: create unreviewed PTY source M",
+        ],
+        { cwd: maliciousCheckout, stdio: "ignore" },
+      );
+      const maliciousRevision = git(maliciousCheckout, ["rev-parse", "HEAD"]);
+      execFileSync(
+        "git",
+        ["worktree", "add", "--detach", "--quiet", evidenceCheckout, maliciousRevision],
+        { cwd: repoRoot, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      evidenceAdded = true;
+      const forged = cloneArtifact(reconnectArtifactPath);
+      forged.provenance.sourceRevision = maliciousRevision;
+      forged.provenance.generationCommit = maliciousRevision;
+      forged.provenance.sourceTree = git(evidenceCheckout, [
+        "rev-parse",
+        `${maliciousRevision}^{tree}`,
+      ]);
+      forged.provenance.sourceBlobs = sourceBlobsForRevision(
+        maliciousRevision,
+        forged.provenance.sourceBlobs.map((blob: MutableArtifact) => blob.path),
+      );
+      const forgedPath = join(
+        evidenceCheckout,
+        "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json",
+      );
+      const cleanPath = join(
+        evidenceCheckout,
+        "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json",
+      );
+      writeFileSync(forgedPath, JSON.stringify(forged, null, 2));
+      writeFileSync(cleanPath, JSON.stringify(readArtifact(connectingArtifactPath), null, 2));
+      execFileSync(
+        "git",
+        ["add", "apps/web/src/lib/terminal/pty-reconnect-supersession-benchmark.json", "apps/web/src/lib/terminal/pty-connecting-ownership-benchmark.json"],
+        { cwd: evidenceCheckout, stdio: "ignore" },
+      );
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Hermternal PTY Test",
+          "-c",
+          "user.email=hermternal-pty-test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "test: add forged evidence E",
+        ],
+        { cwd: evidenceCheckout, stdio: "ignore" },
+      );
+      const forgedResult = runCliArgs(
+        ["src/lib/terminal/pty-reconnect-supersession-benchmark.json"],
+        join(evidenceCheckout, "apps/web"),
+      );
+      expect(forgedResult.ok).toBe(false);
+      expect(forgedResult.output).toMatch(/immutable reviewed PTY source pin|reviewed PTY source/iu);
+      const driftResult = runCliArgs(
+        ["src/lib/terminal/pty-connecting-ownership-benchmark.json"],
+        join(evidenceCheckout, "apps/web"),
+      );
+      expect(driftResult.ok).toBe(false);
+      expect(driftResult.output).toMatch(/two retained evidence JSON paths|unreviewed source or validator/iu);
+    } finally {
+      if (evidenceAdded) removeWorktree(repoRoot, evidenceCheckout);
+      if (maliciousAdded) removeWorktree(repoRoot, maliciousCheckout);
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("rejects attached checkout and runtime or engine provenance drift", () => {
@@ -692,17 +885,34 @@ describe("PTY benchmark evidence validator", () => {
     attached.provenance.detachedHead = false;
     expectCliFailure(attached, /detached clean checkout/iu);
 
-    const hostNode = cloneArtifact(reconnectArtifactPath);
-    hostNode.provenance.runtime.hostNode = "24.3.0";
-    expectCliFailure(hostNode, /hostNode|package runtime|engines/iu);
+    const dirty = cloneArtifact(reconnectArtifactPath);
+    dirty.provenance.cleanCheckout = false;
+    expectCliFailure(dirty, /detached clean checkout/iu);
 
-    const declaredNode = cloneArtifact(reconnectArtifactPath);
-    declaredNode.provenance.runtime.declaredNode = "24.3.0";
-    expectCliFailure(
-      declaredNode,
-      /package runtime|engines|reviewed synthetic harness/iu,
-    );
-  });
+    for (const [field, value] of [
+      ["bun", "1.3.13"],
+      ["packageManager", "bun@1.3.13"],
+      ["declaredBun", "1.3.13"],
+      ["hostNode", "24.3.0"],
+      ["declaredNode", "24.3.0"],
+    ] as const) {
+      const runtime = cloneArtifact(reconnectArtifactPath);
+      runtime.provenance.runtime[field] = value;
+      expectCliFailure(runtime, /provenance\.runtime|package runtime|engines/iu);
+    }
+
+    for (const [field, value] of [
+      ["platform", "linux"],
+      ["release", "24.0.0"],
+      ["architecture", "x86_64"],
+      ["cpuModel", "unreviewed CPU"],
+      ["cpuCount", 1],
+    ] as const) {
+      const operatingSystem = cloneArtifact(reconnectArtifactPath);
+      operatingSystem.provenance.os[field] = value;
+      expectCliFailure(operatingSystem, /provenance\.os|reviewed synthetic harness/iu);
+    }
+  }, 30_000);
 
   it("constructs and verifies its own attached and dirty generation failures", () => {
     const repoRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
@@ -799,7 +1009,7 @@ describe("PTY benchmark evidence validator", () => {
           generationCommit: unknownRevision,
         },
       }),
-    ).toThrow(/git cat-file|failed/iu);
+    ).toThrow(/git cat-file|failed|immutable reviewed PTY source pin/iu);
 
     withWorkingDirectory(harnessEvidenceAppDirectory!, () => {
       expect(() =>

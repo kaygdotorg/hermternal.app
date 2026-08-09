@@ -229,19 +229,31 @@ blobs; it is a stricter evidence mode, not a different benchmark. Both modes
 reject failed or renamed proofs, wrong validator/ticket/factory counts,
 concurrent-stage metadata, missing provenance, or arbitrary source revisions.
 
-Both v2 artifacts record the actual full source commit and generation commit,
-source tree, and Git blob plus SHA-256 hashes for exactly the declared benchmark
-source, transport, package manifest, lockfile, and provenance helper. The helper
-is execution-critical because changing it changes the evidence contract.
-Provenance also records a clean detached checkout. Runtime provenance distinguishes Bun's embedded Node
+Both v2 artifacts record the exact reviewed source S commit and generation
+commit, source tree, and Git blob plus SHA-256 hashes for both benchmark sources,
+transport, package manifest, lockfile, and provenance helper. The helper is
+execution-critical because changing it changes the evidence contract. Four-blob
+provenance is reserved for the explicitly named legacy v1 retry and error
+artifacts; every current v2 artifact requires all five inputs, including its
+helper. Provenance also records a clean detached checkout. Runtime provenance distinguishes Bun's embedded Node
 version from the host Node executable, records Bun/package-manager and declared
 engine versions, and requires the host Node to match `package.json`; it also
 records OS release, architecture, CPU model, and CPU count. Detached checkout
 provenance describes evidence generation and is separate from PTY
-`detachedAtMs`. The helper derives `sourceRevision` from the actual `HEAD` and
-rejects an arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a
-clean detached source checkout, writing outside the repository so the output
-file cannot make the checkout dirty:
+`detachedAtMs`. The reviewed correction uses a two-step trust record. Source S is the exact
+reviewed commit `6732e2e70b22ab17830a9a18f5c34cca3258e535`; trust pin P is a
+separate later commit containing the immutable S manifest and the reviewed
+validator and CLI blobs. The validator must run from P, not from an evidence
+checkout, and the evidence checkout must descend from P before adding only the
+two retained JSON paths. A source M that changes benchmark inputs, transport,
+package or lock files, validator, or CLI cannot self-authorize: P rejects its
+source manifest or its non-evidence descendant paths. Changed paths are read as
+exact NUL-delimited Git bytes; leading/trailing whitespace, controls,
+newlines, duplicate names, and invalid UTF-8 are rejected without trimming.
+The helper derives `sourceRevision` from the actual `HEAD` and rejects an
+arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a clean
+detached source checkout, writing outside the repository so the output file
+cannot make the checkout dirty:
 
 ```sh
 git switch --detach <sourceRevision>
@@ -249,9 +261,15 @@ bun src/lib/terminal/pty-reconnect-supersession.bench.ts > /tmp/pty-reconnect.js
 bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.json
 ```
 
-Run those commands from `apps/web`, then copy the two JSON files into
-`src/lib/terminal/` and commit them in a later evidence-only change. Validate
-both artifacts from `apps/web` with `bun run test:benchmark:pty`, which runs
-standard and `--optimized` validator modes. The benchmark command is
-synthetic-only and never contacts Hermes, opens a live endpoint, logs a ticket,
-or uses credentials.
+Run those commands from `apps/web`, then create a detached evidence checkout
+from trust pin P, copy the two JSON files into `src/lib/terminal/`, and commit
+them in a later evidence-only change. Invoke the validator and CLI from the P
+checkout while pointing at that evidence checkout; do not run validator code
+loaded from E. The two retained JSON files in this source tree are historical,
+not-current evidence under the S-to-P trust pin. They remain byte-for-byte
+untouched by this correction; the focused harness writes temporary E artifacts
+for current standard and optimized validation. Validate both artifacts from
+`apps/web` with
+`bun run test:benchmark:pty`, which runs standard and `--optimized` validator
+modes. The benchmark command is synthetic-only and never contacts Hermes, opens
+a live endpoint, logs a ticket, or uses credentials.
