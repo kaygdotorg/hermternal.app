@@ -33,7 +33,21 @@ after bounded reads, and the path is reopened from the held parent descriptor to
 detect replacement. Selected JSON artifacts must match the registry's exact
 size and SHA-256 binding. There is no pathname or glob fallback. Strict JSON
 parsing rejects duplicate keys and bounds bytes, depth, nodes, keys, strings,
-integers, arrays, case counts, error text, and parser time.
+integers, arrays, case counts, error text, and parser time. Coverage rows preserve
+all neutral statuses (`ready`, `pending`, `empty`, `failure`, `cancelled`, and
+`unknown`); only `ready` can provide evidence, while pending roots may explicitly
+set `validator` to JSON `null`.
+
+Before reading parity evidence, the runner performs an authoritative C-19
+preflight. On macOS it may execute the checked-in validator with bounded
+`/usr/bin/python3 -B`, `PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
+stdout/stderr, and a five-second deadline. A blocked, unavailable, malformed,
+truncated, timed-out, failed, or live-claiming validator result returns a blocked
+report with a specific `errorCode`, zero proven cases, and `liveClaim: false`. On
+iOS and other non-host builds, callers must inject a separately verified preflight
+result; otherwise the runner fails closed with `c19_validator_unavailable`.
+The injected preflight mode is for offline tests and verified host-produced
+results only; it does not replace the C-19 validator or make a live claim.
 
 ## Commands
 

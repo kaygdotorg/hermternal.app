@@ -142,6 +142,25 @@ public enum FixtureStatus: String, Sendable {
     case pending
 }
 
+public enum CoverageStatus: String, CaseIterable, Sendable {
+    case ready
+    case pending
+    case empty
+    case failure
+    case cancelled
+    case unknown
+}
+
+public enum C19ValidatorStatus: String, Sendable {
+    case passed
+    case blocked
+}
+
+public enum C19PreflightMode: Equatable, Sendable {
+    case executeOnHost
+    case verified(C19ValidatorStatus)
+}
+
 public struct RegistryFile: Equatable, Sendable {
     public let path: String
     public let sha256: String
@@ -165,13 +184,13 @@ public struct FixtureRoot: Equatable, Sendable {
     public let platforms: [Platform]
     public let states: [String]
     public let coverageIDs: [String]
-    public let validator: String
+    public let validator: String?
     public let files: [RegistryFile]
 }
 
 public struct CoverageRow: Equatable, Sendable {
     public let id: String
-    public let status: FixtureStatus
+    public let status: CoverageStatus
     public let fixtureIDs: [String]
     public let platforms: [Platform]
     public let requiredStates: [String]
@@ -258,6 +277,8 @@ public struct ParityCaseResult: Codable, Equatable, Sendable {
 
 public struct ParityReport: Codable, Equatable, Sendable {
     public let ok: Bool
+    public let status: String
+    public let errorCode: String?
     public let contract: String
     public let hermesSourceSHA: String
     public let syntheticOnly: Bool
@@ -270,6 +291,8 @@ public struct ParityReport: Codable, Equatable, Sendable {
 
     public init(
         ok: Bool,
+        status: String,
+        errorCode: String? = nil,
         contract: String,
         hermesSourceSHA: String,
         syntheticOnly: Bool,
@@ -281,6 +304,8 @@ public struct ParityReport: Codable, Equatable, Sendable {
         compatibility: CompatibilityRecord
     ) {
         self.ok = ok
+        self.status = status
+        self.errorCode = errorCode
         self.contract = contract
         self.hermesSourceSHA = hermesSourceSHA
         self.syntheticOnly = syntheticOnly
@@ -929,6 +954,15 @@ private func parseFixtureRoot(_ value: JSONValue?, index: Int) throws -> Fixture
     let files = try array(entry["files"], "\(label).files").enumerated().map { fileIndex, file in
         try parseRegistryFile(file, "\(label).files[\(fileIndex)]")
     }
+    let validator: String?
+    switch entry["validator"] {
+    case .null?:
+        validator = nil
+    case .string?:
+        validator = try string(entry["validator"], "\(label).validator")
+    default:
+        throw reject(.malformedInput, "\(label).validator must be text or null")
+    }
     guard files.count <= ParityBounds.maxInventoryFiles else {
         throw reject(.malformedInput, "\(label).files exceeds the inventory limit")
     }
@@ -946,7 +980,7 @@ private func parseFixtureRoot(_ value: JSONValue?, index: Int) throws -> Fixture
         platforms: try platforms(entry["platforms"], "\(label).platforms"),
         states: try strings(entry["states"], "\(label).states"),
         coverageIDs: try strings(entry["coverage_ids"], "\(label).coverage_ids"),
-        validator: try string(entry["validator"], "\(label).validator"),
+        validator: validator,
         files: files
     )
 }
@@ -955,7 +989,7 @@ private func parseCoverage(_ value: JSONValue?, index: Int) throws -> CoverageRo
     let label = "coverage[\(index)]"
     let entry = try object(value, label)
     let rawStatus = try string(entry["status"], "\(label).status")
-    guard let status = FixtureStatus(rawValue: rawStatus) else {
+    guard let status = CoverageStatus(rawValue: rawStatus) else {
         throw reject(.unknownStatus, "\(label).status is unknown")
     }
     return CoverageRow(
@@ -1030,9 +1064,16 @@ public func loadRegistry(at repoRoot: URL) throws -> FixtureRegistry {
     }
 
     let rootIDs = Set(fixtureRoots.map(\.id))
-    for entry in coverage where entry.status == .ready {
+    for entry in coverage {
         guard entry.fixtureIDs.allSatisfy(rootIDs.contains) else {
-            throw reject(.unknownFixture, "ready coverage references an unknown fixture root")
+            throw reject(.unknownFixture, "coverage references an unknown fixture root")
+        }
+        if entry.status == .ready {
+            guard entry.fixtureIDs.allSatisfy({ rootID in
+                fixtureRoots.first(where: { $0.id == rootID })?.status == .ready
+            }) else {
+                throw reject(.coveragePending, "ready coverage references a pending fixture root")
+            }
         }
     }
 
@@ -1186,36 +1227,19 @@ private func runRepresentative(
     representative: Representative
 ) throws -> [ParityCaseResult] {
     let coverage = try coverageByID(registry, representative.coverageID)
-    guard coverage.fixtureIDs.contains(representative.rootID) else {
-        throw reject(.incompatibleInput, "coverage row does not own its representative fixture root")
-    }
-
-    if coverage.status == .pending {
-        var results: [ParityCaseResult] = []
-        for caseID in representative.caseIDs {
-            let fixtureCase = try loadCase(
-                at: repoRoot,
-                registry: registry,
-                rootID: representative.rootID,
-                caseID: caseID
-            )
-            if representative.family == .chat {
-                let caseDecision = try decision(from: fixtureCase.expected)
-                guard ["delivery_uncertain", "automatic_prompt_retry_blocked"].contains(caseDecision) else {
-                    throw reject(.incompatibleInput, "pending chat coverage contains an unexpected success decision")
-                }
-            }
-            results.append(
-                ParityCaseResult(
-                    family: representative.family,
-                    coverageID: representative.coverageID,
-                    caseID: caseID,
-                    status: "blocked",
-                    platforms: coverage.platforms
-                )
+    if coverage.status != .ready {
+        return representative.caseIDs.map { caseID in
+            ParityCaseResult(
+                family: representative.family,
+                coverageID: representative.coverageID,
+                caseID: caseID,
+                status: "blocked",
+                platforms: coverage.platforms
             )
         }
-        return results
+    }
+    guard coverage.fixtureIDs.contains(representative.rootID) else {
+        throw reject(.incompatibleInput, "ready coverage does not own its representative fixture root")
     }
 
     let root = try rootByID(registry, representative.rootID)
@@ -1281,7 +1305,201 @@ private func runRepresentative(
     return results
 }
 
-public func runParity(at repoRoot: URL) throws -> ParityReport {
+private enum C19PreflightOutcome {
+    case passed
+    case blocked(String)
+}
+
+#if os(macOS)
+private struct BoundedPipeResult: Sendable {
+    let data: Data
+    let truncated: Bool
+}
+
+private final class BoundedPipeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: BoundedPipeResult?
+
+    func store(_ result: BoundedPipeResult) {
+        lock.lock()
+        stored = result
+        lock.unlock()
+    }
+
+    var result: BoundedPipeResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+private func collectBoundedOutput(
+    from handle: FileHandle,
+    limit: Int,
+    group: DispatchGroup
+) -> BoundedPipeResult {
+    var data = Data()
+    var truncated = false
+    defer { group.leave() }
+    while true {
+        let chunk = handle.readData(ofLength: 4 * 1024)
+        if chunk.isEmpty { break }
+        if data.count < limit {
+            let remaining = limit - data.count
+            data.append(chunk.prefix(remaining))
+        }
+        if data.count >= limit || chunk.count > limit {
+            truncated = true
+        }
+    }
+    return BoundedPipeResult(data: data, truncated: truncated)
+}
+
+private func runC19Validator(at repoRoot: URL) -> C19PreflightOutcome {
+    do {
+        let root = repoRoot.standardizedFileURL
+        let scriptRelativePath = "contracts/fixtures/validator/validate.py"
+        // Read the script through the same descriptor boundary before asking the
+        // host interpreter to execute it. The validator remains authoritative;
+        // Swift never reimplements its aggregate inventory or trust anchor.
+        _ = try readRegularFile(
+            repoRoot: root,
+            relativePath: scriptRelativePath,
+            label: "C-19 validator",
+            maxBytes: ParityBounds.maxArtifactBytes
+        )
+
+        let scriptURL = root.appendingPathComponent(scriptRelativePath)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-B", scriptURL.path]
+        process.currentDirectoryURL = root
+        var environment = ProcessInfo.processInfo.environment
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PATH"] = "/usr/bin:/bin"
+        process.environment = environment
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+
+        let group = DispatchGroup()
+        let stdoutBox = BoundedPipeBox()
+        let stderrBox = BoundedPipeBox()
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stdoutBox.store(collectBoundedOutput(
+                from: stdout.fileHandleForReading,
+                limit: ParityBounds.maxPreflightOutputBytes,
+                group: group
+            ))
+        }
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrBox.store(collectBoundedOutput(
+                from: stderr.fileHandleForReading,
+                limit: ParityBounds.maxPreflightOutputBytes,
+                group: group
+            ))
+        }
+
+        let deadline = DispatchTime.now().uptimeNanoseconds + ParityBounds.maxPreflightDurationNanoseconds
+        while process.isRunning {
+            guard DispatchTime.now().uptimeNanoseconds <= deadline else {
+                process.terminate()
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                group.wait()
+                return .blocked("c19_validator_timeout")
+            }
+            usleep(10_000)
+        }
+        group.wait()
+        guard let stdoutResult = stdoutBox.result,
+              let stderrResult = stderrBox.result,
+              !stdoutResult.truncated, !stderrResult.truncated,
+              stdoutResult.data.count <= ParityBounds.maxPreflightOutputBytes else {
+            return .blocked("c19_validator_output_bound")
+        }
+
+        let value = try decodeJSON(stdoutResult.data, "C-19 validator output")
+        let output = try object(value, "C-19 validator output")
+        let liveClaim = try boolean(output["live_claim"], "C-19 validator output.live_claim")
+        guard !liveClaim else { return .blocked("c19_validator_live_claim") }
+        let ok = try boolean(output["ok"], "C-19 validator output.ok")
+        guard ok, process.terminationStatus == 0 else {
+            let evidenceStatus = try string(output["evidence_status"], "C-19 validator output.evidence_status")
+            return evidenceStatus == "blocked"
+                ? .blocked("c19_validator_blocked")
+                : .blocked("c19_validator_failed")
+        }
+        return .passed
+    } catch {
+        return .blocked("c19_validator_unavailable")
+    }
+}
+#endif
+
+private func runC19Preflight(at repoRoot: URL, mode: C19PreflightMode) -> C19PreflightOutcome {
+    switch mode {
+    case .verified(.passed):
+        return .passed
+    case .verified(.blocked):
+        return .blocked("c19_validator_blocked")
+    case .executeOnHost:
+        #if os(macOS)
+        return runC19Validator(at: repoRoot)
+        #else
+        // iOS and other non-host builds cannot run the host validator. A caller
+        // must inject a separately verified C-19 result or remain blocked.
+        return .blocked("c19_validator_unavailable")
+        #endif
+    }
+}
+
+private func unavailableCompatibilityRecord() -> CompatibilityRecord {
+    CompatibilityRecord(
+        compatible: false,
+        liveRun: false,
+        deploymentAttestation: "not_available",
+        behavioralProbe: "not_available",
+        proxyProof: "not_available",
+        parityEvidence: "not_available",
+        benchmarkEvidence: "not_available"
+    )
+}
+
+private func blockedParityReport(code: String) -> ParityReport {
+    ParityReport(
+        ok: false,
+        status: "blocked",
+        errorCode: code,
+        contract: dashboardContract,
+        hermesSourceSHA: hermesSourceSHA,
+        syntheticOnly: true,
+        liveClaim: false,
+        networkCalls: 0,
+        readyCaseCount: 0,
+        blockedCoverageIDs: [],
+        cases: [],
+        compatibility: unavailableCompatibilityRecord()
+    )
+}
+
+public func runParity(
+    at repoRoot: URL,
+    preflight: C19PreflightMode = .executeOnHost
+) throws -> ParityReport {
+    switch runC19Preflight(at: repoRoot, mode: preflight) {
+    case .blocked(let code):
+        return blockedParityReport(code: code)
+    case .passed:
+        break
+    }
+
     let registry = try loadRegistry(at: repoRoot)
     try literal(registry.parity.ptyPolicy, expected: "web_only_apple_blocked", "parity PTY policy")
     try literal(registry.parity.missingResultPolicy, expected: "block", "parity missing-result policy")
@@ -1301,11 +1519,12 @@ public func runParity(at repoRoot: URL) throws -> ParityReport {
     }
     let compatibility = try loadCompatibilityRecord(at: repoRoot, registry: registry)
     let blockedCoverageIDs = registry.coverage
-        .filter { $0.status == .pending }
+        .filter { $0.status != .ready }
         .map(\.id)
 
     return ParityReport(
         ok: true,
+        status: "ready",
         contract: dashboardContract,
         hermesSourceSHA: hermesSourceSHA,
         syntheticOnly: true,

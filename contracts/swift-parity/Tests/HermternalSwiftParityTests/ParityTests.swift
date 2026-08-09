@@ -15,7 +15,7 @@ final class ParityTests: XCTestCase {
     }
 
     func testRunParityProvesRepresentativeOfflineSurface() throws {
-        let report = try runParity(at: repoRoot)
+        let report = try runParity(at: repoRoot, preflight: .verified(.passed))
 
         XCTAssertTrue(report.ok)
         XCTAssertEqual(report.contract, dashboardContract)
@@ -45,6 +45,53 @@ final class ParityTests: XCTestCase {
                 .filter { $0.family == .pty }
                 .allSatisfy { $0.status == "proven" && $0.appleDecision == "blocked_platform" }
         )
+    }
+
+    func testC19BlockedPreflightCannotProduceParityEvidence() throws {
+        let report = try runParity(at: repoRoot)
+        XCTAssertFalse(report.ok)
+        XCTAssertEqual(report.status, "blocked")
+        XCTAssertEqual(report.errorCode, "c19_validator_blocked")
+        XCTAssertEqual(report.readyCaseCount, 0)
+        XCTAssertTrue(report.cases.isEmpty)
+        XCTAssertFalse(report.liveClaim)
+    }
+
+    func testNeutralCoverageStatusesAndPendingValidatorAreRepresentable() throws {
+        for status in ["pending", "empty", "failure", "cancelled", "unknown"] {
+            try withMutatedIndex({ index in
+                var coverage = try XCTUnwrap(index["coverage"] as? [[String: Any]])
+                coverage[0]["status"] = status
+                coverage[0]["fixture_ids"] = []
+                index["coverage"] = coverage
+            }) { temporaryRoot in
+                let registry = try loadRegistry(at: temporaryRoot)
+                XCTAssertEqual(registry.coverage[0].status.rawValue, status)
+                XCTAssertTrue(registry.coverage[0].fixtureIDs.isEmpty)
+            }
+        }
+
+        try withMutatedIndex({ index in
+            var roots = try fixtureRoots(from: index)
+            roots[0]["status"] = "pending"
+            roots[0]["validator"] = NSNull()
+            roots[0]["files"] = []
+            index["fixture_roots"] = roots
+
+            var coverage = try XCTUnwrap(index["coverage"] as? [[String: Any]])
+            for position in coverage.indices {
+                let fixtureIDs = (coverage[position]["fixture_ids"] as? [String]) ?? []
+                if fixtureIDs.contains("attachment-policy") {
+                    coverage[position]["status"] = "pending"
+                    coverage[position]["fixture_ids"] = []
+                }
+            }
+            index["coverage"] = coverage
+        }) { temporaryRoot in
+            let registry = try loadRegistry(at: temporaryRoot)
+            XCTAssertNil(registry.fixtureRoots[0].validator)
+            XCTAssertEqual(registry.fixtureRoots[0].status, .pending)
+        }
     }
 
     func testRejectsUnknownFixtureCaseAndNonCanonicalCaseID() throws {
