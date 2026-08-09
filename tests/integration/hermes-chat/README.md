@@ -1,7 +1,9 @@
 # Hermes live chat proof
 
-This directory contains one redacted screenshot and its SHA-256 sidecar for
-issue #327. The proof was reviewed at repository commit
+This directory contains one legacy redacted screenshot and its SHA-256 sidecar
+for issue #327. It remains bounded protocol evidence, but it predates the
+reproducible issue #353 capture contract and is not visual-fidelity proof. The
+proof was reviewed at repository commit
 `e26f71bf8a19c6b83605f3d2f2dcb4d54bf1e5c1` (`origin/dev` at capture time).
 The reviewed official Hermes image digest was
 `sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e`.
@@ -27,6 +29,15 @@ of the stable Chat state. It is not a packet capture, raw JSON-RPC transcript,
 credential record, host proof, or production-readiness claim. The screenshot
 and this README contain no secrets, hosts, users, session/request IDs, raw
 payloads, cookies, bearer values, tickets, or provider credentials.
+
+The checked-in `capture-manifest.json` records the current issue #353 state as
+blocked with no images. Issue #338 confirmed that the authorized disposable
+lane reaches authentication, `gateway.ready`, session creation/resume, and one
+`prompt.submit`, but issue #327's missing authenticated inference capability
+produces the source `error` event before `message.complete`. The explicit
+capture code is therefore implemented and tested without inventing a successful
+live completion; replacement images can be published only after that capability
+exists and the scrub plus independent visual-review hooks approve both sizes.
 
 The remaining workspace blockers are intentionally separate:
 

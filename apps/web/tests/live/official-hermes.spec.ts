@@ -1,4 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { expect, test } from './live-test-fixtures';
+import {
+  captureReviewedLiveScreenshots,
+  retainedScreenshotDirectory
+} from './live-screenshot-contract.mjs';
 
 const password = process.env.HERMES_TEST_PASSWORD;
 const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
@@ -116,6 +122,24 @@ test('browser UI reaches the official Hermes gateway through completion', async 
 
   expect(requests.filter((entry) => entry === 'POST /api/auth/ws-ticket')).toHaveLength(1);
   expect(sentMethods.filter((method) => method === 'prompt.submit')).toHaveLength(1);
+
+  // Explicit retention is reachable only after the reviewed completion and REST
+  // reconciliation gates. Automatic screenshots remain disabled for every
+  // earlier assertion and failure path.
+  const repositoryRoot = resolve(process.cwd(), '../..');
+  const clientCommit = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore']
+  }).trim();
+  await captureReviewedLiveScreenshots({
+    page,
+    outputRoot: requiredEnvironment('PLAYWRIGHT_LIVE_OUTPUT_DIR'),
+    retainedDirectory: retainedScreenshotDirectory(repositoryRoot),
+    repositoryRoot,
+    clientCommit,
+    scrubHook: requiredEnvironment('HERMES_SCREENSHOT_SCRUB_HOOK'),
+    reviewHook: requiredEnvironment('HERMES_SCREENSHOT_REVIEW_HOOK')
+  });
 });
 
 test('browser auth logs out of the official Hermes session', async ({ page }) => {
@@ -216,4 +240,10 @@ function parseFrame(payload: string | Buffer): Record<string, unknown> | undefin
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requiredEnvironment(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required for reviewed screenshot retention`);
+  return value;
 }

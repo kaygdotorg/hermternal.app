@@ -1463,5 +1463,16 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(config).toContain("trace: 'off'");
     expect(config).toContain("video: 'off'");
     expect(config).toContain("screenshot: 'off'");
+    expect(config).toContain("reducedMotion: 'reduce'");
+    expect(config).toContain("locale: 'en-US'");
+    expect(config).toContain("timezoneId: 'UTC'");
+    expect(config).toContain('viewport: { width: 1440, height: 960 }');
+    expect(config).toContain('deviceScaleFactor: 1');
+    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
+    expect(capture).toContain("route: '/'");
+    expect(capture).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
+    expect(capture).toContain("fullPage: false");
+    expect(capture).toContain("animations: 'disabled'");
+    expect(capture).toContain("caret: 'hide'");
   });
 });
