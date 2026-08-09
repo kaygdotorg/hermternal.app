@@ -349,6 +349,7 @@
         </div>
       {/if}
     </div>
+  </div>
 
   {#if mobileSidebarOpen || mobileWorkspaceOpen}
     <button

@@ -99,6 +99,7 @@ function createChatHarness(): {
       storedSessionId: 'stored-draft',
       model: 'Hermes 4'
     }),
+    promoteSession: vi.fn(),
     restore: vi.fn().mockResolvedValue(undefined),
     close: vi.fn(),
     sendPrompt: vi.fn(),
