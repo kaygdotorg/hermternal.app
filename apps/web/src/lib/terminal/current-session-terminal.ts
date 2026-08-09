@@ -77,7 +77,10 @@ export type CurrentSessionTerminalLifecycleIdentity = Readonly<{
  */
 export type CurrentSessionTerminalLifecycleStamp = object;
 
-const lifecycleStamps = new WeakMap<object, CurrentSessionTerminalLifecycleIdentity>();
+const lifecycleStamps = new WeakMap<
+  object,
+  CurrentSessionTerminalLifecycleIdentity
+>();
 
 function createLifecycleStamp(
   identity: CurrentSessionTerminalLifecycleIdentity,
@@ -519,11 +522,15 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     if (reconnectingSessionId === undefined)
       throw new PtyTransportError("aborted");
 
-    // Reconnect must not replace the coordinator's existing lease with a
-    // private binding. Retain and invalidate that lease truthfully; a reconnect
-    // started without one remains input-ineligible until the coordinator attaches.
-    const binding = this.activeBinding;
+    // Preserve a surviving coordinator lease. After transport loss there is no
+    // lease to retain, so direct reconnect creates its bridge-owned lease before
+    // native attached can publish; later Detach then has one truthful owner.
+    let binding = this.activeBinding;
     const token = binding?.token ?? {};
+    if (binding === undefined) {
+      binding = this.createReconnectBinding(token, reconnectingSessionId);
+      this.activeBinding = binding;
+    }
     this.reconnectingSessionId = reconnectingSessionId;
     const operation = this.beginTransportOperation(
       token,
@@ -845,6 +852,34 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     });
   }
 
+  private createReconnectBinding(
+    token: object,
+    sessionId: string,
+  ): ActiveBinding {
+    let binding: ActiveBinding;
+    binding = {
+      token,
+      sessionId,
+      valid: true,
+      invalidate: () => {
+        if (!binding.valid) return;
+        binding.valid = false;
+        if (this.activeBinding?.token !== token) return;
+        this.activeBinding = undefined;
+        this.reconnectingSessionId =
+          this.reconnectingSessionId === sessionId
+            ? undefined
+            : this.reconnectingSessionId;
+        this.invalidatedSessionId = sessionId;
+        if (!this.invalidatePendingTransportOperation(token, "detach")) {
+          this.cleanupTransport("detach");
+        }
+      },
+      isValid: () => binding.valid,
+    };
+    return binding;
+  }
+
   private invalidateActiveBinding(
     cleanup: TransportCleanup = "detach",
   ): boolean {
@@ -1076,7 +1111,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // State callbacks can synchronously cause coordinator cleanup. Stamp the
     // producer's real lease before that reentrancy can retire it; no presentation
     // layer must reconstruct identity from session or generation values.
-    this.emit({ type: "state", state, lifecycle: createLifecycleStamp(lifecycle) }, allowInvalidated);
+    this.emit(
+      { type: "state", state, lifecycle: createLifecycleStamp(lifecycle) },
+      allowInvalidated,
+    );
   }
 
   private emit(

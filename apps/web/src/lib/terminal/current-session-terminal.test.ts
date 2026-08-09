@@ -174,12 +174,18 @@ describe("CurrentSessionTerminalBridge", () => {
 
   it("stamps state callbacks with the active bridge lease before a 4401 retires it", async () => {
     const fake = createFakePty();
-    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
-    const states: Extract<CurrentSessionTerminalEvent, { type: "state" }>[] = [];
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+    });
+    const states: Extract<CurrentSessionTerminalEvent, { type: "state" }>[] =
+      [];
     bridge.subscribe((event) => {
       if (event.type === "state") states.push(event);
     });
-    const binding = await bridge.attach("session-one", new AbortController().signal);
+    const binding = await bridge.attach(
+      "session-one",
+      new AbortController().signal,
+    );
     states.length = 0;
 
     fake.emit({
@@ -817,7 +823,12 @@ describe("CurrentSessionTerminalBridge", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["null", "file://", "ws://reviewed.example", "https://reviewed.example/path"])(
+  it.each([
+    "null",
+    "file://",
+    "ws://reviewed.example",
+    "https://reviewed.example/path",
+  ])(
     "fails closed before default socket construction for unsupported browser origin %s",
     (origin) => {
       vi.stubGlobal("location", { origin });
@@ -1316,6 +1327,34 @@ describe("CurrentSessionTerminalBridge", () => {
     });
     expect(isValid(binding)).toBe(false);
     expect(bridge.lifecycleIdentity.binding).toBeUndefined();
+  });
+
+  it("installs a direct reconnect binding before recovery and detaches it exactly once", async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({
+      createTransport: () => fake.pty,
+      createAttachment: () => ({
+        attach: "attach-one",
+        processIdentity: "process-one",
+      }),
+    });
+    const initial = await bridge.attach(
+      "session-one",
+      new AbortController().signal,
+    );
+    initial.invalidate();
+    expect(bridge.lifecycleIdentity.binding).toBeUndefined();
+
+    await bridge.reconnect();
+
+    const recovered = bridge.lifecycleIdentity.binding;
+    expect(recovered).toBeDefined();
+    expect(recovered).not.toBe(initial);
+    expect(isValid(recovered!)).toBe(true);
+    expect(bridge.state.status).toBe("attached");
+    bridge.detach();
+    expect(fake.detach).toHaveBeenCalledTimes(2);
+    expect(bridge.state.status).toBe("detached");
   });
 
   it("coalesces concurrent same-session attaches until the shared transport settles", async () => {

@@ -27,8 +27,10 @@ and byte frames.
   Close, replacement, stale callbacks, and unmount invalidate once. An ignored
   in-flight operation remains quarantined; replacement waits until it settles,
   then its one deferred cleanup runs before the shared adapter can serve the
-  next binding. Detach preserves the PTY transport's detach semantics; Close is
-  an explicit closed state.
+  next binding. Direct reconnect after transport loss installs its bridge lease
+  before recovered `attached` publication, so a later Detach owns exactly one
+  cleanup. Detach preserves the PTY transport's detach semantics; Close is an
+  explicit closed state.
 - `4401` and `4403` become the closed `authentication-required` and
   `incompatible-origin` presentation failures. Ticket values, close reasons,
   and adapter exceptions never cross this boundary.
