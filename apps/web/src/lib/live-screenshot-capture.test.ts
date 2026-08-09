@@ -220,6 +220,138 @@ async function temporaryDirectory() {
   return root;
 }
 
+/**
+ * Run the hostile-prototype cleanup regression outside Vitest. The persistence
+ * operation intentionally leaves Array.prototype.push poisoned across awaited
+ * filesystem and child-process work; isolating that global mutation prevents
+ * Vitest's own heartbeat reporter from becoming a false failure while keeping
+ * the implementation under test on the poisoned path.
+ */
+function runPoisonedPersistenceChild(
+  destination: string,
+  manifest: ReturnType<typeof manifestFixture>,
+  mode: 'operation-error' | 'close-failure'
+) {
+  const childScript = `
+    const { promises: fs } = await import('node:fs');
+    const { dirname } = await import('node:path');
+    const capture = await import(process.argv[2]);
+    const destination = process.argv[1];
+    const manifest = JSON.parse(process.argv[3]);
+    const bytes = Buffer.from(process.argv[4], 'base64');
+    const mode = process.argv[5];
+    const originalPush = Object.getOwnPropertyDescriptor(Array.prototype, 'push');
+    const originalOpen = Object.getOwnPropertyDescriptor(fs, 'open');
+    const registry = capture.getLiveScreenshotChromiumRegistry();
+    const provenance = Object.freeze({
+      ...registry,
+      executablePath: '/controlled/chromium-1234/chrome',
+      canonicalPath: '/controlled/chromium-1234/chrome',
+      executableSha256: 'a'.repeat(64),
+      dev: 1,
+      ino: 1
+    });
+    let stagingParent;
+    let operationError;
+    let openCount = 0;
+    let injectedCloseFailure = false;
+    try {
+      if (mode === 'close-failure') {
+        const open = fs.open;
+        fs.open = async (...args) => {
+          const handle = await open(...args);
+          openCount += 1;
+          if (openCount === 1) {
+            const close = handle.close.bind(handle);
+            handle.close = async () => {
+              await close();
+              injectedCloseFailure = true;
+              throw new Error('synthetic publication close failure');
+            };
+          }
+          return handle;
+        };
+      }
+      try {
+        await capture.persistApprovedLiveScreenshot({
+          capture: { bytes, manifest },
+          destinationDirectory: destination,
+          review: 'independent-approved',
+          provenance,
+          beforeAtomicPublish: async (stagingDirectory) => {
+            stagingParent = dirname(stagingDirectory);
+          },
+          afterPublishedVerification: async () => {
+            Object.defineProperty(Array.prototype, 'push', {
+              configurable: true,
+              writable: true,
+              value: () => {
+                throw new Error('poisoned push must not run');
+              }
+            });
+            if (mode === 'operation-error') {
+              throw new Error('synthetic post-verification operation error');
+            }
+          }
+        });
+      } catch (error) {
+        operationError = error;
+      }
+    } finally {
+      if (originalOpen) Object.defineProperty(fs, 'open', originalOpen);
+      else delete fs.open;
+      if (originalPush) Object.defineProperty(Array.prototype, 'push', originalPush);
+      else delete Array.prototype.push;
+    }
+    const destinationEntries = await fs.readdir(destination);
+    let stagingRemoved = false;
+    try {
+      await fs.lstat(stagingParent);
+    } catch (error) {
+      stagingRemoved = error && error.code === 'ENOENT';
+    }
+    process.stdout.write(JSON.stringify({
+      mode,
+      operationError: operationError?.message,
+      destinationEntries,
+      stagingRemoved,
+      openCount,
+      injectedCloseFailure
+    }));
+  `;
+  const output = execFileSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      childScript,
+      destination,
+      createRequire(import.meta.url).resolve('../../tests/live/live-screenshot-capture.mjs'),
+      JSON.stringify(manifest),
+      PNG_BYTES.toString('base64'),
+      mode
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        TMPDIR: process.env.TMPDIR ?? '/tmp',
+        LANG: 'C',
+        LC_ALL: 'C'
+      }
+    }
+  );
+  return JSON.parse(output) as {
+    mode: string;
+    operationError?: string;
+    destinationEntries: string[];
+    stagingRemoved: boolean;
+    openCount: number;
+    injectedCloseFailure: boolean;
+  };
+}
+
 async function startTestOrigin() {
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html' });
@@ -1298,31 +1430,62 @@ describe('deterministic live Chat screenshot capture', () => {
   it('records screenshot persistence without mutable Array.prototype.push', async () => {
     const destination = await temporaryDirectory();
     const manifest = manifestFixture();
-    const originalPush = Array.prototype.push;
-    Object.defineProperty(Array.prototype, 'push', {
-      configurable: true,
-      writable: true,
-      value: () => {
-        throw new Error('poisoned push must not run');
-      }
-    });
+    const originalPush = Object.getOwnPropertyDescriptor(Array.prototype, 'push');
     let bundlePath: string | undefined;
+    let imagePath: string | undefined;
+    let manifestPath: string | undefined;
     try {
       const result = await persistApprovedLiveScreenshot({
         capture: { bytes: PNG_BYTES, manifest },
         destinationDirectory: destination,
         review: 'independent-approved',
-        provenance: CONTROLLED_TEST_PROVENANCE
+        provenance: CONTROLLED_TEST_PROVENANCE,
+        afterPublishedVerification: async () => {
+          Object.defineProperty(Array.prototype, 'push', {
+            configurable: true,
+            writable: true,
+            value: () => {
+              throw new Error('poisoned push must not run');
+            }
+          });
+        }
       });
       bundlePath = result.bundlePath;
+      imagePath = result.imagePath;
+      manifestPath = result.manifestPath;
     } finally {
-      Object.defineProperty(Array.prototype, 'push', {
-        configurable: true,
-        writable: true,
-        value: originalPush
-      });
+      if (originalPush) Object.defineProperty(Array.prototype, 'push', originalPush);
+      else delete (Array.prototype as { push?: unknown }).push;
     }
     expect(bundlePath).toBe(join(destination, 'hermternal-chat-proof.bundle'));
+    expect(imagePath).toBe(join(bundlePath!, 'screenshot.png'));
+    expect(manifestPath).toBe(join(bundlePath!, 'manifest.json'));
+    expect(await fsPromises.readFile(imagePath!)).toEqual(PNG_BYTES);
+    expect(JSON.parse(await fsPromises.readFile(manifestPath!, 'utf8'))).toEqual(
+      expect.objectContaining({ review: 'independent-approved' })
+    );
+  });
+
+  it('quarantines and cleans up after a poisoned post-verification operation error', async () => {
+    const destination = await temporaryDirectory();
+    const result = runPoisonedPersistenceChild(destination, manifestFixture(), 'operation-error');
+
+    expect(result.mode).toBe('operation-error');
+    expect(result.operationError).toBe('synthetic post-verification operation error');
+    expect(result.destinationEntries).toEqual([]);
+    expect(result.stagingRemoved).toBe(true);
+  });
+
+  it('cleans up after a publication close failure with poisoned push', async () => {
+    const destination = await temporaryDirectory();
+    const result = runPoisonedPersistenceChild(destination, manifestFixture(), 'close-failure');
+
+    expect(result.mode).toBe('close-failure');
+    expect(result.openCount).toBeGreaterThanOrEqual(3);
+    expect(result.injectedCloseFailure).toBe(true);
+    expect(result.operationError).toBe('live screenshot retention handle cleanup failed');
+    expect(result.destinationEntries).toEqual([]);
+    expect(result.stagingRemoved).toBe(true);
   });
 
   it('persists only approved PNG bytes and the bounded manifest without overwrite', async () => {

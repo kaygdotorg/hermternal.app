@@ -94,7 +94,11 @@ drift, destination swaps, and ancestor swaps fail closed. If verification fails,
 the published directory is moved through the anchored destination descriptor
 into a no-overwrite sibling quarantine. Exact, unchanged files are removed;
 changed or raced entries remain in the bounded quarantine rather than being
-unlinked. Existing bundles are never overwritten. The atomic child uses a
+unlinked. Existing bundles are never overwritten. After a test-only
+post-verification callback, result and cleanup child paths use strict component
+validation and local string construction rather than `path.join`; Node's POSIX
+join implementation consults mutable `Array.prototype.push`, so no ambient join
+is allowed on that hostile-hook path. The atomic child uses a
 fixed absolute trusted Python executable, `-I -S`, and a minimal credential-free
 environment; macOS SDK variables added by the system interpreter are not
 credential or path inputs. Failed staging cleanup checks the original

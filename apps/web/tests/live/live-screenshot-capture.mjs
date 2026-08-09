@@ -631,7 +631,7 @@ async function removePrivateStagingParent(path, expected) {
     throw new Error('live screenshot staging parent identity changed');
   }
   const observed = assertStagingParentEvidence(expected);
-  const tombstone = join(
+  const tombstone = trustedChildPath(
     dirname(expected.path),
     `.${basename(expected.path)}-cleanup-${randomBytes(12).toString('hex')}`
   );
@@ -2108,6 +2108,36 @@ function pathExists(path) {
 }
 
 /**
+ * Build a child path without invoking the ambient path join implementation.
+ * Publication callbacks are allowed to poison Array.prototype.push in tests,
+ * so success and cleanup paths use validated string concatenation after those
+ * callbacks return. The absolute parent and single-component child checks keep
+ * the result bound to the reviewed directory.
+ *
+ * @param {string} parent
+ * @param {string} child
+ * @returns {string}
+ */
+function trustedChildPath(parent, child) {
+  if (
+    typeof parent !== 'string' ||
+    typeof child !== 'string' ||
+    parent.length === 0 ||
+    child.length === 0 ||
+    parent.includes('\0') ||
+    !parent.startsWith(sep) ||
+    (parent.length > sep.length && parent.endsWith(sep)) ||
+    /[\\/]/u.test(child) ||
+    child.includes('\0') ||
+    child === '.' ||
+    child === '..'
+  ) {
+    throw new Error('live screenshot retention trusted child path is invalid');
+  }
+  return parent === sep ? `${parent}${child}` : `${parent}${sep}${child}`;
+}
+
+/**
  * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, size: number }} StagingFileIdentity
  * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, parent: StagingParentEvidence, screenshot: StagingFileIdentity, manifest: StagingFileIdentity }} StagingEvidence
  * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, parent: StagingParentEvidence, screenshot?: StagingFileIdentity, manifest?: StagingFileIdentity }} StagingCleanupEvidence
@@ -2812,8 +2842,8 @@ async function removePublishedBundleSafely({
   ) {
     throw new Error('live screenshot retention published bundle identity changed');
   }
-  const tombstone = join(
-    dirname(destination.candidate),
+  const tombstone = trustedChildPath(
+    destination.candidate,
     `.${basename(bundlePath)}-quarantine-${randomBytes(12).toString('hex')}`
   );
   if (pathExists(tombstone)) {
@@ -2875,7 +2905,7 @@ async function removePublishedBundleSafely({
     throw new Error('live screenshot retention published bundle quarantine found an unexpected entry');
   }
   for (const entry of entries) {
-    const entryPath = join(tombstone, entry);
+    const entryPath = trustedChildPath(tombstone, entry);
     let stats;
     try {
       stats = lstatSync(entryPath);
@@ -2978,6 +3008,7 @@ async function closePublicationHandles(publication) {
  *   provenance?: ChromiumProvenance,
  *   beforeAtomicPublish?: (directory: string) => Promise<void>,
  *   beforePublishedVerification?: (bundlePath: string) => Promise<void>,
+ *   afterPublishedVerification?: () => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
@@ -2989,6 +3020,7 @@ export async function persistApprovedLiveScreenshot({
   provenance,
   beforeAtomicPublish,
   beforePublishedVerification,
+  afterPublishedVerification,
   beforeStagingCleanup
 }) {
   if (review !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
@@ -3144,11 +3176,12 @@ export async function persistApprovedLiveScreenshot({
       publishedBundleHandle: publication.stagingHandle,
       expectedBundle: stagingEvidence
     });
+    await afterPublishedVerification?.();
     if (publication.closeFailure) throw publication.closeFailure;
     result = {
       bundlePath,
-      imagePath: join(bundlePath, 'screenshot.png'),
-      manifestPath: join(bundlePath, 'manifest.json'),
+      imagePath: trustedChildPath(bundlePath, 'screenshot.png'),
+      manifestPath: trustedChildPath(bundlePath, 'manifest.json'),
       manifest
     };
   } catch (error) {
