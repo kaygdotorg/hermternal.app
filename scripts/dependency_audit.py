@@ -157,8 +157,10 @@ class ParsedInputs:
     packages: Mapping[str, LockPackage]
     manifest_dependencies: Mapping[str, str]
     manifest_dev_dependencies: Mapping[str, str]
+    manifest_optional_dependencies: Mapping[str, str]
     lock_dependencies: Mapping[str, str]
     lock_dev_dependencies: Mapping[str, str]
+    lock_optional_dependencies: Mapping[str, str]
 
 
 def _reject_constant(_value: str) -> Any:
@@ -308,10 +310,11 @@ def _require_dependency_map(value: Any) -> dict[str, str]:
     return result
 
 
-def _parse_manifest(document: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+def _parse_manifest(document: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     dependencies = _require_dependency_map(document.get("dependencies", {}))
     dev_dependencies = _require_dependency_map(document.get("devDependencies", {}))
-    return dependencies, dev_dependencies
+    optional_dependencies = _require_dependency_map(document.get("optionalDependencies", {}))
+    return dependencies, dev_dependencies, optional_dependencies
 
 
 def _split_descriptor(descriptor: str, fallback_name: str) -> tuple[str, str]:
@@ -387,7 +390,7 @@ def _parse_lock_packages(document: Mapping[str, Any]) -> dict[str, LockPackage]:
 
 
 def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mapping[str, Any]) -> ParsedInputs:
-    manifest_dependencies, manifest_dev_dependencies = _parse_manifest(manifest_document)
+    manifest_dependencies, manifest_dev_dependencies, manifest_optional_dependencies = _parse_manifest(manifest_document)
     config_version = _require_config_version(lockfile_document.get("configVersion"))
     packages = _parse_lock_packages(lockfile_document)
     workspaces = lockfile_document["workspaces"]
@@ -396,6 +399,7 @@ def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mappi
         raise AuditError("lockfile-shape-invalid")
     lock_dependencies = _require_dependency_map(root.get("dependencies", {}))
     lock_dev_dependencies = _require_dependency_map(root.get("devDependencies", {}))
+    lock_optional_dependencies = _require_dependency_map(root.get("optionalDependencies", {}))
     return ParsedInputs(
         manifest=manifest_document,
         lockfile=lockfile_document,
@@ -403,8 +407,10 @@ def _parse_inputs(manifest_document: Mapping[str, Any], lockfile_document: Mappi
         packages=packages,
         manifest_dependencies=manifest_dependencies,
         manifest_dev_dependencies=manifest_dev_dependencies,
+        manifest_optional_dependencies=manifest_optional_dependencies,
         lock_dependencies=lock_dependencies,
         lock_dev_dependencies=lock_dev_dependencies,
+        lock_optional_dependencies=lock_optional_dependencies,
     )
 
 
@@ -634,15 +640,17 @@ def _base_result(manifest_record: dict[str, Any], lock_record: dict[str, Any]) -
         "summary": {
             "direct_runtime": 0,
             "direct_dev": 0,
+            "direct_optional": 0,
             "transitive": 0,
             "reachable": 0,
             "locked": 0,
             "unreachable": 0,
         },
-        "inventory": {"direct": {"runtime": [], "dev": []}, "transitive": []},
+        "inventory": {"direct": {"runtime": [], "dev": [], "optional": []}, "transitive": []},
         "lockfile": {
             "lockfile_version": None,
             "config_version": None,
+            "optional_dependencies": {},
             "package_count": 0,
             "integrity_present": 0,
             "integrity_missing": [],
@@ -774,12 +782,17 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     findings: list[dict[str, Any]] = []
     budget = Budget()
 
-    if dict(inputs.manifest_dependencies) != dict(inputs.lock_dependencies) or dict(inputs.manifest_dev_dependencies) != dict(inputs.lock_dev_dependencies):
+    if (
+        dict(inputs.manifest_dependencies) != dict(inputs.lock_dependencies)
+        or dict(inputs.manifest_dev_dependencies) != dict(inputs.lock_dev_dependencies)
+        or dict(inputs.manifest_optional_dependencies) != dict(inputs.lock_optional_dependencies)
+    ):
         findings.append(_finding("manifest-lock-mismatch", "blocking"))
 
     for role, dependencies in (
         ("runtime", inputs.manifest_dependencies),
         ("dev", inputs.manifest_dev_dependencies),
+        ("optional", inputs.manifest_optional_dependencies),
     ):
         for name, spec in sorted(dependencies.items()):
             budget.check_time()
@@ -801,14 +814,15 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
             unpinned.append(key)
             findings.append(_finding("lock-entry-unpinned", "blocking", package=key))
 
-    direct_records: dict[str, dict[str, LockPackage]] = {"runtime": {}, "dev": {}}
+    direct_records: dict[str, dict[str, LockPackage]] = {"runtime": {}, "dev": {}, "optional": {}}
     root_specs: dict[str, dict[str, str]] = {
         "runtime": dict(inputs.manifest_dependencies),
         "dev": dict(inputs.manifest_dev_dependencies),
+        "optional": dict(inputs.manifest_optional_dependencies),
     }
     reachable: dict[str, set[str]] = {}
     queue: deque[tuple[str, str]] = deque()
-    for role in ("runtime", "dev"):
+    for role in ("runtime", "dev", "optional"):
         for name, spec in sorted(root_specs[role].items()):
             try:
                 record = _resolve_package(name, spec, inputs.packages)
@@ -880,8 +894,8 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     result["status"] = "fail" if blocking else ("review" if result["review_required"] else "pass")
     result["completed"] = True
 
-    direct_output: dict[str, list[dict[str, Any]]] = {"runtime": [], "dev": []}
-    for role in ("runtime", "dev"):
+    direct_output: dict[str, list[dict[str, Any]]] = {"runtime": [], "dev": [], "optional": []}
+    for role in ("runtime", "dev", "optional"):
         for name in sorted(root_specs[role]):
             record = direct_records[role].get(name)
             if record is None:
@@ -906,6 +920,7 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     result["summary"] = {
         "direct_runtime": len(inputs.manifest_dependencies),
         "direct_dev": len(inputs.manifest_dev_dependencies),
+        "direct_optional": len(inputs.manifest_optional_dependencies),
         "transitive": len(transitive_output),
         "reachable": len(reachable),
         "locked": len(inputs.packages),
@@ -915,6 +930,7 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     result["lockfile"] = {
         "lockfile_version": inputs.lockfile.get("lockfileVersion"),
         "config_version": inputs.config_version,
+        "optional_dependencies": dict(sorted(inputs.lock_optional_dependencies.items())),
         "package_count": len(inputs.packages),
         "integrity_present": len(inputs.packages) - len(integrity_missing) - len(integrity_invalid),
         "integrity_missing": integrity_missing,

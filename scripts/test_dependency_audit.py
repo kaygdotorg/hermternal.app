@@ -307,6 +307,27 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("package-resolution-missing", self.finding_codes(result), result)
         self.assertEqual(result["inventory"]["direct"]["runtime"][0]["resolution"], "missing", result)
 
+    def test_root_optional_dependencies_are_inventoried_and_pinned(self) -> None:
+        manifest_document = {
+            "name": "@fixture/web",
+            "dependencies": {},
+            "devDependencies": {},
+            "optionalDependencies": {"optional": "^1.0.0"},
+        }
+        lock_document = json.loads(synthetic_lock({}, {}, {"optional": package_record("optional", "1.0.0")}))
+        lock_document["workspaces"][""]["optionalDependencies"] = {"optional": "^1.0.0"}
+        result = audit.audit_bytes(
+            json.dumps(manifest_document).encode("utf-8"),
+            json.dumps(lock_document).encode("utf-8"),
+            manifest_label="fixture/package.json",
+            lockfile_label="fixture/bun.lock",
+        )
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("manifest-unpinned", self.finding_codes(result), result)
+        self.assertEqual(result["summary"]["direct_optional"], 1, result)
+        self.assertEqual(result["inventory"]["direct"]["optional"][0]["name"], "optional", result)
+        self.assertFalse(result["inventory"]["direct"]["optional"][0]["pinned"], result)
+
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
         names = {item["name"] for item in result["inventory"]["transitive"]}

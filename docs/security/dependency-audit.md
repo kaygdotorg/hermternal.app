@@ -62,12 +62,15 @@ These fields are scope controls. They are not a vulnerability assessment.
 
 ## Inventory behavior
 
-The harness compares the manifest's `dependencies` and `devDependencies` with
-the Bun workspace root, then resolves the bounded local graph from both roots.
-The report separates:
+The harness compares the manifest's `dependencies`, `devDependencies`, and
+`optionalDependencies` with the Bun workspace root, then resolves the bounded
+local graph from all three roots. Optional root declarations are inventoried as a
+separate direct role and use the same exact-pin requirement as runtime and dev
+roots. The report separates:
 
 - `inventory.direct.runtime`: direct runtime dependencies;
 - `inventory.direct.dev`: direct development dependencies;
+- `inventory.direct.optional`: direct optional dependencies;
 - `inventory.transitive`: all other reachable lock records, including optional
   platform records and parent-scoped Bun virtual locators;
 - `lockfile.unreachable`: lock records not reached from either root.
