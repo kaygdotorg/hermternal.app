@@ -984,6 +984,248 @@ describe('LiveWorkspaceSession', () => {
     }
   );
 
+  it('keeps one detached list identity across mapping, history, publication, and Chat', async () => {
+    const listItem = { ...SESSION };
+    const rest = createRest([{ role: 'assistant', content: 'Owned history' }]);
+    vi.mocked(rest.listSessions).mockResolvedValue({
+      sessions: [listItem],
+      total: 1,
+      limit: 100,
+      offset: 0
+    });
+    vi.mocked(rest.getSessionMessages).mockImplementation(async (sessionId) => {
+      Object.assign(listItem, {
+        id: 'session-b',
+        title: 'Session B',
+        model: 'Model B',
+        isActive: false
+      });
+      return sessionMessagesFor(sessionId, [{ role: 'assistant', content: 'Owned history' }]);
+    });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    await session.initialize();
+
+    expect(rest.getSessionMessages).toHaveBeenCalledWith(
+      'session-1',
+      { limit: 500, offset: 0 },
+      expect.any(AbortSignal)
+    );
+    expect(chat.createChat).toHaveBeenCalledWith(expect.objectContaining({ selectedSessionId: 'session-1' }));
+    expect(session.current).toMatchObject({
+      state: 'ready',
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4'
+    });
+    expect(session.current.sessions).toEqual([
+      expect.objectContaining({ id: 'session-1', title: 'Live session', detail: '1 message · Hermes 4' })
+    ]);
+    expect(session.current.timeline).toEqual([
+      {
+        kind: 'assistant-message',
+        id: 'session-1:message:0',
+        text: 'Owned history',
+        model: 'Hermes 4',
+        status: 'complete'
+      }
+    ]);
+  });
+
+  it('rejects a dynamic list identity before mapping, history, publication, or Chat', async () => {
+    const listItem = { ...SESSION };
+    let idReads = 0;
+    Object.defineProperty(listItem, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        idReads += 1;
+        return idReads === 1 ? 'session-a' : 'session-b';
+      }
+    });
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({
+      sessions: [listItem as LiveSession],
+      total: 1,
+      limit: 100,
+      offset: 0
+    });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+    await session.initialize();
+
+    expect(idReads).toBe(0);
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(session.current).toMatchObject({ state: 'retryable-error', sessions: [] });
+    expect(published.every((snapshot) => !snapshot.includes('session-a') && !snapshot.includes('session-b'))).toBe(
+      true
+    );
+  });
+
+  it.each(['Proxy item', 'inherited getter', 'wrapper', 'symbol item'] as const)(
+    'rejects a %s list item before any workspace consumer observes it',
+    async (variant) => {
+      let idReads = 0;
+      const inheritedPrototype = {
+        get id(): string {
+          idReads += 1;
+          return 'session-a';
+        }
+      };
+      const inherited = Object.create(inheritedPrototype) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(SESSION)) {
+        if (key !== 'id') Object.defineProperty(inherited, key, { value, enumerable: true });
+      }
+      const proxy = new Proxy({ ...SESSION }, {
+        get: (target, key, receiver) => {
+          if (key === 'id') {
+            idReads += 1;
+            return 'session-a';
+          }
+          return Reflect.get(target, key, receiver);
+        }
+      });
+      const wrapper = Object.assign(new (class SessionWrapper {})(), SESSION);
+      const symbolItem = { ...SESSION, [Symbol('untrusted')]: 'hidden' };
+      const items = {
+        'Proxy item': proxy,
+        'inherited getter': inherited,
+        wrapper,
+        'symbol item': symbolItem
+      } as const;
+
+      const rest = createRest([]);
+      vi.mocked(rest.listSessions).mockResolvedValue({
+        sessions: [items[variant] as LiveSession],
+        total: 1,
+        limit: 100,
+        offset: 0
+      });
+      const chat = createChatHarness();
+      const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+      const published: string[] = [];
+      session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+      await session.initialize();
+
+      expect(idReads).toBe(0);
+      expect(rest.getSessionMessages).not.toHaveBeenCalled();
+      expect(chat.createChat).not.toHaveBeenCalled();
+      expect(session.current).toMatchObject({ state: 'retryable-error', sessions: [] });
+      expect(published.every((snapshot) => !snapshot.includes('session-a'))).toBe(true);
+    }
+  );
+
+  it('rejects a mixed valid and invalid list without publishing the valid prefix', async () => {
+    const invalid = { ...SESSION, title: 'session-b title' };
+    let invalidReads = 0;
+    Object.defineProperty(invalid, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        invalidReads += 1;
+        return invalidReads === 1 ? 'session-a' : 'session-b';
+      }
+    });
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockResolvedValue({
+      sessions: [SESSION, invalid as LiveSession],
+      total: 2,
+      limit: 100,
+      offset: 0
+    });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    const published: string[] = [];
+    session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+    await session.initialize();
+
+    expect(invalidReads).toBe(0);
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(session.current).toMatchObject({ state: 'retryable-error', sessions: [] });
+    expect(published.every((snapshot) => !snapshot.includes('Live session') && !snapshot.includes('session-b'))).toBe(
+      true
+    );
+  });
+
+  it('drops a stale list after lifecycle reset without normalizing or publishing it', async () => {
+    const pendingList = createDeferred<{
+      sessions: LiveSession[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>();
+    const invalid = { ...SESSION };
+    let invalidReads = 0;
+    Object.defineProperty(invalid, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        invalidReads += 1;
+        return 'session-b';
+      }
+    });
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions).mockImplementationOnce(() => pendingList.promise);
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    const initialization = session.initialize();
+    await flush();
+    session.invalidate();
+    pendingList.resolve({ sessions: [invalid as LiveSession], total: 1, limit: 100, offset: 0 });
+    await initialization;
+
+    expect(invalidReads).toBe(0);
+    expect(rest.getSessionMessages).not.toHaveBeenCalled();
+    expect(chat.createChat).not.toHaveBeenCalled();
+    expect(session.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
+  });
+
+  it('does not let a stale list from an earlier initialize race replace the current restore', async () => {
+    const staleList = createDeferred<{
+      sessions: LiveSession[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>();
+    const invalid = { ...SESSION };
+    let invalidReads = 0;
+    Object.defineProperty(invalid, 'id', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        invalidReads += 1;
+        return 'session-b';
+      }
+    });
+    const rest = createRest([]);
+    vi.mocked(rest.listSessions)
+      .mockImplementationOnce(() => staleList.promise)
+      .mockResolvedValueOnce({ sessions: [SESSION], total: 1, limit: 100, offset: 0 });
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+
+    const first = session.initialize();
+    await flush();
+    const second = session.initialize();
+    await second;
+    staleList.resolve({ sessions: [invalid as LiveSession], total: 1, limit: 100, offset: 0 });
+    await first;
+
+    expect(invalidReads).toBe(0);
+    expect(rest.getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(chat.createChat).toHaveBeenCalledTimes(1);
+    expect(session.current).toMatchObject({ state: 'empty', activeSessionId: SESSION.id });
+  });
+
   it('adopts a trusted REST canonical alias only after valid history and Chat setup', async () => {
     const requestedSessionId = 'alias-session';
     const canonicalSession = {

@@ -8,7 +8,13 @@ import {
   type JsonRpcCloseClassification,
   type JsonRpcConnectionState
 } from '$lib/chat/json-rpc-chat';
-import { LiveRestError, type LiveRestTransport, type LiveSession } from '$lib/transport';
+import {
+  captureLiveSessionProjection,
+  LiveRestError,
+  type CapturedLiveSession,
+  type LiveRestTransport,
+  type LiveSession
+} from '$lib/transport';
 import {
   consumeLiveRestCanonicalAlias,
   getLiveRestSessionForWorkspace,
@@ -180,7 +186,12 @@ export class LiveWorkspaceSession {
     try {
       const response = await this.rest.listSessions({ limit: 100, offset: 0 }, operation.signal);
       if (!this.isCurrent(operation.generation)) return;
-      const liveSessions = response.sessions.filter((session) => session.archived !== true);
+      // Normalize the complete list once before any archived filtering, mapping,
+      // active selection, or openSession call. A single invalid item rejects the
+      // whole response so a structural adapter cannot present A and later route
+      // history or Chat through a mutable B identity.
+      const capturedSessions = captureLiveSessionList(response.sessions);
+      const liveSessions = capturedSessions.filter((session) => session.archived !== true);
       const sessions = mapLiveSessions(liveSessions);
       if (liveSessions.length === 0) {
         this.publish({ ...initialSnapshot(), sessions, state: 'empty' });
@@ -1362,6 +1373,32 @@ export class LiveWorkspaceSession {
   private assertActive(): void {
     if (this.disposed) throw new Error('Live workspace session is disposed.');
   }
+}
+
+/**
+ * Freeze every session-list item at the workspace boundary before any field is
+ * observed by presentation or restore code. Do not salvage a partial list: a
+ * malformed item makes the whole response unusable, while valid projections
+ * from that response remain private and are never published.
+ */
+function captureLiveSessionList(value: unknown): CapturedLiveSession[] {
+  if (!Array.isArray(value)) throw new LiveRestError('invalid-response');
+
+  const items = value as readonly unknown[];
+  const captured: CapturedLiveSession[] = [];
+  let invalidItem = false;
+  const length = items.length;
+  for (let index = 0; index < length; index += 1) {
+    const projection = captureLiveSessionProjection(items[index]);
+    if (projection === undefined) {
+      invalidItem = true;
+      continue;
+    }
+    captured.push(projection);
+  }
+
+  if (invalidItem) throw new LiveRestError('invalid-response');
+  return captured;
 }
 
 function initialSnapshot(): LiveWorkspaceSnapshot {
