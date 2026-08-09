@@ -2054,13 +2054,15 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
 
 
 def _reject_git_metadata_links(metadata_root: Path) -> None:
-    """Reject every nested metadata symlink while bounding directory scans.
+    """Reject nested metadata links with descriptor-relative DFS.
 
     The reviewed checkout may use a ``.git`` file and a regular ``commondir``
     pointer for linked worktrees. Once those roots are resolved, Git metadata
     itself must be a descriptor-safe tree: a moved ``objects`` or ``refs``
     directory, or a deeper link below either, would otherwise redirect object
-    and ref reads outside the reviewed repository.
+    and ref reads outside the reviewed repository. Each DFS frame owns only its
+    current directory descriptor; exhausted subtrees close before the next
+    sibling opens, so the live descriptor count is O(depth), not O(entries).
     """
 
     root_fd, _canonical = _open_verified_directory_path(
@@ -2068,53 +2070,79 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
         label="Git metadata root",
         resolve_parent_aliases=False,
     )
-    open_directories: list[int] = [root_fd]
-    stack: list[tuple[int, tuple[str, ...]]] = [(root_fd, ())]
     entries_seen = 0
+
+    def read_children(directory_fd: int) -> list[Any]:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                entries = []
+                for entry in iterator:
+                    entries.append(entry)
+                    if len(entries) > GIT_METADATA_ENTRY_MAX:
+                        raise ValueError("Git metadata exceeds the bounded entry count")
+        except ValueError:
+            raise
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ValueError("Git metadata directory could not be inspected") from exc
+        entries.sort(key=lambda entry: entry.name)
+        return entries
+
+    # Materialize only the names for each active frame. Child descriptors are
+    # closed as soon as their frame is exhausted, keeping a wide fanout from
+    # consuming one descriptor per sibling.
+    stack: list[tuple[int, tuple[str, ...], list[Any], int, bool]] = []
     try:
+        stack.append((root_fd, (), read_children(root_fd), 0, False))
         while stack:
-            directory_fd, prefix = stack.pop()
+            directory_fd, prefix, entries, index, owned = stack[-1]
+            if index >= len(entries):
+                stack.pop()
+                if owned:
+                    try:
+                        os.close(directory_fd)
+                    except OSError:
+                        pass
+                continue
+            entry = entries[index]
+            stack[-1] = (directory_fd, prefix, entries, index + 1, owned)
+            name = entry.name
+            if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
+                raise ValueError("Git metadata contains an invalid pathname entry")
+            entries_seen += 1
+            if entries_seen > GIT_METADATA_ENTRY_MAX:
+                raise ValueError("Git metadata exceeds the bounded entry count")
             try:
-                with os.scandir(directory_fd) as iterator:
-                    entries = []
-                    for entry in iterator:
-                        entries.append(entry)
-                        if len(entries) > GIT_METADATA_ENTRY_MAX:
-                            raise ValueError("Git metadata exceeds the bounded entry count")
-            except ValueError:
+                metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise ValueError("Git metadata entry could not be inspected") from exc
+            relative_parts = (*prefix, name)
+            if stat.S_ISLNK(metadata.st_mode):
+                relative = "/".join(relative_parts)
+                raise ValueError(f"Git metadata contains a symlink: {relative}")
+            if not stat.S_ISDIR(metadata.st_mode):
+                continue
+            child_fd = _open_verified_directory_at(
+                directory_fd,
+                name,
+                label="Git metadata directory",
+            )
+            try:
+                child_entries = read_children(child_fd)
+            except BaseException:
+                os.close(child_fd)
                 raise
-            except (OSError, RuntimeError, TypeError) as exc:
-                raise ValueError("Git metadata directory could not be inspected") from exc
-            entries.sort(key=lambda entry: entry.name)
-            for entry in entries:
-                name = entry.name
-                if not isinstance(name, str) or not name or name in {".", ".."} or "/" in name:
-                    raise ValueError("Git metadata contains an invalid pathname entry")
-                entries_seen += 1
-                if entries_seen > GIT_METADATA_ENTRY_MAX:
-                    raise ValueError("Git metadata exceeds the bounded entry count")
-                try:
-                    metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-                except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                    raise ValueError("Git metadata entry could not be inspected") from exc
-                if stat.S_ISLNK(metadata.st_mode):
-                    relative = "/".join((*prefix, name))
-                    raise ValueError(f"Git metadata contains a symlink: {relative}")
-                if not stat.S_ISDIR(metadata.st_mode):
-                    continue
-                child_fd = _open_verified_directory_at(
-                    directory_fd,
-                    name,
-                    label="Git metadata directory",
-                )
-                open_directories.append(child_fd)
-                stack.append((child_fd, (*prefix, name)))
+            stack.append((child_fd, relative_parts, child_entries, 0, True))
     finally:
-        for descriptor in reversed(open_directories):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        for directory_fd, _prefix, _entries, _index, owned in reversed(stack):
+            if owned:
+                try:
+                    os.close(directory_fd)
+                except OSError:
+                    pass
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 def _read_git_config(metadata_root: Path, filename: str) -> str | None:
