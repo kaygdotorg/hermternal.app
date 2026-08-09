@@ -131,8 +131,9 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
         This helper intentionally does not call ``seed_protected_objects``. Its
         callers exercise missing, replaced, alternate, promisor, and packed
-        layouts, so retaining the ordinary single-branch pack keeps those
-        regressions separate from the loose-only success fixture.
+        layouts, so retaining the ordinary clone pack keeps those regressions
+        separate from the loose-only success fixture. The clone follows the
+        current exact checkout tip and does not depend on a local branch name.
         """
 
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-object-repo-")
@@ -142,9 +143,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "git",
                 "clone",
                 "--no-local",
-                "--single-branch",
-                "--branch",
-                "fix/fixture-authority-hardened-a707",
+                "--no-tags",
                 "--quiet",
                 str(ROOT),
                 str(object_repo),
@@ -566,26 +565,35 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         self.assertEqual(legacy["schema"], verifier.LEGACY_AUTHORITY_SCHEMA)
 
     def test_refreshed_source_parent_is_stale_for_final_adoption(self) -> None:
+        # The reviewed hardened authority is the valid immediate correction
+        # parent; its first parent remains the explicit refreshed adoption
+        # source. Keep this ancestry check pinned to reviewed objects rather
+        # than discovering authority from the current checkout HEAD.
         parent = subprocess.check_output(
-            ["git", "-C", str(ROOT), "rev-parse", "HEAD^"],
+            ["git", "-C", str(ROOT), "rev-parse", f"{verifier.EXPECTED_AUTHORITY_COMMIT}^0"],
             text=True,
         ).strip()
-        self.assertEqual(parent, verifier.EXPECTED_SOURCE_COMMIT)
+        self.assertEqual(parent, verifier.EXPECTED_AUTHORITY_COMMIT)
+        source_parent = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", f"{parent}^1"],
+            text=True,
+        ).strip()
+        self.assertEqual(source_parent, verifier.EXPECTED_SOURCE_COMMIT)
         parent_pin = json.loads(
             subprocess.check_output(
-                ["git", "-C", str(ROOT), "show", f"{parent}:{verifier.PIN_PATH}"],
+                ["git", "-C", str(ROOT), "show", f"{source_parent}:{verifier.PIN_PATH}"],
             )
         )
         self.assertEqual(parent_pin["schema"], "hermternal.fixture-registry-authority-pin.v1")
         self.assertEqual(parent_pin["authority_commit"], "fc33b1f461321f319b8c2566d9f0faf6c535b77b")
         self.assertEqual(parent_pin["source_commit"], "a707f5af9612118d6d41450c5090e5c11c3e5c10")
         parent_source = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", f"{parent}:scripts/fixture_authority_test_source.py"],
+            ["git", "-C", str(ROOT), "show", f"{source_parent}:scripts/fixture_authority_test_source.py"],
         )
         self.assertIn(b"TRUSTED_BUNDLE_SIZE_BYTES = 2_986_828", parent_source)
         self.assertIn(b"d61bf4316acbeca06863f527ffcf1cc6bce04d2ffa0261d8548c3a1867b15050", parent_source)
         parent_verifier = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", f"{parent}:scripts/verify_fixture_registry_authority.py"],
+            ["git", "-C", str(ROOT), "show", f"{source_parent}:scripts/verify_fixture_registry_authority.py"],
         )
         self.assertNotIn(verifier.PIN_SCHEMA.encode("ascii"), parent_verifier)
         self.assertIn(b"fc33b1f461321f319b8c2566d9f0faf6c535b77b", parent_verifier)
