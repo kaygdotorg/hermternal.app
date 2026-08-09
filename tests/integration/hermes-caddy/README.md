@@ -81,9 +81,16 @@ current product identity, and task-244 parity binding remains a blocker until
 an independent check verifies it; retaining their digests must not silently
 claim parity. Static-tree and Git trust boundaries have explicit resource and
 special-file limits: static provenance is bounded to regular-file data and
-rejects symlinks and other special files, while Git provenance uses timed
-commands with bounded output and diagnostics. Any limit, identity,
-malformed-output, or command failure fails closed.
+rejects symlinks and other special files, with one monotonic deadline covering
+root resolution through the final digest return. Git provenance uses timed
+commands with bounded output and diagnostics. Its bounded local metadata scan
+rejects nested symlink escapes, include/includeIf directives, and every
+promisor or partial-clone selector, including key-only booleans and active
+`config.worktree`; external Git configuration is disabled. A closed
+stdout/stderr pair that leaves Git running is normalized to the bounded proof
+timeout while the process group is terminated and reaped. Renderer path inputs
+are literal absolute filesystem paths; Caddy placeholders are rejected. Any
+limit, identity, malformed-output, or command failure fails closed.
 
 For the historical proof retained here, pass only the complete evidence file at
 the canonical committed path with `--retained-input`. Retained evidence uses a
@@ -91,7 +98,7 @@ descriptor-verified canonical path and identity: the committed file is checked
 against `caddy-proof-evidence-sha256.txt` before parsing any field. Copies,
 aliases, replacements, symlinks, and anchor mismatches fail closed. Retained
 mode then checks the anchored historical build pair and uses deterministic
-runtime-input placeholders, so it remains usable without a local copy of the
+literal runtime-input paths, so it remains usable without a local copy of the
 old static build. A copied or edited temporary manifest is rejected before any
 browser fields are consumed. Do not combine retained input with standalone
 assertion flags. Both workflows use the fixed
