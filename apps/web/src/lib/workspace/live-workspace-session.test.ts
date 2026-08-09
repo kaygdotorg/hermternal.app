@@ -176,6 +176,23 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function withObjectPrototypeValuePollution<T>(
+  descriptor: PropertyDescriptor,
+  callback: () => Promise<T>
+): Promise<T> {
+  const previous = Reflect.getOwnPropertyDescriptor(Object.prototype, 'value');
+  try {
+    Object.defineProperty(Object.prototype, 'value', { configurable: true, ...descriptor });
+    return await callback();
+  } finally {
+    if (previous) {
+      Object.defineProperty(Object.prototype, 'value', previous);
+    } else {
+      delete (Object.prototype as Record<string, unknown>).value;
+    }
+  }
+}
+
 function latestPromptId(socket: BrowserChatSocket): string {
   for (const frame of [...socket.sent].reverse()) {
     const parsed = JSON.parse(frame) as { id?: string; method?: string };
@@ -888,6 +905,84 @@ describe('LiveWorkspaceSession', () => {
     expect(accessorReads).toBe(0);
     expect(proxyReads).toBe(0);
   });
+
+  it.each(['getter', 'data'] as const)(
+    'rejects own accessor and Proxy details under Object.prototype.value %s pollution',
+    async (pollution) => {
+      let pollutedValueReads = 0;
+      let accessorReads = 0;
+      let proxyReads = 0;
+      const accessorDetail = { ...SESSION };
+      Object.defineProperty(accessorDetail, 'id', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          accessorReads += 1;
+          return SESSION.id;
+        }
+      });
+      const proxyDetail = new Proxy({ ...SESSION }, {
+        get: (target, key, receiver) => {
+          if (key === 'id') {
+            proxyReads += 1;
+            return SESSION.id;
+          }
+          return Reflect.get(target, key, receiver);
+        }
+      });
+      const details = [accessorDetail, proxyDetail];
+      const previous = Reflect.getOwnPropertyDescriptor(Object.prototype, 'value');
+      const descriptor: PropertyDescriptor =
+        pollution === 'getter'
+          ? {
+              get: () => {
+                pollutedValueReads += 1;
+                return SESSION.id;
+              }
+            }
+          : { value: SESSION.id, writable: true };
+
+      const outcomes: Array<{
+        historyCalls: number;
+        chatCalls: number;
+        published: string[];
+        timeline: unknown[];
+      }> = [];
+      await withObjectPrototypeValuePollution(descriptor, async () => {
+        for (const detail of details) {
+          const rest = createRest([]);
+          vi.mocked(rest.listSessions).mockResolvedValue({ sessions: [], total: 0, limit: 100, offset: 0 });
+          vi.mocked(rest.getSession).mockResolvedValue(detail as LiveSession);
+          const chat = createChatHarness();
+          const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+          const published: string[] = [];
+          session.subscribe((snapshot) => published.push(JSON.stringify(snapshot)));
+
+          await session.selectSession(SESSION.id);
+
+          outcomes.push({
+            historyCalls: vi.mocked(rest.getSessionMessages).mock.calls.length,
+            chatCalls: chat.createChat.mock.calls.length,
+            published: [...published],
+            timeline: [...session.current.timeline]
+          });
+          session.dispose();
+        }
+      });
+
+      expect(outcomes).toHaveLength(details.length);
+      for (const outcome of outcomes) {
+        expect(outcome.historyCalls).toBe(0);
+        expect(outcome.chatCalls).toBe(0);
+        expect(outcome.published.every((snapshot) => !snapshot.includes('foreign-session'))).toBe(true);
+        expect(outcome.timeline).toEqual([]);
+      }
+      expect(Reflect.getOwnPropertyDescriptor(Object.prototype, 'value')).toEqual(previous);
+      expect(pollutedValueReads).toBe(0);
+      expect(accessorReads).toBe(0);
+      expect(proxyReads).toBe(0);
+    }
+  );
 
   it('adopts a trusted REST canonical alias only after valid history and Chat setup', async () => {
     const requestedSessionId = 'alias-session';
