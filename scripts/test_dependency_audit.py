@@ -32,7 +32,7 @@ sys.modules[spec.name] = audit
 spec.loader.exec_module(audit)
 
 
-INTEGRITY = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+INTEGRITY = "sha512-" + ("A" * 86) + "=="
 
 
 def synthetic_lock(
@@ -170,6 +170,20 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("invalid-integrity", self.finding_codes(result), result)
         encoded = audit._serialise(result)
         self.assertNotIn("\\u0000", encoded)
+
+    def test_integrity_digest_length_is_enforced(self) -> None:
+        short_sha512 = ("sha512-" + ("A" * 43) + "=").encode("ascii")
+        mutated = re.sub(
+            rb', "sha512-[^"]+"(?=\])',
+            b', "' + short_sha512 + b'"',
+            self.lockfile_bytes,
+            count=1,
+        )
+        self.assertNotEqual(mutated, self.lockfile_bytes)
+        result = audit.audit_bytes(self.manifest_bytes, mutated)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("invalid-integrity", self.finding_codes(result), result)
+        self.assertGreaterEqual(len(result["lockfile"]["integrity_invalid"]), 1, result)
 
     def test_transitive_dependency_is_inventoried_from_local_graph(self) -> None:
         manifest = json.dumps(

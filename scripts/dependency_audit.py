@@ -13,6 +13,8 @@ runtime behavior to the existing terminal proof.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -55,6 +57,7 @@ PACKAGE_NAME = re.compile(r"^@?[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)?$")
 # are not npm names, but their path segments remain bounded and package-like.
 LOCK_KEY = re.compile(r"^[A-Za-z0-9@._~+-]+(?:/[A-Za-z0-9@._~+-]+)*$")
 INTEGRITY = re.compile(r"^sha(?:1|256|384|512)-[A-Za-z0-9+/]+={0,2}$")
+INTEGRITY_DIGEST_LENGTHS = {"sha1": 20, "sha256": 32, "sha384": 48, "sha512": 64}
 SAFE_OUTPUT_TOKEN = re.compile(r"[^A-Za-z0-9@._+:/~*^<>=| -]")
 
 DEPENDENCY_FIELDS = ("dependencies", "optionalDependencies", "peerDependencies")
@@ -261,6 +264,18 @@ def _require_lock_key(name: Any) -> str:
     return name
 
 
+def _valid_integrity(value: str) -> bool:
+    match = INTEGRITY.fullmatch(value)
+    if match is None:
+        return False
+    algorithm, encoded = value.split("-", 1)
+    try:
+        digest = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(digest) == INTEGRITY_DIGEST_LENGTHS[algorithm]
+
+
 def _require_dependency_map(value: Any) -> dict[str, str]:
     if value is None:
         return {}
@@ -339,7 +354,7 @@ def _parse_lock_packages(document: Mapping[str, Any]) -> dict[str, LockPackage]:
             raise AuditError("lockfile-shape-invalid")
         else:
             integrity = raw_integrity
-            integrity_valid = bool(INTEGRITY.fullmatch(raw_integrity))
+            integrity_valid = _valid_integrity(raw_integrity)
         if key in packages:
             raise AuditError("lockfile-shape-invalid")
         packages[key] = LockPackage(

@@ -70,7 +70,8 @@ when no local version satisfies it or when its specification is unsupported or
 malformed; an explicitly optional peer may remain absent and is retained in the
 `peer_dependency_gaps` diagnostics. Exact manifest versions and exact `npm:`
 aliases are pinned. Every lock record must resolve to an exact semantic version
-and carry a valid `sha1`, `sha256`, `sha384`, or `sha512` integrity string. The
+and carry a valid base64-encoded `sha1`, `sha256`, `sha384`, or `sha512`
+integrity string whose decoded digest has the algorithm's required length. The
 harness reports integrity values; it does not recompute registry payload hashes
 because package payloads are intentionally outside this offline input scope.
 
