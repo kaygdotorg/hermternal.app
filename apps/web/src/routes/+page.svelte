@@ -47,12 +47,14 @@
   <PrototypeShell transport={fixtureTransport} />
 {:else if routeMode === 'live' && liveContext}
   <BrowserAuthView session={liveContext.auth}>
-    <LiveWorkspaceView
-      session={liveContext.workspace}
-      registerTerminalLifecycle={liveContext.registerTerminalLifecycle}
-      onReturnToSignIn={returnLiveWorkspaceToSignIn}
-      onTerminalAuthenticationFailure={returnTerminalToSignIn}
-    />
+    <main class="live-route-main">
+      <LiveWorkspaceView
+        session={liveContext.workspace}
+        registerTerminalLifecycle={liveContext.registerTerminalLifecycle}
+        onReturnToSignIn={returnLiveWorkspaceToSignIn}
+        onTerminalAuthenticationFailure={returnTerminalToSignIn}
+      />
+    </main>
   </BrowserAuthView>
 {:else}
   <main aria-busy="true" aria-label="Starting Hermternal"></main>
@@ -61,5 +63,10 @@
 <style>
   main {
     min-height: 100dvh;
+  }
+
+  .live-route-main {
+    width: 100%;
+    min-width: 0;
   }
 </style>

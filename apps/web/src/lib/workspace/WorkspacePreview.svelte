@@ -515,9 +515,9 @@
     container-name: workspace-preview;
     container-type: inline-size;
     width: 100%;
-    height: 960px;
+    height: 100dvh;
     min-width: 0;
-    min-height: 960px;
+    min-height: 0;
     overflow: hidden;
     background: var(--canvas);
     color: var(--ink);
@@ -589,18 +589,18 @@
     height: 100%;
   }
 
-  /* Keep the approved desktop family intact: the sidebar and inspector stay
-     present while the conversation flexes down to the available width. The
-     named container switches the whole surface to the mobile family instead
-     of introducing intermediate navigation substitutions. */
+  /* Paper fixes the 1440px reference to 276 / 720 / 380 columns. Runtime
+     height follows the viewport, while the two bounded transition families
+     below reuse the approved mobile toolbar and drawers instead of shrinking
+     text, targets, or the conversation beyond its readable width. */
   .workspace-grid {
     box-sizing: border-box;
     display: grid;
     grid-template-columns: minmax(220px, 276px) minmax(0, 720px) minmax(260px, 380px);
-    grid-template-rows: 928px;
+    grid-template-rows: calc(100% + 32px);
     gap: 16px;
-    height: 928px;
-    min-height: 928px;
+    height: calc(100% - 32px);
+    min-height: 0;
     padding: 16px;
   }
 
@@ -617,7 +617,7 @@
   .desktop-inspector {
     min-width: 0;
     min-height: 0;
-    height: 928px;
+    height: 100%;
   }
 
   .desktop-inspector {
@@ -636,9 +636,9 @@
   .conversation-body {
     position: relative;
     display: flex;
-    height: 856px;
+    height: calc(100% - 72px);
     min-height: 0;
-    flex: 0 0 856px;
+    flex: 1 1 auto;
     flex-direction: column;
   }
 
@@ -714,7 +714,7 @@
     white-space: nowrap;
   }
 
-  @container workspace-preview (max-width: 760px) {
+  @container workspace-preview (max-width: 1407px) {
     .workspace-preview {
       height: 844px;
       min-height: 844px;
@@ -1106,6 +1106,52 @@
 
     .state-layer.empty-layer {
       padding: 100px 16px 152px;
+    }
+  }
+
+  /* Between the exact 1440px and 390px boards, preserve the approved compact
+     controls but omit the simulated phone status bar. The conversation remains
+     capped at 720px, and both secondary columns move to the existing modal
+     drawers instead of compressing their text or action targets. */
+  @container workspace-preview (min-width: 761px) and (max-width: 1407px) {
+    .workspace-preview {
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .workspace-mobile-status-bar {
+      display: none;
+    }
+
+    .workspace-grid {
+      width: min(720px, 100%);
+      height: calc(100% - 64px);
+      min-height: 0;
+      margin-inline: auto;
+    }
+
+    .conversation-panel,
+    .conversation-body {
+      height: 100%;
+      min-height: 0;
+      flex-basis: auto;
+    }
+
+    .mobile-mode-selector {
+      top: 10px;
+    }
+
+    .mobile-drawer-scrim,
+    .title-edit-dimmer {
+      top: 0;
+    }
+
+    .mobile-session-drawer,
+    .mobile-workspace-drawer {
+      top: 12px;
+      height: calc(100% - 24px);
+      max-height: none;
     }
   }
 

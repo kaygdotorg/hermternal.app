@@ -340,18 +340,22 @@ describe('WorkspacePreview', () => {
     expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
   });
 
-  it('renders explicit live timeline data without synthetic artifacts', () => {
+  it('renders explicit live timeline data beside the visibly mocked approved inspector', () => {
     render(WorkspacePreview, {
       state: 'ready',
-      artifactInspectorEnabled: false,
+      dataMode: 'live',
       timelineEmptyLabel: 'No messages in this chat yet.',
       timelineItems: [{ kind: 'user-message', id: 'live-1', text: 'Live server message' }]
     });
 
     expect(screen.getByText('Live server message')).toBeInTheDocument();
     expect(screen.queryByText('Quarterly inventory movement')).not.toBeInTheDocument();
-    expect(screen.queryByRole('complementary', { name: 'Workspace inspector' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('runtime-preview').querySelector('.workspace-grid')).toHaveClass('inspector-hidden');
+    expect(screen.getByRole('complementary', { name: 'Workspace inspector' })).toBeInTheDocument();
+    expect(screen.getByText('Generated · mock · just now')).toBeInTheDocument();
+    expect(screen.getByText('Delay signal · 12% · synthetic fixture')).toBeInTheDocument();
+    expect(screen.getByTestId('runtime-preview').querySelector('.workspace-grid')).not.toHaveClass(
+      'inspector-hidden'
+    );
   });
 
   it('distinguishes a real empty live session from fixture timelines and copy', () => {
