@@ -242,6 +242,6 @@ public struct AppleBenchmarkRunner: Sendable {
     }
 
     private func isCommitSHA(_ value: String) -> Bool {
-        value.count == 40 && value.allSatisfy { $0.isHexDigit && $0.isLowercase || $0.isNumber }
+        isStrictLowerHexASCII(value, length: 40)
     }
 }
