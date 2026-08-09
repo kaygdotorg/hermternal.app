@@ -186,9 +186,15 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   and clears cookies, Web Storage, IndexedDB, Cache Storage, and service workers. The login-request risk
   is marked before password-login transport starts, so malformed, oversized, or body-read failures still
   trigger a server logout attempt; cookie and browser-state cleanup are independent attempts and any
-  logout or cleanup failure remains observable and fails closed. The mode never retains IDs, timestamps,
-  bodies, prompt/response text, endpoints, headers, raw errors, or artifacts, and it is mutually
-  exclusive with screenshot capture. No live reconciliation was run for this correction.
+  logout or cleanup failure remains observable and fails closed. Every JSON request uses same-origin
+  page-context `fetch` with browser-owned cookies and one 30-second projection deadline. A
+  `ReadableStream` reader counts actual decompressed chunks before accumulation, rejects a declared
+  length above 256 KiB, cancels and aborts when the actual stream would exceed 256 KiB, and fails
+  closed for absent/non-streaming bodies, missing or lying lengths, and read/timeout errors. Page
+  validation returns only bounded provider, auth, or fixed history-count projections; it never returns
+  a raw response body. The mode never retains IDs, timestamps, bodies, prompt/response text, endpoints,
+  headers, raw errors, or artifacts, and it is mutually exclusive with screenshot capture. No live
+  reconciliation was run for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

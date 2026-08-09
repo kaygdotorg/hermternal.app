@@ -150,7 +150,14 @@ Positive current attribution requires a future independently reviewed pre-send
 session correlation and history boundary. This reconciliation cannot clear
 uncertain delivery. It preserves `promptCount===0` in the no-submit lane and
 never prints IDs, timestamps, bodies, prompt/response text, endpoints, headers,
-raw errors, or artifacts.
+raw errors, or artifacts. Every JSON request uses same-origin page-context
+`fetch` with browser-owned cookies and one 30-second projection deadline. A
+ReadableStream reader counts actual decompressed chunks before accumulation,
+rejects a declared length above 256 KiB, cancels and aborts when the actual
+stream would exceed 256 KiB, and fails closed for absent/non-streaming bodies,
+missing or lying lengths, and read/timeout errors. Page validation returns only
+bounded provider, auth, or fixed history-count projections; it never returns a
+raw response body.
 
 Finally it verifies logout and clears cookies, Web Storage, IndexedDB, Cache
 Storage, and service workers. The login-request risk is marked before the

@@ -1,22 +1,16 @@
 import { test as base } from './live-test-fixtures';
-import { LIVE_PROOF_ASSISTANT_MARKER, LIVE_PROOF_PROMPT } from './live-proof-ledger.mjs';
 import {
   LIVE_RECONCILIATION_ENV,
-  formatLiveReconciliationResult,
-  parseReconciliationSessionList,
-  parseReconciliationSessionMessages,
-  reconcileLiveHistory
+  formatLiveReconciliationResult
 } from './live-reconciliation.mjs';
 import { isLiveReconciliationEnabled } from './live-playwright-config.mjs';
 import { runLiveReconciliationAttempt } from './live-reconciliation-auth.mjs';
+import { requestLiveReconciliationProjection } from './live-reconciliation-transport.mjs';
 import { setLiveProofStatus } from './live-proof-status.mjs';
 
 const test = base;
 const password = process.env.HERMES_TEST_PASSWORD;
 const username = process.env.HERMES_TEST_USERNAME ?? 'hermternal-test';
-const MAX_RESPONSE_BYTES = 256 * 1024;
-const MAX_PROVIDER_COUNT = 32;
-const SAFE_PROVIDER_NAME = /^[a-z0-9][a-z0-9._-]{0,95}$/u;
 const reconciliationOnly = isLiveReconciliationEnabled();
 
 test.skip(
@@ -25,7 +19,7 @@ test.skip(
 );
 test.skip(!password, 'HERMES_TEST_PASSWORD is required for the authorized disposable lane.');
 
-test('read-only reconciliation checks the current account without submitting', async ({ context }, testInfo) => {
+test('read-only reconciliation checks the current account without submitting', async ({ context, page }, testInfo) => {
   setLiveProofStatus(testInfo, { phase: 'not-started', delivery: 'not-submitted' });
   const configuredBaseURL = testInfo.project.use.baseURL;
   const baseURL =
@@ -35,6 +29,7 @@ test('read-only reconciliation checks the current account without submitting', a
   if (!baseURL) throw new Error('live reconciliation origin is not approved');
   const passwordValue = password;
   if (!passwordValue) throw new Error('live reconciliation password is unavailable');
+  await page.goto(new URL('/login', baseURL).href, { waitUntil: 'domcontentloaded' });
 
   let result = {
     promptMatches: 'zero',
@@ -43,34 +38,28 @@ test('read-only reconciliation checks the current account without submitting', a
   };
   const attempt = await runLiveReconciliationAttempt({
     operation: async (markLoginRequest) => {
-      const provider = parsePasswordProvider(await requestJson(context, baseURL, '/api/auth/providers'));
+      const providerProjection = await requestLiveReconciliationProjection(page, {
+        baseURL,
+        kind: 'providers'
+      });
+      const provider = providerProjection.provider;
       // Mark the request before transport starts: a malformed, oversized, or
       // unreadable login response may still have issued the session cookie.
       markLoginRequest();
-      const login = await requestJson(context, baseURL, '/auth/password-login', {
-        method: 'POST',
-        data: { provider, username, password: passwordValue, next: '/' }
+      await requestLiveReconciliationProjection(page, {
+        baseURL,
+        kind: 'login',
+        provider,
+        username,
+        password: passwordValue
       });
-      assertPasswordLogin(login);
-      await assertAuthenticated(context, baseURL);
+      await requestLiveReconciliationProjection(page, { baseURL, kind: 'auth-me' });
       setLiveProofStatus(testInfo, { phase: 'authenticated', delivery: 'not-submitted' });
 
-      const sessions = parseReconciliationSessionList(
-        await requestJson(context, baseURL, '/api/sessions?limit=100&offset=0')
-      );
       setLiveProofStatus(testInfo, { phase: 'ready-no-submit', delivery: 'not-submitted' });
-      result = await reconcileLiveHistory({
-        sessions,
-        getMessages: async (sessionId, messageCount) =>
-          parseReconciliationSessionMessages(
-            await requestJson(
-              context,
-              baseURL,
-              `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=500&offset=0`
-            ),
-            sessionId,
-            messageCount
-          )
+      result = await requestLiveReconciliationProjection(page, {
+        baseURL,
+        kind: 'history'
       });
       setLiveProofStatus(testInfo, { phase: 'history-reconciled', delivery: 'uncertain' });
     },
@@ -95,64 +84,6 @@ test('read-only reconciliation checks the current account without submitting', a
   console.log(formatLiveReconciliationResult(result));
   if (operationFailed || cleanupFailed) throw new Error('live reconciliation failed closed');
 });
-
-async function requestJson(
-  context: import('@playwright/test').BrowserContext,
-  baseURL: string,
-  path: string,
-  options: {
-    method?: 'GET' | 'POST';
-    data?: Record<string, string>;
-  } = {}
-): Promise<unknown> {
-  const url = new URL(path, baseURL).href;
-  const response = options.method === 'POST'
-    ? await context.request.post(url, {
-        data: options.data,
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        maxRedirects: 0,
-        failOnStatusCode: false
-      })
-    : await context.request.get(url, {
-        headers: { accept: 'application/json' },
-        maxRedirects: 0,
-        failOnStatusCode: false
-      });
-  if (response.status() !== 200 || response.headers()['content-type']?.toLowerCase().includes('application/json') !== true) {
-    throw new Error('live reconciliation response was not approved');
-  }
-  const body = await response.body();
-  if (body.byteLength > MAX_RESPONSE_BYTES) throw new Error('live reconciliation response exceeded its bound');
-  try {
-    return JSON.parse(body.toString('utf8')) as unknown;
-  } catch {
-    throw new Error('live reconciliation response was malformed');
-  }
-}
-
-async function assertAuthenticated(
-  context: import('@playwright/test').BrowserContext,
-  baseURL: string
-): Promise<void> {
-  const identity = await requestJson(context, baseURL, '/api/auth/me');
-  if (identity === null || typeof identity !== 'object' || Array.isArray(identity)) {
-    throw new Error('live reconciliation authentication was not verified');
-  }
-  const record = identity as Record<string, unknown>;
-  const expiresAt = record.expires_at;
-  if (
-    !isBoundedNonEmptyString(record.user_id, 512) ||
-    typeof record.provider !== 'string' ||
-    record.provider.length === 0 ||
-    record.provider.length > 512 ||
-    typeof expiresAt !== 'number' ||
-    !Number.isInteger(expiresAt) ||
-    expiresAt < 0 ||
-    expiresAt > 4_294_967_295
-  ) {
-    throw new Error('live reconciliation authentication was not verified');
-  }
-}
 
 async function logoutAndVerify(
   context: import('@playwright/test').BrowserContext,
@@ -222,45 +153,3 @@ async function clearBrowserState(
   }
 }
 
-function parsePasswordProvider(value: unknown): string {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('live reconciliation provider response was invalid');
-  }
-  const record = value as Record<string, unknown>;
-  const providers = record.providers;
-  if (!Array.isArray(providers) || providers.length === 0 || providers.length > MAX_PROVIDER_COUNT) {
-    throw new Error('live reconciliation provider response was invalid');
-  }
-  const passwordProviders = providers.filter((provider) => {
-    if (provider === null || typeof provider !== 'object' || Array.isArray(provider)) return false;
-    const record = provider as Record<string, unknown>;
-    return (
-      typeof record.name === 'string' &&
-      SAFE_PROVIDER_NAME.test(record.name) &&
-      typeof record.display_name === 'string' &&
-      record.display_name.length <= 512 &&
-      record.supports_password === true
-    );
-  });
-  if (passwordProviders.length !== 1) throw new Error('live reconciliation password provider is ambiguous');
-  const provider = passwordProviders[0] as Record<string, unknown>;
-  return provider.name as string;
-}
-
-function assertPasswordLogin(value: unknown): void {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('live reconciliation login was not verified');
-  }
-  const record = value as Record<string, unknown>;
-  if (
-    record.ok !== true ||
-    record.next !== '/' ||
-    Object.keys(record).some((key) => key !== 'ok' && key !== 'next')
-  ) {
-    throw new Error('live reconciliation login was not verified');
-  }
-}
-
-function isBoundedNonEmptyString(value: unknown, maxLength: number): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= maxLength;
-}
