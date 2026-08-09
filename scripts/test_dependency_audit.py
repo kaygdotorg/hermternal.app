@@ -522,6 +522,83 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(blocking, {"gt-major", "gt-minor", "gt-wildcard"}, result)
         self.assertEqual(result["lockfile"]["peer_dependency_gaps"], [], result)
 
+    def test_prerelease_admission_requires_an_exact_comparator_core(self) -> None:
+        cases = (
+            ("1.2.3-beta.1", "^1.0.0-beta.1", False),
+            ("1.2.3-beta.1", ">=1.0.0-beta.1", False),
+            ("2.0.0-beta.1", ">=1.0.0-beta.1 <2.0.0", False),
+            ("1.0.0-beta.2", "^1.0.0-beta.1", True),
+            ("1.0.0-beta.2", ">=1.0.0-beta.1", True),
+            ("2.0.0-beta.0", ">=1.0.0 <2.0.0-beta.1", True),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "dependencies": {
+                "mismatch-caret": "^1.0.0-beta.1",
+                "mismatch-comparator": ">=1.0.0-beta.1",
+                "mismatch-set": ">=1.0.0-beta.1 <2.0.0",
+                "admitted-caret": "^1.0.0-beta.1",
+                "admitted-comparator": ">=1.0.0-beta.1",
+                "admitted-set": ">=1.0.0 <2.0.0-beta.1",
+            },
+            "peerDependencies": {
+                "required-peer-mismatch": ">=1.0.0-beta.1",
+                "required-peer-admitted": ">=1.0.0-beta.1",
+            },
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                "mismatch-caret": package_record("mismatch-caret", "1.2.3-beta.1"),
+                "mismatch-comparator": package_record("mismatch-comparator", "1.2.3-beta.1"),
+                "mismatch-set": package_record("mismatch-set", "2.0.0-beta.1"),
+                "admitted-caret": package_record("admitted-caret", "1.0.0-beta.2"),
+                "admitted-comparator": package_record("admitted-comparator", "1.0.0-beta.2"),
+                "admitted-set": package_record("admitted-set", "2.0.0-beta.0"),
+                "required-peer-mismatch": package_record("required-peer-mismatch", "1.2.3-beta.1"),
+                "required-peer-admitted": package_record("required-peer-admitted", "1.0.0-beta.2"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(
+            blocking,
+            {"mismatch-caret", "mismatch-comparator", "mismatch-set", "required-peer-mismatch"},
+            result,
+        )
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": "required-peer-mismatch",
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+            ],
+            result,
+        )
+
     def test_semver_ranges_are_strict_and_prerelease_safe(self) -> None:
         manifest = json.dumps(
             {

@@ -733,8 +733,12 @@ def _range_matches(version: str, specification: str) -> bool:
             # accept a valid arm while silently ignoring unsupported syntax.
             return False
     for terms in parsed_alternatives:
-        if actual.prerelease and not any(term.version.prerelease for term in terms):
-            continue
+        if actual.prerelease:
+            admitted_cores = {
+                term.version.core for term in terms if term.version.prerelease
+            }
+            if actual.core not in admitted_cores:
+                continue
         if all(_matches_term(actual, term) for term in terms):
             return True
     return False

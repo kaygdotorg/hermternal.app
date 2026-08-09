@@ -101,8 +101,9 @@ never falls back to an unmatched local version: unsupported, malformed, or
 unsatisfied transitive and peer specifications fail closed. Its bounded npm
 subset requires canonical numeric components, rejects leading-zero and repeated
 `v` forms, validates every union arm, and excludes prerelease candidates from
-caret, tilde, comparator, and wildcard ranges unless the range arm explicitly
-admits a prerelease. Comparator operands with omitted or wildcard components
+caret, tilde, comparator, and wildcard ranges unless the range arm contains a
+prerelease comparator with the candidate's exact major, minor, and patch tuple.
+Comparator operands with omitted or wildcard components
 use npm partial expansion: `>1` becomes `>=2.0.0`, `>1.2.x` becomes
 `>=1.3.0`, and `<=1.2.x` becomes `<1.3.0`; comparator operands that are only a
 wildcard are rejected. The same rules apply to required peer ranges. An `npm:`
