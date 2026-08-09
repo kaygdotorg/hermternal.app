@@ -83,9 +83,12 @@ an independent check verifies it; retaining their digests must not silently
 claim parity. Static-tree and Git trust boundaries have explicit resource and
 special-file limits: static provenance is bounded to regular-file data and
 rejects symlinks and other special files, with one monotonic deadline covering
-root resolution through the final digest return. Git provenance uses timed
-commands with bounded output and diagnostics. Its bounded local metadata scan
-rejects nested symlink escapes, include/includeIf directives, and every
+root resolution through the final digest return. Git provenance uses one
+total monotonic operation deadline beginning before repository-root and
+metadata discovery; that same deadline covers link scans, recursive snapshots,
+validation, Git spawn, output collection, and post-command assertions. Output
+and diagnostics are bounded. Its bounded local metadata scan rejects nested
+symlink escapes, include/includeIf directives, and every
 promisor or partial-clone selector, including key-only booleans and active
 `config.worktree`; external Git configuration is disabled. The checkout root is pinned by descriptor identity and every Git command
 fchdirs from that retained descriptor; no command uses pathname-based `git -C`
