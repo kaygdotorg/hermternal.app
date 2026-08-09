@@ -253,6 +253,44 @@ test.describe('credential-safe auth-proof helper regressions', () => {
     Object.setPrototypeOf(customPrototype, { inheritedField: true });
     expect(storageEvidenceEqual(base, customPrototype)).toBe(false);
 
+    // Values alone are insufficient proof: descriptor mutability changes must
+    // reject at both the top-level fingerprint and nested truncation record.
+    const fingerprintWritable = supportedEvidence();
+    Object.defineProperty(fingerprintWritable, 'fingerprint', {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: fingerprintWritable.fingerprint
+    });
+    expect(storageEvidenceEqual(base, fingerprintWritable)).toBe(false);
+
+    const fingerprintConfigurable = supportedEvidence();
+    Object.defineProperty(fingerprintConfigurable, 'fingerprint', {
+      configurable: false,
+      enumerable: true,
+      writable: true,
+      value: fingerprintConfigurable.fingerprint
+    });
+    expect(storageEvidenceEqual(base, fingerprintConfigurable)).toBe(false);
+
+    const truncationAnyWritable = supportedEvidence();
+    Object.defineProperty(truncationAnyWritable.truncation, 'any', {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: truncationAnyWritable.truncation.any
+    });
+    expect(storageEvidenceEqual(base, truncationAnyWritable)).toBe(false);
+
+    const truncationAnyConfigurable = supportedEvidence();
+    Object.defineProperty(truncationAnyConfigurable.truncation, 'any', {
+      configurable: false,
+      enumerable: true,
+      writable: true,
+      value: truncationAnyConfigurable.truncation.any
+    });
+    expect(storageEvidenceEqual(base, truncationAnyConfigurable)).toBe(false);
+
     let getterCalls = 0;
     const accessor = supportedEvidence();
     Object.defineProperty(accessor, 'fingerprint', {
