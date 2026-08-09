@@ -9,7 +9,7 @@
   import SessionList from './SessionList.svelte';
   import StateBanner from './StateBanner.svelte';
   import Timeline from './Timeline.svelte';
-  import type { LiveWorkspacePermanentFailure } from './live-workspace-session';
+  import type { LiveWorkspaceDraft, LiveWorkspacePermanentFailure } from './live-workspace-session';
   import { DEFAULT_SESSIONS, timelineForState } from './fixtures';
   import type {
     Appearance,
@@ -17,7 +17,6 @@
     TimelineItem,
     WorkspaceAction,
     WorkspaceDataSource,
-    WorkspaceActionHandler,
     WorkspaceRuntimeState
   } from './types';
 
@@ -42,7 +41,10 @@
   export let chatFocusHandoff = false;
   export let terminalModeEnabled = true;
   export let terminalModeDisabledReason = 'Terminal is available after the first message is saved.';
-  export let onAction: WorkspaceActionHandler = () => {};
+  /** The live root owns this ephemeral state; the preview only restores and emits it. */
+  export let composerDraft: Readonly<LiveWorkspaceDraft> | undefined = undefined;
+  export let onDraftChange: (draft: LiveWorkspaceDraft | undefined) => void = () => {};
+  export let onAction: (action: WorkspaceAction) => void | boolean = () => {};
 
   let inspectorVisible = artifactInspectorEnabled;
   let mobileSidebarOpen = false;
@@ -231,7 +233,7 @@
     }
   }
 
-  function handleAction(action: WorkspaceAction): void {
+  function handleAction(action: WorkspaceAction): void | boolean {
     // `inert` is the browser and accessibility boundary; this handler guard is
     // the matching programmatic boundary for synthetic or forced DOM events.
     if (compatibilityBlocked && !recoveryActionAllowed(action)) return;
@@ -245,7 +247,11 @@
     }
     if (action.type === 'edit-title') localTitle = action.title;
     if (action.type === 'set-model') localModel = action.model;
-    onAction(action);
+    return onAction(action);
+  }
+
+  function handleDraftChange(next: LiveWorkspaceDraft | undefined): void {
+    onDraftChange(next);
   }
 </script>
 
@@ -338,7 +344,9 @@
             disabled={composerDisabled}
             isStreaming={state === 'streaming'}
             model={localModel}
+            retainedDraft={composerDraft}
             onAction={handleAction}
+            onDraftChange={handleDraftChange}
           />
         </div>
       </div>

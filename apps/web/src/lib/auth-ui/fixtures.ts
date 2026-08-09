@@ -27,6 +27,8 @@ export function validateAuthProviders(value: unknown): AuthProvider[] | null {
       provider.monogram.trim() === '' ||
       typeof provider.description !== 'string' ||
       provider.description.trim() === '' ||
+      (provider.mobileDescription !== undefined &&
+        (typeof provider.mobileDescription !== 'string' || provider.mobileDescription.trim() === '')) ||
       !isProviderKind(provider.kind)
     ) {
       return null;
@@ -48,13 +50,15 @@ export const DEFAULT_PROVIDERS: AuthProvider[] = [
     name: 'Nous',
     monogram: 'N',
     kind: 'oauth',
-    description: 'OAuth · local fixture only'
+    description: 'OAuth · opens the provider',
+    mobileDescription: 'OAuth provider'
   },
   {
     id: 'hermes-password',
     name: 'Hermes password',
     monogram: 'H',
     kind: 'password',
-    description: 'Username and password supported'
+    description: 'Username and password supported',
+    mobileDescription: 'Username and password'
   }
 ];

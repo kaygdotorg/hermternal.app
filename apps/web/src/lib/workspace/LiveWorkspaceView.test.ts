@@ -35,6 +35,14 @@ function createSession(snapshot: LiveWorkspaceSnapshot, extras: Record<string, u
     createSession: vi.fn().mockResolvedValue(undefined),
     selectSession: vi.fn().mockResolvedValue(undefined),
     sendPrompt: vi.fn(),
+    setComposerDraft: vi.fn((draft) => {
+      current = { ...current, ...(draft === undefined ? { draft: undefined } : { draft }) };
+      listener?.(current);
+    }),
+    clearComposerDraft: vi.fn(() => {
+      current = { ...current, draft: undefined };
+      listener?.(current);
+    }),
     stop: vi.fn().mockResolvedValue(undefined),
     retryConnection: vi.fn().mockResolvedValue(undefined),
     cancelReconnect: vi.fn(),
@@ -101,6 +109,53 @@ describe('LiveWorkspaceView', () => {
     view.unmount();
     expect(session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(session.dispose).not.toHaveBeenCalled();
+  });
+
+  it('restores the root-owned draft after the authenticated view remounts', async () => {
+    const session = createSession({
+      state: 'ready',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: []
+    });
+    const first = render(LiveWorkspaceView, { session });
+    const editor = screen.getByRole('textbox', { name: 'Message Hermes' });
+    fireEvent.input(editor, { target: { value: 'Keep this across auth recovery' } });
+    await waitFor(() =>
+      expect(session.setComposerDraft).toHaveBeenCalledWith({
+        text: 'Keep this across auth recovery',
+        attachments: []
+      })
+    );
+
+    first.unmount();
+    render(LiveWorkspaceView, { session });
+
+    expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toHaveValue(
+      'Keep this across auth recovery'
+    );
+  });
+
+  it('clears the root-owned draft when Terminal is explicitly closed or detached', async () => {
+    const terminal = createTerminalBridge();
+    const session = createSession({
+      state: 'ready',
+      mode: 'terminal',
+      sessions: [{ id: 'session-1', title: 'Live session', group: 'recent' }],
+      activeSessionId: 'session-1',
+      title: 'Live session',
+      model: 'Hermes 4',
+      timeline: [],
+      draft: { text: 'discard on terminal teardown', attachments: [] }
+    }, { terminal });
+    render(LiveWorkspaceView, { session });
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Close terminal' }));
+
+    expect(session.closeTerminal).toHaveBeenCalledTimes(1);
+    expect(session.clearComposerDraft).toHaveBeenCalledTimes(1);
   });
 
   it('forwards the bridge-stamped active lifecycle through the rendered 4401 action', async () => {

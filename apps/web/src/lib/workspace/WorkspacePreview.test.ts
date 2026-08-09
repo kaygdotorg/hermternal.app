@@ -80,6 +80,41 @@ describe('WorkspacePreview', () => {
     });
   });
 
+  it('restores the live composer draft and forwards later edits to the root callback', async () => {
+    const onDraftChange = vi.fn();
+    render(WorkspacePreview, {
+      state: 'ready',
+      dataMode: 'live',
+      composerDraft: {
+        text: 'Restored live draft',
+        attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+      },
+      onDraftChange
+    });
+
+    const editor = screen.getByRole('textbox', { name: 'Message Hermes' });
+    expect(editor).toHaveValue('Restored live draft');
+    fireEvent.input(editor, { target: { value: 'Restored live draft edited' } });
+
+    await waitFor(() =>
+      expect(onDraftChange).toHaveBeenLastCalledWith({
+        text: 'Restored live draft edited',
+        attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+      })
+    );
+  });
+
+  it('retains the composer draft when its send action is rejected by the live owner', async () => {
+    const onAction = vi.fn(() => false);
+    render(WorkspacePreview, { state: 'ready', dataMode: 'live', onAction });
+    const editor = screen.getByRole('textbox', { name: 'Message Hermes' });
+    fireEvent.input(editor, { target: { value: 'Keep after rejected send' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(onAction).toHaveBeenCalledWith({ type: 'send', text: 'Keep after rejected send' });
+    expect(editor).toHaveValue('Keep after rejected send');
+  });
+
   it('keeps approval and clarification actions enabled only in the ready state', async () => {
     const states = [
       'ready',
