@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Verify the v2 aggregate fixture authority from immutable Git objects.
+"""Verify the hardened aggregate fixture authority from immutable Git objects.
 
-This verifier is intentionally separate from the aggregate scanner. The legacy v1 authority (its schema plus six legacy fields) remains readable
-at its historical path, while the new multi-artifact bootstrap uses the distinct
-v2 path and schema. Stage two pins
-the checked-in predecessor bytes only; the later scanner correction must rebase
-onto the merged predecessor and create its next authority independently. The
-checkout is compared with authority bytes read from the local Git object
-database, so replacing the visible authority file or refreshing local hashes
-cannot silently authorize different scanner inputs.
+This verifier is intentionally separate from the aggregate scanner. The legacy
+v1 authority and bootstrap v2 authority remain readable historical records,
+while the active standalone trust root is the distinct hardened v2 path. The
+hardened authority is introduced only after its direct predecessor commit has
+finalized the scanner, index, tests, and baseline. The checkout is compared with
+authority bytes read from the local Git object database, so replacing the
+visible authority file or refreshing local hashes cannot silently authorize
+different scanner inputs.
 """
 
 from __future__ import annotations
@@ -43,13 +43,25 @@ LEGACY_AUTHORITY_KEYS = (
 )
 LEGACY_VALIDATOR_PATH = "contracts/fixtures/validator/validate.py"
 LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
-AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+# Preserve the bootstrap path as historical evidence. The active verifier uses
+# only the independently pinned hardened path below; it never falls back to the
+# bootstrap or legacy record when that path is missing or stale.
+BOOTSTRAP_AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+BOOTSTRAP_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
+BOOTSTRAP_AUTHORITY_ROLE = "bootstrap_predecessor"
+BOOTSTRAP_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+BOOTSTRAP_AUTHORITY_COMMIT = "f92f339cf26c1da760e99af6508dfabfb6bfb383"
+AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.hardened.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
-AUTHORITY_ROLE = "bootstrap_predecessor"
-# The bootstrap is approved only for this reviewed external predecessor. An
-# ancestry check alone would let a self-consistent but unreviewed commit become
-# the authority source.
-APPROVED_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+AUTHORITY_ROLE = "aggregate_predecessor"
+# These exact pins keep a self-consistent but unreviewed history from selecting
+# the active authority. The hardened authority commit is a direct child of its
+# aggregate predecessor and is read from the local Git object database only.
+EXPECTED_AUTHORITY_COMMIT = "fc33b1f461321f319b8c2566d9f0faf6c535b77b"
+EXPECTED_SOURCE_COMMIT = "a707f5af9612118d6d41450c5090e5c11c3e5c10"
+# Retain the old name for focused historical tests and callers while the active
+# trust root moves from the bootstrap predecessor to the hardened predecessor.
+APPROVED_SOURCE_COMMIT = EXPECTED_SOURCE_COMMIT
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
@@ -601,6 +613,18 @@ def _validate_snapshot_repository(snapshot_root: Path) -> Path:
         _require_missing(git_dir / relative)
     _validate_local_config(_read_bounded_regular_path(git_dir / "config", MAX_GIT_OUTPUT))
     _walk_plain_tree(git_dir / "objects")
+    pack_directory = git_dir / "objects" / "pack"
+    pack_metadata = _lstat_optional(pack_directory)
+    if pack_metadata is not None:
+        _require(stat.S_ISDIR(pack_metadata.st_mode))
+        try:
+            # The standalone success fixture is deliberately materialized as
+            # loose objects. A retained pack can hide a dependency on an
+            # unreviewed or promisor-backed object source, so packed inputs are
+            # rejected instead of relying on the pack-size budget as trust.
+            _require(not any(pack_directory.iterdir()))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AuthorityError() from exc
     _walk_plain_tree(git_dir / "refs")
     # Verify every copied object before trusting any authority or artifact blob.
     _git(root, "fsck", "--full", "--strict", "--no-reflogs", "--no-progress")
@@ -891,7 +915,44 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     return stdout
 
 
-def _authority_introduction_commit(object_repo: Path) -> str:
+def _authority_introduction_commit(
+    object_repo: Path,
+    authority_path: str = AUTHORITY_PATH,
+    expected_commit: str | None = None,
+) -> str:
+    """Resolve a pinned authority introduction without trusting the checkout tip.
+
+    The active hardened authority is an exact reviewed Git object that may be
+    absent from a fresh single-head clone until the offline bundle seeds it.
+    When a pin is supplied, verify that the pinned commit changes this path
+    instead of inferring a replacement from ``HEAD``. The unpinned form remains
+    useful for bounded-output regressions and historical callers.
+    """
+
+    if expected_commit is not None:
+        _require(HEX40.fullmatch(expected_commit) is not None)
+        _require(_git(object_repo, "cat-file", "-t", expected_commit) == b"commit\n")
+        changes = _git(
+            object_repo,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            expected_commit,
+            "--",
+            authority_path,
+        )
+        try:
+            entries = changes.decode("ascii").splitlines()
+        except UnicodeError as exc:
+            raise AuthorityError() from exc
+        _require(
+            len(entries) == 1
+            and entries[0].split("\t")[-1] == authority_path
+            and entries[0].split("\t", 1)[0] in {"A", "M"}
+        )
+        return expected_commit
+
     output = _git(
         object_repo,
         "log",
@@ -900,7 +961,7 @@ def _authority_introduction_commit(object_repo: Path) -> str:
         "--first-parent",
         "HEAD",
         "--",
-        AUTHORITY_PATH,
+        authority_path,
     )
     try:
         commits = output.decode("ascii").splitlines()
@@ -980,17 +1041,42 @@ def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
         raise AuthorityError() from exc
 
 
-def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
-    """Load and verify the v2 authority from immutable Git history."""
+def load_trusted_authority(
+    object_repo: Path,
+    *,
+    authority_path: str = AUTHORITY_PATH,
+    expected_authority_commit: str | None = EXPECTED_AUTHORITY_COMMIT,
+    expected_source_commit: str | None = EXPECTED_SOURCE_COMMIT,
+) -> dict[str, Any]:
+    """Load and verify the pinned hardened authority from an isolated snapshot."""
 
     try:
+        _require(type(authority_path) is str and authority_path and "\x00" not in authority_path)
+        if expected_authority_commit is not None:
+            _require(HEX40.fullmatch(expected_authority_commit) is not None)
+        if expected_source_commit is not None:
+            _require(HEX40.fullmatch(expected_source_commit) is not None)
         with _validate_object_repository(object_repo) as isolated_repo:
-            introduction = _authority_introduction_commit(isolated_repo)
-            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{AUTHORITY_PATH}")
+            introduction = _authority_introduction_commit(
+                isolated_repo,
+                authority_path,
+                expected_commit=expected_authority_commit,
+            )
+            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{authority_path}")
             authority = _parse_json(authority_bytes)
             source_commit, records = _validate_manifest(authority)
+            if expected_source_commit is not None:
+                _require(source_commit == expected_source_commit)
             _require(source_commit != introduction)
             _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
+            try:
+                first_parent = _git(isolated_repo, "rev-parse", f"{introduction}^1").decode("ascii").strip()
+            except UnicodeError as exc:
+                raise AuthorityError() from exc
+            # The authority must be a direct child of the exact manifest source;
+            # ancestry alone would permit an unrelated scanner/index/baseline
+            # commit to sit between the bytes and the authority record.
+            _require(first_parent == source_commit)
             _require(_git(isolated_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
             for record in records:
                 blob_oid, data = _git_blob(isolated_repo, source_commit, record["path"])
@@ -998,7 +1084,7 @@ def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
                 _require(len(data) == record["size_bytes"])
                 _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
-            "authority_path": AUTHORITY_PATH,
+            "authority_path": authority_path,
             "schema": AUTHORITY_SCHEMA,
             "authority_commit": introduction,
             "source_commit": source_commit,
@@ -1076,7 +1162,7 @@ def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
             _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
             "ok": True,
-            "stage": "bootstrap_predecessor_v2",
+            "stage": "aggregate_predecessor_v2",
             "authority_path": authority["authority_path"],
             "schema": authority["schema"],
             "authority_commit": authority["authority_commit"],

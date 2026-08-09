@@ -3,9 +3,9 @@
 ## Purpose
 
 The aggregate fixture registry has a staged trust boundary. The legacy v1
-authority remains a readable compatibility record. The new multi-artifact
-bootstrap is a separate v2 authority and is the only authority consumed by the
-standalone verifier in this change. Neither format is a production attestation;
+authority remains a readable compatibility record. The bootstrap v2 authority
+remains a separate historical record, while the hardened v2 authority is the
+active standalone trust root. Neither format is a production attestation;
 `live_claim` remains `false`.
 
 ## Version and path history
@@ -34,29 +34,38 @@ and the new multi-artifact authority is introduced at:
 
 `scripts/fixture_registry_authority.v2.json`
 
-The new document explicitly declares
-`hermternal.fixture-registry-authority.v2`. The implementation accepts only the
-approved external predecessor
-`abb6754bddd1cf18927b0172ed9fa3456235b035`; it does not accept an arbitrary
-self-consistent ancestor. The pin is not the verifier's implementation commit
-and is not the scanner-preparation change.
+The bootstrap document explicitly declares
+`hermternal.fixture-registry-authority.v2` with role `bootstrap_predecessor` and
+is pinned to the historical external source
+`abb6754bddd1cf18927b0172ed9fa3456235b035`. It remains readable evidence and is
+not selected as the active trust root.
 
-## Active v2 loading rule
+The hardened document is introduced at:
 
-The standalone verifier reads only the v2 authority path from the sole
-first-parent Git commit that introduced that path. It does not use the visible
-checkout copy as its authority source. It reads the v2 bytes from the local Git
-object database, validates the schema and key order, and requires all of the
-following:
+`scripts/fixture_registry_authority.v2.hardened.json`
 
-- the declared predecessor exactly equals the approved external commit
-  `abb6754bddd1cf18927b0172ed9fa3456235b035` and is a distinct ancestor of the
-  v2 authority introduction commit;
+Its role is `aggregate_predecessor`, its source is the exact external commit
+`a707f5af9612118d6d41450c5090e5c11c3e5c10`, and its introduction commit is the
+direct child
+`fc33b1f461321f319b8c2566d9f0faf6c535b77b`. The checked-in pin and offline
+object bundle bind those exact commits without accepting a self-consistent
+replacement history.
+
+## Active hardened v2 loading rule
+
+The standalone verifier reads only the hardened v2 authority path from its
+exact pinned Git commit. It does not use the visible checkout copy as its
+authority source. It reads the authority bytes from the local Git object
+database, validates the schema and key order, and requires all of the following:
+
+- the pinned introduction commit changes the hardened authority path and its
+  first parent is exactly `a707f5af9612118d6d41450c5090e5c11c3e5c10`;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
-- the checkout copies of the v2 authority, index, validator tests, validator,
-  and validation baseline exactly match those immutable predecessor records.
+- the checkout copies of the hardened authority, index, validator tests,
+  validator, and validation baseline exactly match those immutable predecessor
+  records.
 
 The legacy v1 path remains readable through the verifier's compatibility loader,
 but it is not selected as the active v2 trust root. The v2 path selection is
@@ -71,20 +80,19 @@ opens the caller root and `.git` directory from the held descriptors and copies
 the complete Git metadata tree into a private mode-700 temporary snapshot. The
 copy is chunked and category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
-index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) so hostile packed
+inputs fail within the existing budget. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The 8 MiB pack cap
-comes from the supported repository's fresh single-branch remote-clone
-observation of a roughly 2.1 MiB pack, leaving measured growth headroom without
-making one unbounded file acceptable; the 1 MiB non-pack cap remains above the
-checked-in evidence and metadata sizes. It rejects symlinks/non-regular entries
-and checks source metadata before and after each copy. Git is invoked only
-against that snapshot,
-so a concurrent rename or symlink replacement of the caller's `.git`, nested
-fanout/pack/ref path, config, or metadata cannot redirect a later read. The
-snapshot also uses a descriptor walk of the complete `objects` and `refs`
-trees with `O_NOFOLLOW` as a second structural check.
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The active success
+fixture is materialized from the checked-in bundle as the exact reachable
+closure of loose objects; after the bounded snapshot, any nonempty pack
+metadata directory is rejected rather than trusted. The 1 MiB non-pack cap and
+8 MiB pack cap remain unchanged. The verifier rejects symlinks/non-regular
+entries and checks source metadata before and after each copy. Git is invoked
+only against that snapshot, so a concurrent rename or symlink replacement of
+the caller's `.git`, nested fanout/pack/ref path, config, or metadata cannot
+redirect a later read. The snapshot also uses a descriptor walk of the complete
+`objects` and `refs` trees with `O_NOFOLLOW` as a second structural check.
 
 The verifier rejects local `info/grafts`, shallow metadata,
 `objects/info/alternates`, `objects/info/http-alternates`, replacement refs,
@@ -162,9 +170,10 @@ configuration, annotated-tag source objects, FIFO artifact paths, hostile Git
 replacement races after descriptor validation, deterministic ancestor
 replacement during descriptor opening, corrupted loose objects under existing
 OIDs, oversized loose-object, reflog, and metadata snapshot files, and an
-oversized pack-directory file over the category-specific pack cap. A real
-roughly 2.1 MiB pack in a fresh branch-only remote clone passes. It also rejects
-an aggregate snapshot over the total byte budget before copying the next file
+oversized pack-directory file over the category-specific pack cap. A real pack
+in a fresh branch-only remote clone is rejected even when it is below that cap;
+only the exact loose-object success fixture is accepted. It also rejects an
+aggregate snapshot over the total byte budget before copying the next file
 and a snapshot deadline overrun. It bounds oversized blob, stderr, and history output
 in both interpreter modes, terminates no-output timeouts, cleans up selector
 setup failures, and kills descendants that retain stdout or stderr pipes. The
@@ -177,8 +186,9 @@ local scanner or baseline rewrite.
 
 ## Current aggregate sequencing
 
-The current aggregate validator remains intentionally blocked in this bootstrap
-change. The present blocked evidence is caused by three stale artifact records
+The current aggregate validator remains intentionally blocked in this
+hardened authority adoption. The present blocked evidence is caused by three
+stale artifact records
 under `source-audit/compatibility-gate` in the current aggregate index; those
 records are not the future scanner-boundary blockers. Normal and optimized
 validator runs have the same bounded result:
@@ -198,12 +208,12 @@ preparation rebase are:
 - `contracts/fixtures/deployment-security/external-allowlist/test_validate.py`
 - `contracts/fixtures/uncertain-delivery/test_validate.py`
 
-After this v2 authority bootstrap is independently reviewed and merged, the
-scanner-preparation lane must rebase onto the merged external predecessor,
+After this hardened authority adoption is independently reviewed and merged,
+the scanner-preparation lane must rebase onto the merged external predecessor,
 correct those three scanner cases without weakening aggregate trust, regenerate
 the complete index and baseline, and create its next authority from that merged
-external predecessor. The historical v1 path must remain readable while that
-migration is reviewed.
+external predecessor. The historical v1 and bootstrap v2 paths must remain
+readable while that migration is reviewed.
 
 ## Scope and evidence
 
