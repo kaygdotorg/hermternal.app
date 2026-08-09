@@ -37,7 +37,7 @@ public struct ContractInputError: Error, Equatable, Sendable, CustomStringConver
 
     public init(code: ContractInputCode, message: String) {
         self.code = code
-        self.message = message
+        self.message = String(message.prefix(ParityBounds.maxErrorMessageLength))
     }
 
     public var description: String {
@@ -56,6 +56,8 @@ public enum ParityBounds {
     public static let maxJSONNodes = 200_000
     public static let maxJSONStringLength = 4_096
     public static let maxJSONKeyLength = 256
+    public static let maxIntegerDigits = 100
+    public static let maxNumberLength = 256
     public static let maxInventoryFiles = 512
     public static let maxCaseCount = 512
     public static let maxCaseIDLength = 120
@@ -370,22 +372,27 @@ private func reject(_ code: ContractInputCode, _ message: String) -> ContractInp
 }
 
 private func object(_ value: JSONValue?, _ label: String) throws -> [String: JSONValue] {
-    guard let value = value, case .object(let result) = value else {
-        throw reject(.malformedInput, "\(label) must be an object")
+    guard let value = value, case .object(let result) = value,
+          result.count <= ParityBounds.maxJSONNodes else {
+        throw reject(.malformedInput, "\(label) must be a bounded object")
     }
     return result
 }
 
 private func array(_ value: JSONValue?, _ label: String) throws -> [JSONValue] {
-    guard let value = value, case .array(let result) = value else {
-        throw reject(.malformedInput, "\(label) must be an array")
+    guard let value = value, case .array(let result) = value,
+          result.count <= ParityBounds.maxJSONNodes else {
+        throw reject(.malformedInput, "\(label) must be a bounded array")
     }
     return result
 }
 
 private func string(_ value: JSONValue?, _ label: String) throws -> String {
-    guard let value = value, case .string(let result) = value, !result.isEmpty else {
-        throw reject(.malformedInput, "\(label) must be a non-empty string")
+    guard let value = value, case .string(let result) = value,
+          !result.isEmpty,
+          result.count <= ParityBounds.maxJSONStringLength,
+          !result.contains("\\0") else {
+        throw reject(.malformedInput, "\(label) must be a bounded non-empty string")
     }
     return result
 }
@@ -667,6 +674,205 @@ private func sha256Hex(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
+private struct StrictJSONParser {
+    private let bytes: [UInt8]
+    private let label: String
+    private var index = 0
+    private var nodeCount = 0
+    private let deadline: UInt64
+
+    init(data: Data, label: String) {
+        self.bytes = Array(data)
+        self.label = label
+        self.deadline = DispatchTime.now().uptimeNanoseconds + ParityBounds.maxReadDurationNanoseconds
+    }
+
+    private func rejectJSON() -> ContractInputError {
+        reject(.malformedJSON, "\(label) is not valid JSON")
+    }
+
+    private mutating func checkBudget(depth: Int) throws {
+        guard DispatchTime.now().uptimeNanoseconds <= deadline else {
+            throw reject(.malformedInput, "\(label) parse exceeded the time limit")
+        }
+        guard depth <= ParityBounds.maxJSONDepth else {
+            throw reject(.malformedInput, "\(label) exceeds the JSON depth limit")
+        }
+        nodeCount += 1
+        guard nodeCount <= ParityBounds.maxJSONNodes else {
+            throw reject(.malformedInput, "\(label) exceeds the JSON node limit")
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while index < bytes.count && [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) {
+            index += 1
+        }
+    }
+
+    private mutating func consume(_ byte: UInt8) -> Bool {
+        guard index < bytes.count, bytes[index] == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private mutating func parseString() throws -> String {
+        guard consume(0x22) else { throw rejectJSON() }
+        let tokenStart = index - 1
+        var escaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            index += 1
+            if byte < 0x20 && !escaped {
+                throw rejectJSON()
+            }
+            if escaped {
+                escaped = false
+                continue
+            }
+            if byte == 0x5C {
+                escaped = true
+                continue
+            }
+            if byte == 0x22 {
+                let token = Data(bytes[tokenStart..<index])
+                guard let value = try? JSONSerialization.jsonObject(with: token, options: [.fragmentsAllowed]) as? String,
+                      value.count <= ParityBounds.maxJSONStringLength,
+                      !value.contains("\\0") else {
+                    throw rejectJSON()
+                }
+                return value
+            }
+        }
+        throw rejectJSON()
+    }
+
+    private mutating func parseNumber() throws -> JSONValue {
+        let start = index
+        if consume(0x2D) { }
+        guard index < bytes.count else { throw rejectJSON() }
+        if bytes[index] == 0x30 {
+            index += 1
+        } else {
+            guard bytes[index] >= 0x31 && bytes[index] <= 0x39 else { throw rejectJSON() }
+            while index < bytes.count, bytes[index] >= 0x30 && bytes[index] <= 0x39 {
+                index += 1
+            }
+        }
+        var isInteger = true
+        if consume(0x2E) {
+            isInteger = false
+            guard index < bytes.count, bytes[index] >= 0x30 && bytes[index] <= 0x39 else {
+                throw rejectJSON()
+            }
+            while index < bytes.count, bytes[index] >= 0x30 && bytes[index] <= 0x39 {
+                index += 1
+            }
+        }
+        if index < bytes.count, bytes[index] == 0x65 || bytes[index] == 0x45 {
+            isInteger = false
+            index += 1
+            if index < bytes.count, bytes[index] == 0x2B || bytes[index] == 0x2D {
+                index += 1
+            }
+            guard index < bytes.count, bytes[index] >= 0x30 && bytes[index] <= 0x39 else {
+                throw rejectJSON()
+            }
+            while index < bytes.count, bytes[index] >= 0x30 && bytes[index] <= 0x39 {
+                index += 1
+            }
+        }
+        let token = String(decoding: bytes[start..<index], as: UTF8.self)
+        guard token.count <= ParityBounds.maxNumberLength else { throw rejectJSON() }
+        if isInteger {
+            let digits = token.drop(while: { $0 == "-" })
+            guard digits.count <= ParityBounds.maxIntegerDigits else { throw rejectJSON() }
+        }
+        guard let value = Double(token), value.isFinite else { throw rejectJSON() }
+        return .number(value)
+    }
+
+    private mutating func parseLiteral(_ literal: String, value: JSONValue) throws -> JSONValue {
+        let encoded = Array(literal.utf8)
+        guard bytes[index...].starts(with: encoded) else { throw rejectJSON() }
+        index += encoded.count
+        return value
+    }
+
+    private mutating func parseArray(depth: Int) throws -> JSONValue {
+        guard consume(0x5B) else { throw rejectJSON() }
+        try checkBudget(depth: depth)
+        skipWhitespace()
+        var values: [JSONValue] = []
+        if consume(0x5D) { return .array(values) }
+        while true {
+            guard values.count < ParityBounds.maxJSONNodes else {
+                throw reject(.malformedInput, "\(label) exceeds the JSON array limit")
+            }
+            values.append(try parseValue(depth: depth + 1))
+            skipWhitespace()
+            if consume(0x5D) { return .array(values) }
+            guard consume(0x2C) else { throw rejectJSON() }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseObject(depth: Int) throws -> JSONValue {
+        guard consume(0x7B) else { throw rejectJSON() }
+        try checkBudget(depth: depth)
+        skipWhitespace()
+        var values: [String: JSONValue] = [:]
+        if consume(0x7D) { return .object(values) }
+        while true {
+            let key = try parseString()
+            guard key.count <= ParityBounds.maxJSONKeyLength else { throw rejectJSON() }
+            guard values[key] == nil else {
+                throw reject(.malformedJSON, "\(label) contains a duplicate object key")
+            }
+            skipWhitespace()
+            guard consume(0x3A) else { throw rejectJSON() }
+            skipWhitespace()
+            values[key] = try parseValue(depth: depth + 1)
+            skipWhitespace()
+            if consume(0x7D) { return .object(values) }
+            guard consume(0x2C) else { throw rejectJSON() }
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseValue(depth: Int) throws -> JSONValue {
+        skipWhitespace()
+        guard index < bytes.count else { throw rejectJSON() }
+        try checkBudget(depth: depth)
+        switch bytes[index] {
+        case 0x7B:
+            return try parseObject(depth: depth)
+        case 0x5B:
+            return try parseArray(depth: depth)
+        case 0x22:
+            return .string(try parseString())
+        case 0x74:
+            return try parseLiteral("true", value: .boolean(true))
+        case 0x66:
+            return try parseLiteral("false", value: .boolean(false))
+        case 0x6E:
+            return try parseLiteral("null", value: .null)
+        case 0x2D, 0x30...0x39:
+            return try parseNumber()
+        default:
+            throw rejectJSON()
+        }
+    }
+
+    mutating func parse() throws -> JSONValue {
+        skipWhitespace()
+        let value = try parseValue(depth: 0)
+        skipWhitespace()
+        guard index == bytes.count else { throw rejectJSON() }
+        return value
+    }
+}
+
 private func decodeJSON(_ data: Data, _ label: String) throws -> JSONValue {
     guard data.count <= ParityBounds.maxJSONBytes else {
         throw reject(.malformedInput, "\(label) exceeds the JSON byte limit")
@@ -674,11 +880,8 @@ private func decodeJSON(_ data: Data, _ label: String) throws -> JSONValue {
     guard String(data: data, encoding: .utf8) != nil else {
         throw reject(.malformedUTF8, "\(label) is not valid UTF-8")
     }
-    do {
-        return try JSONDecoder().decode(JSONValue.self, from: data)
-    } catch {
-        throw reject(.malformedJSON, "\(label) is not valid JSON")
-    }
+    var parser = StrictJSONParser(data: data, label: label)
+    return try parser.parse()
 }
 
 private func readJSON(
@@ -699,10 +902,20 @@ private func readJSON(
 
 private func parseRegistryFile(_ value: JSONValue?, _ label: String) throws -> RegistryFile {
     let entry = try object(value, label)
+    let digest = try string(entry["sha256"], "\(label).sha256")
+    let hexDigits = CharacterSet(charactersIn: "0123456789abcdef")
+    guard digest.count == 64,
+          digest.unicodeScalars.allSatisfy({ hexDigits.contains($0) }) else {
+        throw reject(.malformedInput, "\(label).sha256 is not a canonical digest")
+    }
+    let size = try nonNegativeInteger(entry["size_bytes"], "\(label).size_bytes")
+    guard size <= ParityBounds.maxArtifactBytes else {
+        throw reject(.malformedInput, "\(label).size_bytes exceeds the artifact limit")
+    }
     return RegistryFile(
         path: try safeRelativePath(try string(entry["path"], "\(label).path"), "\(label).path"),
-        sha256: try string(entry["sha256"], "\(label).sha256"),
-        sizeBytes: try nonNegativeInteger(entry["size_bytes"], "\(label).size_bytes")
+        sha256: digest,
+        sizeBytes: size
     )
 }
 
@@ -878,8 +1091,12 @@ public func loadCase(
     rootID: String,
     caseID: String
 ) throws -> FixtureCase {
-    guard !caseID.isEmpty, caseID.trimmingCharacters(in: .whitespacesAndNewlines) == caseID else {
-        throw reject(.malformedInput, "case ID must be a non-empty canonical string")
+    let caseIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
+    guard !caseID.isEmpty,
+          caseID.count <= ParityBounds.maxCaseIDLength,
+          caseID.trimmingCharacters(in: .whitespacesAndNewlines) == caseID,
+          caseID.unicodeScalars.allSatisfy({ caseIDCharacters.contains($0) }) else {
+        throw reject(.malformedInput, "case ID must be a bounded canonical string")
     }
     let root = try rootByID(registry, rootID)
     // A pending root is an absence of evidence, not a successful fixture.
@@ -888,6 +1105,9 @@ public func loadCase(
     }
     let artifact = try loadArtifact(repoRoot: repoRoot, root: root)
     let cases = try array(artifact["cases"], "fixture \(rootID).cases")
+    guard cases.count <= ParityBounds.maxCaseCount else {
+        throw reject(.malformedInput, "fixture \(rootID).cases exceeds the case limit")
+    }
     let matches = cases.compactMap { value -> [String: JSONValue]? in
         guard case .object(let entry) = value,
               case .string(let id)? = entry["id"], id == caseID else {

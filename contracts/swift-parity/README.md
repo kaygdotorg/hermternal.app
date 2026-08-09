@@ -31,7 +31,9 @@ Every read is rooted at a held repository descriptor. Directory and regular-file
 components use no-follow opens; regular-file metadata is checked before and
 after bounded reads, and the path is reopened from the held parent descriptor to
 detect replacement. Selected JSON artifacts must match the registry's exact
-size and SHA-256 binding. There is no pathname or glob fallback.
+size and SHA-256 binding. There is no pathname or glob fallback. Strict JSON
+parsing rejects duplicate keys and bounds bytes, depth, nodes, keys, strings,
+integers, arrays, case counts, error text, and parser time.
 
 ## Commands
 

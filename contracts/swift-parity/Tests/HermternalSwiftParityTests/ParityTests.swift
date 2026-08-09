@@ -121,6 +121,33 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testStrictJSONRejectsDuplicateKeysAndBoundsErrors() throws {
+        try withTemporaryIndex(Data("{\"schema\":\"hermternal.fixture-index.v1\",\"schema\":\"hermternal.fixture-index.v1\"}".utf8)) { temporaryRoot in
+            assertInputCode(.malformedJSON) {
+                _ = try loadRegistry(at: temporaryRoot)
+            }
+        }
+
+        let oversizedMessage = String(repeating: "x", count: ParityBounds.maxErrorMessageLength * 4)
+        let error = ContractInputError(code: .malformedInput, message: oversizedMessage)
+        XCTAssertLessThanOrEqual(error.message.count, ParityBounds.maxErrorMessageLength)
+
+        let oversized = Data(("{\"value\":\"" + String(repeating: "x", count: ParityBounds.maxJSONStringLength + 1) + "\"}").utf8)
+        try withTemporaryIndex(oversized) { temporaryRoot in
+            assertInputCode(.malformedJSON) {
+                _ = try loadRegistry(at: temporaryRoot)
+            }
+        }
+
+        var nested = "0"
+        for _ in 0..<(ParityBounds.maxJSONDepth + 2) { nested = "[" + nested + "]" }
+        try withTemporaryIndex(Data(("{\"value\":\(nested)}").utf8)) { temporaryRoot in
+            assertInputCode(.malformedInput) {
+                _ = try loadRegistry(at: temporaryRoot)
+            }
+        }
+    }
+
     func testRejectsMalformedIncompatibleAndUnsupportedRegistryInputs() throws {
         try withTemporaryIndex(Data("{\n".utf8)) { temporaryRoot in
             assertInputCode(.malformedJSON) {
