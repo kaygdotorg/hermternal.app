@@ -1,6 +1,6 @@
 {
   "schema": "hermternal.fixture-registry-authority-pin.v1",
   "authority_path": "scripts/fixture_registry_authority.v2.hardened.json",
-  "authority_commit": "41fc0b59ba680c4c7cd31026b4de48226811c3fa",
-  "source_commit": "8775f56230f733adbed7c3f42ff8fb5bae4c0001"
+  "authority_commit": "4a4d95d286a058574b54c94dc877887f11965def",
+  "source_commit": "620d837a19806a8db01589751bea60775a61146f"
 }
