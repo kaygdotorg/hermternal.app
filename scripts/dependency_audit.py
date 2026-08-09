@@ -400,6 +400,17 @@ def _is_pinned_spec(spec: str) -> bool:
     return separator > 0 and bool(SEMVER.fullmatch(alias[separator + 1 :]))
 
 
+def _expected_alias_target(spec: str) -> Optional[str]:
+    if not spec.startswith("npm:"):
+        return None
+    alias = spec[4:]
+    separator = alias.rfind("@")
+    if separator <= 0:
+        return None
+    target = alias[:separator]
+    return target if PACKAGE_NAME.fullmatch(target) else None
+
+
 def _expected_alias_version(spec: str) -> Optional[str]:
     if not spec.startswith("npm:"):
         return None
@@ -524,7 +535,20 @@ def _resolve_package(
     *,
     parent_key: Optional[str] = None,
 ) -> LockPackage:
-    candidates = [record for key, record in packages.items() if key == name or record.resolved_name == name]
+    alias_target = _expected_alias_target(spec)
+    if spec.startswith("npm:"):
+        if alias_target is None:
+            raise AuditError("package-resolution-missing")
+        # An npm alias is identified by the dependency name in the lock key,
+        # while its descriptor carries the target package name. Bind both
+        # identities before applying the exact target version below.
+        candidates = [
+            record
+            for key, record in packages.items()
+            if key == name and record.resolved_name == alias_target
+        ]
+    else:
+        candidates = [record for key, record in packages.items() if key == name or record.resolved_name == name]
     expected_version = _expected_exact_version(spec)
     if expected_version is not None:
         candidates = [record for record in candidates if record.version == expected_version]

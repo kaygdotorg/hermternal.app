@@ -251,6 +251,27 @@ class DependencyAuditTests(unittest.TestCase):
             result,
         )
 
+    def test_npm_alias_binds_target_identity_and_version(self) -> None:
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alias": "npm:target@1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        lockfile = synthetic_lock(
+            {"alias": "npm:target@1.0.0"},
+            {},
+            {
+                "alias": package_record("other", "1.0.0"),
+                "target": package_record("target", "1.0.0"),
+            },
+        )
+        result = audit.audit_bytes(manifest, lockfile, manifest_label="fixture/package.json", lockfile_label="fixture/bun.lock")
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("package-resolution-missing", self.finding_codes(result), result)
+        self.assertEqual(result["inventory"]["direct"]["runtime"][0]["resolution"], "missing", result)
+
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
         names = {item["name"] for item in result["inventory"]["transitive"]}
