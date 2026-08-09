@@ -332,7 +332,9 @@ def _split_descriptor(descriptor: str, fallback_name: str) -> tuple[str, str]:
 
 def _parse_lock_packages(document: Mapping[str, Any]) -> dict[str, LockPackage]:
     lock_version = document.get("lockfileVersion")
-    if lock_version != 1:
+    # Python considers True equal to 1, so the type check is part of the
+    # lockfile contract rather than a cosmetic validation detail.
+    if type(lock_version) is not int or lock_version != 1:
         raise AuditError("unsupported-lock-version")
     workspaces = document.get("workspaces")
     if not isinstance(workspaces, dict) or not isinstance(workspaces.get(""), dict):

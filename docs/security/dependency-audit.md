@@ -39,10 +39,11 @@ the output bound, the CLI emits one fixed sanitized `output-too-large` failure
 report and returns exit code `1`; it never reports success for a truncated or
 replaced result.
 
-The lockfile `lockfileVersion` is accepted only as the exact integer `1`.
-`configVersion` is also required to be a bounded non-negative integer and only
-that validated scalar is emitted; malformed objects, strings, booleans, floats,
-and oversized values fail closed without being copied into the report.
+The lockfile `lockfileVersion` is accepted only as the exact integer `1`;
+boolean `true` and float `1.0` lookalikes are rejected. `configVersion` is also
+required to be a bounded non-negative integer and only that validated scalar is
+emitted; malformed objects, strings, booleans, floats, and oversized values fail
+closed without being copied into the report.
 
 The report always states:
 

@@ -193,6 +193,21 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("invalid-config-version", self.finding_codes(result), result)
         self.assertIsNone(result["lockfile"]["config_version"], result)
 
+    def test_lockfile_version_requires_exact_integer_one(self) -> None:
+        manifest = json.dumps({"name": "@fixture/web", "dependencies": {}, "devDependencies": {}}).encode("utf-8")
+        for invalid_version in (True, 1.0):
+            lock_document = json.loads(synthetic_lock({}, {}, {}))
+            lock_document["lockfileVersion"] = invalid_version
+            result = audit.audit_bytes(
+                manifest,
+                json.dumps(lock_document).encode("utf-8"),
+                manifest_label="fixture/package.json",
+                lockfile_label="fixture/bun.lock",
+            )
+            self.assertEqual(result["status"], "fail", (invalid_version, result))
+            self.assertIn("unsupported-lock-version", self.finding_codes(result), (invalid_version, result))
+            self.assertIsNone(result["lockfile"]["lockfile_version"], (invalid_version, result))
+
     def test_invalid_integrity_is_blocking_and_sanitized(self) -> None:
         mutated = re.sub(
             rb', "sha512-[^"]+"(?=\])',
