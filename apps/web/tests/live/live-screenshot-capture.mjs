@@ -253,11 +253,18 @@ manifest_size = int(sys.argv[14])
 
 def verify_source():
     parent_stat = os.fstat(source_fd)
-    if parent_stat.st_dev != parent_dev or parent_stat.st_ino != parent_ino:
+    if (
+        not stat.S_ISDIR(parent_stat.st_mode)
+        or parent_stat.st_dev != parent_dev
+        or parent_stat.st_ino != parent_ino
+    ):
         raise OSError(errno.EAGAIN, 'staging parent identity changed')
+    no_follow = getattr(os, 'O_NOFOLLOW', None)
+    if no_follow is None:
+        raise OSError(errno.ENOTSUP, 'O_NOFOLLOW is unavailable')
     source_directory_fd = os.open(
         source_name,
-        os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0),
+        os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | no_follow,
         dir_fd=source_fd,
     )
     try:
@@ -272,14 +279,22 @@ def verify_source():
             (b'screenshot.png', screenshot_dev, screenshot_ino, screenshot_size),
             (b'manifest.json', manifest_dev, manifest_ino, manifest_size),
         ):
-            entry_stat = os.stat(name, dir_fd=source_directory_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(entry_stat.st_mode)
-                or entry_stat.st_dev != expected_dev
-                or entry_stat.st_ino != expected_ino
-                or entry_stat.st_size != expected_size
-            ):
-                raise OSError(errno.EAGAIN, 'staging entry identity changed')
+            entry_fd = os.open(
+                name,
+                os.O_RDONLY | no_follow,
+                dir_fd=source_directory_fd,
+            )
+            try:
+                entry_stat = os.fstat(entry_fd)
+                if (
+                    not stat.S_ISREG(entry_stat.st_mode)
+                    or entry_stat.st_dev != expected_dev
+                    or entry_stat.st_ino != expected_ino
+                    or entry_stat.st_size != expected_size
+                ):
+                    raise OSError(errno.EAGAIN, 'staging entry identity changed')
+            finally:
+                os.close(entry_fd)
     finally:
         os.close(source_directory_fd)
 
@@ -317,6 +332,101 @@ elif sys.platform.startswith('linux'):
         )
 else:
     raise OSError(errno.ENOTSUP, 'exclusive directory rename is unavailable')
+
+if result != 0:
+    error_number = ctypes.get_errno()
+    sys.exit(error_number or 1)
+`;
+
+/**
+ * Quarantine a published directory through an already-open destination
+ * descriptor. The source identity is checked again by name relative to that
+ * descriptor and the no-replace rename primitive prevents an occupied
+ * tombstone from being overwritten. A pathname ancestor swap therefore cannot
+ * redirect this operation to an attacker-selected directory.
+ */
+const QUARANTINE_RENAME_SCRIPT = String.raw`
+import ctypes
+import errno
+import os
+import platform
+import stat
+import sys
+
+source_fd = int(sys.argv[1])
+destination_fd = int(sys.argv[2])
+source_name = sys.argv[3].encode('utf-8')
+destination_name = sys.argv[4].encode('utf-8')
+expected_dev = int(sys.argv[5])
+expected_ino = int(sys.argv[6])
+expected_uid = int(sys.argv[7])
+expected_gid = int(sys.argv[8])
+
+no_follow = getattr(os, 'O_NOFOLLOW', None)
+if no_follow is None:
+    raise OSError(errno.ENOTSUP, 'O_NOFOLLOW is unavailable')
+directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | no_follow
+source_parent = os.fstat(source_fd)
+destination_parent = os.fstat(destination_fd)
+if not stat.S_ISDIR(source_parent.st_mode) or not stat.S_ISDIR(destination_parent.st_mode):
+    raise OSError(errno.ENOTDIR, 'quarantine parent is not a directory')
+if (
+    source_parent.st_dev != destination_parent.st_dev
+    or source_parent.st_ino != destination_parent.st_ino
+):
+    raise OSError(errno.EAGAIN, 'quarantine parent identity changed')
+source_directory_fd = os.open(source_name, directory_flags, dir_fd=source_fd)
+try:
+    source_stat = os.fstat(source_directory_fd)
+    if (
+        not stat.S_ISDIR(source_stat.st_mode)
+        or source_stat.st_dev != expected_dev
+        or source_stat.st_ino != expected_ino
+        or source_stat.st_uid != expected_uid
+        or source_stat.st_gid != expected_gid
+    ):
+        raise OSError(errno.EAGAIN, 'published bundle identity changed')
+finally:
+    os.close(source_directory_fd)
+try:
+    os.lstat(destination_name, dir_fd=destination_fd)
+except FileNotFoundError:
+    pass
+else:
+    raise OSError(errno.EEXIST, 'quarantine tombstone is occupied')
+
+libc = ctypes.CDLL(None, use_errno=True)
+if sys.platform == 'darwin':
+    rename = libc.renameatx_np
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    result = rename(source_fd, source_name, destination_fd, destination_name, 0x00000004)
+elif sys.platform.startswith('linux'):
+    rename = getattr(libc, 'renameat2', None)
+    if rename is not None:
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(source_fd, source_name, destination_fd, destination_name, 0x00000001)
+    else:
+        syscall_number = {
+            'x86_64': 316,
+            'aarch64': 276,
+            'arm64': 276,
+        }.get(platform.machine())
+        if syscall_number is None:
+            raise OSError(errno.ENOTSUP, 'renameat2 is unavailable')
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(
+            syscall_number,
+            source_fd,
+            source_name,
+            destination_fd,
+            destination_name,
+            0x00000001,
+        )
+else:
+    raise OSError(errno.ENOTSUP, 'exclusive quarantine rename is unavailable')
 
 if result != 0:
     error_number = ctypes.get_errno()
@@ -379,7 +489,7 @@ export function getLiveScreenshotAtomicRenameChildConfiguration() {
 }
 
 /**
- * @typedef {{ path: string, canonical: string, dev: number, ino: number, systemCanonical: string, systemDev: number, systemIno: number }} StagingParentEvidence
+ * @typedef {{ path: string, canonical: string, dev: number, ino: number, uid: number, gid: number, mode: number, systemCanonical: string, systemDev: number, systemIno: number }} StagingParentEvidence
  */
 
 /** @returns {{ canonical: string, dev: number, ino: number }} */
@@ -424,6 +534,9 @@ function readStagingParentEvidence(path, systemRoot) {
       canonical,
       dev: stats.dev,
       ino: stats.ino,
+      uid: stats.uid,
+      gid: stats.gid,
+      mode: stats.mode & 0o7777,
       systemCanonical: systemRoot.canonical,
       systemDev: systemRoot.dev,
       systemIno: systemRoot.ino
@@ -455,7 +568,10 @@ function assertStagingParentEvidence(expected) {
   if (
     observed.canonical !== expected.canonical ||
     observed.dev !== expected.dev ||
-    observed.ino !== expected.ino
+    observed.ino !== expected.ino ||
+    observed.uid !== expected.uid ||
+    observed.gid !== expected.gid ||
+    observed.mode !== expected.mode
   ) {
     throw new Error('live screenshot staging parent changed');
   }
@@ -817,10 +933,66 @@ export function createLiveScreenshotManifest(input) {
   return Object.freeze(manifest);
 }
 
+/**
+ * Rebuild the reviewed manifest from own primitive data before serialization.
+ * A null-prototype record is intentional: JSON.stringify consults an inherited
+ * `toJSON` before it considers enumerable keys, so serializing the caller's
+ * object directly would let hostile Object.prototype state replace the public
+ * manifest after validation.
+ *
+ * @param {Record<string, any>} manifest
+ * @returns {Record<string, any>}
+ */
+function canonicalManifestData(manifest) {
+  /** @param {Array<[string, any]>} entries @returns {Record<string, any>} */
+  const own = (entries) => {
+    const record = Object.create(null);
+    for (const [key, value] of entries) {
+      Object.defineProperty(record, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true
+      });
+    }
+    return record;
+  };
+  return own([
+    ['schema', manifest.schema],
+    ['issue', manifest.issue],
+    ['route', manifest.route],
+    ['viewport', own([
+      ['width', manifest.viewport.width],
+      ['height', manifest.viewport.height]
+    ])],
+    ['devicePixelRatio', manifest.devicePixelRatio],
+    ['browser', own([
+      ['name', manifest.browser.name],
+      ['version', manifest.browser.version],
+      ['revision', manifest.browser.revision],
+      ['executableSha256', manifest.browser.executableSha256],
+      ['zoom', manifest.browser.zoom]
+    ])],
+    ['theme', manifest.theme],
+    ['reducedMotion', manifest.reducedMotion],
+    ['locale', manifest.locale],
+    ['uiState', manifest.uiState],
+    ['clientSha', manifest.clientSha],
+    ['hermes', own([
+      ['imageDigest', manifest.hermes.imageDigest],
+      ['sourceSha', manifest.hermes.sourceSha],
+      ['attestation', manifest.hermes.attestation]
+    ])],
+    ['testCommand', manifest.testCommand],
+    ['imageSha256', manifest.imageSha256],
+    ['review', manifest.review]
+  ]);
+}
+
 /** @param {Record<string, unknown>} manifest */
 export function serializeLiveScreenshotManifest(manifest) {
-  validateLiveScreenshotManifest(manifest);
-  return `${JSON.stringify(manifest, null, 2)}\n`;
+  const validated = /** @type {Record<string, any>} */ (validateLiveScreenshotManifest(manifest));
+  return `${JSON.stringify(canonicalManifestData(validated), null, 2)}\n`;
 }
 
 /** @param {Record<string, string | undefined>} [environment] */
@@ -885,7 +1057,7 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     if (trimmed.length > maxSensitiveValueLength || oldLiveValues.length >= maxSensitiveValues) {
       privacyOverflow();
     }
-    oldLiveValues.push(trimmed);
+    oldLiveValues[oldLiveValues.length] = trimmed;
   };
   /** @param {unknown} value */
   const rememberMetadata = (value) => {
@@ -895,7 +1067,7 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     if (trimmed.length > maxSensitiveValueLength || oldMetadataValues.length >= maxSensitiveValues) {
       privacyOverflow();
     }
-    oldMetadataValues.push(trimmed);
+    oldMetadataValues[oldMetadataValues.length] = trimmed;
   };
   const markerValues = [
     ...(Array.isArray(sensitiveMarkers) ? sensitiveMarkers : []),
@@ -1758,13 +1930,14 @@ export async function captureLiveChatScreenshotIfEnabled({
       capture,
       destinationDirectory: retentionDestination.candidate,
       fileStem: LIVE_SCREENSHOT_FILE_STEM,
-      review: LIVE_SCREENSHOT_APPROVED_REVIEW
+      review: LIVE_SCREENSHOT_APPROVED_REVIEW,
+      provenance
     });
   }
   return capture;
 }
 
-/** @typedef {{ candidate: string, dev: number, ino: number, canonical: string }} DirectoryEvidence */
+/** @typedef {{ candidate: string, dev: number, ino: number, uid: number, gid: number, mode: number, canonical: string }} DirectoryEvidence */
 
 /**
  * Verify an existing destination and every existing ancestor without following
@@ -1829,7 +2002,15 @@ function safeDestinationEvidence(directory) {
   if (!stats.isDirectory() || stats.isSymbolicLink()) {
     throw new Error('live screenshot retention destination is not a directory');
   }
-  return { candidate, dev: stats.dev, ino: stats.ino, canonical };
+  return {
+    candidate,
+    dev: stats.dev,
+    ino: stats.ino,
+    uid: stats.uid,
+    gid: stats.gid,
+    mode: stats.mode & 0o7777,
+    canonical
+  };
 }
 
 /** @param {DirectoryEvidence} evidence */
@@ -1847,6 +2028,9 @@ function assertSameDestination(evidence) {
     stats.isSymbolicLink() ||
     stats.dev !== evidence.dev ||
     stats.ino !== evidence.ino ||
+    stats.uid !== evidence.uid ||
+    stats.gid !== evidence.gid ||
+    (stats.mode & 0o7777) !== evidence.mode ||
     canonical !== evidence.canonical
   ) {
     throw new Error('live screenshot retention destination changed');
@@ -1863,12 +2047,22 @@ function assertSameDestination(evidence) {
 async function openVerifiedDestination(evidence) {
   let handle;
   try {
-    handle = await fsPromises.open(evidence.candidate, 'r');
+    const noFollow = fsConstants.O_NOFOLLOW;
+    if (typeof noFollow !== 'number') {
+      throw new Error('live screenshot retention no-follow open is unavailable');
+    }
+    handle = await fsPromises.open(
+      evidence.candidate,
+      fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | noFollow
+    );
     const stats = await handle.stat();
     if (
       !stats.isDirectory() ||
       stats.dev !== evidence.dev ||
-      stats.ino !== evidence.ino
+      stats.ino !== evidence.ino ||
+      stats.uid !== evidence.uid ||
+      stats.gid !== evidence.gid ||
+      (stats.mode & 0o7777) !== evidence.mode
     ) {
       throw new Error('live screenshot retention destination changed');
     }
@@ -1891,7 +2085,14 @@ async function openVerifiedDestination(evidence) {
 /** @param {any} handle @param {DirectoryEvidence} evidence */
 async function assertDestinationHandle(handle, evidence) {
   const stats = await handle.stat();
-  if (!stats.isDirectory() || stats.dev !== evidence.dev || stats.ino !== evidence.ino) {
+  if (
+    !stats.isDirectory() ||
+    stats.dev !== evidence.dev ||
+    stats.ino !== evidence.ino ||
+    stats.uid !== evidence.uid ||
+    stats.gid !== evidence.gid ||
+    (stats.mode & 0o7777) !== evidence.mode
+  ) {
     throw new Error('live screenshot retention destination changed');
   }
 }
@@ -1907,14 +2108,41 @@ function pathExists(path) {
 }
 
 /**
- * @typedef {{ dev: number, ino: number, size: number }} StagingFileIdentity
- * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot: StagingFileIdentity, manifest: StagingFileIdentity }} StagingEvidence
- * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot?: StagingFileIdentity, manifest?: StagingFileIdentity }} StagingCleanupEvidence
+ * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, size: number }} StagingFileIdentity
+ * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, parent: StagingParentEvidence, screenshot: StagingFileIdentity, manifest: StagingFileIdentity }} StagingEvidence
+ * @typedef {{ dev: number, ino: number, uid: number, gid: number, mode: number, parent: StagingParentEvidence, screenshot?: StagingFileIdentity, manifest?: StagingFileIdentity }} StagingCleanupEvidence
  */
 
 /** @param {unknown} error */
 function isNotFoundError(error) {
   return error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT';
+}
+
+/** @param {{ dev: number, ino: number, uid: number, gid: number, mode: number, size: number }} stats */
+function stagingFileIdentity(stats) {
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    uid: stats.uid,
+    gid: stats.gid,
+    mode: stats.mode & 0o7777,
+    size: stats.size
+  };
+}
+
+/** @param {string} path @returns {StagingFileIdentity} */
+function readPrivateStagingFileIdentity(path) {
+  const stats = lstatSync(path);
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    (stats.mode & 0o077) !== 0 ||
+    (currentUid !== undefined && stats.uid !== currentUid)
+  ) {
+    throw new Error('live screenshot staging bundle contains an unsafe entry');
+  }
+  return stagingFileIdentity(stats);
 }
 
 /**
@@ -1942,14 +2170,48 @@ async function removePrivateStagingDirectory(directory, expected) {
     !stats.isDirectory() ||
     stats.isSymbolicLink() ||
     stats.dev !== expected.dev ||
-    stats.ino !== expected.ino
+    stats.ino !== expected.ino ||
+    stats.uid !== expected.uid ||
+    stats.gid !== expected.gid ||
+    (stats.mode & 0o7777) !== expected.mode
+  ) {
+    throw new Error('live screenshot staging identity changed during cleanup');
+  }
+
+  // Move the exact directory to a private sibling tombstone before unlinking
+  // children. This binds cleanup to the observed inode and prevents a later
+  // replacement at the public staging pathname from being followed.
+  const tombstone = join(
+    dirname(expected.parent.path),
+    `.${basename(directory)}-cleanup-${randomBytes(12).toString('hex')}`
+  );
+  try {
+    await fsPromises.rename(directory, tombstone);
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw new Error('live screenshot staging cleanup failed');
+  }
+  let tombstoneStats;
+  try {
+    tombstoneStats = lstatSync(tombstone);
+  } catch {
+    throw new Error('live screenshot staging cleanup failed');
+  }
+  if (
+    !tombstoneStats.isDirectory() ||
+    tombstoneStats.isSymbolicLink() ||
+    tombstoneStats.dev !== expected.dev ||
+    tombstoneStats.ino !== expected.ino ||
+    tombstoneStats.uid !== expected.uid ||
+    tombstoneStats.gid !== expected.gid ||
+    (tombstoneStats.mode & 0o7777) !== expected.mode
   ) {
     throw new Error('live screenshot staging identity changed during cleanup');
   }
 
   let entries;
   try {
-    entries = (await fsPromises.readdir(directory)).sort();
+    entries = (await fsPromises.readdir(tombstone)).sort();
   } catch {
     throw new Error('live screenshot staging cleanup inspection failed');
   }
@@ -1960,29 +2222,33 @@ async function removePrivateStagingDirectory(directory, expected) {
 
   for (const entry of entries) {
     assertStagingParentEvidence(expected.parent);
-    const current = lstatSync(directory);
+    const current = lstatSync(tombstone);
     if (
       !current.isDirectory() ||
       current.isSymbolicLink() ||
       current.dev !== expected.dev ||
-      current.ino !== expected.ino
+      current.ino !== expected.ino ||
+      current.uid !== expected.uid ||
+      current.gid !== expected.gid ||
+      (current.mode & 0o7777) !== expected.mode
     ) {
       throw new Error('live screenshot staging identity changed during cleanup');
     }
-    const entryPath = join(directory, entry);
+    const entryPath = join(tombstone, entry);
     let entryStats;
     try {
-      entryStats = lstatSync(entryPath);
+      entryStats = readPrivateStagingFileIdentity(entryPath);
     } catch {
-      throw new Error('live screenshot staging entry disappeared during cleanup');
+      throw new Error('live screenshot staging entry identity changed during cleanup');
     }
     const expectedEntry = expected[entry === 'screenshot.png' ? 'screenshot' : 'manifest'];
     if (
       !expectedEntry ||
-      !entryStats.isFile() ||
-      entryStats.isSymbolicLink() ||
       entryStats.dev !== expectedEntry.dev ||
       entryStats.ino !== expectedEntry.ino ||
+      entryStats.uid !== expectedEntry.uid ||
+      entryStats.gid !== expectedEntry.gid ||
+      entryStats.mode !== expectedEntry.mode ||
       entryStats.size !== expectedEntry.size
     ) {
       throw new Error('live screenshot staging entry identity changed during cleanup');
@@ -1995,17 +2261,20 @@ async function removePrivateStagingDirectory(directory, expected) {
   }
 
   assertStagingParentEvidence(expected.parent);
-  const current = lstatSync(directory);
+  const finalStats = lstatSync(tombstone);
   if (
-    !current.isDirectory() ||
-    current.isSymbolicLink() ||
-    current.dev !== expected.dev ||
-    current.ino !== expected.ino
+    !finalStats.isDirectory() ||
+    finalStats.isSymbolicLink() ||
+    finalStats.dev !== expected.dev ||
+    finalStats.ino !== expected.ino ||
+    finalStats.uid !== expected.uid ||
+    finalStats.gid !== expected.gid ||
+    (finalStats.mode & 0o7777) !== expected.mode
   ) {
     throw new Error('live screenshot staging identity changed during cleanup');
   }
   try {
-    await fsPromises.rmdir(directory);
+    await fsPromises.rmdir(tombstone);
   } catch {
     throw new Error('live screenshot staging cleanup left a remnant');
   }
@@ -2047,11 +2316,14 @@ async function verifyPrivateStagingDirectory(directory, parent) {
     if (!entryStats.isFile() || entryStats.isSymbolicLink() || (entryStats.mode & 0o077) !== 0) {
       throw new Error('live screenshot staging bundle contains an unsafe entry');
     }
-    files[entry] = { dev: entryStats.dev, ino: entryStats.ino, size: entryStats.size };
+    files[entry] = stagingFileIdentity(entryStats);
   }
   return {
     dev: stats.dev,
     ino: stats.ino,
+    uid: stats.uid,
+    gid: stats.gid,
+    mode: stats.mode & 0o7777,
     parent,
     screenshot: files['screenshot.png'],
     manifest: files['manifest.json']
@@ -2067,6 +2339,9 @@ async function assertStagingEvidence(directory, expected) {
   if (
     observed.dev !== expected.dev ||
     observed.ino !== expected.ino ||
+    observed.uid !== expected.uid ||
+    observed.gid !== expected.gid ||
+    observed.mode !== expected.mode ||
     observed.parent.dev !== expected.parent.dev ||
     observed.parent.ino !== expected.parent.ino ||
     !observed.screenshot ||
@@ -2075,9 +2350,15 @@ async function assertStagingEvidence(directory, expected) {
     !expected.manifest ||
     observed.screenshot.dev !== expected.screenshot.dev ||
     observed.screenshot.ino !== expected.screenshot.ino ||
+    observed.screenshot.uid !== expected.screenshot.uid ||
+    observed.screenshot.gid !== expected.screenshot.gid ||
+    observed.screenshot.mode !== expected.screenshot.mode ||
     observed.screenshot.size !== expected.screenshot.size ||
     observed.manifest.dev !== expected.manifest.dev ||
     observed.manifest.ino !== expected.manifest.ino ||
+    observed.manifest.uid !== expected.manifest.uid ||
+    observed.manifest.gid !== expected.manifest.gid ||
+    observed.manifest.mode !== expected.manifest.mode ||
     observed.manifest.size !== expected.manifest.size
   ) {
     throw new Error('live screenshot staging identity changed');
@@ -2125,10 +2406,12 @@ function runAtomicRename(args, fileDescriptors) {
  * descriptors. It revalidates the staging parent, directory, and both bundle
  * files by device/inode/size immediately before rename, so a source swap cannot
  * publish attacker-controlled bytes and a replaced destination receives no
- * bytes.
+ * bytes. The source and destination descriptors remain open after a successful
+ * rename so post-publication verification and failure quarantine stay anchored
+ * to the objects that were actually published.
  *
  * @param {{ stagingDirectory: string, stagingEvidence: StagingEvidence, destination: DirectoryEvidence, beforeAtomicPublish?: (directory: string) => Promise<void> }} options
- * @returns {Promise<{ renamed: boolean, closeFailure?: Error }>}
+ * @returns {Promise<{ renamed: boolean, closeFailure?: Error, stagingHandle?: any, destinationHandle?: any }>}
  */
 async function publishStagedBundle({ stagingDirectory, stagingEvidence, destination, beforeAtomicPublish }) {
   const stagingParentPath = dirname(stagingDirectory);
@@ -2142,8 +2425,13 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
   let failure;
   let renamed = false;
   try {
-    stagingParent = await fsPromises.open(stagingParentPath, 'r');
-    stagingHandle = await fsPromises.open(stagingDirectory, 'r');
+    const noFollow = fsConstants.O_NOFOLLOW;
+    if (typeof noFollow !== 'number') {
+      throw new Error('live screenshot retention no-follow open is unavailable');
+    }
+    const directoryFlags = fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | noFollow;
+    stagingParent = await fsPromises.open(stagingParentPath, directoryFlags);
+    stagingHandle = await fsPromises.open(stagingDirectory, directoryFlags);
     destinationHandle = await openVerifiedDestination(destination);
 
     await assertStagingEvidence(stagingDirectory, stagingEvidence);
@@ -2153,9 +2441,15 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
       !openParentStats.isDirectory() ||
       openParentStats.dev !== stagingEvidence.parent.dev ||
       openParentStats.ino !== stagingEvidence.parent.ino ||
+      openParentStats.uid !== stagingEvidence.parent.uid ||
+      openParentStats.gid !== stagingEvidence.parent.gid ||
+      (openParentStats.mode & 0o7777) !== stagingEvidence.parent.mode ||
       !openStagingStats.isDirectory() ||
       openStagingStats.dev !== stagingEvidence.dev ||
-      openStagingStats.ino !== stagingEvidence.ino
+      openStagingStats.ino !== stagingEvidence.ino ||
+      openStagingStats.uid !== stagingEvidence.uid ||
+      openStagingStats.gid !== stagingEvidence.gid ||
+      (openStagingStats.mode & 0o7777) !== stagingEvidence.mode
     ) {
       throw new Error('live screenshot staging identity changed');
     }
@@ -2205,6 +2499,18 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
   }
 
   let closeFailure;
+  if (renamed) {
+    if (stagingParent) {
+      try {
+        await stagingParent.close();
+      } catch {
+        closeFailure = new Error('live screenshot retention handle cleanup failed');
+      }
+    }
+    if (failure) throw failure;
+    return { renamed, closeFailure, stagingHandle, destinationHandle };
+  }
+
   for (const handle of [destinationHandle, stagingHandle, stagingParent].reverse()) {
     if (!handle) continue;
     try {
@@ -2218,37 +2524,134 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
 }
 
 /**
- * Verify the published bundle before reporting success. This checks the exact
- * two-entry shape, private regular-file identities, manifest bytes, PNG bytes,
- * and image hash after the atomic rename. Any replacement or content drift is
- * reported with a fixed message; the final pathname is never accepted merely
- * because the directory rename returned success.
+ * Read a fixed-size file from offset zero without relying on the mutable shared
+ * offset of a FileHandle. Repeated positioned reads let verification compare
+ * the same bytes twice while a raced writer cannot make the second read start
+ * at EOF.
  *
- * @param {string} bundlePath
- * @param {Buffer} expectedBytes
- * @param {string} expectedManifestText
+ * @param {any} handle
+ * @param {number} size
+ * @returns {Promise<Buffer>}
  */
-async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifestText) {
+async function readFileHandleAtStart(handle, size) {
+  const buffer = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const result = await handle.read(buffer, offset, size - offset, offset);
+    if (!result || result.bytesRead <= 0) {
+      throw new Error('live screenshot retention file read was incomplete');
+    }
+    offset += result.bytesRead;
+  }
+  return buffer;
+}
+
+/**
+ * Verify the published bundle before reporting success. The destination and
+ * published-bundle descriptors stay open for the entire read. Each public file
+ * is opened with O_NOFOLLOW, checked against the exact staging identity, read,
+ * read again, and revalidated for owner, mode, device, inode, size, and hash.
+ * This makes same-size replacement, permission drift, and ancestor swaps fail
+ * closed instead of accepting bytes merely because the directory rename worked.
+ *
+ * @param {{
+ *   bundlePath: string,
+ *   expectedBytes: Buffer,
+ *   expectedManifestText: string,
+ *   destination: DirectoryEvidence,
+ *   destinationHandle: any,
+ *   publishedBundleHandle: any,
+ *   expectedBundle: StagingEvidence
+ * }} options
+ */
+async function verifyPublishedBundle({
+  bundlePath,
+  expectedBytes,
+  expectedManifestText,
+  destination,
+  destinationHandle,
+  publishedBundleHandle,
+  expectedBundle
+}) {
+  const noFollow = fsConstants.O_NOFOLLOW;
+  if (typeof noFollow !== 'number') {
+    throw new Error('live screenshot retention no-follow open is unavailable');
+  }
+  await assertDestinationHandle(destinationHandle, destination);
+  const expectedBundleStats = {
+    dev: expectedBundle.dev,
+    ino: expectedBundle.ino,
+    uid: expectedBundle.uid,
+    gid: expectedBundle.gid,
+    mode: expectedBundle.mode
+  };
+  const anchorStats = await publishedBundleHandle.stat();
+  if (
+    !anchorStats.isDirectory() ||
+    anchorStats.dev !== expectedBundleStats.dev ||
+    anchorStats.ino !== expectedBundleStats.ino ||
+    anchorStats.uid !== expectedBundleStats.uid ||
+    anchorStats.gid !== expectedBundleStats.gid ||
+    (anchorStats.mode & 0o7777) !== expectedBundleStats.mode
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+
   let bundleStats;
   try {
     bundleStats = lstatSync(bundlePath);
   } catch {
     throw new Error('live screenshot retention published bundle is unavailable');
   }
-  if (!bundleStats.isDirectory() || bundleStats.isSymbolicLink()) {
+  if (
+    !bundleStats.isDirectory() ||
+    bundleStats.isSymbolicLink() ||
+    bundleStats.dev !== expectedBundleStats.dev ||
+    bundleStats.ino !== expectedBundleStats.ino ||
+    bundleStats.uid !== expectedBundleStats.uid ||
+    bundleStats.gid !== expectedBundleStats.gid ||
+    (bundleStats.mode & 0o7777) !== expectedBundleStats.mode
+  ) {
     throw new Error('live screenshot retention published bundle is unsafe');
   }
+
   let entries;
   try {
     entries = (await fsPromises.readdir(bundlePath)).sort();
   } catch {
     throw new Error('live screenshot retention published bundle is unavailable');
   }
+  await assertDestinationHandle(destinationHandle, destination);
+  const afterReadDirectory = await publishedBundleHandle.stat();
+  if (
+    !afterReadDirectory.isDirectory() ||
+    afterReadDirectory.dev !== expectedBundleStats.dev ||
+    afterReadDirectory.ino !== expectedBundleStats.ino ||
+    afterReadDirectory.uid !== expectedBundleStats.uid ||
+    afterReadDirectory.gid !== expectedBundleStats.gid ||
+    (afterReadDirectory.mode & 0o7777) !== expectedBundleStats.mode
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  assertSameDestination(destination);
+  const afterReadBundlePath = lstatSync(bundlePath);
+  if (
+    afterReadBundlePath.dev !== expectedBundleStats.dev ||
+    afterReadBundlePath.ino !== expectedBundleStats.ino ||
+    afterReadBundlePath.uid !== expectedBundleStats.uid ||
+    afterReadBundlePath.gid !== expectedBundleStats.gid ||
+    (afterReadBundlePath.mode & 0o7777) !== expectedBundleStats.mode
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
   if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
     throw new Error('live screenshot retention published bundle shape changed');
   }
-  /** @type {Record<string, { dev: number, ino: number, size: number }>} */
-  const identities = {};
+
+  const expectedContents = /** @type {Record<'screenshot.png' | 'manifest.json', Buffer>} */ ({
+    'screenshot.png': expectedBytes,
+    'manifest.json': Buffer.from(expectedManifestText, 'utf8')
+  });
   for (const entry of entries) {
     const entryPath = join(bundlePath, entry);
     let stats;
@@ -2257,40 +2660,308 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
     } catch {
       throw new Error('live screenshot retention published bundle entry disappeared');
     }
-    if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o077) !== 0) {
+    const expectedEntry = expectedBundle[entry === 'screenshot.png' ? 'screenshot' : 'manifest'];
+    if (
+      !expectedEntry ||
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      stats.dev !== expectedEntry.dev ||
+      stats.ino !== expectedEntry.ino ||
+      stats.uid !== expectedEntry.uid ||
+      stats.gid !== expectedEntry.gid ||
+      (stats.mode & 0o7777) !== expectedEntry.mode ||
+      stats.size !== expectedEntry.size
+    ) {
       throw new Error('live screenshot retention published bundle entry is unsafe');
     }
-    identities[entry] = { dev: stats.dev, ino: stats.ino, size: stats.size };
+
+    let entryHandle;
+    try {
+      entryHandle = await fsPromises.open(entryPath, fsConstants.O_RDONLY | noFollow);
+      const opened = await entryHandle.stat();
+      if (
+        !opened.isFile() ||
+        opened.dev !== expectedEntry.dev ||
+        opened.ino !== expectedEntry.ino ||
+        opened.uid !== expectedEntry.uid ||
+        opened.gid !== expectedEntry.gid ||
+        (opened.mode & 0o7777) !== expectedEntry.mode ||
+        opened.size !== expectedEntry.size
+      ) {
+        throw new Error('live screenshot retention published bundle entry changed');
+      }
+      const firstBytes = await readFileHandleAtStart(entryHandle, expectedEntry.size);
+      const secondBytes = await readFileHandleAtStart(entryHandle, expectedEntry.size);
+      const after = await entryHandle.stat();
+      if (
+        !after.isFile() ||
+        after.dev !== expectedEntry.dev ||
+        after.ino !== expectedEntry.ino ||
+        after.uid !== expectedEntry.uid ||
+        after.gid !== expectedEntry.gid ||
+        (after.mode & 0o7777) !== expectedEntry.mode ||
+        after.size !== expectedEntry.size ||
+        !firstBytes.equals(secondBytes)
+      ) {
+        throw new Error('live screenshot retention published bundle entry changed');
+      }
+      const entryName = entry === 'screenshot.png' ? 'screenshot.png' : 'manifest.json';
+      const expectedContent = expectedContents[entryName];
+      const expectedHash = createHash('sha256').update(expectedContent).digest('hex');
+      const actualHash = createHash('sha256').update(secondBytes).digest('hex');
+      if (actualHash !== expectedHash || secondBytes.length !== after.size) {
+        throw new Error(
+          entry === 'screenshot.png'
+            ? 'live screenshot retention published PNG changed'
+            : 'live screenshot retention published manifest changed'
+        );
+      }
+      if (entry === 'screenshot.png') {
+        if (!secondBytes.equals(expectedBytes) || sha256Hex(secondBytes) !== sha256Hex(expectedBytes)) {
+          throw new Error('live screenshot retention published PNG changed');
+        }
+      } else if (secondBytes.toString('utf8') !== expectedManifestText) {
+        throw new Error('live screenshot retention published manifest changed');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('published')) throw error;
+      throw new Error('live screenshot retention published bundle content is unavailable');
+    } finally {
+      if (entryHandle) {
+        try {
+          await entryHandle.close();
+        } catch {
+          throw new Error('live screenshot retention handle cleanup failed');
+        }
+      }
+    }
+    await assertDestinationHandle(destinationHandle, destination);
+    const afterEntryBundle = await publishedBundleHandle.stat();
+    if (
+      !afterEntryBundle.isDirectory() ||
+      afterEntryBundle.dev !== expectedBundleStats.dev ||
+      afterEntryBundle.ino !== expectedBundleStats.ino ||
+      afterEntryBundle.uid !== expectedBundleStats.uid ||
+      afterEntryBundle.gid !== expectedBundleStats.gid ||
+      (afterEntryBundle.mode & 0o7777) !== expectedBundleStats.mode
+    ) {
+      throw new Error('live screenshot retention published bundle identity changed');
+    }
+    assertSameDestination(destination);
   }
-  let screenshot;
-  let manifest;
-  try {
-    screenshot = await fsPromises.readFile(join(bundlePath, 'screenshot.png'));
-    manifest = await fsPromises.readFile(join(bundlePath, 'manifest.json'), 'utf8');
-  } catch {
-    throw new Error('live screenshot retention published bundle content is unavailable');
-  }
-  if (!screenshot.equals(expectedBytes) || sha256Hex(screenshot) !== sha256Hex(expectedBytes)) {
-    throw new Error('live screenshot retention published PNG changed');
-  }
-  if (manifest !== expectedManifestText) {
-    throw new Error('live screenshot retention published manifest changed');
-  }
-  const afterBundleStats = lstatSync(bundlePath);
-  if (afterBundleStats.dev !== bundleStats.dev || afterBundleStats.ino !== bundleStats.ino) {
+}
+
+/**
+ * Remove or quarantine a published bundle after verification failure. The open
+ * destination and published-bundle descriptors anchor the decision; a raced
+ * replacement is never unlinked. If an entry no longer matches the exact
+ * staging identity, the whole bundle remains in the private sibling tombstone
+ * as bounded quarantine rather than following attacker-controlled bytes.
+ *
+ * @param {{
+ *   bundlePath: string,
+ *   destination: DirectoryEvidence,
+ *   destinationHandle: any,
+ *   publishedBundleHandle: any,
+ *   expectedBundle: StagingEvidence,
+ *   expectedBytes: Buffer,
+ *   expectedManifestText: string
+ * }} options
+ */
+async function removePublishedBundleSafely({
+  bundlePath,
+  destination,
+  destinationHandle,
+  publishedBundleHandle,
+  expectedBundle,
+  expectedBytes,
+  expectedManifestText
+}) {
+  await assertDestinationHandle(destinationHandle, destination);
+  assertSameDestination(destination);
+  const expectedBundleStats = {
+    dev: expectedBundle.dev,
+    ino: expectedBundle.ino,
+    uid: expectedBundle.uid,
+    gid: expectedBundle.gid,
+    mode: expectedBundle.mode
+  };
+  const anchored = await publishedBundleHandle.stat();
+  if (
+    !anchored.isDirectory() ||
+    anchored.dev !== expectedBundleStats.dev ||
+    anchored.ino !== expectedBundleStats.ino ||
+    anchored.uid !== expectedBundleStats.uid ||
+    anchored.gid !== expectedBundleStats.gid
+  ) {
     throw new Error('live screenshot retention published bundle identity changed');
   }
+  let current;
+  try {
+    current = lstatSync(bundlePath);
+  } catch {
+    throw new Error('live screenshot retention published bundle disappeared');
+  }
+  if (
+    !current.isDirectory() ||
+    current.isSymbolicLink() ||
+    current.dev !== expectedBundleStats.dev ||
+    current.ino !== expectedBundleStats.ino ||
+    current.uid !== expectedBundleStats.uid ||
+    current.gid !== expectedBundleStats.gid
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  const tombstone = join(
+    dirname(destination.candidate),
+    `.${basename(bundlePath)}-quarantine-${randomBytes(12).toString('hex')}`
+  );
+  if (pathExists(tombstone)) {
+    throw new Error('live screenshot retention published bundle quarantine is occupied');
+  }
+  if (resolve(dirname(bundlePath)) !== resolve(destination.candidate)) {
+    throw new Error('live screenshot retention published bundle destination binding changed');
+  }
+  const tombstoneName = basename(tombstone);
+  try {
+    await runAtomicRename(
+      [
+        '-c',
+        QUARANTINE_RENAME_SCRIPT,
+        '3',
+        '4',
+        basename(bundlePath),
+        tombstoneName,
+        String(expectedBundleStats.dev),
+        String(expectedBundleStats.ino),
+        String(expectedBundleStats.uid),
+        String(expectedBundleStats.gid)
+      ],
+      [destinationHandle.fd, destinationHandle.fd]
+    );
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 17) {
+      throw new Error('live screenshot retention published bundle quarantine is occupied');
+    }
+    throw new Error('live screenshot retention published bundle quarantine failed');
+  }
+  assertSameDestination(destination);
+  let tombstoneStats;
+  try {
+    tombstoneStats = lstatSync(tombstone);
+  } catch {
+    throw new Error('live screenshot retention published bundle quarantine failed');
+  }
+  if (
+    !tombstoneStats.isDirectory() ||
+    tombstoneStats.isSymbolicLink() ||
+    tombstoneStats.dev !== expectedBundleStats.dev ||
+    tombstoneStats.ino !== expectedBundleStats.ino ||
+    tombstoneStats.uid !== expectedBundleStats.uid ||
+    tombstoneStats.gid !== expectedBundleStats.gid ||
+    (tombstoneStats.mode & 0o7777) !== expectedBundleStats.mode
+  ) {
+    throw new Error('live screenshot retention published bundle quarantine identity changed');
+  }
+
+  let entries;
+  try {
+    entries = (await fsPromises.readdir(tombstone)).sort();
+  } catch {
+    throw new Error('live screenshot retention published bundle quarantine inspection failed');
+  }
+  const ownedEntries = ['manifest.json', 'screenshot.png'];
+  if (entries.some((entry) => !ownedEntries.includes(entry))) {
+    throw new Error('live screenshot retention published bundle quarantine found an unexpected entry');
+  }
   for (const entry of entries) {
-    const after = lstatSync(join(bundlePath, entry));
-    const before = identities[entry];
+    const entryPath = join(tombstone, entry);
+    let stats;
+    try {
+      stats = lstatSync(entryPath);
+    } catch {
+      throw new Error('live screenshot retention published bundle quarantine entry disappeared');
+    }
+    const expectedEntry = expectedBundle[entry === 'screenshot.png' ? 'screenshot' : 'manifest'];
     if (
-      after.dev !== before.dev ||
-      after.ino !== before.ino ||
-      after.size !== before.size
+      !expectedEntry ||
+      !stats.isFile() ||
+      stats.isSymbolicLink() ||
+      stats.dev !== expectedEntry.dev ||
+      stats.ino !== expectedEntry.ino ||
+      stats.uid !== expectedEntry.uid ||
+      stats.gid !== expectedEntry.gid ||
+      (stats.mode & 0o7777) !== expectedEntry.mode ||
+      stats.size !== expectedEntry.size
     ) {
-      throw new Error('live screenshot retention published bundle entry changed');
+      throw new Error('live screenshot retention published bundle quarantine preserved unsafe entry');
+    }
+    const expectedContent = entry === 'screenshot.png'
+      ? expectedBytes
+      : Buffer.from(expectedManifestText, 'utf8');
+    const noFollow = fsConstants.O_NOFOLLOW;
+    if (typeof noFollow !== 'number') {
+      throw new Error('live screenshot retention no-follow open is unavailable');
+    }
+    let entryHandle;
+    let actualContent;
+    try {
+      entryHandle = await fsPromises.open(entryPath, fsConstants.O_RDONLY | noFollow);
+      actualContent = await fsPromises.readFile(entryHandle);
+    } catch {
+      throw new Error('live screenshot retention published bundle quarantine content unavailable');
+    } finally {
+      if (entryHandle) {
+        try {
+          await entryHandle.close();
+        } catch {
+          throw new Error('live screenshot retention handle cleanup failed');
+        }
+      }
+    }
+    if (!actualContent.equals(expectedContent)) {
+      throw new Error('live screenshot retention quarantine preserved unsafe entry');
+    }
+    try {
+      await fsPromises.unlink(entryPath);
+    } catch {
+      throw new Error('live screenshot retention published bundle quarantine cleanup failed');
     }
   }
+  try {
+    await fsPromises.rmdir(tombstone);
+  } catch {
+    throw new Error('live screenshot retention published bundle quarantine remnant');
+  }
+}
+
+/**
+ * Close the two descriptors retained after publication exactly once. A handle
+ * is cleared before close so an injected close failure cannot trigger a second
+ * close from another cleanup path.
+ *
+ * @param {{ stagingHandle?: any, destinationHandle?: any } | undefined} publication
+ * @returns {Promise<Error[]>}
+ */
+async function closePublicationHandles(publication) {
+  /** @type {Error[]} */
+  const failures = [];
+  if (!publication) return failures;
+  const handles = /** @type {Record<'stagingHandle' | 'destinationHandle', any>} */ (publication);
+  const keys = /** @type {Array<'stagingHandle' | 'destinationHandle'>} */ (
+    ['stagingHandle', 'destinationHandle']
+  );
+  for (const key of keys) {
+    const handle = handles[key];
+    handles[key] = undefined;
+    if (!handle) continue;
+    try {
+      await handle.close();
+    } catch {
+      failures[failures.length] = new Error('live screenshot retention handle cleanup failed');
+    }
+  }
+  return failures;
 }
 
 /**
@@ -2306,6 +2977,7 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
  *   review: 'independent-approved',
  *   provenance?: ChromiumProvenance,
  *   beforeAtomicPublish?: (directory: string) => Promise<void>,
+ *   beforePublishedVerification?: (bundlePath: string) => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
@@ -2316,6 +2988,7 @@ export async function persistApprovedLiveScreenshot({
   review,
   provenance,
   beforeAtomicPublish,
+  beforePublishedVerification,
   beforeStagingCleanup
 }) {
   if (review !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
@@ -2370,6 +3043,7 @@ export async function persistApprovedLiveScreenshot({
     throw new Error('live screenshot retention refuses to overwrite existing bundle');
   }
 
+  /** @type {string | undefined} */
   let stagingDirectory;
   /** @type {StagingParentEvidence | undefined} */
   let stagingParentEvidence;
@@ -2378,6 +3052,7 @@ export async function persistApprovedLiveScreenshot({
   /** @type {StagingEvidence | undefined} */
   let stagingEvidence;
   let published = false;
+  let publicationHandles;
   let result;
   let operationError;
   try {
@@ -2396,40 +3071,49 @@ export async function persistApprovedLiveScreenshot({
     ) {
       throw new Error('live screenshot staging directory is not private');
     }
+    await fsPromises.chmod(stagingDirectory, 0o700);
+    const privateStagingStats = lstatSync(stagingDirectory);
+    const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+    if (
+      !privateStagingStats.isDirectory() ||
+      privateStagingStats.isSymbolicLink() ||
+      (privateStagingStats.mode & 0o077) !== 0 ||
+      (currentUid !== undefined && privateStagingStats.uid !== currentUid)
+    ) {
+      throw new Error('live screenshot staging directory is not private');
+    }
     stagingIdentity = {
-      dev: createdStagingStats.dev,
-      ino: createdStagingStats.ino,
+      dev: privateStagingStats.dev,
+      ino: privateStagingStats.ino,
+      uid: privateStagingStats.uid,
+      gid: privateStagingStats.gid,
+      mode: privateStagingStats.mode & 0o7777,
       parent: stagingParentEvidence
     };
-    await fsPromises.chmod(stagingDirectory, 0o700);
-    await fsPromises.writeFile(join(stagingDirectory, 'screenshot.png'), bytes, {
-      encoding: null,
-      flag: 'wx',
-      mode: 0o600
-    });
-    const screenshotStats = lstatSync(join(stagingDirectory, 'screenshot.png'));
-    if (!screenshotStats.isFile() || screenshotStats.isSymbolicLink()) {
-      throw new Error('live screenshot staging bundle contains an unsafe entry');
-    }
-    stagingIdentity.screenshot = {
-      dev: screenshotStats.dev,
-      ino: screenshotStats.ino,
-      size: screenshotStats.size
+    const cleanupIdentity = /** @type {StagingCleanupEvidence} */ (stagingIdentity);
+    const stagingPath = /** @type {string} */ (stagingDirectory);
+    /** @param {'screenshot.png' | 'manifest.json'} name @param {Buffer | string} data @param {BufferEncoding | null} encoding */
+    const writeStagingEntry = async (name, data, encoding) => {
+      try {
+        await fsPromises.writeFile(join(stagingPath, name), data, {
+          encoding,
+          flag: 'wx',
+          mode: 0o600
+        });
+      } finally {
+        // A mocked or interrupted write can leave a regular partial file. Take
+        // its exact identity even on failure so cleanup can remove only bytes
+        // this operation created; unsafe replacements remain quarantined.
+        try {
+          cleanupIdentity[name === 'screenshot.png' ? 'screenshot' : 'manifest'] =
+            readPrivateStagingFileIdentity(join(stagingPath, name));
+        } catch {
+          // No trustworthy identity means cleanup must preserve the entry.
+        }
+      }
     };
-    await fsPromises.writeFile(join(stagingDirectory, 'manifest.json'), manifestText, {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600
-    });
-    const manifestStats = lstatSync(join(stagingDirectory, 'manifest.json'));
-    if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) {
-      throw new Error('live screenshot staging bundle contains an unsafe entry');
-    }
-    stagingIdentity.manifest = {
-      dev: manifestStats.dev,
-      ino: manifestStats.ino,
-      size: manifestStats.size
-    };
+    await writeStagingEntry('screenshot.png', bytes, null);
+    await writeStagingEntry('manifest.json', manifestText, 'utf8');
     stagingEvidence = await verifyPrivateStagingDirectory(stagingDirectory, stagingParentEvidence);
     stagingIdentity = stagingEvidence;
     const destinationStats = lstatSync(evidence.candidate);
@@ -2444,12 +3128,22 @@ export async function persistApprovedLiveScreenshot({
       destination: evidence,
       beforeAtomicPublish
     });
+    publicationHandles = publication;
     // The atomic rename has already moved the source when `renamed` is true;
     // close failures must not send the outer cleanup back to the old pathname.
     published = publication.renamed;
     if (!published) throw new Error('live screenshot retention bundle publication failed');
     assertSameDestination(evidence);
-    await verifyPublishedBundle(bundlePath, bytes, manifestText);
+    await beforePublishedVerification?.(bundlePath);
+    await verifyPublishedBundle({
+      bundlePath,
+      expectedBytes: bytes,
+      expectedManifestText: manifestText,
+      destination: evidence,
+      destinationHandle: publication.destinationHandle,
+      publishedBundleHandle: publication.stagingHandle,
+      expectedBundle: stagingEvidence
+    });
     if (publication.closeFailure) throw publication.closeFailure;
     result = {
       bundlePath,
@@ -2465,6 +3159,32 @@ export async function persistApprovedLiveScreenshot({
 
   /** @type {Error[]} */
   const cleanupFailures = [];
+  if (published && publicationHandles) {
+    if (operationError && stagingEvidence) {
+      try {
+        await removePublishedBundleSafely({
+          bundlePath,
+          destination: evidence,
+          destinationHandle: publicationHandles.destinationHandle,
+          publishedBundleHandle: publicationHandles.stagingHandle,
+          expectedBundle: stagingEvidence,
+          expectedBytes: bytes,
+          expectedManifestText: manifestText
+        });
+      } catch {
+        // A raced replacement or failed identity check stays in place. The
+        // cleanup failure is reported without unlinking bytes we cannot prove
+        // this operation published.
+        cleanupFailures[cleanupFailures.length] = new Error(
+          'live screenshot published bundle cleanup failed'
+        );
+      }
+    }
+    const handleFailures = await closePublicationHandles(publicationHandles);
+    for (const failure of handleFailures) {
+      cleanupFailures[cleanupFailures.length] = failure;
+    }
+  }
   if (stagingDirectory && stagingIdentity && !published) {
     try {
       // Test-only race hook runs before identity-anchored cleanup. If it
@@ -2472,19 +3192,19 @@ export async function persistApprovedLiveScreenshot({
       // leaves the replacement untouched while reporting the failure.
       await beforeStagingCleanup?.(stagingDirectory);
     } catch {
-      cleanupFailures.push(new Error('live screenshot staging cleanup hook failed'));
+      cleanupFailures[cleanupFailures.length] = new Error('live screenshot staging cleanup hook failed');
     }
     try {
       await removePrivateStagingDirectory(stagingDirectory, stagingIdentity);
     } catch {
-      cleanupFailures.push(new Error('live screenshot staging cleanup failed'));
+      cleanupFailures[cleanupFailures.length] = new Error('live screenshot staging cleanup failed');
     }
   }
   if (stagingParentEvidence) {
     try {
       await removePrivateStagingParent(stagingParentEvidence.path, stagingParentEvidence);
     } catch {
-      cleanupFailures.push(new Error('live screenshot staging parent cleanup failed'));
+      cleanupFailures[cleanupFailures.length] = new Error('live screenshot staging parent cleanup failed');
     }
   }
 
