@@ -662,7 +662,7 @@
     }
   }
 
-  @container workspace-preview (max-width: 760px) {
+  @container workspace-preview (max-width: 1439px) {
     .timeline {
       gap: 20px;
       padding: 12px 16px 148px;

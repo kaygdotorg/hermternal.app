@@ -255,7 +255,7 @@
     white-space: nowrap;
   }
 
-  @container workspace-preview (max-width: 760px) {
+  @container workspace-preview (max-width: 1439px) {
     .composer {
       right: 16px;
       bottom: 16px;

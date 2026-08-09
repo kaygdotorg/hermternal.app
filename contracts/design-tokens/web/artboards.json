@@ -9,6 +9,11 @@
     "token_content_hash": "b5b2b8c5",
     "pages": [
       {
+        "id": "A-0",
+        "name": "Chat workspace",
+        "artboard_count": 34
+      },
+      {
         "id": "3-0",
         "name": "Web states — Authentication",
         "artboard_count": 34
@@ -127,6 +132,7 @@
     {"name": "--color-search-light-success", "value": "#0B6B4B", "scope": "deferred"},
     {"name": "--color-search-light-signal", "value": "#2348C7", "scope": "deferred"},
     {"name": "--font-ui", "value": "Instrument Sans", "scope": "shipped"},
+    {"name": "--font-mono", "value": "Geist Mono", "scope": "shipped"},
     {"name": "--text-meta", "value": "12px", "scope": "shipped"},
     {"name": "--text-control", "value": "14px", "scope": "shipped"},
     {"name": "--text-body", "value": "15px", "scope": "shipped"},
@@ -494,7 +500,7 @@
   "token_sets": [
     {
       "id": "runtime",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--font-ui", "--font-mono", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     },
     {
       "id": "runtime-gate",
@@ -502,22 +508,37 @@
     },
     {
       "id": "auth",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--font-ui", "--font-mono", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     },
     {
       "id": "auth-gate",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-auth-signal", "--color-auth-danger", "--color-gate-light-action", "--color-gate-light-action-ink", "--color-gate-light-state-surface", "--color-gate-light-state-ink", "--color-gate-light-focus", "--color-gate-light-error-surface", "--color-gate-light-error-ink", "--color-gate-light-error-border", "--color-gate-dark-action", "--color-gate-dark-action-ink", "--color-gate-dark-state-surface", "--color-gate-dark-state-ink", "--color-gate-dark-focus", "--color-gate-dark-error-surface", "--color-gate-dark-error-ink", "--color-gate-dark-error-border", "--font-ui", "--font-mono", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     },
     {
       "id": "deep-link-deferred",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-deeplink-light-courier", "--color-deeplink-light-success", "--color-deeplink-light-signal", "--color-deeplink-light-danger", "--color-deeplink-light-muted", "--color-deeplink-light-action", "--color-deeplink-light-action-ink", "--color-deeplink-dark-courier", "--color-deeplink-dark-success", "--color-deeplink-dark-signal", "--color-deeplink-dark-danger", "--color-deeplink-dark-muted", "--color-deeplink-dark-action", "--color-deeplink-dark-action-ink", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-deeplink-light-courier", "--color-deeplink-light-success", "--color-deeplink-light-signal", "--color-deeplink-light-danger", "--color-deeplink-light-muted", "--color-deeplink-light-action", "--color-deeplink-light-action-ink", "--color-deeplink-dark-courier", "--color-deeplink-dark-success", "--color-deeplink-dark-signal", "--color-deeplink-dark-danger", "--color-deeplink-dark-muted", "--color-deeplink-dark-action", "--color-deeplink-dark-action-ink", "--font-ui", "--font-mono", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     },
     {
       "id": "search-deferred",
-      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-search-light-courier", "--color-search-light-success", "--color-search-light-signal", "--font-ui", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
+      "tokens": ["--color-canvas", "--color-paper", "--color-ink", "--color-muted", "--color-line", "--color-signal", "--color-courier", "--color-success", "--color-danger", "--color-dark-canvas", "--color-dark-paper", "--color-dark-ink", "--color-dark-muted", "--color-dark-line", "--color-dark-signal", "--color-dark-courier", "--color-dark-success", "--color-dark-danger", "--color-search-light-courier", "--color-search-light-success", "--color-search-light-signal", "--font-ui", "--font-mono", "--text-meta", "--text-control", "--text-body", "--text-title", "--weight-regular", "--weight-medium", "--weight-semibold", "--leading-meta", "--leading-control", "--leading-body", "--leading-title", "--space-1", "--space-2", "--space-3", "--space-4", "--space-6", "--space-8", "--radius-nested", "--radius-structural", "--radius-pill", "--radius-input", "--radius-nested-glass", "--radius-card", "--radius-popover", "--radius-glass"]
     }
   ],
   "states": [
+    {
+      "id": "runtime.chat-workspace-resting",
+      "family": "runtime",
+      "status": "ready",
+      "release": "v0.0.1",
+      "token_set": "runtime",
+      "variants": [
+        {"id": "light.desktop", "artboard_id": "1-0", "name": "Light / Desktop — Hermes workspace", "width": 1440, "height": 960},
+        {"id": "light.narrow", "artboard_id": "66-0", "name": "Light / Mobile — narrow workspace", "width": 390, "height": 844},
+        {"id": "dark.desktop", "artboard_id": "1KP-0", "name": "Dark / Desktop — Hermes workspace", "width": 1440, "height": 960},
+        {"id": "dark.narrow", "artboard_id": "1XV-0", "name": "Dark / Mobile — narrow workspace", "width": 390, "height": 844}
+      ],
+      "missing_variants": [],
+      "notes": "Approved resting Chat workspace boards define the live shell geometry and appearance. Runtime content remains server-owned; the inspector content is visibly marked as a local mock."
+    },
     {
       "id": "runtime.interrupted-response",
       "family": "runtime",

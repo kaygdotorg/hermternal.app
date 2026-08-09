@@ -282,22 +282,33 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(page.locator('.section-note').first()).toHaveText('send');
 });
 
-test('Paper effective width switches exactly at 760px without a tabbed desktop replacement', async ({ page }) => {
-  for (const width of [760, 761]) {
+test('Paper effective widths use deterministic narrow, intermediate, and desktop families', async ({ page }) => {
+  for (const width of [760, 761, 1439, 1440]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
     const workspace = page.locator('.workspace-preview');
     expect((await workspace.boundingBox())?.width).toBe(width);
 
-    if (width === 760) {
+    if (width <= 1439) {
       await expect(workspace.locator('.mobile-toolbar')).toBeVisible();
       await expect(workspace.locator('.conversation-header')).toBeHidden();
+      await expect(workspace.locator('.sidebar')).toBeHidden();
+      await expect(workspace.locator('.desktop-inspector')).toBeHidden();
+      if (width > 760) {
+        expect((await workspace.locator('.conversation-panel').boundingBox())?.width).toBeLessThanOrEqual(720);
+      }
+      if (width === 760) await expect(workspace.locator('.workspace-mobile-status-bar')).toBeVisible();
+      else await expect(workspace.locator('.workspace-mobile-status-bar')).toBeHidden();
     } else {
       await expect(workspace.locator('.mobile-toolbar')).toBeHidden();
       await expect(workspace.locator('.conversation-header')).toBeVisible();
       await expect(workspace.locator('.sidebar')).toBeVisible();
+      await expect(workspace.locator('.desktop-inspector')).toBeVisible();
+      expect((await workspace.locator('.conversation-panel').boundingBox())?.width).toBe(720);
     }
+
+    await expect(workspace.getByRole('tab', { name: /Chat|Terminal/ })).toHaveCount(0);
   }
 });
 
@@ -601,12 +612,14 @@ test('narrow title editing uses the compound island, separate workspace action, 
   await expect(page.getByRole('button', { name: 'Open workspace' })).toBeVisible();
 
   const workspace = page.locator('.workspace-preview');
-  const workspaceBox = await workspace.boundingBox();
   await island.getByRole('button', { name: 'Edit conversation title' }).click();
   const titleLayer = page.getByTestId('mobile-title-editor');
   const dimmer = page.locator('.title-edit-dimmer');
-  const dimmerBox = await dimmer.boundingBox();
   await expect(titleLayer).toBeVisible();
+  // Focusing the represented mobile editor may scroll the preview host. Measure
+  // both boxes after focus settles so the assertion verifies relative geometry.
+  const workspaceBox = await workspace.boundingBox();
+  const dimmerBox = await dimmer.boundingBox();
   await expect(titleLayer).toHaveAttribute('role', 'dialog');
   await expect(titleLayer).toHaveAttribute('aria-modal', 'true');
   await expect(page.getByTestId('represented-mobile-keyboard')).toBeVisible();

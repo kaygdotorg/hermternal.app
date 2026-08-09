@@ -240,7 +240,9 @@ test('narrow production route keeps one current session across accessible Chat a
   // Narrow uses the selector above Terminal. Desktop instead returns focus to a
   // Chat control in the covered underlay, so assert hit-test visibility at the
   // instant the real handoff calls focus rather than trusting a layout rect.
-  await page.setViewportSize({ width: 1280, height: 800 });
+  // The exact Paper desktop family begins when all 276 / 720 / 380 columns fit;
+  // narrower widths use the compact selector and modal secondary surfaces.
+  await page.setViewportSize({ width: 1440, height: 800 });
   // The inactive Desktop control is intentionally behind the Terminal-owned
   // accessibility boundary. Use its stable DOM selector until the handoff flips
   // it to the selected, released Chat control.

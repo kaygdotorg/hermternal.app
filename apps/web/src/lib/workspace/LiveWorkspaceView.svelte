@@ -12,7 +12,9 @@
   import type { Appearance, WorkspaceAction } from './types';
 
   export let session: LiveWorkspaceSession;
-  export let appearance: Appearance = 'light';
+  // The production route follows the OS when no explicit preview appearance is
+  // injected. Paper supplies exact light and dark resting boards for both.
+  export let appearance: Appearance | undefined = undefined;
   export let onReturnToSignIn: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
   /** Root accepts only an opaque stamp issued by a concrete bridge state callback. */
   export let registerTerminalLifecycle: ((
@@ -22,7 +24,17 @@
   /** Terminal 4401 must carry the registered opaque lease; chat has its own path. */
   export let onTerminalAuthenticationFailure: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
 
+  function initialSystemAppearance(): Appearance {
+    // SSR has no media query. Client instances read the preference before their
+    // first render so a dark production route does not paint a light frame.
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'light';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
   let snapshot: Readonly<LiveWorkspaceSnapshot> = session.current;
+  let systemAppearance: Appearance = initialSystemAppearance();
+  let resolvedAppearance: Appearance;
+  let unsubscribeAppearance: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   let unsubscribeTerminalLifecycle: (() => void) | undefined;
   let terminalAuthenticationLease: RootTerminalLifecycleLease | undefined;
@@ -34,6 +46,10 @@
   let chatHandoffRequested = false;
   let chatHandoffRunning = false;
   let handoffSequence = 0;
+
+  // Explicit preview controls stay reactive after mount. The media query keeps
+  // its latest value in reserve for the production route and later prop removal.
+  $: resolvedAppearance = appearance ?? systemAppearance;
 
   // A latched factory failure has no bridge or coordinator of its own. Keep an
   // unpromoted draft fail-closed instead of turning its Terminal controls into a
@@ -59,6 +75,15 @@
   }
 
   onMount(() => {
+    if (typeof window.matchMedia === 'function') {
+      const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
+      const applyColorScheme = (): void => {
+        systemAppearance = colorScheme.matches ? 'dark' : 'light';
+      };
+      applyColorScheme();
+      colorScheme.addEventListener('change', applyColorScheme);
+      unsubscribeAppearance = () => colorScheme.removeEventListener('change', applyColorScheme);
+    }
     coordinator = session.coordinator;
     terminal = session.terminal;
     bindTerminalLifecycle(terminal);
@@ -85,6 +110,7 @@
   onDestroy(() => {
     // The route root owns final disposal. This authenticated projection only
     // releases its subscription so expiry can remount the same workspace.
+    unsubscribeAppearance?.();
     unsubscribe?.();
     unsubscribeTerminalLifecycle?.();
   });
@@ -247,10 +273,13 @@
 </script>
 
 <div bind:this={liveWorkspaceElement} class="live-workspace">
+  <h1 class="sr-only">Hermternal workspace</h1>
+  <!-- Paper's resting desktop shell includes the inspector beside live Chat.
+       Its card remains visibly marked as a local mock; only the timeline and
+       durable session metadata are projected from the runtime. -->
   <WorkspacePreview
     activeSessionId={snapshot.activeSessionId ?? ''}
-    artifactInspectorEnabled={false}
-    {appearance}
+    appearance={resolvedAppearance}
     {chatFocusHandoff}
     terminalPresentationActive={terminalLayerVisible}
     dataMode="live"
@@ -270,7 +299,7 @@
     <div
       class="terminal-layer terminal-appearance-scope"
       class:active={terminalLayerVisible}
-      data-appearance={appearance}
+      data-appearance={resolvedAppearance}
       data-testid="terminal-appearance-scope"
     >
       {#if terminal}
@@ -310,6 +339,15 @@
   .live-workspace {
     position: relative;
     min-height: 100dvh;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .terminal-layer {
