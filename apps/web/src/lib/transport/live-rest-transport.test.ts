@@ -136,6 +136,23 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+async function withObjectPrototypeValuePollution<T>(
+  descriptor: PropertyDescriptor,
+  callback: () => Promise<T>
+): Promise<T> {
+  const previous = Reflect.getOwnPropertyDescriptor(Object.prototype, 'value');
+  try {
+    Object.defineProperty(Object.prototype, 'value', { configurable: true, ...descriptor });
+    return await callback();
+  } finally {
+    if (previous) {
+      Object.defineProperty(Object.prototype, 'value', previous);
+    } else {
+      delete (Object.prototype as Record<string, unknown>).value;
+    }
+  }
+}
+
 function rawProviderDiscovery(): string {
   return JSON.stringify({
     providers: [
@@ -1163,6 +1180,73 @@ describe('createLiveRestTransport', () => {
     expect(accessorReads).toBe(0);
     expect(proxyReads).toBe(0);
   });
+
+  it.each(['getter', 'data'] as const)(
+    'rejects own accessor and Proxy details under Object.prototype.value %s pollution',
+    async (pollution) => {
+      let pollutedValueReads = 0;
+      let accessorReads = 0;
+      let proxyReads = 0;
+      const accessorDetail = { ...LIVE_SESSION_FIXTURE };
+      Object.defineProperty(accessorDetail, 'id', {
+        configurable: true,
+        enumerable: true,
+        get: () => {
+          accessorReads += 1;
+          return LIVE_SESSION_FIXTURE.id;
+        }
+      });
+      const proxyDetail = new Proxy({ ...LIVE_SESSION_FIXTURE }, {
+        get: (target, key, receiver) => {
+          if (key === 'id') {
+            proxyReads += 1;
+            return LIVE_SESSION_FIXTURE.id;
+          }
+          return Reflect.get(target, key, receiver);
+        }
+      });
+      const details = [accessorDetail, proxyDetail];
+      const previous = Reflect.getOwnPropertyDescriptor(Object.prototype, 'value');
+      const descriptor: PropertyDescriptor =
+        pollution === 'getter'
+          ? {
+              get: () => {
+                pollutedValueReads += 1;
+                return LIVE_SESSION_FIXTURE.id;
+              }
+            }
+          : { value: LIVE_SESSION_FIXTURE.id, writable: true };
+
+      const results: Array<{ status: 'resolved' | 'rejected'; error?: unknown }> = [];
+      await withObjectPrototypeValuePollution(descriptor, async () => {
+        for (const detail of details) {
+          const adapter: LiveRestTransport = {
+            getProviders: vi.fn(),
+            getAuthState: vi.fn(),
+            listSessions: vi.fn(),
+            getSessions: vi.fn(),
+            getSession: vi.fn().mockResolvedValue(detail),
+            getSessionMessages: vi.fn()
+          };
+          try {
+            await getLiveRestSessionForWorkspace(adapter, {}, LIVE_SESSION_FIXTURE.id);
+            results.push({ status: 'resolved' });
+          } catch (error) {
+            results.push({ status: 'rejected', error });
+          }
+        }
+      });
+
+      expect(results).toHaveLength(details.length);
+      for (const result of results) {
+        expect(result).toMatchObject({ status: 'rejected', error: { code: 'invalid-response' } });
+      }
+      expect(Reflect.getOwnPropertyDescriptor(Object.prototype, 'value')).toEqual(previous);
+      expect(pollutedValueReads).toBe(0);
+      expect(accessorReads).toBe(0);
+      expect(proxyReads).toBe(0);
+    }
+  );
 
   it('rejects oversized, wrong-media, malformed-UTF8, redirected, and non-success responses', async () => {
     const oversized = fetchSequence(response('{"providers":[]}'));

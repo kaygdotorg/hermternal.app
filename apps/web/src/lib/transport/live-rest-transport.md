@@ -124,10 +124,14 @@ budgets:
   requested path because Hermes resolves aliases and continuation sessions to a
   canonical ID before returning session details or messages. Detail responses
   are accepted only when a plain object exposes own enumerable data
-  descriptors; accessors, inherited fields, symbols, non-enumerable descriptor
-  variants, revoked objects, and Proxy wrappers fail closed. The transport then
-  captures one immutable normalized projection and the workspace never reads
-  the adapter's raw object again. The exact transport instance created here is
+  descriptors. Each reflected descriptor record is separately proven to have an
+  own `value` and enumerable data flag with no own `get` or `set`; inherited
+  descriptor keys such as a polluted `Object.prototype.value` are never trusted.
+  Accessors, inherited fields, symbols, non-enumerable descriptor variants,
+  revoked objects, and Proxy wrappers fail closed before cloning or value reads.
+  The transport then captures one immutable normalized projection and the
+  workspace never reads the adapter's raw object again. The exact transport
+  instance created here is
   registered in a module-private `WeakMap`; when that instance resolves an
   alias, the exact workspace instance, requested alias, canonical ID, and exact
   frozen projection are recorded in workspace-scoped private state. The helper

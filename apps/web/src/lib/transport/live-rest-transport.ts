@@ -471,9 +471,13 @@ const SESSION_DETAIL_REQUIRED_KEYS = [
 /**
  * Captures one immutable detail projection for structural adapters. Reflection
  * never reads through the source object: every accepted field comes from one
- * own data descriptor, and all own keys must be enumerable data properties on a
- * plain object. structuredClone is a fail-closed proxy check; its result is not
- * used because the descriptor values above are the single captured snapshot.
+ * own enumerable data descriptor, and all own keys must be plain data
+ * properties. Descriptor records inherit from Object.prototype, so the check
+ * uses primordial own-descriptor reflection instead of `in` or ambient
+ * Object.hasOwn. Any own `get` or `set` descriptor is rejected before
+ * structuredClone, and descriptor values are not read until that proof passes.
+ * structuredClone is a fail-closed proxy check; its result is not used because
+ * the descriptor values above are the single captured snapshot.
  */
 function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
@@ -486,7 +490,17 @@ function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefin
     for (const key of Reflect.ownKeys(value)) {
       if (typeof key !== 'string') return undefined;
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor || !('value' in descriptor) || descriptor.enumerable !== true) {
+      if (!descriptor) return undefined;
+
+      // PropertyDescriptor records inherit from Object.prototype. Prove the
+      // record has an own data `value`, own enumerable flag, and no own getter
+      // or setter before any later descriptor.value read. This keeps a polluted
+      // Object.prototype.value from turning an accessor into trusted data.
+      const ownValue = Reflect.getOwnPropertyDescriptor(descriptor, 'value');
+      const ownEnumerable = Reflect.getOwnPropertyDescriptor(descriptor, 'enumerable');
+      const ownGet = Reflect.getOwnPropertyDescriptor(descriptor, 'get');
+      const ownSet = Reflect.getOwnPropertyDescriptor(descriptor, 'set');
+      if (!ownValue || ownGet || ownSet || ownEnumerable?.value !== true) {
         return undefined;
       }
       descriptors.set(key, descriptor);
