@@ -39,7 +39,7 @@ type LiveProofPageEvent =
   | { kind: 'http.request'; method: string; route: string }
   | { kind: 'http.response'; method: string; route: string; status: number }
   | { kind: 'http.failure'; method: string; route: string }
-  | { kind: 'ws.open'; route: string; ticketOnly: boolean }
+  | { kind: 'ws.open'; route: string; ticketOnly: boolean; originBound: boolean }
   | {
       kind: 'ws.sent';
       method: string;
@@ -51,6 +51,7 @@ type LiveProofPageEvent =
       event: string;
       requestTag?: string;
       sessionTag?: string;
+      acknowledgement?: boolean;
     }
   | { kind: 'gateway.ready'; sessionTag?: string }
   | {
@@ -147,7 +148,8 @@ test('browser UI reaches official Hermes, reconciles exact history, and logs out
     expect.objectContaining({
       kind: 'ws.open',
       route: '/api/ws',
-      ticketOnly: true
+      ticketOnly: true,
+      originBound: true
     })
   );
   setLiveProofStatus(testInfo, {
@@ -425,7 +427,8 @@ async function drainPageProofEvents(
       case 'ws.open':
         ledger.recordWebSocketOpen({
           route: event.route,
-          ticketOnly: event.ticketOnly
+          ticketOnly: event.ticketOnly,
+          originBound: event.originBound
         });
         break;
       case 'ws.sent':
@@ -439,7 +442,8 @@ async function drainPageProofEvents(
         ledger.recordWebSocketReceived({
           event: event.event,
           requestTag: event.requestTag,
-          sessionTag: event.sessionTag
+          sessionTag: event.sessionTag,
+          acknowledgement: event.acknowledgement
         });
         break;
       case 'gateway.ready':
@@ -508,11 +512,12 @@ function parseLiveProofPageEvents(value: unknown): LiveProofPageEvent[] {
           route: projectionText(candidate.route, 256, index)
         };
       case 'ws.open':
-        requireProjectionKeys(candidate, ['kind', 'route', 'ticketOnly'], index);
+        requireProjectionKeys(candidate, ['kind', 'route', 'ticketOnly', 'originBound'], index);
         return {
           kind: 'ws.open',
           route: projectionText(candidate.route, 256, index),
-          ticketOnly: projectionBoolean(candidate.ticketOnly, index)
+          ticketOnly: projectionBoolean(candidate.ticketOnly, index),
+          originBound: projectionBoolean(candidate.originBound, index)
         };
       case 'ws.sent':
         requireProjectionKeys(candidate, ['kind', 'method', 'requestTag', 'sessionTag'], index);
@@ -522,14 +527,19 @@ function parseLiveProofPageEvents(value: unknown): LiveProofPageEvent[] {
           requestTag: projectionTag(candidate.requestTag, index),
           sessionTag: projectionTag(candidate.sessionTag, index)
         };
-      case 'ws.received':
-        requireProjectionKeys(candidate, ['kind', 'event', 'requestTag', 'sessionTag'], index);
+      case 'ws.received': {
+        requireProjectionKeys(candidate, ['kind', 'event', 'requestTag', 'sessionTag', 'acknowledgement'], index);
+        const event = projectionText(candidate.event, 96, index);
+        const acknowledgement =
+          event === 'response' ? projectionBoolean(candidate.acknowledgement, index) : projectionOptionalBoolean(candidate.acknowledgement, index);
         return {
           kind: 'ws.received',
-          event: projectionText(candidate.event, 96, index),
+          event,
           requestTag: projectionTag(candidate.requestTag, index),
-          sessionTag: projectionTag(candidate.sessionTag, index)
+          sessionTag: projectionTag(candidate.sessionTag, index),
+          acknowledgement
         };
+      }
       case 'gateway.ready':
         requireProjectionKeys(candidate, ['kind', 'sessionTag'], index);
         return {
@@ -603,6 +613,11 @@ function projectionTag(value: unknown, index: number): string | undefined {
 function projectionBoolean(value: unknown, index: number): boolean {
   if (typeof value !== 'boolean') throw new Error(`live proof page bridge event ${index} contains an unsafe boolean`);
   return value;
+}
+
+function projectionOptionalBoolean(value: unknown, index: number): boolean | undefined {
+  if (value === undefined) return undefined;
+  return projectionBoolean(value, index);
 }
 
 function projectionStatus(value: unknown, index: number): number {

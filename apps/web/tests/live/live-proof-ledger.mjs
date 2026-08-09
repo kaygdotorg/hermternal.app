@@ -290,12 +290,16 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS, options = 
         status: event.status
       });
     },
-    /** @param {{ route: string, ticketOnly: boolean }} event */
+    /** @param {{ route: string, ticketOnly: boolean, originBound: boolean }} event */
     recordWebSocketOpen(event) {
+      if (event.originBound !== true) {
+        throw new Error('live proof WebSocket origin was not page-bound');
+      }
       return append({
         kind: 'ws.open',
         route: boundedRoute(event.route),
-        ticketOnly: event.ticketOnly === true
+        ticketOnly: event.ticketOnly === true,
+        originBound: true
       });
     },
     /**
@@ -312,14 +316,45 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS, options = 
         sessionTag: eventTag(event, 'sessionTag', 'sessionId')
       });
     },
-    /** @param {{ event: string, requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string }} event */
+    /**
+     * A response projection carries a page-validated successful-result bit. A
+     * request tag alone is not an acknowledgement: error, resultless, or
+     * malformed JSON-RPC responses remain explicitly unsuccessful.
+     * @param {{ event: string, acknowledgement?: boolean, requestTag?: string, sessionTag?: string, requestId?: string, sessionId?: string }} event
+     */
     recordWebSocketReceived(event) {
+      const properties = readStrictObject(
+        event,
+        'live proof WebSocket received event',
+        ['event', 'acknowledgement', 'requestTag', 'sessionTag', 'requestId', 'sessionId']
+      );
+      const eventName = boundedEventName(properties.get('event'));
+      const acknowledgement = properties.get('acknowledgement');
+      if (eventName === 'response') {
+        if (typeof acknowledgement !== 'boolean') {
+          throw new Error('live proof response acknowledgement is invalid');
+        }
+      } else if (acknowledgement !== undefined) {
+        throw new Error('live proof response acknowledgement is misplaced');
+      }
       rejectRawIdentityFields(event);
+      /** @param {string} tagKey @param {string} rawKey */
+      const safeTag = (tagKey, rawKey) => {
+        if (properties.has(tagKey)) return boundedTag(properties.get(tagKey));
+        if (properties.has(rawKey)) {
+          if (trustedSigner.kind !== 'test') {
+            throw new Error('production ledger received a raw dynamic identity');
+          }
+          return identityTag(properties.get(rawKey));
+        }
+        return undefined;
+      };
       return append({
         kind: 'ws.received',
-        event: boundedEventName(event.event),
-        requestTag: eventTag(event, 'requestTag', 'requestId'),
-        sessionTag: eventTag(event, 'sessionTag', 'sessionId')
+        event: eventName,
+        requestTag: safeTag('requestTag', 'requestId'),
+        sessionTag: safeTag('sessionTag', 'sessionId'),
+        acknowledgement: eventName === 'response' ? acknowledgement : undefined
       });
     },
     /** @param {{ sessionTag?: string, sessionId?: string }} [event] */
@@ -1052,7 +1087,8 @@ export function matchLiveProofLedger(events, expected) {
   const websocketOpens = events.filter((event) => event.kind === 'ws.open');
   const websocket = websocketOpens.length === 1 &&
     websocketOpens[0].route === '/api/ws' &&
-    websocketOpens[0].ticketOnly === true
+    websocketOpens[0].ticketOnly === true &&
+    websocketOpens[0].originBound === true
     ? websocketOpens[0]
     : undefined;
   const readyEvents = events.filter((event) => event.kind === 'gateway.ready');
@@ -1075,12 +1111,14 @@ export function matchLiveProofLedger(events, expected) {
     (!expectedPromptRequestTag || event.requestTag === expectedPromptRequestTag) &&
     (!expectedPromptSessionTag || event.sessionTag === expectedPromptSessionTag)
   );
-  const acknowledgement = events.find((event) =>
+  const promptAcknowledgements = events.filter((event) =>
     !!prompt &&
     event.kind === 'ws.received' &&
     event.event === 'response' &&
+    event.acknowledgement === true &&
     event.requestTag === prompt.requestTag
   );
+  const acknowledgement = promptAcknowledgements.length === 1 ? promptAcknowledgements[0] : undefined;
   const deltas = events.filter((event) => event.kind === 'message.delta');
   const delta = deltas.find((event) =>
     !!prompt &&

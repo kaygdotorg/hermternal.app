@@ -78,7 +78,18 @@ signer exists only behind an explicit unit-test opt-in. The ledger keeps
 only fixed method/route/event projections, HMAC tags, statuses, booleans, and
 bounded counts; dynamic session paths are reduced to fixed route templates. The
 page key, message rows, message IDs, prompt, response body, frames, and
-watermark are discarded outside the one-shot assertion step.
+watermark are discarded outside the one-shot assertion step. Before any
+WebSocket open, frame, or close observation, the page bridge proves an absolute
+same-origin `ws`/`wss` URL by mapping it to the page's `http`/`https` security
+scheme and matching the exact hostname and effective port. It rejects userinfo,
+fragments, malformed or encoded query grammar, wrong paths, duplicate or extra
+keys, empty tickets, and ticket values outside the bounded
+`^[A-Za-z0-9_-]+$` contract. The URL and ticket remain page-local and never enter
+Node projections or error text. A response projection also carries a fixed
+successful-result boolean; JSON-RPC errors, resultless or malformed responses,
+and unstable or extra-field response objects cannot satisfy the prompt
+acknowledgement. The ledger requires that page-validated bit before delta,
+completion, and post-fence history matching.
 
 Canonical history projections are strict on both shape and value. They snapshot
 plain own data properties, reject accessors, inconsistent proxy-backed
@@ -91,13 +102,15 @@ values fail closed before a projection tag is produced. This prevents a lenient
 Node-side parser from widening the page-produced canonical boundary.
 
 `live-proof-parent-compat.mjs` is intentionally a focused offline migration
-probe. It loads only `live-proof-ledger.mjs` from exact parent commit
-`a98b3ad901292ff3434f19e8a17f9e9b1eab4d65` and the working-tree child, then
-contrasts the old default Node-HMAC and lenient projection behavior with the
-child's page-signer requirement and strict rejection of malformed optional
-shapes and fractional timestamps. It does not import the live host, reporter,
-capture, browser, or reconciliation surfaces because none of those boundaries
-changed in this compatibility correction. Run it directly with Node:
+probe. It loads only the ledger from exact parent commit
+`a7d43f636424dcd02bf65743966db30e5aeb30f0` and the working-tree child, then
+proves that the parent accepts attacker-origin fixed projections and treats
+resultless, JSON-RPC error, and malformed-result same-ID responses as prompt
+acknowledgements, while the child requires the page-validated URL and
+successful-result acknowledgement projections. The parent and child retain the
+same strict history projection contract; this probe is limited to the changed
+origin and acknowledgement gates. It does not import the live host, reporter,
+capture, browser, or reconciliation surfaces. Run it directly with Node:
 
 ```sh
 node apps/web/tests/live/live-proof-parent-compat.mjs
@@ -123,8 +136,10 @@ use fixed `/api/sessions/:sessionId/...` templates rather than raw IDs.
 The lane submits exactly one exact prompt and never retries after any uncertain
 transport or assertion state. Hermes message events are correlated only by the
 source-provided event-envelope `session_id`; no request ID is fabricated from
-the prompt acknowledgement. Successful completion is the source status
-`complete`. After that completion, the lane performs one explicit canonical
+the prompt acknowledgement. A prompt acknowledgement is accepted only when
+its response has exactly one bounded JSON-RPC `result`, no `error`, no extra
+response fields, and a stable descriptor-first page projection. Successful
+completion is the source status `complete`. After that completion, the lane performs one explicit canonical
 history read and accepts only one exact post-watermark user prompt followed in
 order by one exact post-watermark assistant marker. Any stale-only match,
 missing or changed pre-fence message projection, duplicate/extra user or assistant

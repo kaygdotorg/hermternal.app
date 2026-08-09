@@ -59,7 +59,8 @@ function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}
   const postMessages = proofMessages();
   ledger.recordWebSocketOpen({
     route: options.route ?? '/api/ws',
-    ticketOnly: options.ticketOnly ?? true
+    ticketOnly: options.ticketOnly ?? true,
+    originBound: true
   });
   ledger.recordWebSocketReceived({ event: 'gateway.ready' });
   ledger.recordGatewayReady();
@@ -71,7 +72,11 @@ function validProofEvents(options: { route?: string; ticketOnly?: boolean } = {}
   });
   ledger.recordHistoryResponse(historyEvent(ledger, 'pre-send', preMessages));
   ledger.recordPrompt({ requestId: 'prompt-1', sessionId: 'ephemeral-1', promptMatches: true });
-  ledger.recordWebSocketReceived({ event: 'response', requestId: 'prompt-1' });
+  ledger.recordWebSocketReceived({
+    event: 'response',
+    requestId: 'prompt-1',
+    acknowledgement: true
+  });
   ledger.recordDelta({ sessionId: 'ephemeral-1' });
   ledger.recordCompletion({
     sessionId: 'ephemeral-1',
@@ -511,6 +516,63 @@ describe('bounded live proof ledger', () => {
     const proof = matchLiveProofLedger(withoutAcknowledgement, valid.expected);
     expect(proof.promptAcknowledgement).toBe(false);
     expect(proof.ordered).toBe(false);
+  });
+
+  it('requires a page-validated successful JSON-RPC result before matching the prompt ack', () => {
+    const valid = validProofEvents();
+    const response = valid.events.find(
+      (event) => event.kind === 'ws.received' && event.event === 'response'
+    );
+    expect(response).toBeTruthy();
+
+    const errorAck = valid.events.map((event) =>
+      event === response ? { ...event, acknowledgement: false } : event
+    );
+    expect(matchLiveProofLedger(errorAck, valid.expected).promptAcknowledgement).toBe(false);
+    expect(matchLiveProofLedger(errorAck, valid.expected).ordered).toBe(false);
+
+    const resultlessAck = valid.events.map((event) => {
+      if (event !== response) return event;
+      const { acknowledgement: _acknowledgement, ...withoutResultProjection } = event;
+      return withoutResultProjection;
+    });
+    expect(matchLiveProofLedger(resultlessAck, valid.expected).promptAcknowledgement).toBe(false);
+
+    expect(() => valid.ledger.recordWebSocketReceived({
+      event: 'response',
+      requestId: 'prompt-1'
+    })).toThrow('acknowledgement');
+    expect(() => valid.ledger.recordWebSocketReceived({
+      event: 'response',
+      requestId: 'prompt-1',
+      acknowledgement: true,
+      extra: true
+    } as never)).toThrow('unexpected keys');
+
+    const accessor = {
+      event: 'response',
+      requestId: 'prompt-1',
+      acknowledgement: true
+    };
+    Object.defineProperty(accessor, 'acknowledgement', {
+      configurable: true,
+      enumerable: true,
+      get: () => true
+    });
+    expect(() => valid.ledger.recordWebSocketReceived(accessor)).toThrow('descriptor');
+
+    let ownKeysCalls = 0;
+    const unstableProxy = new Proxy(
+      { event: 'response', requestId: 'prompt-1', acknowledgement: true },
+      {
+        ownKeys(target) {
+          ownKeysCalls += 1;
+          const keys = Reflect.ownKeys(target);
+          return ownKeysCalls === 1 ? keys : [...keys, 'late'];
+        }
+      }
+    );
+    expect(() => valid.ledger.recordWebSocketReceived(unstableProxy)).toThrow('unstable');
   });
 
   it('requires an exact post-watermark pair and rejects stale-only history', () => {

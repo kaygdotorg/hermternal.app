@@ -29,6 +29,7 @@ export function installLiveProofPageBridge(config) {
   const MAX_SESSION_ID_LENGTH = 128;
   const MAX_ROUTE_LENGTH = 256;
   const MAX_URL_LENGTH = 2048;
+  const MAX_WS_TICKET_LENGTH = 512;
   const MAX_METHOD_LENGTH = 64;
   const MAX_EVENT_NAME_LENGTH = 96;
   const MAX_STATUS_LENGTH = 32;
@@ -42,6 +43,7 @@ export function installLiveProofPageBridge(config) {
   const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
   const SAFE_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._~:-]{0,254}[A-Za-z0-9])?$/u;
   const SAFE_SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._~-]{0,126}[A-Za-z0-9])?$/u;
+  const SAFE_WS_TICKET_PATTERN = /^[A-Za-z0-9_-]+$/u;
   const FIXED_HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
   const FIXED_WS_OPERATIONS = new Set([
     'session.create',
@@ -85,6 +87,7 @@ export function installLiveProofPageBridge(config) {
   ]);
   const PLAIN_OBJECT_PROTO = Object.prototype;
   const ARRAY_PROTO = Array.prototype;
+  const NativeURL = globalThis.URL;
 
   /** @param {string} label @returns {never} */
   function fail(label) {
@@ -610,7 +613,7 @@ export function installLiveProofPageBridge(config) {
   function trackedRoute(url) {
     if (typeof url !== 'string' || url.length === 0 || url.length > MAX_URL_LENGTH) return undefined;
     try {
-      const parsed = new URL(url, location.href);
+      const parsed = new NativeURL(url, location.href);
       if (parsed.origin !== location.origin) return undefined;
       return normalizeRoute(parsed.pathname);
     } catch {
@@ -645,7 +648,7 @@ export function installLiveProofPageBridge(config) {
     try {
       if (typeof input === 'string') {
         url = input;
-      } else if (typeof URL === 'function' && input instanceof URL) {
+      } else if (typeof NativeURL === 'function' && input instanceof NativeURL) {
         url = input.href;
       } else if (typeof Request === 'function' && input instanceof Request) {
         url = input.url;
@@ -700,20 +703,129 @@ export function installLiveProofPageBridge(config) {
     return { method, requestId, params };
   }
 
+  /** @param {unknown} candidate @returns {string} */
+  function candidateWebSocketHref(candidate) {
+    try {
+      if (typeof candidate === 'string') return candidate;
+      if (typeof NativeURL === 'function' && candidate instanceof NativeURL) return candidate.href;
+    } catch {
+      // The raw candidate stays page-local; callers receive only a fixed failure.
+    }
+    fail('WebSocket URL is not approved');
+  }
+
+  /** @param {unknown} candidate @returns {string} */
+  function validateWebSocketUrl(candidate) {
+    const href = candidateWebSocketHref(candidate);
+    if (
+      href.length === 0 ||
+      href.length > MAX_URL_LENGTH ||
+      href.includes('%') ||
+      href.includes('\\') ||
+      href.includes('#') ||
+      href.includes('@')
+    ) {
+      fail('WebSocket URL is not approved');
+    }
+
+    let page;
+    let parsed;
+    try {
+      page = new NativeURL(location.href);
+      parsed = new NativeURL(href, page.href);
+    } catch {
+      fail('WebSocket URL is not approved');
+    }
+
+    const pageSecurity = page.protocol === 'http:' ? 'http' : page.protocol === 'https:' ? 'https' : undefined;
+    const socketSecurity = parsed.protocol === 'ws:' ? 'http' : parsed.protocol === 'wss:' ? 'https' : undefined;
+    if (!pageSecurity || !socketSecurity || pageSecurity !== socketSecurity) {
+      fail('WebSocket URL is not approved');
+    }
+    if (parsed.username !== '' || parsed.password !== '' || parsed.hash !== '') {
+      fail('WebSocket URL is not approved');
+    }
+    if (parsed.hostname !== page.hostname) {
+      fail('WebSocket URL is not approved');
+    }
+    const pagePort = page.port || (page.protocol === 'http:' ? '80' : '443');
+    const socketPort = parsed.port || (parsed.protocol === 'ws:' ? '80' : '443');
+    if (pagePort !== socketPort || parsed.pathname !== '/api/ws') {
+      fail('WebSocket URL is not approved');
+    }
+
+    const rawQuery = parsed.search.startsWith('?') ? parsed.search.slice(1) : '';
+    const queryParts = rawQuery.split('&');
+    if (queryParts.length !== 1) fail('WebSocket URL is not approved');
+    const separator = queryParts[0].indexOf('=');
+    if (separator <= 0) fail('WebSocket URL is not approved');
+    const key = queryParts[0].slice(0, separator);
+    const ticket = queryParts[0].slice(separator + 1);
+    if (
+      key !== 'ticket' ||
+      ticket.length === 0 ||
+      ticket.length > MAX_WS_TICKET_LENGTH ||
+      !SAFE_WS_TICKET_PATTERN.test(ticket)
+    ) {
+      fail('WebSocket URL is not approved');
+    }
+
+    // Return only the page-local normalized URL. The ticket and original URL
+    // never enter a projection or an error message.
+    return parsed.href;
+  }
+
+  /** @param {any} value @param {string} label @param {{ nodes: number }} state @param {number} depth */
+  function validateBoundedResponseValue(value, label, state, depth = 0) {
+    state.nodes += 1;
+    if (state.nodes > MAX_HISTORY_NODES || depth > MAX_HISTORY_DEPTH) {
+      fail(`${label} exceeded its bound`);
+    }
+    if (value === null || typeof value === 'boolean') return;
+    if (typeof value === 'string') {
+      boundedString(value, MAX_FRAME_BYTES, label, { allowEmpty: true });
+      return;
+    }
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) fail(`${label} is invalid`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const child of strictArray(value, `${label} array`, MAX_HISTORY_CHILDREN)) {
+        validateBoundedResponseValue(child, label, state, depth + 1);
+      }
+      return;
+    }
+    if (typeof value !== 'object') fail(`${label} is invalid`);
+    const properties = descriptorSnapshot(value, `${label} object`, PLAIN_OBJECT_PROTO, MAX_HISTORY_CHILDREN);
+    for (const [key, child] of properties) {
+      boundedString(key, MAX_ROUTE_LENGTH, `${label} key`, { allowEmpty: false });
+      validateBoundedResponseValue(child, label, state, depth + 1);
+    }
+  }
+
+  /** @param {any} value @param {string} label @returns {boolean} */
+  function validResponseResult(value, label) {
+    if (value === undefined) return false;
+    validateBoundedResponseValue(value, label, { nodes: 0 });
+    return true;
+  }
+
   /** @param {any} frame @returns {any} */
   function parseEventFrame(frame) {
-    const root = strictObject(
-      frame,
-      'received WebSocket frame',
-      ['jsonrpc', 'id', 'method', 'params', 'result', 'error'],
-      ['jsonrpc'],
-      6
-    );
+    const root = descriptorSnapshot(frame, 'received WebSocket frame', PLAIN_OBJECT_PROTO, MAX_HISTORY_CHILDREN);
     if (root.get('jsonrpc') !== '2.0') fail('received WebSocket frame version is invalid');
     if (root.has('method')) {
-      if (root.get('method') !== 'event' || !root.has('params')) return undefined;
+      const event = strictObject(
+        frame,
+        'received event envelope',
+        ['jsonrpc', 'method', 'params'],
+        ['jsonrpc', 'method', 'params'],
+        3
+      );
+      if (event.get('method') !== 'event') return undefined;
       const params = strictObject(
-        root.get('params'),
+        event.get('params'),
         'event envelope',
         [
           'type',
@@ -743,11 +855,32 @@ export function installLiveProofPageBridge(config) {
     }
     if (!root.has('id')) return undefined;
     const responseId = root.get('id');
-    if (responseId === null) return { kind: 'response', responseId: undefined, result: undefined };
+    if (responseId === null) return undefined;
+    const boundedResponseId = boundedRequestId(responseId, 'response identity');
+    if (root.has('error')) {
+      const errorResponse = strictObject(
+        frame,
+        'received error response',
+        ['jsonrpc', 'id', 'error'],
+        ['jsonrpc', 'id', 'error'],
+        3
+      );
+      validateBoundedResponseValue(errorResponse.get('error'), 'response error', { nodes: 0 });
+      return { kind: 'response', responseId: boundedResponseId, acknowledgement: false };
+    }
+    if (!root.has('result')) fail('received response has no result');
+    const successResponse = strictObject(
+      frame,
+      'received success response',
+      ['jsonrpc', 'id', 'result'],
+      ['jsonrpc', 'id', 'result'],
+      3
+    );
     return {
       kind: 'response',
-      responseId: boundedRequestId(responseId, 'response identity'),
-      result: root.has('result') ? root.get('result') : undefined
+      responseId: boundedResponseId,
+      result: successResponse.get('result'),
+      acknowledgement: validResponseResult(successResponse.get('result'), 'response result')
     };
   }
 
@@ -932,10 +1065,16 @@ export function installLiveProofPageBridge(config) {
 
       if (parsed.responseId === undefined) return;
       const requestTag = await identityTag(parsed.responseId);
-      push({ kind: 'ws.received', event: 'response', requestTag });
+      push({
+        kind: 'ws.received',
+        event: 'response',
+        requestTag,
+        acknowledgement: parsed.acknowledgement === true
+      });
       const controlMethod = controlRequests.get(parsed.responseId);
       try {
         if (controlMethod === 'session.create') {
+          if (parsed.acknowledgement !== true) return;
           const result = strictObject(
             parsed.result,
             'session.create response',
@@ -982,28 +1121,22 @@ export function installLiveProofPageBridge(config) {
     if (typeof NativeWebSocket !== 'function') fail('WebSocket is unavailable');
     const TrackedWebSocket = new Proxy(NativeWebSocket, {
       construct(target, argumentsList, newTarget) {
+        // Prove the page origin, security mode, route, and opaque ticket before
+        // creating or observing a socket. Invalid sockets never enter the set,
+        // queue, or close lifecycle, and the validator emits no raw URL text.
+        const approvedHref = validateWebSocketUrl(argumentsList[0]);
         if (sockets.size >= MAX_SOCKETS) fail('WebSocket count exceeded its bound');
-        const socket = Reflect.construct(target, argumentsList, newTarget);
+        const constructorArguments = [approvedHref, ...argumentsList.slice(1)];
+        const socket = Reflect.construct(target, constructorArguments, newTarget);
         if (websocketOpenCount >= MAX_QUEUE_EVENTS) fail('WebSocket open count exceeded its bound');
         sockets.add(socket);
         websocketOpenCount += 1;
-        let parsed;
-        const candidateUrl = argumentsList[0];
-        if (typeof candidateUrl === 'string' && candidateUrl.length <= MAX_URL_LENGTH) {
-          try {
-            parsed = new URL(candidateUrl, location.href);
-          } catch {
-            parsed = undefined;
-          }
-        }
-        if (parsed?.pathname === '/api/ws') {
-          const searchKeys = [...parsed.searchParams.keys()];
-          push({
-            kind: 'ws.open',
-            route: '/api/ws',
-            ticketOnly: searchKeys.length === 1 && searchKeys[0] === 'ticket'
-          });
-        }
+        push({
+          kind: 'ws.open',
+          route: '/api/ws',
+          ticketOnly: true,
+          originBound: true
+        });
 
         const nativeSend = socket.send.bind(socket);
         Object.defineProperty(socket, 'send', {
