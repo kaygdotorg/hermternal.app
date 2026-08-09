@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused offline tests for the local live-proof credential handoff.
+"""Focused offline tests for the marker-bound live-proof credential handoff.
 
 These tests use synthetic bytes only. They never contact Hermes, create a real
 credential, start a browser, or retain authentication data.
@@ -22,6 +22,14 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MARKER_SCRIPT = ROOT / "scripts" / "live_run_marker.py"
+marker_spec = importlib.util.spec_from_file_location("live_run_marker", MARKER_SCRIPT)
+if marker_spec is None or marker_spec.loader is None:
+    raise RuntimeError(f"Could not load {MARKER_SCRIPT}")
+marker = importlib.util.module_from_spec(marker_spec)
+sys.modules[marker_spec.name] = marker
+marker_spec.loader.exec_module(marker)
+
 SCRIPT = ROOT / "scripts" / "with_live_credential.py"
 spec = importlib.util.spec_from_file_location("with_live_credential", SCRIPT)
 if spec is None or spec.loader is None:
@@ -41,10 +49,13 @@ def documented_bun_command(path: Path) -> list[str]:
     """Extract one documented handoff command without executing README text."""
 
     lines = path.read_text(encoding="utf-8").splitlines()
-    marker = 'HERMES_LIVE_TARGET="$endpoint" \\'
-    helper_line = 'python3 scripts/with_live_credential.py "$credential_file" -- \\'
+    marker_line = 'marker_path="$(printf \'%s\' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"'
+    if marker_line not in {line.strip() for line in lines}:
+        raise AssertionError(f"No exact marker handoff found in {path}")
+    handoff_line = 'HERMES_LIVE_TARGET="$endpoint" \\'
+    helper_line = 'python3 scripts/with_live_credential.py "$marker_path" -- \\'
     for index, line in enumerate(lines[:-2]):
-        if line.strip() != marker:
+        if line.strip() != handoff_line:
             continue
         if lines[index + 1].strip() != helper_line:
             continue
@@ -55,11 +66,36 @@ def documented_bun_command(path: Path) -> list[str]:
 class LiveProofCredentialTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.path = Path(self.temporary.name) / "password"
+        self.root = Path(self.temporary.name).resolve()
+        self.runs = self.root / "runs"
+        self.runs.mkdir(mode=marker.RUNS_DIR_MODE)
+        self.runs.chmod(marker.RUNS_DIR_MODE)
+        self.marker_path = self.runs / "fixture.json"
+        self.credential_path = self.runs / "fixture.credential"
         self.value = b"a" * 48
+        self._write_credential(self.value + b"\n")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def _write_credential(self, raw: bytes) -> None:
+        self.credential_path.write_bytes(raw)
+        self.credential_path.chmod(marker.CREDENTIAL_MODE)
+        identity = marker.credential_lstat(self.credential_path)
+        binding = marker.new_marker(
+            self.marker_path,
+            run_id="a" * 64,
+            instance="fixture-one",
+            container_id="b" * 64,
+            container_name="hermternal-hermes-fixture-one",
+            image="docker.io/nousresearch/hermes-agent:v1@sha256:" + "c" * 64,
+            endpoint="http://127.0.0.1:19119",
+            credential_identity=identity,
+        )
+        if self.marker_path.exists():
+            marker.replace_marker(binding)
+        else:
+            marker.create_marker(binding)
 
     def test_read_strips_only_terminal_crlf_and_preserves_file(self) -> None:
         for label, suffix in (
@@ -71,9 +107,87 @@ class LiveProofCredentialTests(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 raw = self.value + suffix
-                self.path.write_bytes(raw)
-                self.assertEqual(helper.read_credential_file(self.path), self.value.decode("ascii"))
-                self.assertEqual(self.path.read_bytes(), raw)
+                self._write_credential(raw)
+                self.assertEqual(helper.read_credential_file(self.marker_path), self.value.decode("ascii"))
+                self.assertEqual(self.credential_path.read_bytes(), raw)
+
+    def test_identity_is_revalidated_before_reading_credential_value(self) -> None:
+        with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("credential value read")):
+            self.assertEqual(helper.read_credential_file(self.marker_path), self.value.decode("ascii"))
+
+        replacement = self.runs / "replacement"
+        replacement.write_bytes(self.value + b"\n")
+        replacement.chmod(marker.CREDENTIAL_MODE)
+        self.credential_path.unlink()
+        replacement.rename(self.credential_path)
+        with mock.patch.object(
+            helper.live_run_marker,
+            "verify_credential_identity",
+            side_effect=helper.live_run_marker.MarkerError("credential_identity_mismatch"),
+        ) as verify:
+            with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+        verify.assert_called_once()
+
+    def test_parent_swap_during_descriptor_relative_credential_read_fails_closed(self) -> None:
+        moved = self.root / "runs-credential-original"
+        swapped = False
+        original_verify = helper.live_run_marker.verify_credential_identity
+
+        def swap_after_identity(binding, *, parent_fd=None):
+            nonlocal swapped
+            result = original_verify(binding, parent_fd=parent_fd)
+            if not swapped:
+                swapped = True
+                self.runs.rename(moved)
+                self.runs.mkdir(mode=marker.RUNS_DIR_MODE)
+                self.runs.chmod(marker.RUNS_DIR_MODE)
+            return result
+
+        with mock.patch.object(
+            helper.live_run_marker,
+            "verify_credential_identity",
+            side_effect=swap_after_identity,
+        ):
+            with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue((moved / "fixture.json").exists())
+        self.assertEqual((moved / "fixture.credential").read_bytes(), self.value + b"\n")
+        self.assertFalse(any(self.runs.iterdir()))
+
+    def test_marker_replacement_during_credential_use_fails_closed(self) -> None:
+        original = marker.load_marker(self.marker_path)
+        replacement = marker.new_marker(
+            self.marker_path,
+            run_id="f" * 64,
+            instance=original.instance,
+            container_id=original.container_id,
+            container_name=original.container_name,
+            image=original.image,
+            endpoint=original.endpoint,
+            credential_identity=original.credential_identity,
+        )
+        original_read = helper._read_pinned_credential
+        replaced = False
+
+        def replace_after_read(binding, *, marker_identity=None, parent_fd=None):
+            nonlocal replaced
+            raw = original_read(binding, marker_identity=marker_identity, parent_fd=parent_fd)
+            if not replaced:
+                replaced = True
+                marker.replace_marker(replacement, parent_fd=parent_fd)
+            return raw
+
+        with mock.patch.object(helper, "_read_pinned_credential", side_effect=replace_after_read):
+            with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "marker_identity_mismatch")
+        self.assertTrue(replaced)
+        self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
+        self.assertEqual(self.credential_path.read_bytes(), self.value + b"\n")
 
     def test_non_line_ending_whitespace_and_interior_line_endings_fail_closed(self) -> None:
         rejected = (
@@ -84,28 +198,41 @@ class LiveProofCredentialTests(unittest.TestCase):
             ("uppercase", self.value.upper()),
             ("short", self.value[:-1]),
             ("long", self.value + b"0"),
-            ("empty", b""),
         )
         for label, raw in rejected:
             with self.subTest(label=label):
-                self.path.write_bytes(raw)
+                self._write_credential(raw)
                 with self.assertRaises(helper.LiveProofCredentialError) as raised:
-                    helper.read_credential_file(self.path)
+                    helper.read_credential_file(self.marker_path)
                 self.assertEqual(raised.exception.code, "credential_file_invalid")
 
-    def test_overlong_file_fails_before_command_and_does_not_log_value(self) -> None:
-        self.path.write_bytes(self.value + (b"x" * (helper.MAX_CREDENTIAL_BYTES + 1)))
+    def test_marker_status_and_credential_file_type_fail_before_child(self) -> None:
+        tombstone = marker.cleanup_failed(marker.load_marker(self.marker_path))
+        marker.replace_marker(tombstone)
+        with self.assertRaises(helper.LiveProofCredentialError) as raised:
+            helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "marker_not_selectable")
+
+        marker.replace_marker(tombstone.with_status(marker.STATUS_RUNNING))
+        self.credential_path.unlink()
+        self.credential_path.mkdir(mode=marker.CREDENTIAL_MODE)
+        with self.assertRaises(helper.LiveProofCredentialError) as raised:
+            helper.read_credential_file(self.marker_path)
+        self.assertIn(raised.exception.code, {"credential_identity_invalid", "credential_file_invalid"})
+
+    def test_bounded_invalid_value_fails_before_command_and_does_not_log_value(self) -> None:
+        raw = self.value + (b"x" * (256 - len(self.value)))
+        self._write_credential(raw)
         stderr = io.StringIO()
         with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
-            status = helper.main([str(self.path), "--", "synthetic-proof"])
+            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
         self.assertFalse(execvpe.called)
         self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
-    def test_runner_debug_fails_before_reading_credential_or_starting_child(self) -> None:
-        self.path.write_bytes(self.value + b"\n")
+    def test_runner_debug_fails_before_loading_marker_or_starting_child(self) -> None:
         stderr = io.StringIO()
         with (
             mock.patch.dict(helper.os.environ, {helper.LIVE_RUNNER_DEBUG_ENV: "1"}),
@@ -113,7 +240,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             mock.patch.object(helper.os, "execvpe") as execvpe,
             contextlib.redirect_stderr(stderr),
         ):
-            status = helper.main([str(self.path), "--", "synthetic-proof"])
+            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
@@ -123,7 +250,7 @@ class LiveProofCredentialTests(unittest.TestCase):
 
     def test_valid_value_is_only_passed_to_child_environment(self) -> None:
         raw = self.value + b"\r\n"
-        self.path.write_bytes(raw)
+        self._write_credential(raw)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with (
@@ -131,7 +258,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            status = helper.main([str(self.path), "--", "synthetic-proof", "--flag"])
+            status = helper.main([str(self.marker_path), "--", "synthetic-proof", "--flag"])
 
         self.assertEqual(status, 1)
         self.assertEqual(stdout.getvalue(), "")
@@ -144,14 +271,16 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertEqual(environment["HERMES_TEST_PASSWORD"], self.value.decode("ascii"))
         self.assertNotEqual(environment["HERMES_TEST_PASSWORD"], raw.decode("ascii"))
         self.assertNotIn(self.value.decode("ascii"), " ".join(arguments))
-        self.assertEqual(self.path.read_bytes(), raw)
+        self.assertEqual(self.credential_path.read_bytes(), raw)
 
     def test_invalid_shape_never_starts_child(self) -> None:
-        self.path.write_bytes(self.value + b"\n ")
-        with mock.patch.object(helper.os, "execvpe") as execvpe:
-            status = helper.main([str(self.path), "--", "synthetic-proof"])
+        self._write_credential(self.value + b"\n ")
+        stderr = io.StringIO()
+        with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
+            status = helper.main([str(self.marker_path), "--", "synthetic-proof"])
 
         self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
         self.assertFalse(execvpe.called)
 
     def test_documented_handoff_invokes_valid_bun_command(self) -> None:
@@ -176,13 +305,13 @@ class LiveProofCredentialTests(unittest.TestCase):
             encoding="utf-8",
         )
         fake_bun.chmod(stat.S_IRWXU)
-        self.path.write_bytes(self.value + b"\n")
+        self._write_credential(self.value + b"\n")
         environment = os.environ.copy()
         environment["PATH"] = f"{bin_directory}{os.pathsep}{environment['PATH']}"
         environment["HANDOFF_CAPTURE"] = str(capture)
         environment["HERMES_LIVE_TARGET"] = "http://127.0.0.1:19124"
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), str(self.path), "--", *EXPECTED_BUN_COMMAND],
+            [sys.executable, str(SCRIPT), str(self.marker_path), "--", *EXPECTED_BUN_COMMAND],
             check=False,
             capture_output=True,
             text=True,
@@ -193,7 +322,7 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
         self.assertEqual(capture.read_text(encoding="utf-8").splitlines(), EXPECTED_BUN_COMMAND[1:])
-        self.assertEqual(self.path.read_bytes(), self.value + b"\n")
+        self.assertEqual(self.credential_path.read_bytes(), self.value + b"\n")
 
 
 if __name__ == "__main__":

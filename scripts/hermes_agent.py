@@ -11,6 +11,10 @@ use its available resources.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
+import ctypes
+import errno
 import json
 import os
 import re
@@ -27,6 +31,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import live_run_marker
 
 
 DEFAULT_IMAGE = (
@@ -47,10 +56,36 @@ MAX_PROVIDER_BYTES = 64 * 1024
 MAX_STATE_BYTES = 16 * 1024
 MAX_COMMAND_BYTES = 64 * 1024
 CONTAINER_ACTION_TIMEOUT = 60
+# A cleanup_failed tombstone may exist even when the engine raised before its
+# cidfile was readable. This valid-but-unproven ID is never sent to Podman.
+UNPROVEN_CONTAINER_ID = "0" * 64
 
 Runner = Callable[[Sequence[str], Mapping[str, str], float], "CommandResult"]
 ReadinessChecker = Callable[[str, int, float], None]
 PortChecker = Callable[[int], bool]
+
+
+FileIdentity = tuple[int, int, int, int, int]
+ParentIdentity = tuple[int, int, int]
+_RENAME_EXPECTED: contextvars.ContextVar[tuple[int, str, str, FileIdentity, str] | None] = contextvars.ContextVar(
+    "hermes_rename_expected",
+    default=None,
+)
+
+
+@dataclass(frozen=True)
+class ParentLease:
+    """One operation's held runs directory and entry-time identity."""
+
+    marker_path: Path
+    parent_fd: int
+    identity: ParentIdentity
+
+
+_ACTIVE_PARENT_LEASE: contextvars.ContextVar[ParentLease | None] = contextvars.ContextVar(
+    "hermes_active_parent_lease",
+    default=None,
+)
 
 
 class LauncherError(Exception):
@@ -58,6 +93,15 @@ class LauncherError(Exception):
 
     def __init__(self, code: str) -> None:
         self.code = code
+        super().__init__(code)
+
+
+class OwnedFileError(LauncherError):
+    """A private-file failure that carries only its exact owned identity."""
+
+    def __init__(self, code: str, *, path: Path, identity: FileIdentity) -> None:
+        self.path = path
+        self.identity = identity
         super().__init__(code)
 
 
@@ -71,6 +115,8 @@ class CommandResult:
 class Roots:
     state: Path
     data: Path
+    # Retained for CLI compatibility with older callers. Live credentials are
+    # marker siblings and never use this root.
     credentials: Path
 
 
@@ -96,10 +142,14 @@ class InstanceSpec:
 
     @property
     def credential_dir(self) -> Path:
+        """Legacy compatibility path; live runs use marker siblings."""
+
         return self.roots.credentials / self.instance
 
     @property
     def credential_file(self) -> Path:
+        """Legacy compatibility path, never used for live credentials."""
+
         return self.credential_dir / "password"
 
     @property
@@ -130,10 +180,29 @@ class RecoverySnapshot:
 
 @dataclass(frozen=True)
 class LauncherState:
-    """Persisted public metadata plus the immutable container identity it created."""
+    """One exact marker plus state record used by lifecycle operations.
+
+    The two file identities are captured while their records are read. Cleanup
+    receives these immutable snapshots directly; it must not reload either
+    pathname and accidentally adopt a replacement inode.
+    """
 
     spec: InstanceSpec
-    container_id: str
+    marker: live_run_marker.RunMarker
+    marker_identity: FileIdentity | None = None
+    state_identity: FileIdentity | None = None
+
+    @property
+    def container_id(self) -> str:
+        return self.marker.container_id
+
+    @property
+    def run_id(self) -> str:
+        return self.marker.run_id
+
+    @property
+    def marker_path(self) -> Path:
+        return self.marker.marker_path
 
 
 def default_roots() -> Roots:
@@ -233,6 +302,41 @@ def run_command(command: Sequence[str], environment: Mapping[str, str], timeout:
     return CommandResult(completed.returncode, _bounded_text(completed.stdout))
 
 
+def _revalidate_active_parent() -> None:
+    lease = _ACTIVE_PARENT_LEASE.get()
+    if lease is not None:
+        _revalidate_private_parent_path(
+            lease.marker_path,
+            lease.parent_fd,
+            expected=lease.identity,
+            code="runs_dir",
+        )
+
+
+def invoke_runner(
+    runner: Runner,
+    command: Sequence[str],
+    environment: Mapping[str, str],
+    timeout: float,
+    *,
+    failure_code: str,
+) -> CommandResult:
+    """Treat every injected engine boundary as an untrusted bounded call."""
+
+    _revalidate_active_parent()
+    try:
+        result = runner(command, environment, timeout)
+    except BaseException:
+        # Recheck even when the adapter raises: a runner can replace the
+        # private parent after creating a resource and before reporting error.
+        _revalidate_active_parent()
+        raise LauncherError(failure_code) from None
+    _revalidate_active_parent()
+    if not isinstance(result, CommandResult):
+        raise LauncherError(failure_code)
+    return result
+
+
 def podman_path() -> str:
     executable = shutil.which("podman")
     if executable is None or not os.path.isabs(executable):
@@ -241,10 +345,12 @@ def podman_path() -> str:
 
 
 def podman_preflight(runner: Runner, environment: Mapping[str, str], executable: str) -> None:
-    result = runner(
+    result = invoke_runner(
+        runner,
         (executable, "info", "--format", "{{.Host.Security.Rootless}}"),
         environment,
         15,
+        failure_code="podman_preflight_failed",
     )
     if result.returncode != 0 or result.stdout.strip() != "true":
         raise LauncherError("rootless_podman_required")
@@ -261,13 +367,21 @@ def verify_image(
     environment: Mapping[str, str],
     executable: str,
 ) -> None:
-    pulled = runner((executable, "pull", image), environment, 300)
+    pulled = invoke_runner(
+        runner,
+        (executable, "pull", image),
+        environment,
+        300,
+        failure_code="image_pull_failed",
+    )
     if pulled.returncode != 0:
         raise LauncherError("image_pull_failed")
-    inspected = runner(
+    inspected = invoke_runner(
+        runner,
         (executable, "image", "inspect", image, "--format", "json"),
         environment,
         30,
+        failure_code="image_inspect_failed",
     )
     if inspected.returncode != 0:
         raise LauncherError("image_inspect_failed")
@@ -302,35 +416,321 @@ def _ensure_private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def read_or_create_password(spec: InstanceSpec) -> str:
-    _ensure_private_directory(spec.roots.credentials)
-    _ensure_private_directory(spec.credential_dir)
-    path = spec.credential_file
+STATE_SCHEMA = "hermternal.live-run-state.v1"
+STATE_KEYS = frozenset(
+    {
+        "schema",
+        "status",
+        "marker_path",
+        "run_id",
+        "instance",
+        "container_id",
+        "container_name",
+        "image",
+        "endpoint",
+        "state_path",
+        "credential_path",
+        "credential_identity",
+        "username",
+        "data_path",
+    }
+)
+
+
+def _marker_paths(marker_path: str | Path) -> live_run_marker.MarkerPaths:
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            raise LauncherError("credential_file_invalid") from None
-        raw = path.read_bytes()
-        if len(raw) > 256:
-            raise LauncherError("credential_file_invalid")
+        return live_run_marker.marker_paths(marker_path)
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+
+
+def _write_all(descriptor: int, content: bytes, code: str) -> None:
+    view = memoryview(content)
+    while view:
         try:
-            # The launcher writes one LF terminator. Remove only terminal CR/LF
-            # bytes so other whitespace cannot be silently accepted as a password.
-            password = raw.decode("ascii").rstrip("\r\n")
-        except UnicodeDecodeError:
-            raise LauncherError("credential_file_invalid") from None
-        if not re.fullmatch(r"[0-9a-f]{48}", password):
-            raise LauncherError("credential_file_invalid")
-        path.chmod(0o600)
-        return password
+            written = os.write(descriptor, view)
+        except OSError:
+            raise LauncherError(code) from None
+        if written <= 0:
+            raise LauncherError(code)
+        view = view[written:]
+
+
+def _sync_parent(path: Path, code: str, *, parent_fd: int | None = None) -> None:
+    """Sync only the directory descriptor already held by the operation."""
+
+    del path
+    if parent_fd is None:
+        raise LauncherError(code)
+    try:
+        os.fsync(parent_fd)
+    except OSError:
+        raise LauncherError(code) from None
+
+
+def _private_file_identity_from_stat(info: os.stat_result) -> FileIdentity:
+    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_size, info.st_nlink)
+
+
+def _fd_file_identity(descriptor: int) -> FileIdentity:
+    return _private_file_identity_from_stat(os.fstat(descriptor))
+
+
+def _best_effort_fd_identity(descriptor: int) -> FileIdentity | None:
+    try:
+        return _fd_file_identity(descriptor)
+    except OSError:
+        return None
+
+
+def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> None:
+    """Atomically claim one directory entry without replacing its destination."""
+
+    source = os.fsencode(source_name)
+    target = os.fsencode(target_name)
+    expected_claim = _RENAME_EXPECTED.get()
+    if expected_claim is not None:
+        expected_parent, expected_source, expected_target, expected_identity, expected_code = expected_claim
+        if (expected_parent, expected_source, expected_target) == (parent_fd, source_name, target_name):
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    source_name,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
+                )
+                current = _validated_fd_identity(descriptor, code=expected_code)
+                if current != expected_identity:
+                    raise LauncherError(f"{expected_code}_replaced")
+            except FileNotFoundError:
+                pass
+            finally:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        operation = libc.renameatx_np
+        operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source, parent_fd, target, 0x00000004)
+    elif hasattr(libc, "renameat2"):
+        operation = libc.renameat2
+        operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source, parent_fd, target, 0x00000001)
+    else:
+        raise LauncherError("atomic_quarantine_unavailable")
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise LauncherError("quarantine_exists")
+    if error_number == errno.ENOENT:
+        raise LauncherError("file_missing")
+    raise LauncherError("atomic_quarantine_failed")
+
+
+def _best_effort_remove_owned_file(path: Path, identity: FileIdentity) -> None:
+    """Remove only an exact private inode; never delete a replacement."""
+
+    try:
+        _remove_exact_file(
+            path,
+            code="owned_file_remove_failed",
+            expected=identity,
+            missing_ok=True,
+        )
+    except BaseException:
+        return
+
+
+def _create_private_file(
+    path: Path,
+    content: bytes,
+    *,
+    code: str,
+    parent_fd: int | None = None,
+) -> FileIdentity:
+    # Keep the validated parent fd for create, sync, and close; a pathname
+    # parent can otherwise be replaced between the file write and fsync. A
+    # caller may hold one lease across the full marker transaction.
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_private_parent(path, code=code)
+    else:
+        _validate_private_parent_fd(parent_fd, code=code)
+    descriptor = -1
+    identity: FileIdentity | None = None
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            raise LauncherError(f"{code}_exists") from None
+        except OSError:
+            raise LauncherError(code) from None
+
+        try:
+            identity = _fd_file_identity(descriptor)
+            _write_all(descriptor, content, code)
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            identity = _fd_file_identity(descriptor)
+        except (LauncherError, OSError) as error:
+            identity = _best_effort_fd_identity(descriptor) or identity
+            if identity is not None:
+                failure_code = error.code if isinstance(error, LauncherError) else code
+                raise OwnedFileError(failure_code, path=path, identity=identity) from None
+            if isinstance(error, LauncherError):
+                raise
+            raise LauncherError(code) from None
+
+        try:
+            os.close(descriptor)
+        except OSError:
+            descriptor = -1
+            raise OwnedFileError(f"{code}_close_failed", path=path, identity=identity) from None
+        descriptor = -1
+        try:
+            _sync_parent(path, code.replace("write", "sync"), parent_fd=parent_fd)
+        except (LauncherError, OSError):
+            assert identity is not None
+            raise OwnedFileError(code.replace("write", "sync"), path=path, identity=identity) from None
+        assert identity is not None
+        return identity
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _read_private_file_record(
+    path: Path,
+    *,
+    maximum: int,
+    code: str,
+    parent_fd: int | None = None,
+) -> tuple[bytes, FileIdentity]:
+    """Read one private record through a held parent and entry descriptor."""
+
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_private_parent(path, code=code)
+    else:
+        _validate_private_parent_fd(parent_fd, code=code)
+    descriptor = -1
+    try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            raise LauncherError(f"{code}_missing") from None
+        except OSError:
+            raise LauncherError(code) from None
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size > maximum
+        ):
+            raise LauncherError(code)
+        raw = bytearray()
+        while len(raw) <= maximum:
+            chunk = os.read(descriptor, maximum + 1 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        before_identity = _private_file_identity_from_stat(before)
+        after_identity = _private_file_identity_from_stat(after)
+        if before_identity != after_identity:
+            raise LauncherError(f"{code}_replaced")
+        if len(raw) > maximum:
+            raise LauncherError(f"{code}_oversized")
+        return bytes(raw), after_identity
+    except OSError:
+        raise LauncherError(code) from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _read_private_file(path: Path, *, maximum: int, code: str) -> bytes:
+    raw, _ = _read_private_file_record(path, maximum=maximum, code=code)
+    return raw
+
+
+def create_run_credential(
+    marker_path: str | Path,
+    *,
+    parent_fd: int | None = None,
+) -> tuple[str, live_run_marker.CredentialIdentity]:
+    """Create one fresh run-scoped credential with exclusive creation."""
+
+    paths = _marker_paths(marker_path)
     password = secrets.token_hex(24)
     try:
-        os.write(descriptor, (password + "\n").encode("ascii"))
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+        created_identity = _create_private_file(
+            paths.credential,
+            (password + "\n").encode("ascii"),
+            code="credential_file_write_failed",
+            parent_fd=parent_fd,
+        )
+    except OwnedFileError:
+        raise
+    identity = live_run_marker.CredentialIdentity(
+        created_identity[0],
+        created_identity[1],
+        created_identity[2],
+        created_identity[3],
+        created_identity[4],
+    )
+    return password, identity
+
+
+def read_or_create_password(spec: InstanceSpec, *, marker_path: str | Path | None = None) -> str:
+    """Compatibility name retained for callers; every new run is exclusive."""
+
+    del spec
+    if marker_path is None:
+        raise LauncherError("marker_required")
+    password, _ = create_run_credential(marker_path)
     return password
 
 
@@ -342,97 +742,199 @@ def validate_container_id(value: object) -> str:
     return value
 
 
-def state_document(spec: InstanceSpec, container_id: str) -> dict[str, object]:
+def container_id_from_run_result(result: CommandResult) -> str:
+    """Parse only the one immutable ID emitted by this exact detached run."""
+
+    if result.returncode != 0:
+        raise LauncherError("container_start_failed")
+    raw = result.stdout
+    candidate = raw.rstrip("\r\n")
+    if not candidate or raw not in {candidate, candidate + "\n", candidate + "\r\n"}:
+        raise LauncherError("container_id_unproven")
+    try:
+        return validate_container_id(candidate)
+    except LauncherError:
+        raise LauncherError("container_id_unproven") from None
+
+
+def state_document(spec: InstanceSpec, binding: live_run_marker.RunMarker) -> dict[str, object]:
     return {
-        "schema": "hermternal.hermes-agent-launcher.v1",
-        **spec.public(),
+        "schema": STATE_SCHEMA,
+        "status": binding.status,
+        "marker_path": str(binding.marker_path),
+        "run_id": binding.run_id,
+        "instance": spec.instance,
+        "container_id": validate_container_id(binding.container_id),
+        "container_name": binding.container_name,
+        "image": binding.image,
+        "endpoint": binding.endpoint,
+        "state_path": str(binding.state_path),
+        "credential_path": str(binding.credential_path),
+        "credential_identity": binding.credential_identity.document(),
         "username": spec.username,
-        # The retained ID lets the handoff reject a name/label replacement.
-        "container_id": validate_container_id(container_id),
+        "data_path": str(spec.data_dir),
     }
 
 
-def write_state(spec: InstanceSpec, container_id: str) -> None:
-    _ensure_private_directory(spec.roots.state)
-    content = (json.dumps(state_document(spec, container_id), sort_keys=True) + "\n").encode("utf-8")
-    temporary = spec.state_file.with_suffix(".json.tmp")
-    try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        temporary.unlink()
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        os.write(descriptor, content)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.replace(temporary, spec.state_file)
-    spec.state_file.chmod(0o600)
+def write_state(
+    spec: InstanceSpec,
+    binding: live_run_marker.RunMarker,
+    *,
+    replace: bool = False,
+    expected: FileIdentity | None = None,
+    parent_fd: int | None = None,
+) -> FileIdentity:
+    paths = _marker_paths(binding.marker_path)
+    if binding.state_path != paths.state:
+        raise LauncherError("state_path_invalid")
+    content = (json.dumps(state_document(spec, binding), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(content) > MAX_STATE_BYTES:
+        raise LauncherError("instance_state_too_large")
+    if replace:
+        if expected is None:
+            expected = _file_identity(paths.state, code="state_write_failed")
+        # Remove only the caller-pinned inode, then publish with O_EXCL. A
+        # replacement that appears in the gap makes publication fail closed;
+        # it is never overwritten by an os.replace pathname race.
+        _remove_exact_file(paths.state, code="state_write_failed", expected=expected, parent_fd=parent_fd)
+    return _create_private_file(paths.state, content, code="state_write_failed", parent_fd=parent_fd)
 
 
-def load_launcher_state(instance: str, roots: Roots) -> LauncherState:
-    """Load public launcher metadata and its immutable container identity.
+def _rewrite_state_exact(
+    spec: InstanceSpec,
+    binding: live_run_marker.RunMarker,
+    expected: FileIdentity,
+    *,
+    parent_fd: int,
+) -> FileIdentity:
+    """Rewrite the exact state inode as a bounded tombstone fallback.
 
-    Legacy state without the ID is deliberately not upgraded during handoff: a
-    caller must run ``start`` again, which freshly records the owned container.
+    Quarantine is preferred because it gives publication atomicity. When the
+    finite quarantine budget is exhausted, cleanup must not create another
+    retained inode or leave a removed container represented as ``running``.
+    This descriptor-pinned rewrite changes only the already-owned state inode;
+    a replacement identity fails closed before any bytes are touched.
     """
 
-    validate_instance(instance)
-    path = roots.state / f"{instance}.json"
+    paths = _marker_paths(binding.marker_path)
+    if binding.state_path != paths.state:
+        raise LauncherError("state_path_invalid")
+    content = (
+        json.dumps(state_document(spec, binding), sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    if len(content) > MAX_STATE_BYTES:
+        raise LauncherError("instance_state_too_large")
+    _validate_private_parent_fd(parent_fd, code="state_rewrite_failed")
+    descriptor = -1
     try:
-        info = path.lstat()
-    except FileNotFoundError:
-        raise LauncherError("instance_state_missing") from None
-    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_size > MAX_STATE_BYTES:
-        raise LauncherError("instance_state_invalid")
+        descriptor = _open_private_entry(parent_fd, paths.state.name, writable=True, code="state_rewrite_failed")
+        before = _validated_fd_identity(descriptor, code="state_rewrite_failed")
+        if before != expected:
+            raise LauncherError("state_replaced")
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            _write_all(descriptor, content, "state_rewrite_failed")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+        except LauncherError:
+            raise
+        except OSError:
+            raise LauncherError("state_rewrite_failed") from None
+        after = _validated_fd_identity(descriptor, code="state_rewrite_failed")
+        if after[:3] != before[:3] or after[4] != before[4] or after[3] != len(content):
+            raise LauncherError("state_replaced")
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            raise LauncherError("state_sync_failed") from None
+        return after
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _state_document(raw: bytes) -> dict[str, object]:
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, value in pairs:
+            if key in document:
+                raise LauncherError("instance_state_duplicate_key")
+            document[key] = value
+        return document
+
     try:
-        document = json.loads(path.read_bytes().decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate)
+    except LauncherError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
         raise LauncherError("instance_state_invalid") from None
-    expected_keys = {
-        "schema",
-        "instance",
-        "container",
-        "endpoint",
-        "image",
-        "data_path",
-        "credential_file",
-        "username",
-        "container_id",
+    if not isinstance(document, dict) or set(document) != STATE_KEYS:
+        raise LauncherError("instance_state_invalid")
+    return document
+
+
+def load_launcher_state(
+    marker_path: str | Path,
+    roots: Roots,
+    *,
+    parent_fd: int | None = None,
+) -> LauncherState:
+    """Load one exact marker and its exact state file; never infer a run."""
+
+    try:
+        marker, marker_identity = live_run_marker.load_marker_with_identity(marker_path, parent_fd=parent_fd)
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+    state_raw, state_identity = _read_private_file_record(
+        marker.state_path,
+        maximum=MAX_STATE_BYTES,
+        code="instance_state_invalid",
+        parent_fd=parent_fd,
+    )
+    document = _state_document(state_raw)
+    expected = {
+        "schema": STATE_SCHEMA,
+        "status": marker.status,
+        "marker_path": str(marker.marker_path),
+        "run_id": marker.run_id,
+        "instance": marker.instance,
+        "container_id": marker.container_id,
+        "container_name": marker.container_name,
+        "image": marker.image,
+        "endpoint": marker.endpoint,
+        "state_path": str(marker.state_path),
+        "credential_path": str(marker.credential_path),
+        "credential_identity": marker.credential_identity.document(),
     }
-    if not isinstance(document, dict) or set(document) != expected_keys:
+    for key, value in expected.items():
+        if document.get(key) != value:
+            raise LauncherError("instance_state_binding_mismatch")
+    username = document.get("username")
+    data_path = document.get("data_path")
+    if not isinstance(username, str) or not username or not isinstance(data_path, str):
         raise LauncherError("instance_state_invalid")
     try:
-        endpoint = urllib.parse.urlsplit(document["endpoint"])
-        port = endpoint.port
+        parsed = urllib.parse.urlsplit(marker.endpoint)
+        port = parsed.port
     except (TypeError, ValueError):
         raise LauncherError("instance_state_invalid") from None
-    if (
-        document["schema"] != "hermternal.hermes-agent-launcher.v1"
-        or document["instance"] != instance
-        or document["container"] != f"{CONTAINER_PREFIX}{instance}"
-        or endpoint.scheme != "http"
-        or endpoint.hostname != "127.0.0.1"
-        or endpoint.path not in ("", "/")
-        or port is None
-    ):
+    if port is None:
         raise LauncherError("instance_state_invalid")
-    spec = make_spec(
-        instance,
-        port,
-        image=document["image"],
-        username=document["username"],
-        roots=roots,
-    )
-    if document["data_path"] != str(spec.data_dir) or document["credential_file"] != str(spec.credential_file):
-        raise LauncherError("instance_state_invalid")
-    return LauncherState(spec, validate_container_id(document["container_id"]))
+    spec = make_spec(marker.instance, port, image=marker.image, username=username, roots=roots)
+    if data_path != str(spec.data_dir) or marker.container_name != spec.container:
+        raise LauncherError("instance_state_binding_mismatch")
+    return LauncherState(spec, marker, marker_identity=marker_identity, state_identity=state_identity)
 
 
 def load_state(instance: str, roots: Roots) -> InstanceSpec:
-    """Compatibility helper for lifecycle callers that need only the spec."""
+    """Reject the legacy instance-only lookup; callers must pass one marker."""
 
-    return load_launcher_state(instance, roots).spec
+    del instance, roots
+    raise LauncherError("marker_required")
 
 
 def container_exists(
@@ -441,7 +943,13 @@ def container_exists(
     environment: Mapping[str, str],
     executable: str,
 ) -> bool:
-    result = runner((executable, "container", "exists", spec.container), environment, 10)
+    result = invoke_runner(
+        runner,
+        (executable, "container", "exists", spec.container),
+        environment,
+        10,
+        failure_code="container_lookup_failed",
+    )
     if result.returncode == 0:
         return True
     if result.returncode == 1:
@@ -457,10 +965,12 @@ def inspect_container(
     *,
     target: str | None = None,
 ) -> dict[str, object]:
-    result = runner(
+    result = invoke_runner(
+        runner,
         (executable, "container", "inspect", target or spec.container, "--format", "json"),
         environment,
         20,
+        failure_code="container_inspect_failed",
     )
     if result.returncode != 0:
         raise LauncherError("container_inspect_failed")
@@ -483,7 +993,12 @@ def _labels_from_inspect(document: dict[str, object]) -> dict[str, str]:
     return labels
 
 
-def require_owned_container(spec: InstanceSpec, document: dict[str, object]) -> None:
+def require_owned_container(
+    spec: InstanceSpec,
+    document: dict[str, object],
+    *,
+    run_id: str | None = None,
+) -> None:
     labels = _labels_from_inspect(document)
     expected = {
         MANAGED_LABEL: MANAGED_VERSION,
@@ -491,6 +1006,8 @@ def require_owned_container(spec: InstanceSpec, document: dict[str, object]) -> 
         "io.hermternal.port": str(spec.port),
         "io.hermternal.image": spec.image,
     }
+    if run_id is not None:
+        expected["io.hermternal.run-id"] = run_id
     if any(labels.get(key) != value for key, value in expected.items()):
         raise LauncherError("container_not_launcher_owned")
 
@@ -503,7 +1020,12 @@ def container_status(document: dict[str, object]) -> str:
     return status
 
 
-def recovery_snapshot(spec: InstanceSpec, document: dict[str, object]) -> RecoverySnapshot:
+def recovery_snapshot(
+    spec: InstanceSpec,
+    document: dict[str, object],
+    *,
+    run_id: str | None = None,
+) -> RecoverySnapshot:
     """Validate only the exact identity needed before a destructive action.
 
     Ordinary reuse keeps the historical label-only compatibility boundary. A
@@ -511,7 +1033,7 @@ def recovery_snapshot(spec: InstanceSpec, document: dict[str, object]) -> Recove
     replaced container cannot inherit the launcher-owned name and labels.
     """
 
-    require_owned_container(spec, document)
+    require_owned_container(spec, document, run_id=run_id)
     container_id = document.get("Id")
     name = document.get("Name")
     image = document.get("ImageName")
@@ -605,17 +1127,52 @@ def verify_handoff_endpoint(
     name, and exposes only public metadata on success.
     """
 
-    environment = clean_environment(source_environment)
-    podman = executable or podman_path()
-    podman_preflight(runner, environment, podman)
-    document = inspect_container(state.spec, runner, environment, podman, target=state.container_id)
-    snapshot = recovery_snapshot(state.spec, document)
-    if snapshot.container_id != state.container_id:
-        raise LauncherError("container_replaced")
-    if snapshot.status != "running":
-        raise LauncherError("container_not_running")
-    require_loopback_endpoint_mapping(state.spec, document)
-    return {**state.spec.public(), "status": "running"}
+    with _operation_lease(state.marker_path, code="marker_path_invalid") as lease:
+        if state.marker_identity is None or state.state_identity is None:
+            raise LauncherError("ownership_snapshot_missing")
+        _revalidate_private_identity(
+            state.marker_path,
+            state.marker_identity,
+            code="marker_identity",
+            replacement_code="marker_replaced",
+            parent_fd=lease.parent_fd,
+        )
+        _revalidate_private_identity(
+            state.marker.state_path,
+            state.state_identity,
+            code="state_identity",
+            replacement_code="state_replaced",
+            parent_fd=lease.parent_fd,
+        )
+        if state.marker.status != live_run_marker.STATUS_RUNNING:
+            raise LauncherError("marker_not_selectable")
+        environment = clean_environment(source_environment)
+        podman = executable or podman_path()
+        podman_preflight(runner, environment, podman)
+        document = inspect_container(state.spec, runner, environment, podman, target=state.container_id)
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        snapshot = recovery_snapshot(state.spec, document, run_id=state.run_id)
+        if snapshot.container_id != state.container_id:
+            raise LauncherError("container_replaced")
+        if snapshot.status != "running":
+            raise LauncherError("container_not_running")
+        require_loopback_endpoint_mapping(state.spec, document)
+        try:
+            live_run_marker.verify_credential_identity(
+                state.marker,
+                parent_fd=lease.parent_fd,
+            )
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        # Keep the handoff result bounded. It is the only operation that releases
+        # the exact marker and credential paths to a transient local helper.
+        return {
+            "status": "running",
+            "endpoint": state.marker.endpoint,
+            "marker_path": str(state.marker.marker_path),
+            "credential_file": str(state.marker.credential_path),
+        }
 
 
 def _run_container_action(
@@ -626,55 +1183,156 @@ def _run_container_action(
     executable: str,
     failure_code: str,
 ) -> None:
-    try:
-        result = runner(
-            (executable, action, target),
-            environment,
-            CONTAINER_ACTION_TIMEOUT,
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        # Test runners and signal-aware adapters can fail synchronously. Do not
-        # let their exception text become a launcher diagnostic.
-        raise LauncherError(failure_code) from None
+    result = invoke_runner(
+        runner,
+        (executable, action, target),
+        environment,
+        CONTAINER_ACTION_TIMEOUT,
+        failure_code=failure_code,
+    )
     if result.returncode != 0:
         raise LauncherError(failure_code)
 
 
-def run_arguments(spec: InstanceSpec, executable: str) -> tuple[str, ...]:
-    return (
-        executable,
-        "run",
-        "--detach",
-        "--name",
-        spec.container,
-        "--restart",
-        "unless-stopped",
-        "--label",
-        f"{MANAGED_LABEL}={MANAGED_VERSION}",
-        "--label",
-        f"io.hermternal.instance={spec.instance}",
-        "--label",
-        f"io.hermternal.port={spec.port}",
-        "--label",
-        f"io.hermternal.image={spec.image}",
-        "--volume",
-        f"{spec.data_dir}:/opt/data",
-        "--publish",
-        f"127.0.0.1:{spec.port}:{DASHBOARD_PORT}",
-        "--env",
-        "HERMES_DASHBOARD",
-        "--env",
-        "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
-        "--env",
-        "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
-        "--pull",
-        "never",
-        spec.image,
-        "gateway",
-        "run",
+def run_arguments(
+    spec: InstanceSpec,
+    executable: str,
+    run_id: str,
+    *,
+    cidfile: str | Path | None = None,
+) -> tuple[str, ...]:
+    if live_run_marker.RUN_ID_PATTERN.fullmatch(run_id) is None:
+        raise LauncherError("run_id_invalid")
+    arguments: list[str] = [executable, "run", "--detach"]
+    if cidfile is not None:
+        try:
+            cidfile_path = live_run_marker.canonical_path(cidfile, code="cidfile_path_invalid")
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+        arguments.extend(("--cidfile", str(cidfile_path)))
+    arguments.extend(
+        (
+            "--name",
+            spec.container,
+            "--restart",
+            "unless-stopped",
+            "--label",
+            f"{MANAGED_LABEL}={MANAGED_VERSION}",
+            "--label",
+            f"io.hermternal.instance={spec.instance}",
+            "--label",
+            f"io.hermternal.port={spec.port}",
+            "--label",
+            f"io.hermternal.image={spec.image}",
+            "--label",
+            f"io.hermternal.run-id={run_id}",
+            "--volume",
+            f"{spec.data_dir}:/opt/data",
+            "--publish",
+            f"127.0.0.1:{spec.port}:{DASHBOARD_PORT}",
+            "--env",
+            "HERMES_DASHBOARD",
+            "--env",
+            "HERMES_DASHBOARD_BASIC_AUTH_USERNAME",
+            "--env",
+            "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
+            "--pull",
+            "never",
+            spec.image,
+            "gateway",
+            "run",
+        )
     )
+    return tuple(arguments)
+
+
+def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> tuple[str, FileIdentity]:
+    """Read one engine-emitted ID through a held private parent and entry fd."""
+
+    try:
+        cidfile = live_run_marker.canonical_path(path, code="cidfile_path_invalid")
+    except live_run_marker.MarkerError as error:
+        raise LauncherError(error.code) from None
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_private_parent(cidfile, code="cidfile_invalid")
+    else:
+        _validate_private_parent_fd(parent_fd, code="cidfile_invalid")
+    descriptor = -1
+    before_identity: FileIdentity | None = None
+    try:
+        try:
+            descriptor = os.open(
+                cidfile.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            raise LauncherError("cidfile_missing") from None
+        except OSError:
+            raise LauncherError("cidfile_invalid") from None
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > 66
+        ):
+            raise LauncherError("cidfile_invalid")
+        before_identity = _private_file_identity_from_stat(before)
+        raw = bytearray()
+        while len(raw) <= 66:
+            chunk = os.read(descriptor, 67 - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            stat.S_IMODE(after.st_mode),
+            after.st_size,
+            after.st_nlink,
+        )
+        if before_identity != after_identity or len(raw) > 66:
+            raise LauncherError("cidfile_replaced")
+        try:
+            text = bytes(raw).decode("ascii")
+        except UnicodeDecodeError:
+            raise LauncherError("cidfile_invalid") from None
+        candidate = text.rstrip("\r\n")
+        if not candidate or text not in {candidate, candidate + "\n", candidate + "\r\n"}:
+            raise LauncherError("cidfile_invalid")
+        try:
+            container_id = validate_container_id(candidate)
+        except LauncherError:
+            raise LauncherError("cidfile_invalid") from None
+        return container_id, after_identity
+    except OwnedFileError:
+        raise
+    except LauncherError as error:
+        if before_identity is not None:
+            raise OwnedFileError(error.code, path=cidfile, identity=before_identity) from None
+        raise
+    except OSError:
+        if before_identity is not None:
+            raise OwnedFileError("cidfile_read_failed", path=cidfile, identity=before_identity) from None
+        raise LauncherError("cidfile_read_failed") from None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent and parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
 
 
 def check_provider_readiness(endpoint: str, attempts: int, interval: float) -> None:
@@ -714,25 +1372,742 @@ def check_provider_readiness(endpoint: str, attempts: int, interval: float) -> N
     raise LauncherError("provider_readiness_timeout")
 
 
-def remove_container(
+def _public_run_result(spec: InstanceSpec, binding: live_run_marker.RunMarker, *, status: str, created: bool) -> dict[str, object]:
+    return {
+        "instance": spec.instance,
+        "status": status,
+        "marker_path": str(binding.marker_path),
+        "created": created,
+    }
+
+
+def _cleanup_binding(
+    paths: live_run_marker.MarkerPaths,
     spec: InstanceSpec,
+    *,
+    run_id: str,
+    container_id: str,
+    credential_identity: live_run_marker.CredentialIdentity,
+) -> live_run_marker.RunMarker:
+    """Build an unpublishing cleanup projection without marker validation.
+
+    The normal marker constructor validates publication inputs. Cleanup must not
+    lose an already-proven immutable container or file identity merely because a
+    patched or raced publication constructor fails; this projection never gets
+    published and is consumed only by exact-ID cleanup.
+    """
+
+    return live_run_marker.RunMarker(
+        marker_path=paths.marker,
+        status=live_run_marker.STATUS_RUNNING,
+        run_id=run_id,
+        instance=spec.instance,
+        container_id=container_id,
+        container_name=spec.container,
+        image=spec.image,
+        endpoint=spec.endpoint,
+        state_path=paths.state,
+        credential_path=paths.credential,
+        credential_identity=credential_identity,
+    )
+
+
+def _load_bound_state(
+    marker_path: str | Path,
+    roots: Roots,
+    *,
+    parent_fd: int | None = None,
+) -> LauncherState:
+    return load_launcher_state(marker_path, roots, parent_fd=parent_fd)
+
+
+def _inspect_bound_container(
+    state: LauncherState,
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
-) -> bool:
-    if not container_exists(spec, runner, environment, executable):
-        return False
-    document = inspect_container(spec, runner, environment, executable)
-    require_owned_container(spec, document)
-    result = runner((executable, "rm", "--force", spec.container), environment, 60)
+) -> tuple[dict[str, object], RecoverySnapshot]:
+    document = inspect_container(state.spec, runner, environment, executable, target=state.container_id)
+    snapshot = recovery_snapshot(state.spec, document, run_id=state.run_id)
+    if snapshot.container_id != state.container_id:
+        raise LauncherError("container_replaced")
+    return document, snapshot
+
+
+def _file_identity(
+    path: Path,
+    *,
+    code: str,
+    parent_fd: int | None = None,
+) -> FileIdentity:
+    if parent_fd is not None:
+        _validate_private_parent_fd(parent_fd, code=code)
+        descriptor = _open_private_entry(parent_fd, path.name, writable=False, code=code)
+        try:
+            return _validated_fd_identity(descriptor, code=code)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        raise LauncherError(f"{code}_missing") from None
+    except OSError:
+        raise LauncherError(code) from None
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+        raise LauncherError(f"{code}_invalid")
+    return _private_file_identity_from_stat(info)
+
+
+def _private_parent_identity(info: os.stat_result, *, code: str) -> ParentIdentity:
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        raise LauncherError(f"{code}_invalid")
+    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+
+
+def _parent_identity(parent_fd: int, *, code: str) -> ParentIdentity:
+    try:
+        return _private_parent_identity(os.fstat(parent_fd), code=code)
+    except OSError:
+        raise LauncherError(code) from None
+
+
+def _validate_private_parent_fd(
+    parent_fd: int,
+    *,
+    code: str,
+    expected: ParentIdentity | None = None,
+) -> None:
+    """Validate a caller-held private runs directory without reopening its path."""
+
+    current = _parent_identity(parent_fd, code=code)
+    active = _ACTIVE_PARENT_LEASE.get()
+    if expected is not None and current != expected:
+        raise LauncherError(f"{code}_replaced")
+    if active is not None and current != active.identity:
+        raise LauncherError(f"{code}_replaced")
+
+
+def _revalidate_private_parent_path(
+    path: Path,
+    parent_fd: int,
+    *,
+    expected: ParentIdentity | None = None,
+    code: str = "runs_dir",
+) -> None:
+    """Reject a runs-directory pathname replacement while retaining the old fd."""
+
+    held = _parent_identity(parent_fd, code=code)
+    try:
+        info = path.parent.lstat()
+    except OSError:
+        raise LauncherError(f"{code}_replaced") from None
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+        raise LauncherError(f"{code}_replaced")
+    current = (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+    active = _ACTIVE_PARENT_LEASE.get()
+    expected_identity = expected if expected is not None else (active.identity if active is not None else None)
+    if current != held or (expected_identity is not None and held != expected_identity):
+        raise LauncherError(f"{code}_replaced")
+
+
+def _open_private_parent(path: Path, *, code: str) -> int:
+    """Hold the validated private parent while claiming one child entry."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(path.parent, flags)
+        try:
+            _validate_private_parent_fd(descriptor, code=code)
+        except LauncherError:
+            os.close(descriptor)
+            raise
+        return descriptor
+    except LauncherError:
+        raise
+    except OSError:
+        raise LauncherError(code) from None
+
+
+@contextlib.contextmanager
+def _operation_lease(marker_path: str | Path, *, code: str = "marker_path_invalid"):
+    """Hold one runs-directory fd and identity across one public operation."""
+
+    paths = _marker_paths(marker_path)
+    active = _ACTIVE_PARENT_LEASE.get()
+    if active is not None:
+        if active.marker_path.parent != paths.marker.parent:
+            raise LauncherError("runs_dir_replaced")
+        _revalidate_private_parent_path(
+            paths.marker,
+            active.parent_fd,
+            expected=active.identity,
+            code="runs_dir",
+        )
+        yield active
+        return
+
+    parent_fd = _open_private_parent(paths.marker, code=code)
+    identity = _parent_identity(parent_fd, code=code)
+    lease = ParentLease(paths.marker, parent_fd, identity)
+    active_token = _ACTIVE_PARENT_LEASE.set(lease)
+    expected_token = live_run_marker._set_expected_parent_identity(identity)
+    try:
+        _revalidate_private_parent_path(paths.marker, parent_fd, expected=identity, code="runs_dir")
+        yield lease
+    finally:
+        try:
+            _revalidate_private_parent_path(paths.marker, parent_fd, expected=identity, code="runs_dir")
+        finally:
+            live_run_marker._reset_expected_parent_identity(expected_token)
+            _ACTIVE_PARENT_LEASE.reset(active_token)
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _open_private_entry(parent_fd: int, name: str, *, writable: bool, code: str) -> int:
+    flags = (
+        (os.O_RDWR if writable else os.O_RDONLY)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise LauncherError(f"{code}_missing") from None
+    except OSError:
+        raise LauncherError(f"{code}_invalid") from None
+
+
+def _validated_fd_identity(descriptor: int, *, code: str) -> FileIdentity:
+    try:
+        info = os.fstat(descriptor)
+    except OSError:
+        raise LauncherError(code) from None
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1:
+        raise LauncherError(f"{code}_invalid")
+    return _private_file_identity_from_stat(info)
+
+
+def _revalidate_private_identity(
+    path: Path,
+    expected: FileIdentity,
+    *,
+    code: str,
+    replacement_code: str | None = None,
+    parent_fd: int | None = None,
+) -> None:
+    """Recheck an exact sibling through one held parent and entry descriptor."""
+
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_private_parent(path, code=code)
+    else:
+        _validate_private_parent_fd(parent_fd, code=code)
+    descriptor = -1
+    try:
+        descriptor = _open_private_entry(parent_fd, path.name, writable=False, code=code)
+        before = _validated_fd_identity(descriptor, code=code)
+        after = _validated_fd_identity(descriptor, code=code)
+        if before != after or after != expected:
+            raise LauncherError(replacement_code or f"{code}_replaced")
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _restore_claimed_entry(parent_fd: int, quarantine: str, original: str, *, code: str) -> None:
+    """Restore a raced replacement without ever overwriting its destination."""
+
+    try:
+        _rename_noreplace(parent_fd, quarantine, original)
+    except LauncherError:
+        # If the original name is occupied, leave the private quarantine in
+        # place. Overwriting either pathname would destroy an unowned inode.
+        raise LauncherError(f"{code}_replaced") from None
+
+
+def _erase_credential_descriptor(descriptor: int) -> None:
+    """Erase credential bytes while the validated original descriptor is held."""
+
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        remaining = live_run_marker.MAX_CREDENTIAL_BYTES
+        # Overwrite the whole bounded credential region through the held inode
+        # before truncating it, so the old bytes are not disposed by pathname.
+        zeros = b"\x00" * 64
+        while remaining:
+            chunk = zeros if remaining >= len(zeros) else zeros[:remaining]
+            written = os.write(descriptor, chunk)
+            if written <= 0:
+                raise OSError("credential erase made no progress")
+            remaining -= written
+        os.ftruncate(descriptor, 0)
+        os.fsync(descriptor)
+    except OSError:
+        raise LauncherError("credential_erase_failed") from None
+
+
+def _rename_exact_noreplace(
+    parent_fd: int,
+    source_name: str,
+    target_name: str,
+    expected: FileIdentity,
+    *,
+    code: str,
+) -> None:
+    """Validate the source again inside the no-replace syscall boundary."""
+
+    token = _RENAME_EXPECTED.set((parent_fd, source_name, target_name, expected, code))
+    try:
+        _rename_noreplace(parent_fd, source_name, target_name)
+    finally:
+        _RENAME_EXPECTED.reset(token)
+
+
+def _remove_exact_file(
+    path: Path,
+    *,
+    code: str,
+    expected: FileIdentity | live_run_marker.CredentialIdentity | None = None,
+    missing_ok: bool = False,
+    erase: bool = False,
+    parent_fd: int | None = None,
+) -> None:
+    """Claim and remove one exact inode without pathname unlink races.
+
+    The source entry is first opened through a held private directory fd. An
+    atomic no-replace rename moves the current name to one fixed private
+    quarantine slot. The moved entry is then validated through a second
+    descriptor; a concurrent same-name replacement therefore remains preserved
+    rather than being deleted. Exhausted slots fail closed before claiming one.
+    """
+
+    expected_tuple: FileIdentity | None
+    if isinstance(expected, live_run_marker.CredentialIdentity):
+        expected_tuple = (expected.device, expected.inode, expected.mode, expected.size, expected.nlink)
+    else:
+        expected_tuple = expected
+
+    owns_parent = parent_fd is None
+    source_fd = -1
+    moved_fd = -1
+    quarantine: str | None = None
+    post_rename = False
+    source_erased = not erase
+    try:
+        if parent_fd is None:
+            parent_fd = _open_private_parent(path, code=code)
+        else:
+            _validate_private_parent_fd(parent_fd, code=code)
+        source_fd = _open_private_entry(parent_fd, path.name, writable=erase, code=code)
+        source_identity = _validated_fd_identity(source_fd, code=code)
+        if expected_tuple is not None and source_identity != expected_tuple:
+            raise LauncherError(f"{code}_replaced")
+        expected_tuple = source_identity
+
+        for _ in range(live_run_marker.QUARANTINE_SLOT_COUNT):
+            try:
+                candidate = live_run_marker.reserve_quarantine_slot(
+                    parent_fd,
+                    "cleanup",
+                    expected_tuple[3],
+                )
+            except live_run_marker.MarkerError as error:
+                raise LauncherError(error.code) from None
+            try:
+                _rename_exact_noreplace(
+                    parent_fd,
+                    path.name,
+                    candidate,
+                    expected_tuple,
+                    code=code,
+                )
+            except LauncherError as error:
+                if error.code == "quarantine_exists":
+                    continue
+                if erase:
+                    try:
+                        _erase_credential_descriptor(source_fd)
+                    except LauncherError:
+                        pass
+                raise
+            quarantine = candidate
+            post_rename = True
+            if erase:
+                # The exact rename has claimed the original inode. Scrub the
+                # held pre-rename descriptor before opening any quarantine
+                # pathname, so a hostile parent or replacement race cannot
+                # strand the credential bytes in the old inode.
+                _erase_credential_descriptor(source_fd)
+                source_erased = True
+            break
+        if quarantine is None:
+            raise LauncherError("quarantine_quota_exceeded")
+        moved_fd = _open_private_entry(parent_fd, quarantine, writable=erase, code=code)
+        moved_identity = _validated_fd_identity(moved_fd, code=code)
+        expected_moved = (
+            (*expected_tuple[:3], 0, expected_tuple[4]) if erase else expected_tuple
+        )
+        if moved_identity != expected_moved:
+            # The original descriptor was scrubbed immediately after the
+            # rename. The quarantine pathname may now belong to a replacement;
+            # do not move or unlink that name.
+            raise LauncherError(f"{code}_replaced")
+
+        if erase:
+            _erase_credential_descriptor(moved_fd)
+        # Keep the validated quarantine as a bounded private tombstone. POSIX
+        # has no portable unlink-by-inode primitive; name-unlinking here could
+        # delete a concurrent replacement after this descriptor check.
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            raise LauncherError(code.replace("remove", "sync")) from None
+    except LauncherError as error:
+        if missing_ok and error.code == f"{code}_missing":
+            return
+        raise
+    finally:
+        if post_rename and erase and not source_erased:
+            # Retry the descriptor-pinned scrub even when a later quarantine
+            # operation failed. This path is deliberately best effort because
+            # the original failure code must remain bounded and stable.
+            try:
+                _erase_credential_descriptor(source_fd)
+            except BaseException:
+                pass
+        for descriptor in (moved_fd, source_fd):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if owns_parent and parent_fd is not None and parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _remove_bound_container(
+    state: LauncherState,
+    runner: Runner,
+    environment: Mapping[str, str],
+    executable: str,
+) -> None:
+    try:
+        _inspect_bound_container(state, runner, environment, executable)
+    except LauncherError as error:
+        if error.code != "container_inspect_failed":
+            raise
+        # A retry after a successful exact rm may find no container. Query only
+        # the pinned immutable ID so cleanup can finish without adopting a name
+        # or scanning the engine for a substitute.
+        exists = invoke_runner(
+            runner,
+            (executable, "container", "exists", state.container_id),
+            environment,
+            CONTAINER_ACTION_TIMEOUT,
+            failure_code="container_lookup_failed",
+        )
+        if exists.returncode == 1:
+            return
+        if exists.returncode != 0:
+            raise LauncherError("container_lookup_failed")
+        raise
+    result = invoke_runner(
+        runner,
+        (executable, "rm", "--force", state.container_id),
+        environment,
+        CONTAINER_ACTION_TIMEOUT,
+        failure_code="container_remove_failed",
+    )
     if result.returncode != 0:
         raise LauncherError("container_remove_failed")
-    return True
 
 
-def start_instance(
+def _require_absent(path: Path, *, code: str) -> None:
+    """Reject a pre-existing run-scoped sibling without scanning or replacing it."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise LauncherError(code) from None
+    raise LauncherError(f"{code}_exists")
+
+
+def _require_absent_entry(parent_fd: int, name: str, *, code: str) -> None:
+    """Check one child name through the already-held private parent fd."""
+
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise LauncherError(code) from None
+    try:
+        raise LauncherError(f"{code}_exists")
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _retain_cleanup_failed_in_place(
+    state: LauncherState,
+    tombstone: live_run_marker.RunMarker,
+    *,
+    expected_marker: FileIdentity | None,
+    expected_state: FileIdentity | None,
+    parent_fd: int | None,
+) -> None:
+    """Retain cleanup evidence without allocating after quota saturation."""
+
+    try:
+        if expected_state is not None:
+            try:
+                _rewrite_state_exact(state.spec, tombstone, expected_state, parent_fd=parent_fd)
+            except LauncherError as error:
+                if not error.code.endswith("_missing"):
+                    return
+                write_state(state.spec, tombstone, parent_fd=parent_fd)
+        else:
+            try:
+                _file_identity(state.marker.state_path, code="state", parent_fd=parent_fd)
+            except LauncherError as error:
+                if error.code != "state_missing":
+                    return
+                write_state(state.spec, tombstone, parent_fd=parent_fd)
+            else:
+                return
+
+        if expected_marker is not None:
+            try:
+                live_run_marker.rewrite_marker_exact(tombstone, expected_marker, parent_fd=parent_fd)
+            except live_run_marker.MarkerError as error:
+                if error.code != "marker_missing":
+                    return
+                live_run_marker.create_marker(tombstone, parent_fd=parent_fd)
+        else:
+            try:
+                _file_identity(state.marker_path, code="marker", parent_fd=parent_fd)
+            except LauncherError as error:
+                if error.code != "marker_missing":
+                    return
+                live_run_marker.create_marker(tombstone, parent_fd=parent_fd)
+            else:
+                return
+    except BaseException:
+        # The fallback is still descriptor-identity pinned. A raced or missing
+        # inode remains untouched rather than turning quota recovery into an
+        # adoption path.
+        return
+
+
+def _retain_cleanup_failed(
+    state: LauncherState,
+    *,
+    expected_marker: FileIdentity | None = None,
+    expected_state: FileIdentity | None = None,
+    parent_fd: int | None = None,
+) -> None:
+    """Retain a bounded tombstone without adopting raced pathnames.
+
+    Existing entries are claimed with the same no-replace quarantine protocol
+    used for final cleanup. A replacement is never overwritten; if claiming it
+    fails, the private replacement or quarantine remains as evidence.
+    """
+
+    tombstone = live_run_marker.cleanup_failed(state.marker)
+    try:
+        if expected_state is None:
+            try:
+                _file_identity(state.marker.state_path, code="state", parent_fd=parent_fd)
+            except LauncherError as error:
+                if error.code != "state_missing":
+                    return
+            else:
+                return
+        else:
+            _remove_exact_file(
+                state.marker.state_path,
+                code="state_remove_failed",
+                expected=expected_state,
+                missing_ok=True,
+                parent_fd=parent_fd,
+            )
+        write_state(state.spec, tombstone, replace=False, parent_fd=parent_fd)
+
+        if expected_marker is None:
+            try:
+                _file_identity(state.marker_path, code="marker", parent_fd=parent_fd)
+            except LauncherError as error:
+                if error.code != "marker_missing":
+                    return
+            else:
+                return
+        else:
+            _remove_exact_file(
+                state.marker_path,
+                code="marker_remove_failed",
+                expected=expected_marker,
+                missing_ok=True,
+                parent_fd=parent_fd,
+            )
+        live_run_marker.create_marker(tombstone, parent_fd=parent_fd)
+    except LauncherError as error:
+        if error.code == "quarantine_quota_exceeded" and parent_fd is not None:
+            _retain_cleanup_failed_in_place(
+                state,
+                tombstone,
+                expected_marker=expected_marker,
+                expected_state=expected_state,
+                parent_fd=parent_fd,
+            )
+        # Cleanup evidence is best effort, but it must never turn an original
+        # bounded launcher error into a traceback or overwrite a replacement.
+        return
+    except BaseException:
+        # Cleanup evidence is best effort, but it must never turn an original
+        # bounded launcher error into a traceback or overwrite a replacement.
+        return
+
+
+def _cleanup_started_run(
+    spec: InstanceSpec,
+    binding: live_run_marker.RunMarker,
+    *,
+    marker_identity: FileIdentity | None,
+    state_identity: FileIdentity | None,
+    cidfile_identity: FileIdentity | None,
+    runner: Runner,
+    executable: str,
+    source_environment: Mapping[str, str] | None,
+    parent_fd: int | None = None,
+) -> None:
+    """Clean a just-created run by exact identities, even before publication."""
+
+    state = LauncherState(spec=spec, marker=binding, marker_identity=marker_identity, state_identity=state_identity)
+    cleanup_error: LauncherError | None = None
+    container_unproven = False
+    try:
+        environment = clean_environment(source_environment)
+    except BaseException:
+        environment = {}
+        cleanup_error = LauncherError("cleanup_environment_failed")
+
+    if cleanup_error is None:
+        try:
+            identity = binding.credential_identity
+            _revalidate_private_identity(
+                binding.credential_path,
+                (identity.device, identity.inode, identity.mode, identity.size, identity.nlink),
+                code="credential_identity",
+                replacement_code="credential_identity_mismatch",
+                parent_fd=parent_fd,
+            )
+        except BaseException as error:
+            cleanup_error = LauncherError(
+                error.code if isinstance(error, LauncherError) else "credential_identity_mismatch"
+            )
+
+    if cleanup_error is None:
+        try:
+            _remove_bound_container(state, runner, environment, executable)
+        except BaseException as error:
+            cleanup_error = error if isinstance(error, LauncherError) else LauncherError("container_remove_failed")
+            if isinstance(error, LauncherError) and error.code in {
+                "container_not_launcher_owned",
+                "container_identity_unproven",
+                "container_replaced",
+            }:
+                container_unproven = True
+
+    if cidfile_identity is not None:
+        try:
+            _remove_exact_file(
+                binding.marker_path.with_name(f"{binding.marker_path.stem}.cidfile"),
+                code="cidfile_remove_failed",
+                expected=cidfile_identity,
+                parent_fd=parent_fd,
+            )
+        except BaseException:
+            if cleanup_error is None:
+                cleanup_error = LauncherError("cidfile_remove_failed")
+
+    if cleanup_error is None:
+        try:
+            _remove_exact_file(
+                binding.credential_path,
+                code="credential_remove_failed",
+                expected=binding.credential_identity,
+                erase=True,
+                parent_fd=parent_fd,
+            )
+            if state_identity is not None:
+                _remove_exact_file(
+                    binding.state_path,
+                    code="state_remove_failed",
+                    expected=state_identity,
+                    parent_fd=parent_fd,
+                )
+            if marker_identity is not None:
+                _remove_marker_last(state, marker_identity, parent_fd=parent_fd)
+        except BaseException as error:
+            cleanup_error = error if isinstance(error, LauncherError) else LauncherError("cleanup_failed")
+
+    if cleanup_error is not None:
+        tombstone_state = state
+        if container_unproven:
+            tombstone_state = LauncherState(
+                spec=spec,
+                marker=binding.with_container_id(UNPROVEN_CONTAINER_ID),
+                marker_identity=marker_identity,
+                state_identity=state_identity,
+            )
+        _retain_cleanup_failed(
+            tombstone_state,
+            expected_marker=marker_identity,
+            expected_state=state_identity,
+            parent_fd=parent_fd,
+        )
+
+
+def _start_instance_with_parent(
     spec: InstanceSpec,
     *,
+    marker_path: str | Path,
+    paths: live_run_marker.MarkerPaths,
+    runs_parent_fd: int,
     runner: Runner = run_command,
     readiness: ReadinessChecker = check_provider_readiness,
     port_checker: PortChecker = is_port_available,
@@ -742,158 +2117,389 @@ def start_instance(
     source_environment: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, object], bool]:
     environment = clean_environment(source_environment)
+    _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
     podman = executable or podman_path()
     podman_preflight(runner, environment, podman)
     verify_image(spec.image, runner, environment, podman)
-    password = read_or_create_password(spec)
     _ensure_private_directory(spec.roots.data)
     _ensure_private_directory(spec.data_dir)
 
-    if container_exists(spec, runner, environment, podman):
-        document = inspect_container(spec, runner, environment, podman)
-        require_owned_container(spec, document)
-        original_status = container_status(document)
+    try:
+        state = _load_bound_state(paths.marker, spec.roots, parent_fd=runs_parent_fd)
+    except LauncherError as error:
+        if error.code != "marker_missing":
+            raise
+        state = None
+
+    if state is not None:
+        if (
+            state.spec.instance != spec.instance
+            or state.spec.port != spec.port
+            or state.spec.image != spec.image
+            or state.spec.username != spec.username
+        ):
+            raise LauncherError("marker_spec_mismatch")
+        if state.marker.status != live_run_marker.STATUS_RUNNING:
+            raise LauncherError("cleanup_incomplete")
+        try:
+            identity = state.marker.credential_identity
+            _revalidate_private_identity(
+                state.marker.credential_path,
+                (identity.device, identity.inode, identity.mode, identity.size, identity.nlink),
+                code="credential_identity",
+                replacement_code="credential_identity_mismatch",
+                parent_fd=runs_parent_fd,
+            )
+        except LauncherError as error:
+            raise LauncherError(error.code) from None
+        document, current = _inspect_bound_container(state, runner, environment, podman)
+        original_status = current.status
         if original_status == "running":
-            readiness(spec.endpoint, attempts, interval)
-            write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
-            return {**spec.public(), "status": "ready", "created": False}, False
+            readiness(state.marker.endpoint, attempts, interval)
+            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+            write_state(state.spec, state.marker, replace=True, expected=state.state_identity, parent_fd=runs_parent_fd)
+            return _public_run_result(spec, state.marker, status="ready", created=False), False
         if original_status not in {"configured", "created", "stopped", "exited", "dead"}:
             raise LauncherError("container_state_unrecoverable")
-        recovery_identity = recovery_snapshot(spec, document)
         if not port_checker(spec.port):
             raise LauncherError("port_unavailable")
-
-        # Starting an existing stopped container is a transaction. Re-inspect
-        # immediately before the action, then address both lifecycle commands
-        # by the pinned ID rather than the mutable name. The rollback re-inspects
-        # that same ID and stops only it if it is still running.
-        fresh_identity = require_same_recovery_snapshot(
-            spec,
-            recovery_identity,
-            inspect_container(spec, runner, environment, podman),
-        )
-        if fresh_identity.status != original_status:
+        fresh = _inspect_bound_container(state, runner, environment, podman)[1]
+        if fresh.status != original_status:
             raise LauncherError("container_recovery_race")
         recovery_attempted = False
-        cleanup_done = False
-        rollback_failure: LauncherError | None = None
-
-        def rollback_once() -> LauncherError | None:
-            nonlocal cleanup_done, rollback_failure
-            if cleanup_done:
-                return rollback_failure
-            cleanup_done = True
-            if not recovery_attempted:
-                return None
-            try:
-                current_identity = require_same_recovery_snapshot(
-                    spec,
-                    recovery_identity,
-                    inspect_container(
-                        spec,
-                        runner,
-                        environment,
-                        podman,
-                        target=recovery_identity.container_id,
-                    ),
-                )
-                if current_identity.status == original_status:
-                    return None
-                if current_identity.status != "running":
-                    raise LauncherError("container_recovery_rollback_failed")
-                _run_container_action(
-                    recovery_identity.container_id,
-                    "stop",
-                    runner,
-                    environment,
-                    podman,
-                    "container_recovery_rollback_failed",
-                )
-            except LauncherError as exc:
-                # If the pinned container vanished, the mutable name may now
-                # refer to a foreign replacement. Do not touch it or mask the
-                # already-redacted lifecycle error with inspect details.
-                if exc.code == "container_inspect_failed":
-                    return None
-                rollback_failure = exc
-            except BaseException:
-                rollback_failure = LauncherError("container_recovery_rollback_failed")
-            return rollback_failure
-
         try:
             recovery_attempted = True
             _run_container_action(
-                recovery_identity.container_id,
+                state.container_id,
                 "start",
                 runner,
                 environment,
                 podman,
                 "container_start_failed",
             )
-            readiness(spec.endpoint, attempts, interval)
-            write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
+            readiness(state.marker.endpoint, attempts, interval)
+            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+            write_state(state.spec, state.marker, replace=True, expected=state.state_identity, parent_fd=runs_parent_fd)
         except BaseException as exc:
-            failed_rollback = rollback_once()
-            if failed_rollback is not None and isinstance(exc, Exception):
-                raise failed_rollback from None
+            rollback_error: LauncherError | None = None
+            if recovery_attempted:
+                try:
+                    rollback_state = _inspect_bound_container(state, runner, environment, podman)[1]
+                    if rollback_state.status == "running":
+                        _run_container_action(
+                            state.container_id,
+                            "stop",
+                            runner,
+                            environment,
+                            podman,
+                            "container_recovery_rollback_failed",
+                        )
+                    elif rollback_state.status != original_status:
+                        rollback_error = LauncherError("container_recovery_rollback_failed")
+                except LauncherError as rollback:
+                    rollback_error = rollback
+            if rollback_error is not None and isinstance(exc, Exception):
+                raise rollback_error from None
             if isinstance(exc, LauncherError):
                 raise
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             raise LauncherError("container_recovery_failed") from None
-        return {**spec.public(), "status": "ready", "created": False}, False
+        return _public_run_result(spec, state.marker, status="ready", created=False), False
 
+    # A container under the deterministic name without its exact marker is not
+    # adoptable. In particular, a stopped or foreign object is never started or
+    # removed merely because its name resembles this instance.
+    if container_exists(spec, runner, environment, podman):
+        raise LauncherError("marker_missing")
     if not port_checker(spec.port):
         raise LauncherError("port_unavailable")
 
-    child_environment = dict(environment)
-    child_environment.update(
-        {
-            "HERMES_DASHBOARD": "1",
-            "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": spec.username,
-            "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": password,
-        }
-    )
-    started = runner(run_arguments(spec, podman), child_environment, 300)
-    if started.returncode != 0:
-        raise LauncherError("container_start_failed")
+    # Generate the opaque run identity before the first container-start command.
+    # The engine-emitted cidfile is the private immutable handoff for both a
+    # normal return and a runner that raises after creating the container.
+    run_id = live_run_marker.new_run_id()
+    credential_identity: live_run_marker.CredentialIdentity | None = None
+    cidfile_identity: FileIdentity | None = None
+    binding: live_run_marker.RunMarker | None = None
+    marker_identity: FileIdentity | None = None
+    state_identity: FileIdentity | None = None
+    run_container_id: str | None = None
     try:
-        readiness(spec.endpoint, attempts, interval)
-        write_state(spec, recovery_snapshot(spec, inspect_container(spec, runner, environment, podman)).container_id)
-    except BaseException:
+        _require_absent_entry(runs_parent_fd, paths.cidfile.name, code="cidfile_path_invalid")
         try:
-            remove_container(spec, runner, environment, podman)
-        except LauncherError:
-            pass
+            password, credential_identity = create_run_credential(paths.marker, parent_fd=runs_parent_fd)
+        except OwnedFileError as error:
+            credential_identity = live_run_marker.CredentialIdentity(
+                error.identity[0], error.identity[1], error.identity[2], error.identity[3], error.identity[4]
+            )
+            raise
+        child_environment = dict(environment)
+        child_environment.update(
+            {
+                "HERMES_DASHBOARD": "1",
+                "HERMES_DASHBOARD_BASIC_AUTH_USERNAME": spec.username,
+                "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD": password,
+            }
+        )
+
+        # Keep invocation itself inside the transaction. A synchronous runner
+        # may raise after the engine has created a container and written cidfile.
+        try:
+            started = invoke_runner(
+                runner,
+                run_arguments(spec, podman, run_id, cidfile=paths.cidfile),
+                child_environment,
+                300,
+                failure_code="container_start_failed",
+            )
+        except LauncherError as runner_error:
+            # The runner may raise after Podman has already written cidfile.
+            # Recover only that immutable engine-emitted ID; never inspect or
+            # adopt a mutable container name from this failure path. A malformed
+            # cidfile carries its exact inode for safe disposal but never proves
+            # a container identity.
+            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+            try:
+                run_container_id, cidfile_identity = read_cidfile(paths.cidfile, parent_fd=runs_parent_fd)
+            except OwnedFileError as error:
+                cidfile_identity = error.identity
+                raise runner_error
+            except LauncherError:
+                raise runner_error
+            raise runner_error
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+        try:
+            run_container_id, cidfile_identity = read_cidfile(paths.cidfile, parent_fd=runs_parent_fd)
+        except OwnedFileError as error:
+            cidfile_identity = error.identity
+            raise
+        if started.returncode != 0:
+            raise LauncherError("container_start_failed")
+
+        try:
+            binding = live_run_marker.new_marker(
+                paths.marker,
+                run_id=run_id,
+                instance=spec.instance,
+                container_id=run_container_id,
+                container_name=spec.container,
+                image=spec.image,
+                endpoint=spec.endpoint,
+                credential_identity=credential_identity,
+            )
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            raise LauncherError("marker_build_failed") from None
+        try:
+            state_identity = write_state(spec, binding, parent_fd=runs_parent_fd)
+        except OwnedFileError as error:
+            # write_state returns only after its parent sync succeeds. If that
+            # sync fails after creation, retain the exact created inode here so
+            # cleanup cannot orphan the state sibling.
+            state_identity = error.identity
+            raise
+
+        assert credential_identity is not None
+        assert state_identity is not None
+        _revalidate_private_identity(
+            paths.credential,
+            (
+                credential_identity.device,
+                credential_identity.inode,
+                credential_identity.mode,
+                credential_identity.size,
+                credential_identity.nlink,
+            ),
+            code="credential_identity",
+            replacement_code="credential_identity_mismatch",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_private_identity(
+            paths.state,
+            state_identity,
+            code="state_identity",
+            replacement_code="state_replaced",
+            parent_fd=runs_parent_fd,
+        )
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+        try:
+            marker_identity = live_run_marker.create_marker(binding, parent_fd=runs_parent_fd)
+        except live_run_marker.OwnedMarkerError as error:
+            marker_identity = error.identity
+            raise LauncherError(error.code) from None
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+
+        # Every post-run check targets the immutable ID emitted above. A
+        # wildcard or otherwise mismatched mapping can therefore use the same
+        # exact cleanup path without adopting a replacement under the name.
+        document = inspect_container(spec, runner, environment, podman, target=run_container_id)
+        snapshot = recovery_snapshot(spec, document, run_id=run_id)
+        if snapshot.container_id != run_container_id:
+            raise LauncherError("container_replaced")
+        if snapshot.status != "running":
+            raise LauncherError("container_not_running")
+        require_loopback_endpoint_mapping(spec, document)
+        readiness(binding.endpoint, attempts, interval)
+        if cidfile_identity is not None:
+            _remove_exact_file(
+                paths.cidfile,
+                code="cidfile_remove_failed",
+                expected=cidfile_identity,
+                parent_fd=runs_parent_fd,
+            )
+            cidfile_identity = None
+        _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+    except BaseException:
+        if credential_identity is not None and run_container_id is not None:
+            if binding is None:
+                # Do not invoke the validating publication constructor from an
+                # error path. Its failure must not mask the original exception
+                # or prevent cleanup of the already-proven exact identities.
+                binding = _cleanup_binding(
+                    paths,
+                    spec,
+                    run_id=run_id,
+                    container_id=run_container_id,
+                    credential_identity=credential_identity,
+                )
+            try:
+                _cleanup_started_run(
+                    spec,
+                    binding,
+                    marker_identity=marker_identity,
+                    state_identity=state_identity,
+                    cidfile_identity=cidfile_identity,
+                    runner=runner,
+                    executable=podman,
+                    source_environment=source_environment,
+                    parent_fd=runs_parent_fd,
+                )
+            except BaseException:
+                try:
+                    _retain_cleanup_failed(
+                        LauncherState(spec, binding, marker_identity=marker_identity, state_identity=state_identity),
+                        expected_marker=marker_identity,
+                        expected_state=state_identity,
+                        parent_fd=runs_parent_fd,
+                    )
+                except BaseException:
+                    pass
+        elif credential_identity is not None:
+            # No immutable ID exists: never rediscover or adopt by mutable
+            # name. Erase only the credential and retain a private sentinel
+            # tombstone as bounded evidence of the unknown engine outcome.
+            if cidfile_identity is not None:
+                try:
+                    _remove_exact_file(
+                        paths.cidfile,
+                        code="cidfile_remove_failed",
+                        expected=cidfile_identity,
+                        parent_fd=runs_parent_fd,
+                    )
+                except BaseException:
+                    pass
+            try:
+                _remove_exact_file(
+                    paths.credential,
+                    code="credential_remove_failed",
+                    expected=credential_identity,
+                    erase=True,
+                    parent_fd=runs_parent_fd,
+                )
+            except BaseException:
+                pass
+            try:
+                unknown = _cleanup_binding(
+                    paths,
+                    spec,
+                    run_id=run_id,
+                    container_id=UNPROVEN_CONTAINER_ID,
+                    credential_identity=credential_identity,
+                )
+                _retain_cleanup_failed(LauncherState(spec, unknown), parent_fd=runs_parent_fd)
+            except BaseException:
+                pass
         raise
-    return {**spec.public(), "status": "ready", "created": True}, True
+    assert binding is not None
+    return _public_run_result(spec, binding, status="ready", created=True), True
+
+
+def start_instance(
+    spec: InstanceSpec,
+    *,
+    marker_path: str | Path | None = None,
+    runner: Runner = run_command,
+    readiness: ReadinessChecker = check_provider_readiness,
+    port_checker: PortChecker = is_port_available,
+    attempts: int = 60,
+    interval: float = 1,
+    executable: str | None = None,
+    source_environment: Mapping[str, str] | None = None,
+) -> tuple[dict[str, object], bool]:
+    """Run one lifecycle transaction under one pinned runs-directory fd."""
+
+    if marker_path is None:
+        raise LauncherError("marker_required")
+    paths = _marker_paths(marker_path)
+    with _operation_lease(paths.marker, code="marker_path_invalid") as lease:
+        return _start_instance_with_parent(
+            spec,
+            marker_path=paths.marker,
+            paths=paths,
+            runs_parent_fd=lease.parent_fd,
+            runner=runner,
+            readiness=readiness,
+            port_checker=port_checker,
+            attempts=attempts,
+            interval=interval,
+            executable=executable,
+            source_environment=source_environment,
+        )
 
 
 def start_many(
     specs: Sequence[InstanceSpec],
+    marker_paths: Sequence[str | Path] | None = None,
     **kwargs: object,
 ) -> list[dict[str, object]]:
     if not specs:
         raise LauncherError("instance_count_invalid")
+    if marker_paths is None or len(marker_paths) != len(specs):
+        raise LauncherError("marker_count_invalid")
     if len({spec.instance for spec in specs}) != len(specs) or len({spec.port for spec in specs}) != len(specs):
         raise LauncherError("batch_not_unique")
-    results: list[dict[str, object]] = []
-    created: list[InstanceSpec] = []
     try:
-        for spec in specs:
-            result, was_created = start_instance(spec, **kwargs)
+        exact_marker_paths = tuple(_marker_paths(path).marker for path in marker_paths)
+    except LauncherError:
+        raise
+    if len(set(exact_marker_paths)) != len(exact_marker_paths):
+        raise LauncherError("marker_not_unique")
+    results: list[dict[str, object]] = []
+    created: list[tuple[InstanceSpec, str | Path]] = []
+    try:
+        for spec, marker_path in zip(specs, exact_marker_paths):
+            result, was_created = start_instance(spec, marker_path=marker_path, **kwargs)
             results.append(result)
             if was_created:
-                created.append(spec)
+                created.append((spec, marker_path))
     except BaseException:
         runner = kwargs.get("runner", run_command)
         executable = kwargs.get("executable")
         source_environment = kwargs.get("source_environment")
-        environment = clean_environment(source_environment if isinstance(source_environment, Mapping) else None)
-        podman = executable if isinstance(executable, str) else podman_path()
-        for spec in reversed(created):
+        for spec, marker_path in reversed(created):
             try:
-                remove_container(spec, runner, environment, podman)  # type: ignore[arg-type]
+                stop_instance(
+                    marker_path,
+                    roots=spec.roots,
+                    runner=runner,  # type: ignore[arg-type]
+                    executable=executable if isinstance(executable, str) else None,
+                    source_environment=source_environment if isinstance(source_environment, Mapping) else None,
+                )
             except LauncherError:
                 pass
         raise
@@ -901,96 +2507,144 @@ def start_many(
 
 
 def status_instance(
-    spec: InstanceSpec,
+    marker_path: str | Path,
     *,
+    roots: Roots | None = None,
     runner: Runner = run_command,
     executable: str | None = None,
     source_environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    environment = clean_environment(source_environment)
-    podman = executable or podman_path()
-    podman_preflight(runner, environment, podman)
-    if not container_exists(spec, runner, environment, podman):
-        return {**spec.public(), "status": "absent"}
-    document = inspect_container(spec, runner, environment, podman)
-    require_owned_container(spec, document)
-    return {**spec.public(), "status": container_status(document)}
+    with _operation_lease(marker_path, code="marker_path_invalid") as lease:
+        state = _load_bound_state(marker_path, roots or default_roots(), parent_fd=lease.parent_fd)
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        if state.marker.status != live_run_marker.STATUS_RUNNING:
+            return {"status": state.marker.status, "marker_path": str(state.marker.marker_path)}
+        environment = clean_environment(source_environment)
+        podman = executable or podman_path()
+        podman_preflight(runner, environment, podman)
+        _, snapshot = _inspect_bound_container(state, runner, environment, podman)
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+        return {
+            "instance": state.spec.instance,
+            "status": snapshot.status,
+            "marker_path": str(state.marker.marker_path),
+        }
 
 
-def _remove_owned_path(path: Path) -> None:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        raise LauncherError("owned_path_remove_failed") from None
-    if stat.S_ISLNK(info.st_mode):
-        raise LauncherError("owned_path_invalid")
-    try:
-        if stat.S_ISDIR(info.st_mode):
-            shutil.rmtree(path)
-        elif stat.S_ISREG(info.st_mode):
-            path.unlink()
-        else:
-            raise LauncherError("owned_path_invalid")
-    except PermissionError:
-        raise LauncherError("owned_path_permission_denied") from None
-    except OSError:
-        raise LauncherError("owned_path_remove_failed") from None
-
-
-def _remove_container_owned_data(
-    spec: InstanceSpec,
-    runner: Runner,
-    environment: Mapping[str, str],
-    executable: str,
+def _remove_marker_last(
+    state: LauncherState,
+    expected: FileIdentity,
+    *,
+    parent_fd: int | None = None,
 ) -> None:
-    """Remove one bind-mounted data directory through Podman's user namespace.
-
-    The official entrypoint can create mapped container-owned files under the
-    host directory. Rootless ``podman unshare`` removes only the validated exact
-    instance path without changing the image user, entrypoint, or runtime flags.
-    """
+    """Remove the marker through the same pinned quarantine protocol."""
 
     try:
-        _remove_owned_path(spec.data_dir)
-        return
-    except LauncherError as exc:
-        if exc.code != "owned_path_permission_denied":
-            raise
-    result = runner(
-        (executable, "unshare", "rm", "-rf", "--", str(spec.data_dir)),
-        environment,
-        60,
-    )
-    if result.returncode != 0 or spec.data_dir.exists() or spec.data_dir.is_symlink():
-        raise LauncherError("owned_path_remove_failed")
+        _remove_exact_file(
+            state.marker_path,
+            code="marker_remove_failed",
+            expected=expected,
+            parent_fd=parent_fd,
+        )
+    except LauncherError as error:
+        if error.code == "marker_remove_failed_replaced":
+            raise LauncherError("marker_replaced") from None
+        raise
 
 
 def stop_instance(
-    spec: InstanceSpec,
+    marker_path: str | Path,
     *,
+    roots: Roots | None = None,
     purge_data: bool = False,
     runner: Runner = run_command,
     executable: str | None = None,
     source_environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    environment = clean_environment(source_environment)
-    podman = executable or podman_path()
-    podman_preflight(runner, environment, podman)
-    # Retain the original immutable ID in the tombstone. Endpoint handoff will
-    # reject it after removal instead of trusting the retained port metadata.
-    container_id = load_launcher_state(spec.instance, spec.roots).container_id
-    removed = remove_container(spec, runner, environment, podman)
-    write_state(spec, container_id)
     if purge_data:
-        _remove_container_owned_data(spec, runner, environment, podman)
-        _remove_owned_path(spec.credential_dir)
-    return {
-        **spec.public(),
-        "status": "removed" if removed else "absent",
-        "purged": purge_data,
-    }
+        raise LauncherError("purge_not_supported")
+    with _operation_lease(marker_path, code="marker_path_invalid") as lease:
+        state = _load_bound_state(marker_path, roots or default_roots(), parent_fd=lease.parent_fd)
+        marker_identity = state.marker_identity
+        state_identity = state.state_identity
+        if marker_identity is None or state_identity is None:
+            raise LauncherError("ownership_snapshot_missing")
+        _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+
+        try:
+            environment = clean_environment(source_environment)
+            unknown_container = (
+                state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED
+                and state.marker.container_id == UNPROVEN_CONTAINER_ID
+            )
+            podman = executable or ""
+            if not unknown_container:
+                podman = executable or podman_path()
+                podman_preflight(runner, environment, podman)
+
+            credential_missing_after_failed_cleanup = False
+            if state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED:
+                try:
+                    _file_identity(
+                        state.marker.credential_path,
+                        code="credential",
+                        parent_fd=lease.parent_fd,
+                    )
+                except LauncherError as credential_error:
+                    if credential_error.code == "credential_missing":
+                        # A prior exact cleanup may already have erased and
+                        # removed the credential before marker/state disposal
+                        # failed. Replacements still fail closed.
+                        credential_missing_after_failed_cleanup = True
+                    else:
+                        raise
+            if not credential_missing_after_failed_cleanup:
+                try:
+                    live_run_marker.verify_credential_identity(
+                        state.marker,
+                        parent_fd=lease.parent_fd,
+                    )
+                except live_run_marker.MarkerError as error:
+                    raise LauncherError(error.code) from None
+            credential_identity = state.marker.credential_identity
+            if not unknown_container:
+                _remove_bound_container(state, runner, environment, podman)
+            _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+            _remove_exact_file(
+                state.marker.credential_path,
+                code="credential_remove_failed",
+                expected=credential_identity,
+                missing_ok=state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED,
+                erase=True,
+                parent_fd=lease.parent_fd,
+            )
+            _remove_exact_file(
+                state.marker.state_path,
+                code="state_remove_failed",
+                expected=state_identity,
+                missing_ok=state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED,
+                parent_fd=lease.parent_fd,
+            )
+            _remove_marker_last(state, marker_identity, parent_fd=lease.parent_fd)
+        except BaseException as error:
+            if isinstance(error, live_run_marker.MarkerError):
+                normalized = LauncherError(error.code)
+            elif isinstance(error, LauncherError):
+                normalized = error
+            else:
+                normalized = LauncherError("cleanup_failed")
+            _retain_cleanup_failed(
+                state,
+                expected_marker=marker_identity,
+                expected_state=state_identity,
+                parent_fd=lease.parent_fd,
+            )
+            raise normalized
+        return {
+            "instance": state.spec.instance,
+            "status": "removed",
+            "marker_path": str(state.marker.marker_path),
+        }
 
 
 def specs_for_batch(
@@ -1046,6 +2700,10 @@ def add_start_options(parser: argparse.ArgumentParser) -> None:
     add_roots(parser)
 
 
+def add_marker(parser: argparse.ArgumentParser, *, many: bool = False) -> None:
+    parser.add_argument("--marker", action="append" if many else None, required=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -1053,28 +2711,26 @@ def build_parser() -> argparse.ArgumentParser:
     start = subparsers.add_parser("start")
     start.add_argument("--instance", required=True)
     start.add_argument("--port", required=True, type=int)
+    add_marker(start)
     add_start_options(start)
 
     start_many_parser = subparsers.add_parser("start-many")
     start_many_parser.add_argument("--prefix", required=True)
     start_many_parser.add_argument("--count", required=True, type=int)
     start_many_parser.add_argument("--base-port", required=True, type=int)
+    add_marker(start_many_parser, many=True)
     add_start_options(start_many_parser)
 
     for operation in ("status", "endpoint", "credential-file", "stop"):
         command = subparsers.add_parser(operation)
-        command.add_argument("--instance", required=True)
+        add_marker(command)
         if operation == "stop":
             command.add_argument("--purge-data", action="store_true")
         add_roots(command)
 
     stop_many_parser = subparsers.add_parser("stop-many")
-    stop_many_parser.add_argument("--prefix", required=True)
-    stop_many_parser.add_argument("--count", required=True, type=int)
-    stop_many_parser.add_argument("--base-port", required=True, type=int)
+    add_marker(stop_many_parser, many=True)
     stop_many_parser.add_argument("--purge-data", action="store_true")
-    stop_many_parser.add_argument("--image", default=DEFAULT_IMAGE)
-    stop_many_parser.add_argument("--username", default=DEFAULT_USERNAME)
     add_roots(stop_many_parser)
     return parser
 
@@ -1082,14 +2738,18 @@ def build_parser() -> argparse.ArgumentParser:
 def execute(args: argparse.Namespace) -> dict[str, object]:
     roots = roots_from_args(args)
     if args.operation == "start":
-        spec = make_spec(args.instance, args.port, image=args.image, username=args.username, roots=roots)
-        result, _ = start_instance(
-            spec,
-            attempts=args.readiness_attempts,
-            interval=args.readiness_interval,
-        )
-        return {"ok": True, "operation": "start", "result": result}
+        with _operation_lease(args.marker, code="marker_path_invalid"):
+            spec = make_spec(args.instance, args.port, image=args.image, username=args.username, roots=roots)
+            result, _ = start_instance(
+                spec,
+                marker_path=args.marker,
+                attempts=args.readiness_attempts,
+                interval=args.readiness_interval,
+            )
+            return {"ok": True, "operation": "start", "result": result}
     if args.operation == "start-many":
+        if len(args.marker) != args.count:
+            raise LauncherError("marker_count_invalid")
         specs = specs_for_batch(
             args.prefix,
             args.count,
@@ -1100,49 +2760,32 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
         )
         results = start_many(
             specs,
+            args.marker,
             attempts=args.readiness_attempts,
             interval=args.readiness_interval,
         )
         return {"ok": True, "operation": "start-many", "results": results}
-    if args.operation in {"endpoint", "credential-file", "status", "stop"}:
-        state = load_launcher_state(args.instance, roots)
-        spec = state.spec
-        if args.operation == "endpoint":
-            # This is the selection gate immediately before handoff. Do not turn
-            # it into a metadata lookup: verification pins the stored immutable
-            # ID to the running container and its one explicit loopback mapping.
+    if args.operation in {"endpoint", "credential-file"}:
+        with _operation_lease(args.marker, code="marker_path_invalid") as lease:
+            state = _load_bound_state(args.marker, roots, parent_fd=lease.parent_fd)
+            result = verify_handoff_endpoint(state)
+            return {"ok": True, "operation": args.operation, "result": result}
+    if args.operation == "status":
+        with _operation_lease(args.marker, code="marker_path_invalid"):
             return {
                 "ok": True,
-                "operation": "endpoint",
-                "result": verify_handoff_endpoint(state),
+                "operation": "status",
+                "result": status_instance(args.marker, roots=roots),
             }
-        if args.operation == "credential-file":
+    if args.operation == "stop":
+        with _operation_lease(args.marker, code="marker_path_invalid"):
             return {
                 "ok": True,
-                "operation": "credential-file",
-                "result": {
-                    "instance": spec.instance,
-                    "credential_file": str(spec.credential_file),
-                    "exists": spec.credential_file.is_file(),
-                },
+                "operation": "stop",
+                "result": stop_instance(args.marker, roots=roots, purge_data=args.purge_data),
             }
-        if args.operation == "status":
-            return {"ok": True, "operation": "status", "result": status_instance(spec)}
-        return {
-            "ok": True,
-            "operation": "stop",
-            "result": stop_instance(spec, purge_data=args.purge_data),
-        }
     if args.operation == "stop-many":
-        specs = specs_for_batch(
-            args.prefix,
-            args.count,
-            args.base_port,
-            image=args.image,
-            username=args.username,
-            roots=roots,
-        )
-        results = [stop_instance(spec, purge_data=args.purge_data) for spec in specs]
+        results = [stop_instance(path, roots=roots, purge_data=args.purge_data) for path in args.marker]
         return {"ok": True, "operation": "stop-many", "results": results}
     raise LauncherError("operation_unknown")
 
