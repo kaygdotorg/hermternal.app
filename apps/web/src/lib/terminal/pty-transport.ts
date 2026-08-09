@@ -917,8 +917,11 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     // must hide reconnect. Keep these intents distinct in public retry state.
     const hadActiveContext = activeContext !== undefined;
     const hadActiveAttempt = activeAttempt !== undefined;
+    // Detach starts the exact-identity retention window; explicit Close latches
+    // reconnect denial. A later detach must not weaken that Close authorization,
+    // while ordinary detach remains eligible for exact-identity reconnect.
     userClosed = closing;
-    explicitlyClosed = closing;
+    if (closing) explicitlyClosed = true;
     // Keep a server/authentication retry fence after cleanup has no active
     // owner. Only a new identity or explicit recovery in start() may clear it;
     // detach/Close must not turn failed authentication into an implicit retry.
