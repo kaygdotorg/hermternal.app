@@ -59,6 +59,41 @@ describe('TerminalSurface', () => {
     view.unmount(); expect(b.setRendererReady).toHaveBeenLastCalledWith(false); expect(renderer.dispose).toHaveBeenCalled(); vi.unstubAllGlobals();
   });
 
+  it('moves replacement bytes to a fresh renderer across a defined-to-undefined session transition', async () => {
+    const b = bridge();
+    const view = render(TerminalSurface, { bridge: b, active: true, coordinator: coordinator() });
+    await waitFor(() => expect(harness.instances).toHaveLength(1));
+    const firstRenderer = harness.instances[0];
+
+    let releaseReplacement!: () => void;
+    harness.setDeferred(new Promise<void>((resolve) => { releaseReplacement = resolve; }));
+    const replacementBytes = new Uint8Array([0xff, 0x00, 0x80]);
+    let publishReplacement = false;
+    b.setRendererReady.mockImplementation((ready: boolean) => {
+      if (!ready || !publishReplacement) return;
+      publishReplacement = false;
+      b.emit({ type: 'state', state: attached('session-two', 2) });
+      b.emit({ type: 'bytes', generation: 2, bytes: replacementBytes, outputMayBeTruncated: false });
+    });
+
+    publishReplacement = true;
+    b.emit({ type: 'state', state: { ...attached('session-one'), status: 'detached', sessionId: undefined } });
+
+    expect(b.setRendererReady).toHaveBeenLastCalledWith(false);
+    expect(firstRenderer.dispose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(harness.instances).toHaveLength(2));
+    const replacementRenderer = harness.instances[1];
+    expect(replacementRenderer.write).not.toHaveBeenCalled();
+
+    releaseReplacement();
+    await waitFor(() => expect(replacementRenderer.write).toHaveBeenCalledWith(replacementBytes));
+    expect(firstRenderer.write).not.toHaveBeenCalled();
+    expect(replacementRenderer.write).toHaveBeenCalledTimes(1);
+    expect(harness.instances).toHaveLength(2);
+    expect(replacementRenderer.dispose).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('fails closed when delayed renderer mount rejects', async () => {
     const b = bridge(); harness.createTerminalRenderer.mockImplementationOnce((options: any) => ({ state: 'idle', error: null, mount: vi.fn().mockRejectedValue(new Error('raw')), write: vi.fn(), resize: vi.fn(), focus: vi.fn(), dispose: vi.fn(), whenIdle: vi.fn(), onInput: options.onInput }));
     render(TerminalSurface, { bridge: b, active: true, coordinator: coordinator() });
@@ -117,7 +152,9 @@ describe('TerminalSurface', () => {
 
     await waitFor(() => expect(harness.instances.at(-1)?.focus).toHaveBeenCalledTimes(1));
     // The initially mounted renderer receives only the final intent; no stale
-    // continuation creates a second focus call during the transfer.
+    // continuation creates a second focus call or renderer during the transfer.
+    expect(harness.instances).toHaveLength(1);
+    expect(harness.instances[0].dispose).not.toHaveBeenCalled();
     expect(harness.instances[0].focus).toHaveBeenCalledTimes(1);
     view.unmount();
   });

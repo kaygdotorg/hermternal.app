@@ -83,9 +83,9 @@
   }
 
   function resetBridgeBoundary(): void {
-    // `bridge` has already changed at this point. Close the bridge that owned
-    // the old sink first; otherwise a replaced bridge could keep replay open
-    // after its renderer has been disposed.
+    // Readiness belongs to the current renderer/session sink. Close its bridge
+    // before disposal whether ownership changed inside one bridge or by bridge
+    // replacement; no replay may remain open across that boundary.
     const previousBridge = subscribedBridge;
     previousBridge?.setRendererReady(false);
     mountGeneration += 1;
@@ -95,7 +95,7 @@
     rendererError = null;
     rendererLoading = false;
     lastResize = '';
-    bridge.setRendererReady(false);
+    if (bridge !== previousBridge) bridge.setRendererReady(false);
     subscribeToBridge(bridge);
     if (active) void ensureRenderer();
   }
@@ -113,10 +113,15 @@
       if (event.generation === currentTerminal.generation) outputMayBeTruncated = true;
       return;
     }
-    const changedSession = currentTerminal.sessionId !== event.state.sessionId;
+    const previousSessionId = currentTerminal.sessionId;
+    const changedSession = previousSessionId !== event.state.sessionId;
     currentTerminal = event.state;
     outputMayBeTruncated = event.state.outputMayBeTruncated;
-    if (changedSession && event.state.sessionId !== undefined) resetBridgeBoundary();
+    // Readiness belongs to the renderer/session sink that was current before
+    // this publication. Losing a defined owner closes that lease immediately;
+    // the following undefined -> session transition claims the fresh renderer
+    // without disposing it after attach has already passed the readiness gate.
+    if (changedSession && previousSessionId !== undefined) resetBridgeBoundary();
   }
 
   function canForwardTerminalIo(): boolean {

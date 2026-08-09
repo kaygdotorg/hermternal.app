@@ -8,7 +8,11 @@ Hermes proof and its tests use synthetic transports, ticket responses, sockets,
 and byte frames.
 
 - A renderer-ready gate delays the first attach or explicit reconnect until the
-  lazy renderer has a sink. The bridge never queues or decodes bytes while the
+  lazy renderer has a sink. Readiness belongs to the current renderer/session
+  sink and closes synchronously before any ownership loss, including a defined
+  session becoming undefined during replacement. The following publication
+  that assigns the new session claims the fresh sink without remounting it after
+  attach passes the gate. The bridge never queues or decodes bytes while the
   gate is closed.
 - Presentation receives raw `Uint8Array` values by reference and compact state
   only. Attach handles, process identities, ticket values, terminal content, and
