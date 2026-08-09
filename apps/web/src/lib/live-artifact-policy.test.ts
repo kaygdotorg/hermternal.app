@@ -708,6 +708,59 @@ describe('live Playwright artifact policy', () => {
     expect(() => redactLiveText('x'.repeat(256 * 1024 + 1), [])).toThrow('budget');
   });
 
+  it('redacts safely when Array.prototype.push is poisoned', () => {
+    const originalPush = Array.prototype.push;
+    Object.defineProperty(Array.prototype, 'push', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        throw new Error('poisoned push must not run');
+      }
+    });
+    let snapshot: Array<Record<string, unknown>> = [];
+    try {
+      snapshot = redactTestErrors(
+        [{ message: 'synthetic-password', nested: ['synthetic-user'] }],
+        ['synthetic-password', 'synthetic-user']
+      ) as Array<Record<string, unknown>>;
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', {
+        configurable: true,
+        writable: true,
+        value: originalPush
+      });
+    }
+    expect(snapshot).toHaveLength(1);
+    expect(JSON.stringify(snapshot)).not.toContain('synthetic-password');
+    expect(JSON.stringify(snapshot)).not.toContain('synthetic-user');
+  });
+
+  it('scrubs exactly one stateful attachment array', async () => {
+    const outputRoot = liveArtifactOutputDirectory();
+    const testOutput = join(outputRoot, 'stateful-attachment-array');
+    await mkdir(testOutput, { recursive: true });
+    const firstAttachments = [{ name: 'safe', path: join(testOutput, 'safe.txt') }];
+    const secondAttachments = [{ name: 'leaked', path: join(testOutput, 'credential.txt') }];
+    await writeFile(firstAttachments[0].path, 'safe', 'utf8');
+    await writeFile(secondAttachments[0].path, 'synthetic-password', 'utf8');
+    let attachmentReads = 0;
+    const testInfo = {
+      get attachments(): unknown[] {
+        attachmentReads += 1;
+        return attachmentReads === 1 ? firstAttachments : secondAttachments;
+      },
+      errors: [] as unknown[],
+      outputDir: testOutput
+    };
+
+    await finalizeLiveTest({ testInfo, secrets: ['synthetic-password'] });
+
+    expect(attachmentReads).toBe(1);
+    expect(firstAttachments).toHaveLength(0);
+    expect(secondAttachments).toHaveLength(1);
+    expect(await exists(secondAttachments[0].path)).toBe(false);
+  });
+
   it('replaces retained errors with trusted snapshots before cleanup', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     const testOutput = join(outputRoot, 'replaces-retained-errors');

@@ -139,7 +139,10 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   and attachment bodies are bounded-decoded from base64 and replaced when their bytes contain a captured
   credential encoding or end in any non-empty prefix of one; this closes split-write reconstruction across parent IPC messages while preserving buffers proven safe. Malformed or oversized binary fields fail closed. Unknown, trapped, or over-budget
   values are replaced or not forwarded, so Playwright cannot fall back to serializing the unsafe source
-  graph. Per-test finalization validates every path ancestor and only quarantines strict child output directories;
+  graph. Per-test finalization reads the reporter attachment property once, freezes a detached snapshot, and
+  scrubs only that exact observed array; a stateful getter cannot hand cleanup a second credential-bearing
+  array. Finalizer bookkeeping uses indexed local-array writes rather than mutable `Array.prototype.push`.
+  Per-test finalization validates every path ancestor and only quarantines strict child output directories;
   symlink ancestors fail closed. It preserves the shared marker, root, and root-level artifacts. The config routes Playwright's post-teardown
   `LastRunReporter` to the platform null sink, so it cannot recreate a markerless `.last-run.json` directory after
   global teardown. Global teardown alone removes the complete root by atomic quarantine plus bounded
@@ -156,14 +159,18 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   accepted as termination proof. Attachments and safe output cleanup run in `finally` even when redaction
   fails, so a failed proof cannot retain synthetic credentials in traces, screenshots, reports, error
   contexts, or `test-results`. The official proof stores only a bounded typed ledger of method, route,
-  event, request/session identity, status, boolean-match, and count projections. It requires the
+  event, request/session identity, status, boolean-match, and count projections; event recording also uses
+  indexed writes so a poisoned array prototype cannot suppress evidence. It requires the
   ordered auth/ticket/upgrade, server-first readiness, session, one-prompt acknowledgement, correlated
   delta/completion, and canonical REST history chain, then performs same-context logout and browser
   storage absence checks. Screenshot retention uses a trusted private staging parent anchored by
-  device/inode, an absolute trusted Python child with `-I -S` and a credential-free environment, and
-  exclusive no-overwrite publication. Source swaps, parent swaps, quarantine remnants, attachment
-  failures, and cleanup errors are surfaced without recursive pathname deletion. No live Hermes run or
-  retainable live screenshot was performed for this correction.
+  device/inode/owner/mode, an `O_NOFOLLOW`-checked absolute trusted Python child with `-I -S` and a
+  credential-free environment, exclusive no-overwrite publication, and retained destination/bundle
+  descriptors through post-write verification. Public entries are read twice from offset zero and
+  revalidated for owner, mode, device, inode, size, and hash; same-size replacements, mode changes,
+  destination swaps, and ancestor swaps are quarantined or preserved without recursive pathname deletion.
+  Source swaps, parent swaps, quarantine remnants, attachment failures, and cleanup errors are surfaced.
+  No live Hermes run or retainable live screenshot was performed for this correction.
 - `tests/static/assert-static-build.mjs`, `tests/static/assert-css-tokens.mjs`, and
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target

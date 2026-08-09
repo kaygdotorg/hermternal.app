@@ -78,7 +78,10 @@ export function createLiveProofLedger(maxEvents = DEFAULT_MAX_EVENTS) {
     }
     nextSequence += 1;
     const projected = Object.freeze({ sequence: nextSequence, ...event });
-    events.push(projected);
+    // Do not dispatch through Array.prototype.push here. The live proof lane
+    // runs beside untrusted test code, so a poisoned mutable prototype must not
+    // be able to suppress or replace a proof event.
+    events[events.length] = projected;
     return projected;
   }
 

@@ -79,26 +79,36 @@ publication to close the capture-to-publish TOCTOU window.
 
 The complete PNG and manifest are first written to a private 0700 staging
 bundle below a trusted private staging parent. The parent system-root and
-parent device/inode are captured before creation and revalidated through source
-checks, publication, and cleanup. After destination and ancestor identity
-checks, one exclusive atomic directory rename publishes
-`hermternal-chat-proof.bundle/`, containing only `screenshot.png` and
-`manifest.json`. No PNG or manifest is opened through its final public pathname,
-and a replacement destination receives zero bundle bytes. Existing bundles are
-never overwritten. The atomic child uses a fixed absolute trusted Python
-executable, `-I -S`, and a minimal credential-free environment; macOS SDK
-variables added by the system interpreter are not credential or path inputs.
-Failed staging cleanup checks the original directory and file device/inode/size,
-unlinks only known regular files, and uses non-recursive `rmdir`; source swaps,
-parent swaps, replacement pathnames, quarantine remnants, and cleanup failures
-are preserved and surfaced rather than followed or silently discarded. An
-independent reviewer must inspect the PNG bytes and manifest together before
-the bundle is copied into the repository. This is a tooling contract only:
-deterministic unit tests use synthetic page metadata, controlled browser
-provenance, and PNG bytes, while the opt-in Playwright lane is the only path
-that can observe the real Hermes Chat state. No live Hermes run or retainable
-live screenshot was performed for this change; credentials and VM access are
-not required for the regression suite.
+parent device/inode/owner/mode are captured before creation and revalidated
+through source checks, publication, and cleanup. Each staging write records its
+file identity even when an injected write failure leaves partial bytes, so
+cleanup removes only the exact regular files created by that attempt. The
+embedded Python child opens the source directory and both entries with
+`O_NOFOLLOW`, proves directory/file type and device/inode/size identity, and
+then performs one exclusive atomic directory rename after destination and
+ancestor checks. The destination and published-bundle descriptors remain open
+through post-publication verification. Public entries are opened with
+`O_NOFOLLOW`, read twice from offset zero, and revalidated for owner, mode,
+device, inode, size, and SHA-256 after reading; same-size replacements, mode
+drift, destination swaps, and ancestor swaps fail closed. If verification fails,
+the published directory is moved through the anchored destination descriptor
+into a no-overwrite sibling quarantine. Exact, unchanged files are removed;
+changed or raced entries remain in the bounded quarantine rather than being
+unlinked. Existing bundles are never overwritten. The atomic child uses a
+fixed absolute trusted Python executable, `-I -S`, and a minimal credential-free
+environment; macOS SDK variables added by the system interpreter are not
+credential or path inputs. Failed staging cleanup checks the original
+directory and file device/inode/size, unlinks only known regular files, and
+uses non-recursive `rmdir`; source swaps, parent swaps, replacement pathnames,
+quarantine remnants, and cleanup failures are preserved and surfaced rather
+than followed or silently discarded. An independent reviewer must inspect the
+PNG bytes and manifest together before the bundle is copied into the
+repository. This is a tooling contract only: deterministic unit tests use
+synthetic page metadata, controlled browser provenance, and PNG bytes, while
+the opt-in Playwright lane is the only path that can observe the real Hermes
+Chat state. No live Hermes run or retainable live screenshot was performed for
+this change; credentials and VM access are not required for the regression
+suite.
 
 This lane serves the production static build and proxies only `/api/*`, `/auth/*`, `/api/ws`, and the exact `/api/pty` WebSocket upgrade to a disposable local HTTP target. `HERMES_LIVE_TARGET` is accepted only as a plain HTTP loopback URL: canonical IPv4 in `127.0.0.0/8`, `[::1]`, or `localhost`, with an explicit unambiguous decimal port and an optional root slash. Set it from the selected launcher `.result.endpoint` (or an approved tunnel URL whose remote side was selected from that endpoint); do not use a remembered or inferred port. Hermes and its Dashboard stay on the VM loopback interface.
 

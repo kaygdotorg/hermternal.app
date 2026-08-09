@@ -728,8 +728,8 @@ describe('deterministic live Chat screenshot capture', () => {
     }
   });
 
-  it.skipIf(!browserPrerequisiteEnabled)('rejects wrong Chromium version, revision, or executable before page mutation', async () => {
-    const pinned = getLiveScreenshotChromiumProvenance();
+  it('rejects wrong Chromium version, revision, or executable before page mutation', async () => {
+    const pinned = CONTROLLED_TEST_PROVENANCE;
     for (const page of [
       fakePage({ browserVersion: '151.0.7922.35' }),
       fakePage({ executablePath: pinned.executablePath.replace('chromium-1234', 'chromium-9999') }),
@@ -739,7 +739,8 @@ describe('deterministic live Chat screenshot capture', () => {
         captureLiveChatScreenshotIfEnabled({
           page,
           uiState: 'ready',
-          environment: captureEnvironment()
+          environment: captureEnvironment(),
+          provenance: CONTROLLED_TEST_PROVENANCE
         })
       ).rejects.toThrow('Chromium provenance is not pinned');
       expect(page.emulateMedia).not.toHaveBeenCalled();
@@ -820,7 +821,7 @@ describe('deterministic live Chat screenshot capture', () => {
     }
   });
 
-  it.skipIf(!browserPrerequisiteEnabled)('captures after valid retention preflight but publishes zero bytes after destination replacement', async () => {
+  it('captures after valid retention preflight but publishes zero bytes after destination replacement', async () => {
     const root = await temporaryDirectory();
     const destination = join(root, 'destination');
     const replacement = join(root, 'replacement');
@@ -841,7 +842,8 @@ describe('deterministic live Chat screenshot capture', () => {
           HERMTERNAL_LIVE_SCREENSHOT_RETAIN: '1',
           HERMTERNAL_LIVE_SCREENSHOT_REVIEW: 'independent-approved',
           HERMTERNAL_LIVE_SCREENSHOT_DESTINATION: destination
-        })
+        }),
+        provenance: CONTROLLED_TEST_PROVENANCE
       })
     ).rejects.toThrow(/symlink|changed/);
     expect(page.evaluate).toHaveBeenCalled();
@@ -849,16 +851,18 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(await fsPromises.readdir(replacement)).toEqual([]);
   });
 
-  it.skipIf(!browserPrerequisiteEnabled)('pins the route, dimensions, browser inputs, UI state, attestation, and image hash deterministically', async () => {
+  it('pins the route, dimensions, browser inputs, UI state, attestation, and image hash deterministically', async () => {
     const first = await captureLiveChatScreenshotIfEnabled({
       page: fakePage(),
       uiState: 'ready',
-      environment: captureEnvironment()
+      environment: captureEnvironment(),
+      provenance: CONTROLLED_TEST_PROVENANCE
     });
     const second = await captureLiveChatScreenshotIfEnabled({
       page: fakePage(),
       uiState: 'ready',
-      environment: captureEnvironment()
+      environment: captureEnvironment(),
+      provenance: CONTROLLED_TEST_PROVENANCE
     });
 
     expect(first).toBeDefined();
@@ -904,7 +908,28 @@ describe('deterministic live Chat screenshot capture', () => {
     );
   });
 
-  it.skipIf(!browserPrerequisiteEnabled)('rejects non-approved routes and dimensions before screenshot bytes exist', async () => {
+  it('serializes manifests through own canonical records under inherited toJSON poisoning', () => {
+    const originalToJSON = Object.getOwnPropertyDescriptor(Object.prototype, 'toJSON');
+    Object.defineProperty(Object.prototype, 'toJSON', {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: () => ({ leaked: 'synthetic-password' })
+    });
+    try {
+      const serialized = serializeLiveScreenshotManifest(manifestFixture());
+      expect(serialized).not.toContain('synthetic-password');
+      const parsed = JSON.parse(serialized) as Record<string, unknown>;
+      expect(parsed.schema).toBe('hermternal.live-chat-screenshot.v2');
+      expect(parsed.review).toBe('pending-independent-review');
+      expect(parsed.viewport).toEqual({ width: 1440, height: 960 });
+    } finally {
+      if (originalToJSON) Object.defineProperty(Object.prototype, 'toJSON', originalToJSON);
+      else delete (Object.prototype as { toJSON?: unknown }).toJSON;
+    }
+  });
+
+  it('rejects non-approved routes and dimensions before screenshot bytes exist', async () => {
     const wrongRoute = fakePage({ route: '/?prompt=synthetic' });
     await expect(
       captureLiveChatScreenshotIfEnabled({
@@ -987,6 +1012,88 @@ describe('deterministic live Chat screenshot capture', () => {
     } finally {
       fsPromises.writeFile = originalWriteFile;
     }
+
+    expect(await fsPromises.readdir(destination)).toEqual([]);
+  });
+
+  it('removes bytes when screenshot staging writes then rejects', async () => {
+    const destination = await temporaryDirectory();
+    const originalWriteFile = fsPromises.writeFile;
+    let writeCount = 0;
+    fsPromises.writeFile = async (...args: Parameters<typeof originalWriteFile>) => {
+      writeCount += 1;
+      if (writeCount === 1) {
+        await originalWriteFile(...args);
+        throw new Error('synthetic screenshot staging failure after bytes');
+      }
+      return originalWriteFile(...args);
+    };
+
+    try {
+      await expect(
+        persistApprovedLiveScreenshot({
+          capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+          destinationDirectory: destination,
+          review: 'independent-approved',
+          provenance: CONTROLLED_TEST_PROVENANCE
+        })
+      ).rejects.toThrow('synthetic screenshot staging failure after bytes');
+    } finally {
+      fsPromises.writeFile = originalWriteFile;
+    }
+
+    expect(await fsPromises.readdir(destination)).toEqual([]);
+  });
+
+  it('removes bytes when manifest staging writes then rejects', async () => {
+    const destination = await temporaryDirectory();
+    const originalWriteFile = fsPromises.writeFile;
+    let writeCount = 0;
+    fsPromises.writeFile = async (...args: Parameters<typeof originalWriteFile>) => {
+      writeCount += 1;
+      if (writeCount === 2) {
+        await originalWriteFile(...args);
+        throw new Error('synthetic manifest staging failure after bytes');
+      }
+      return originalWriteFile(...args);
+    };
+
+    try {
+      await expect(
+        persistApprovedLiveScreenshot({
+          capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+          destinationDirectory: destination,
+          review: 'independent-approved',
+          provenance: CONTROLLED_TEST_PROVENANCE
+        })
+      ).rejects.toThrow('synthetic manifest staging failure after bytes');
+    } finally {
+      fsPromises.writeFile = originalWriteFile;
+    }
+
+    expect(await fsPromises.readdir(destination)).toEqual([]);
+  });
+
+  it('preserves a replaced staged entry after post-write identity failure', async () => {
+    const destination = await temporaryDirectory();
+    const replacementBytes = Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.from('attacker-staged-bytes', 'utf8')
+    ]);
+
+    await expect(
+      persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        provenance: CONTROLLED_TEST_PROVENANCE,
+        beforeAtomicPublish: async (stagingDirectory) => {
+          const replacementPath = join(stagingDirectory, 'replacement.png');
+          await fsPromises.writeFile(replacementPath, replacementBytes, { mode: 0o600 });
+          await fsPromises.rename(replacementPath, join(stagingDirectory, 'screenshot.png'));
+        }
+      })
+    ).rejects.toThrow('publication and cleanup failed');
 
     expect(await fsPromises.readdir(destination)).toEqual([]);
   });
@@ -1115,6 +1222,107 @@ describe('deterministic live Chat screenshot capture', () => {
     ).rejects.toThrow('destination changed');
 
     expect(await fsPromises.readdir(replacement)).toEqual([]);
+  });
+
+  it('quarantines a same-size replacement after publication verification fails', async () => {
+    const destination = await temporaryDirectory();
+    const replacementBytes = Buffer.from(PNG_BYTES);
+    replacementBytes[replacementBytes.length - 1] ^= 1;
+
+    await expect(
+      persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        provenance: CONTROLLED_TEST_PROVENANCE,
+        beforePublishedVerification: async (bundlePath) => {
+          const replacementPath = join(bundlePath, 'replacement.png');
+          await fsPromises.writeFile(replacementPath, replacementBytes, { mode: 0o600 });
+          await fsPromises.rename(replacementPath, join(bundlePath, 'screenshot.png'));
+        }
+      })
+    ).rejects.toThrow('publication and cleanup failed');
+
+    const entries = await fsPromises.readdir(destination);
+    expect(entries).not.toContain('hermternal-chat-proof.bundle');
+    const quarantine = entries.find((entry) => entry.includes('quarantine-'));
+    expect(quarantine).toBeDefined();
+    expect(await fsPromises.readFile(join(destination, quarantine!, 'screenshot.png'))).toEqual(
+      replacementBytes
+    );
+  });
+
+  it('quarantines a mode change after publication verification fails', async () => {
+    const destination = await temporaryDirectory();
+
+    await expect(
+      persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        provenance: CONTROLLED_TEST_PROVENANCE,
+        beforePublishedVerification: async (bundlePath) => {
+          await fsPromises.chmod(join(bundlePath, 'screenshot.png'), 0o644);
+        }
+      })
+    ).rejects.toThrow('publication and cleanup failed');
+
+    const entries = await fsPromises.readdir(destination);
+    expect(entries).not.toContain('hermternal-chat-proof.bundle');
+    expect(entries.some((entry) => entry.includes('quarantine-'))).toBe(true);
+  });
+
+  it('does not follow an ancestor swap after publication', async () => {
+    const root = await temporaryDirectory();
+    const destination = join(root, 'destination');
+    const replacement = join(root, 'replacement');
+    await fsPromises.mkdir(destination);
+    await fsPromises.mkdir(replacement);
+
+    await expect(
+      persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest: manifestFixture() },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        provenance: CONTROLLED_TEST_PROVENANCE,
+        beforePublishedVerification: async () => {
+          await fsPromises.rm(destination, { recursive: true, force: true });
+          await fsPromises.symlink(replacement, destination);
+        }
+      })
+    ).rejects.toThrow('publication and cleanup failed');
+
+    expect(await fsPromises.readdir(replacement)).toEqual([]);
+  });
+
+  it('records screenshot persistence without mutable Array.prototype.push', async () => {
+    const destination = await temporaryDirectory();
+    const manifest = manifestFixture();
+    const originalPush = Array.prototype.push;
+    Object.defineProperty(Array.prototype, 'push', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        throw new Error('poisoned push must not run');
+      }
+    });
+    let bundlePath: string | undefined;
+    try {
+      const result = await persistApprovedLiveScreenshot({
+        capture: { bytes: PNG_BYTES, manifest },
+        destinationDirectory: destination,
+        review: 'independent-approved',
+        provenance: CONTROLLED_TEST_PROVENANCE
+      });
+      bundlePath = result.bundlePath;
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', {
+        configurable: true,
+        writable: true,
+        value: originalPush
+      });
+    }
+    expect(bundlePath).toBe(join(destination, 'hermternal-chat-proof.bundle'));
   });
 
   it('persists only approved PNG bytes and the bounded manifest without overwrite', async () => {

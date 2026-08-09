@@ -53,6 +53,32 @@ describe('bounded live proof ledger', () => {
     );
   });
 
+  it('records events when Array.prototype.push is poisoned', () => {
+    const originalPush = Array.prototype.push;
+    Object.defineProperty(Array.prototype, 'push', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        throw new Error('poisoned push must not run');
+      }
+    });
+    let event: unknown;
+    let snapshot: unknown[] = [];
+    try {
+      const ledger = createLiveProofLedger();
+      event = ledger.recordHttpRequest({ method: 'GET', route: 'auth.me' });
+      snapshot = ledger.snapshot();
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', {
+        configurable: true,
+        writable: true,
+        value: originalPush
+      });
+    }
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0]).toBe(event);
+  });
+
   it('matches the exact ordered session, prompt, completion, and history chain', () => {
     const ledger = createLiveProofLedger();
     ledger.recordHttpRequest({ method: 'GET', route: 'auth.me' });

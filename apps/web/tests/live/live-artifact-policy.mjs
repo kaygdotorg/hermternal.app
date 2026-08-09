@@ -16,7 +16,6 @@ const SAFE_ARRAY_AT = Array.prototype.at;
 const SAFE_ARRAY_FILTER = Array.prototype.filter;
 const SAFE_ARRAY_JOIN = Array.prototype.join;
 const SAFE_ARRAY_POP = Array.prototype.pop;
-const SAFE_ARRAY_PUSH = Array.prototype.push;
 const SAFE_ARRAY_REVERSE = Array.prototype.reverse;
 const SAFE_ARRAY_SORT = Array.prototype.sort;
 const SAFE_BUFFER_FROM = Buffer.from;
@@ -66,6 +65,18 @@ function trustedApply(method, receiver, argumentsList = []) {
 }
 
 /**
+ * Append without dispatching through Array.prototype.push. The live worker
+ * runs beside untrusted test code, so array bookkeeping must remain stable
+ * even when a test poisons the mutable prototype.
+ *
+ * @param {unknown[]} target
+ * @param {unknown} value
+ */
+function trustedArrayAppend(target, value) {
+  target[target.length] = value;
+}
+
+/**
  * @param {object} target
  * @param {PropertyKey} key
  * @returns {boolean}
@@ -86,7 +97,7 @@ function trustedArrayCopy(values) {
   if (!SAFE_ARRAY_IS_ARRAY(values)) throw new SAFE_ERROR(REDACTION_FAILURE_MESSAGE);
   const copy = new SAFE_ARRAY();
   for (let index = 0; index < values.length; index += 1) {
-    trustedApply(SAFE_ARRAY_PUSH, copy, [values[index]]);
+    trustedArrayAppend(copy, values[index]);
   }
   return copy;
 }
@@ -102,7 +113,7 @@ function trustedUniqueArray(values) {
     const value = values[index];
     if (trustedApply(SAFE_SET_HAS, seen, [value])) continue;
     trustedApply(SAFE_SET_ADD, seen, [value]);
-    trustedApply(SAFE_ARRAY_PUSH, unique, [value]);
+    trustedArrayAppend(unique, value);
   }
   return unique;
 }
@@ -182,7 +193,7 @@ function trustedSortedSecrets(secrets) {
   for (let index = 0; index < copied.length; index += 1) {
     const secret = copied[index];
     if (typeof secret === 'string' && secret.length > 0) {
-      trustedApply(SAFE_ARRAY_PUSH, filtered, [secret]);
+      trustedArrayAppend(filtered, secret);
     }
   }
   trustedApply(SAFE_ARRAY_SORT, filtered, [
@@ -284,7 +295,7 @@ export function liveCredentialValues(environment) {
     const name = LIVE_SECRET_ENV_NAMES[index];
     const value = environment[name];
     if (typeof value === 'string' && value.length > 0) {
-      trustedApply(SAFE_ARRAY_PUSH, values, [value]);
+      trustedArrayAppend(values, value);
     }
   }
   return /** @type {string[]} */ (trustedUniqueArray(values));
@@ -632,13 +643,13 @@ function parseHtmlTag(value, start, end) {
         attributeValue = trustedStringSlice(value,valueStart, valueEnd);
       }
     }
-    trustedApply(SAFE_ARRAY_PUSH, attributes, [{
+    trustedArrayAppend(attributes, {
       name: attributeName,
       value: attributeValue,
       valueStart,
       valueEnd,
       quote
-    }]);
+    });
     while (cursor < end && trustedRegExpTest(/\s/u, value[cursor])) cursor += 1;
   }
 
@@ -725,7 +736,7 @@ function findMatchingClosingTag(value, opening) {
       trustedApply(SAFE_ARRAY_POP, stack);
       if (stack.length === 0) return { start: next, end };
     } else if (!tag.selfClosing && !trustedApply(SAFE_SET_HAS, HTML_VOID_ELEMENTS, [tag.name])) {
-      trustedApply(SAFE_ARRAY_PUSH, stack, [tag.name]);
+      trustedArrayAppend(stack, tag.name);
     }
     cursor = end + 1;
   }
@@ -854,7 +865,7 @@ function findSelectClosingTag(value, opening) {
         (parent === 'select' && (tag.name === 'option' || tag.name === 'optgroup')) ||
         (parent === 'optgroup' && tag.name === 'option');
       if (!allowed) return undefined;
-      trustedApply(SAFE_ARRAY_PUSH, stack, [tag.name]);
+      trustedArrayAppend(stack, tag.name);
     }
     cursor = end + 1;
   }
@@ -1390,7 +1401,7 @@ function credentialBytePatterns(secrets) {
         trustedApply(SAFE_BUFFER_FROM, Buffer, [secret, encoding])
       );
       if (bytes.length > 0 && bytes.length <= REDACTION_MAX_BINARY_BYTES) {
-        trustedApply(SAFE_ARRAY_PUSH, patterns, [{ bytes, prefixTable: binaryPrefixTable(bytes) }]);
+        trustedArrayAppend(patterns, { bytes, prefixTable: binaryPrefixTable(bytes) });
       }
     }
   }
@@ -1691,7 +1702,7 @@ function safeFailureAggregate(failures, message) {
   /** @type {unknown[]} */
   const safeFailures = new SAFE_ARRAY();
   for (let index = 0; index < failures.length; index += 1) {
-    trustedApply(SAFE_ARRAY_PUSH, safeFailures, [failures[index]]);
+    trustedArrayAppend(safeFailures, failures[index]);
   }
   return new SAFE_AGGREGATE_ERROR(safeFailures, message);
 }
@@ -1994,7 +2005,7 @@ function replaceDiagnosticArray(testInfo, snapshot) {
   try {
     target.length = 0;
     for (let index = 0; index < snapshot.length; index += 1) {
-      trustedApply(SAFE_ARRAY_PUSH, target, [snapshot[index]]);
+      trustedArrayAppend(target, snapshot[index]);
     }
     if (target.length !== snapshot.length) throwRedactionFailure();
     for (let index = 0; index < snapshot.length; index += 1) {
@@ -2020,6 +2031,26 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
   let redactionError;
   /** @type {unknown[]} */
   const cleanupFailures = new SAFE_ARRAY();
+
+  // Read the reporter-owned attachment property exactly once. Keep an immutable
+  // value snapshot for the teardown decision, but retain the exact observed
+  // array reference for scrubbing. A stateful getter must not be called again:
+  // a second read could return a fresh credential-bearing array that the
+  // reporter would serialize after this hook returns.
+  let observedAttachments;
+  let attachmentSnapshot;
+  try {
+    observedAttachments = testInfo.attachments;
+    if (!SAFE_ARRAY_IS_ARRAY(observedAttachments)) {
+      throw new SAFE_ERROR('live test attachments were not cleared');
+    }
+    attachmentSnapshot = SAFE_OBJECT_FREEZE(trustedArrayCopy(observedAttachments));
+  } catch {
+    trustedArrayAppend(
+      cleanupFailures,
+      new SAFE_ERROR('live test attachments could not be cleared')
+    );
+  }
   try {
     if (scrubDiagnostics) {
       try {
@@ -2042,25 +2073,25 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
     }
   } finally {
     try {
-      const attachments = testInfo.attachments;
-      if (!SAFE_ARRAY_IS_ARRAY(attachments)) {
+      if (!observedAttachments || !attachmentSnapshot) {
         throw new SAFE_ERROR('live test attachments were not cleared');
       }
-      attachments.length = 0;
-      if (testInfo.attachments !== attachments || attachments.length !== 0) {
+      // Scrub only the array captured above. Never re-read testInfo.attachments;
+      // the property may be a stateful getter or a reporter proxy.
+      observedAttachments.length = 0;
+      if (observedAttachments.length !== 0) {
         throw new SAFE_ERROR('live test attachments were not cleared');
       }
     } catch {
-      trustedApply(SAFE_ARRAY_PUSH, cleanupFailures, [
+      trustedArrayAppend(
+        cleanupFailures,
         new SAFE_ERROR('live test attachments could not be cleared')
-      ]);
+      );
     }
     try {
       await removeLiveTestArtifacts(testInfo.outputDir ?? liveArtifactCleanupRoot());
     } catch {
-      trustedApply(SAFE_ARRAY_PUSH, cleanupFailures, [
-        new SAFE_ERROR('live artifact cleanup failed')
-      ]);
+      trustedArrayAppend(cleanupFailures, new SAFE_ERROR('live artifact cleanup failed'));
     }
   }
 
@@ -2071,15 +2102,16 @@ export async function finalizeLiveTest({ testInfo, scrubError, secrets = liveCre
       (redactionError.message === REDACTION_FAILURE_MESSAGE || redactionError.message === REDACTION_BUDGET_MESSAGE)
       ? redactionError.message
       : REDACTION_FAILURE_MESSAGE;
-    trustedApply(SAFE_ARRAY_PUSH, failures, [new SAFE_ERROR(message)]);
+    trustedArrayAppend(failures, new SAFE_ERROR(message));
   }
   if (scrubDiagnostics) {
-    trustedApply(SAFE_ARRAY_PUSH, failures, [
+    trustedArrayAppend(
+      failures,
       safeScrubDiagnostic ?? new SAFE_ERROR('live page scrub failed')
-    ]);
+    );
   }
   for (let index = 0; index < cleanupFailures.length; index += 1) {
-    trustedApply(SAFE_ARRAY_PUSH, failures, [cleanupFailures[index]]);
+    trustedArrayAppend(failures, cleanupFailures[index]);
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) {
