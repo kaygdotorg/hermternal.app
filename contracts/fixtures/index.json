@@ -82,22 +82,22 @@
       "files": [
         {
           "path": "behavioral-probe/README.md",
-          "sha256": "7a3f350bef2d83d832103ab57f283f6ff8f072a34a42c9cdaea38ad17376d065",
+          "sha256": "875b83f523c7ec4ff8e6c28e542f80ae734a73f79118bd27b1294f444b7e8dc9",
           "size_bytes": 9387
         },
         {
           "path": "behavioral-probe/baseline-canonical-sha256.txt",
-          "sha256": "142431718d63b7f886c9057339b18fcd42b1962cb95d2a05ae7dc04e62d5f06c",
+          "sha256": "3d94e162c619d18772ce3c3b08bf6ffb1e3b41c50a4494f409a17c468acb70b3",
           "size_bytes": 65
         },
         {
           "path": "behavioral-probe/probe-baseline.json",
-          "sha256": "2336209230cffe3d04515b54bbd9c17f3c514da1c86e064384b773a63b3d42bd",
+          "sha256": "4c9c88f807babe7c010d9127fa13ded7ca3be5abef56009d07ed5092de837be6",
           "size_bytes": 4059
         },
         {
           "path": "behavioral-probe/probe-fixtures.json",
-          "sha256": "9e9ba4463c1203b9963b14a6d33a04674f967530fb210f1dd77ba881a073ad87",
+          "sha256": "9958c4c3f32946e7301fdffa5a861b36f7921ada8b394ea72e07405b7c1d3fef",
           "size_bytes": 71389
         },
         {
@@ -107,8 +107,67 @@
         },
         {
           "path": "behavioral-probe/validate.py",
-          "sha256": "3dbb2a18ce9e8b16482a0c75aaec857607a7dc4a4126a6f156094947e569df60",
+          "sha256": "aa426279c5844475af765b45990e55c519c1814ee98c1f445ac65f981550f75d",
           "size_bytes": 54195
+        }
+      ]
+    },
+    {
+      "id": "chat-stream-completion",
+      "path": "chat-stream-completion",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "chat-stream-and-completion"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "chat-stream-completion/README.md",
+          "sha256": "e35db6fb2d0b53eb770710105fe24dbd408927b12d93509dc258e4de1789e437",
+          "size_bytes": 5484
+        },
+        {
+          "path": "chat-stream-completion/cases.json",
+          "sha256": "7b19df2b8ad000f94f7521da12f30a0d013683f799244c470ae539cea8cae384",
+          "size_bytes": 29766
+        },
+        {
+          "path": "chat-stream-completion/source-audit.json",
+          "sha256": "a4722049299599c6fefb42047d05f0304eeccc473d6066bb3d0492e8d2c7ff61",
+          "size_bytes": 2719
+        },
+        {
+          "path": "chat-stream-completion/test_validate.py",
+          "sha256": "f208b898fd0f9ec114ef0c65931acefbd73262635d20922983dbe6ea2ffed06c",
+          "size_bytes": 17416
+        },
+        {
+          "path": "chat-stream-completion/validate.py",
+          "sha256": "b6ec003a3b961b33b1141d16ec7aa1c80cf5e2ac70924413b900474e596b8014",
+          "size_bytes": 26635
+        },
+        {
+          "path": "chat-stream-completion/validation-baseline.json",
+          "sha256": "77c6d8cc88489809855c61a54becc9158764ebd73d8bf42c62356bfbc4c7723b",
+          "size_bytes": 2747
         }
       ]
     },
@@ -137,7 +196,7 @@
       "files": [
         {
           "path": "compatibility-attestation/README.md",
-          "sha256": "d473be26713ee91383cb0ae4b70dc47430d5aa9fe96445e84a2cec788ebc18f3",
+          "sha256": "6d02a502dfc22bd1c50f6adbd5f6dde65f5824bc5be8f53dc7f5144d785ac950",
           "size_bytes": 7537
         },
         {
@@ -147,7 +206,7 @@
         },
         {
           "path": "compatibility-attestation/revision_attestation.json",
-          "sha256": "3969cf7fb5bb4845b8f2b77e85f367e3040dc1d6157494f34edeeba02109b9bc",
+          "sha256": "bf8288a9b3da55197568de51d839040887094a6be1bda2424d36f68c1aabd40f",
           "size_bytes": 1679
         },
         {
@@ -157,12 +216,12 @@
         },
         {
           "path": "compatibility-attestation/validate.py",
-          "sha256": "da997795d5fa478ca0eeaab2e9a236e5a990355a97ce20f5d800df7805ea8781",
-          "size_bytes": 45544
+          "sha256": "5fbf6535f9b06c8140c957ef11dadef9c176a451f0894c051d7586e4d319ba5d",
+          "size_bytes": 45624
         },
         {
           "path": "compatibility-attestation/validation-baseline.json",
-          "sha256": "a74730b86d03c96e70720402a6280f1545a02665056583fde00ea7c62733d861",
+          "sha256": "f6d506b2752b6751d45bc8439eb4625d2b18d9e58422013bb97193639378a964",
           "size_bytes": 1558
         }
       ]
@@ -266,6 +325,68 @@
       ]
     },
     {
+      "id": "deep-link-resolution",
+      "path": "deep-link-resolution",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "failure",
+        "pending",
+        "success"
+      ],
+      "coverage_ids": [
+        "deep-link-resolution"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deep-link-resolution/README.md",
+          "sha256": "876268046ffdb40af2380e9f0572195cd792d1e706baca77ed35cc65fbb36829",
+          "size_bytes": 6152
+        },
+        {
+          "path": "deep-link-resolution/baseline-evidence.json",
+          "sha256": "a69e94bff3426015bcc5cc9dcea6deb498d3c88b1664c47c649f4cb4e18da722",
+          "size_bytes": 1585
+        },
+        {
+          "path": "deep-link-resolution/cases.json",
+          "sha256": "6618d3f6077953e0cd5f03970806b8b21fa5f8722627c9696b893f9702995e1a",
+          "size_bytes": 53188
+        },
+        {
+          "path": "deep-link-resolution/review-root.json",
+          "sha256": "cf6f7c8f52deb5ea35514e44b10c3bc8194cee59da77c9fd81db70041648e227",
+          "size_bytes": 1206
+        },
+        {
+          "path": "deep-link-resolution/test_validate.py",
+          "sha256": "9a4be7f657d6212f35e96e46e6d159152621bee53820724d6bc44f4c88c959cf",
+          "size_bytes": 15878
+        },
+        {
+          "path": "deep-link-resolution/validate.py",
+          "sha256": "abd8e144c24da2ca7e0102dbc0a20d978ccfba9fce06606141efe013a494e720",
+          "size_bytes": 29056
+        },
+        {
+          "path": "deep-link-resolution/validation-baseline.json",
+          "sha256": "32d6db975d7566dc83c448b5598c07b1f26e7853b86e308e0eb6e39e21f88b81",
+          "size_bytes": 1993
+        }
+      ]
+    },
+    {
       "id": "deployment-security-browser-auth",
       "path": "deployment-security/browser-auth",
       "status": "ready",
@@ -309,6 +430,155 @@
           "path": "deployment-security/browser-auth/validation-baseline.json",
           "sha256": "32c1e7811e52bb6d59b168aa7da2c094be0782268e727b0d83adc666d6b3bb14",
           "size_bytes": 2308
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-direct-port-denial",
+      "path": "deployment-security/direct-port-denial",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "direct-port-denial"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/direct-port-denial/README.md",
+          "sha256": "315d11253d170e8570e332c4e135bd3697fc5d5caa3430a4955af3d2c9ab4086",
+          "size_bytes": 6658
+        },
+        {
+          "path": "deployment-security/direct-port-denial/cases.json",
+          "sha256": "fdba8da5d759395f20624af5eebb5893f48d015814240faa75456d0aad0c2afb",
+          "size_bytes": 26733
+        },
+        {
+          "path": "deployment-security/direct-port-denial/test_validate.py",
+          "sha256": "c4f039d896f3d2a0272209d2411e28cc89d6162fea815c15c01ab3fc1aec5dd2",
+          "size_bytes": 23398
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validate.py",
+          "sha256": "119afd870724ae22a543242607605bb93ca10566b7a7925f2f1466c1e7d3e937",
+          "size_bytes": 45846
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validation-baseline-sha256.txt",
+          "sha256": "6a34d3b89b568032fad401c9bfc9cd8816e3b870930a8efd94b71ff0b861f7e2",
+          "size_bytes": 65
+        },
+        {
+          "path": "deployment-security/direct-port-denial/validation-baseline.json",
+          "sha256": "f3b4db9cd929118d0adef84ca45758c5d72cc7682d0ac48402b38701ebc04bb1",
+          "size_bytes": 2426
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-external-allowlist",
+      "path": "deployment-security/external-allowlist",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "external-allowlist"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/external-allowlist/README.md",
+          "sha256": "938a575fccad4c0fa7b1c9ff1790f0094a28127f1c1b35478a41ffb219252ab9",
+          "size_bytes": 12365
+        },
+        {
+          "path": "deployment-security/external-allowlist/cases.json",
+          "sha256": "3e300ac1ffbcc4d65e2d103b5bef726a25557011396c16260403c38670702f2c",
+          "size_bytes": 50859
+        },
+        {
+          "path": "deployment-security/external-allowlist/test_validate.py",
+          "sha256": "c7a7ef97161d6e474991ddf47477215143d4349b5e6ef8c38de869b935cc3a32",
+          "size_bytes": 29079
+        },
+        {
+          "path": "deployment-security/external-allowlist/validate.py",
+          "sha256": "067ab14eaf8009a07d2f0b20ac109aab12cc62772c09dab1eacbc2b18ea35a39",
+          "size_bytes": 63667
+        },
+        {
+          "path": "deployment-security/external-allowlist/validation-baseline.json",
+          "sha256": "3e43065814627dc0649ad78988e678ca062ba0bf288bf9fb8b6e0d74ae24b252",
+          "size_bytes": 2406
+        }
+      ]
+    },
+    {
+      "id": "deployment-security-host-origin-mapping",
+      "path": "deployment-security/host-origin-mapping",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web"
+      ],
+      "states": [
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "host-origin-mapping"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "deployment-security/host-origin-mapping/README.md",
+          "sha256": "589d4f5b49f029f5e2fecea9a7fdd4da9575dc2d213a547add4867786c0082c7",
+          "size_bytes": 12689
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/cases.json",
+          "sha256": "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32",
+          "size_bytes": 52421
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/test_validate.py",
+          "sha256": "fc13936139c221effd1bc6f5cd233b2ebd6b529baaa02a671df07bff3426291b",
+          "size_bytes": 47828
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/validate.py",
+          "sha256": "ce5e190a7342bd652a5f70f96418848bad10fcf98ed34f967558649e5264129a",
+          "size_bytes": 60635
+        },
+        {
+          "path": "deployment-security/host-origin-mapping/validation-baseline.json",
+          "sha256": "00f74a1e496280d060172071116be01785cb214087787cc6c13e2de336f393d7",
+          "size_bytes": 3032
         }
       ]
     },
@@ -441,7 +711,7 @@
         },
         {
           "path": "deployment-security/ws-ticket/probe-baseline.json",
-          "sha256": "6a69abbc7b42bee6e2fdf300ddeb1b1152699895fc871d749fe355be188d510c",
+          "sha256": "64e77fee867b31ad0ceafc887a5257212c2c166ed8b0e33b7c8ce157a3f2680b",
           "size_bytes": 3158
         },
         {
@@ -451,12 +721,12 @@
         },
         {
           "path": "deployment-security/ws-ticket/ticket-fixtures.json",
-          "sha256": "90a29f60aa84b662cb647cb11672394d13e97f61f7875ff5b176745996b2558b",
+          "sha256": "63492a77b3fa4766a77bdd88ae722ca19bf2c13dbf80e86f4264cfbfb3c94e86",
           "size_bytes": 37600
         },
         {
           "path": "deployment-security/ws-ticket/validate.py",
-          "sha256": "0e0d074ae7b9939482acd3e85e3fb52e12c56230a1a9db824318e24bf4367b8d",
+          "sha256": "9953166f05a26d7a98ca099a4562c33ad26f785c5a2e3e7148440d445f03664f",
           "size_bytes": 55327
         }
       ]
@@ -705,6 +975,65 @@
       ]
     },
     {
+      "id": "session-lineage",
+      "path": "session-lineage",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "session-lineage"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "session-lineage/README.md",
+          "sha256": "cd609d64f7f97e7c880fdaa5b4ec8361c074f2a0f6a59af38f851c8c182933eb",
+          "size_bytes": 6865
+        },
+        {
+          "path": "session-lineage/baseline-evidence.json",
+          "sha256": "30b82db987f901cf11d5aeb9abaf115a47d9790fa56504e4b3d79e8d4834890b",
+          "size_bytes": 1450
+        },
+        {
+          "path": "session-lineage/cases.json",
+          "sha256": "ebd320005dea1623b691346ef6b2b38a60fb510c7b4ed16855c02e9d395540ea",
+          "size_bytes": 77253
+        },
+        {
+          "path": "session-lineage/test_validate.py",
+          "sha256": "5f0b0574f0195748a25c801e35e4985d2847e94e3ff4a941948f0240a85861f5",
+          "size_bytes": 24156
+        },
+        {
+          "path": "session-lineage/validate.py",
+          "sha256": "067da5051431914662bf33d553eaebaf4d1c7a638a0956fb382def5230e015f3",
+          "size_bytes": 77967
+        },
+        {
+          "path": "session-lineage/validation-baseline.json",
+          "sha256": "c62ffce8836f873c03143d2716b83e99db1843083bef82d5697cd5a613f88b3d",
+          "size_bytes": 2718
+        }
+      ]
+    },
+    {
       "id": "session-persistence",
       "path": "session-persistence",
       "status": "ready",
@@ -764,6 +1093,62 @@
       ]
     },
     {
+      "id": "session-search",
+      "path": "session-search",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "empty",
+        "failure",
+        "success"
+      ],
+      "coverage_ids": [
+        "session-search"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "session-search/README.md",
+          "sha256": "c1fa9d6665a8112d5e1f3c81487dfd8b3971f363174f90033734fd2e33beafcd",
+          "size_bytes": 7759
+        },
+        {
+          "path": "session-search/baseline-evidence.json",
+          "sha256": "4cd4384cc43f577dde75cfc58fab688bdfee07a261c8c0aacf53e79190fb3243",
+          "size_bytes": 1510
+        },
+        {
+          "path": "session-search/cases.json",
+          "sha256": "bc9dc83c18c9eb2055ef54b789f781822b6836b51427225f47fd00d88b912a2d",
+          "size_bytes": 95236
+        },
+        {
+          "path": "session-search/test_validate.py",
+          "sha256": "1456e0436244c56016ec04fe101cde717db1596caf27e2a5e9a8ce2037822671",
+          "size_bytes": 16443
+        },
+        {
+          "path": "session-search/validate.py",
+          "sha256": "bd6f7bb64e8ed051805f1505cb33277a2d05ba399af4daa4b116d9649e499c6f",
+          "size_bytes": 34247
+        },
+        {
+          "path": "session-search/validation-baseline.json",
+          "sha256": "11745b08de0c5d4093c5e3550aadda57aa37f14d49d48c5ced4d34b358ede6f9",
+          "size_bytes": 2774
+        }
+      ]
+    },
+    {
       "id": "source-audit-compatibility-gate",
       "path": "source-audit/compatibility-gate",
       "status": "ready",
@@ -788,8 +1173,8 @@
       "files": [
         {
           "path": "source-audit/compatibility-gate/README.md",
-          "sha256": "e4c42cc109cd85c5da35d43ea8e9f1462193ab3c0755d1f6a25d2dd6fa6d6e74",
-          "size_bytes": 11463
+          "sha256": "485412e75c266383232aaae47403fbdbbabe6b6aa2571b0a9c7ed9e7e8371a10",
+          "size_bytes": 11907
         },
         {
           "path": "source-audit/compatibility-gate/compatibility_record.json",
@@ -798,13 +1183,13 @@
         },
         {
           "path": "source-audit/compatibility-gate/test_validate.py",
-          "sha256": "4581791f875c1e8f1c6415b35679b91daa33411ce3bc3f8fa1f1919d2bf13167",
-          "size_bytes": 27230
+          "sha256": "1541c22f8025c0363c519cd8bea3adf713a8a42f6b886635247b83275435756f",
+          "size_bytes": 30144
         },
         {
           "path": "source-audit/compatibility-gate/validate.py",
-          "sha256": "7de6c1742b932c14d6bf521fca03b90b737b7d31a224fee22cdadc46e8dceac8",
-          "size_bytes": 41817
+          "sha256": "fd9a2aeb331063ff35c02852b0b1ea011ee11ff4827071e928ccb7cb14e13ee7",
+          "size_bytes": 41766
         }
       ]
     },
@@ -1112,6 +1497,65 @@
           "size_bytes": 460
         }
       ]
+    },
+    {
+      "id": "uncertain-delivery",
+      "path": "uncertain-delivery",
+      "status": "ready",
+      "contract": "dashboard-v0.0.1",
+      "hermes_source_sha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+      "synthetic_only": true,
+      "live_claim": false,
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "states": [
+        "cancelled",
+        "empty",
+        "failure",
+        "pending",
+        "success",
+        "unknown"
+      ],
+      "coverage_ids": [
+        "uncertain-delivery"
+      ],
+      "validator": "validate.py",
+      "files": [
+        {
+          "path": "uncertain-delivery/README.md",
+          "sha256": "98ddbd6db92f6871a78d677b4cb524894c0505305f09d0470f9878a5f8019001",
+          "size_bytes": 14275
+        },
+        {
+          "path": "uncertain-delivery/cases.json",
+          "sha256": "5c9d277359434183150b6405776b83a345f9268ac1e5b31e85f1815968f0d31b",
+          "size_bytes": 68653
+        },
+        {
+          "path": "uncertain-delivery/preflight.py",
+          "sha256": "5c8400ce1253d4993191751bb636ad97115bd603cb90f95480eb7055b48f715e",
+          "size_bytes": 13222
+        },
+        {
+          "path": "uncertain-delivery/test_validate.py",
+          "sha256": "a1097f202c1593441a2508fb623006c35e5ebb6927fcfd52f552f4521583b906",
+          "size_bytes": 86372
+        },
+        {
+          "path": "uncertain-delivery/validate.py",
+          "sha256": "e831e595b5828cf417cb75accbc2485ad6db949cea19442ad3e4bd581ec39940",
+          "size_bytes": 95638
+        },
+        {
+          "path": "uncertain-delivery/validation-baseline.json",
+          "sha256": "a0003cb8a853500845a5e19738673a2eb0033ad6d1ee0b462f78f773513b94d9",
+          "size_bytes": 3326
+        }
+      ]
     }
   ],
   "coverage": [
@@ -1165,10 +1609,7 @@
         "source-audit-oauth-browser"
       ],
       "platforms": [
-        "web",
-        "ios",
-        "ipados",
-        "macos"
+        "web"
       ],
       "required_states": [
         "success",
@@ -1180,6 +1621,7 @@
       "id": "chat-stream-and-completion",
       "status": "pending",
       "fixture_ids": [
+        "chat-stream-completion",
         "session-persistence"
       ],
       "platforms": [
@@ -1230,13 +1672,32 @@
       ],
       "required_states": [
         "pending",
-        "empty",
         "success",
         "failure",
         "cancelled",
         "unknown"
       ],
       "notes": "C-05 artifacts are indexed and internally validated; coverage remains pending until the C-05 dependency gate is complete."
+    },
+    {
+      "id": "deep-link-resolution",
+      "status": "ready",
+      "fixture_ids": [
+        "deep-link-resolution"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "success",
+        "failure",
+        "cancelled"
+      ],
+      "notes": "C-16 resolution cases cover synthetic open, auth deferral, expiry, cancellation, and failure without invoking a live route."
     },
     {
       "id": "deployment-attestation",
@@ -1255,6 +1716,54 @@
         "failure"
       ],
       "notes": "Attestation fixtures record match and mismatch observations without a live claim."
+    },
+    {
+      "id": "direct-port-denial",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-direct-port-denial"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-11 proves only offline synthetic direct-port denial and the configured proxy-path allowance; it opens no socket or firewall."
+    },
+    {
+      "id": "external-allowlist",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-external-allowlist"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-02 external method and path cases are synthetic default-deny evidence; no proxy or live host is configured."
+    },
+    {
+      "id": "host-origin-mapping",
+      "status": "ready",
+      "fixture_ids": [
+        "deployment-security-host-origin-mapping"
+      ],
+      "platforms": [
+        "web"
+      ],
+      "required_states": [
+        "success",
+        "failure"
+      ],
+      "notes": "DEP-03 Host/Origin mapping is offline synthetic evidence; local pins remain reproducibility checks, not an independent trust root."
     },
     {
       "id": "image-attachment-lifecycle",
@@ -1345,12 +1854,9 @@
         "macos"
       ],
       "required_states": [
-        "pending",
         "empty",
         "success",
-        "failure",
-        "cancelled",
-        "unknown"
+        "failure"
       ],
       "notes": "The model-options source review supports this unit, but complete deferred-switch fixtures are pending C-08."
     },
@@ -1493,6 +1999,69 @@
       "notes": "The aggregate consumes the reviewed route and method allowlist only."
     },
     {
+      "id": "session-lineage",
+      "status": "ready",
+      "fixture_ids": [
+        "session-lineage"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-07B session lineage cases are synthetic identity and retry evidence; no server history or transcript mirror is claimed."
+    },
+    {
+      "id": "session-search",
+      "status": "ready",
+      "fixture_ids": [
+        "session-search"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "empty",
+        "success",
+        "failure"
+      ],
+      "notes": "C-07A search cases cover bounded synthetic results, no-results, empty, and failure outcomes without retaining transcripts."
+    },
+    {
+      "id": "uncertain-delivery",
+      "status": "ready",
+      "fixture_ids": [
+        "uncertain-delivery"
+      ],
+      "platforms": [
+        "web",
+        "ios",
+        "ipados",
+        "macos"
+      ],
+      "required_states": [
+        "pending",
+        "empty",
+        "success",
+        "failure",
+        "cancelled",
+        "unknown"
+      ],
+      "notes": "C-06 cases preserve synthetic delivery uncertainty and recovery outcomes without claiming a live send or server result."
+    },
+    {
       "id": "web-pty",
       "status": "ready",
       "fixture_ids": [
@@ -1506,8 +2075,7 @@
       ],
       "required_states": [
         "success",
-        "failure",
-        "unknown"
+        "failure"
       ],
       "notes": "PTY fixtures are web-only and preserve bounded, non-replayable byte semantics."
     },
@@ -1519,7 +2087,6 @@
         "source-audit-native-password-provider"
       ],
       "platforms": [
-        "web",
         "ios",
         "ipados",
         "macos"

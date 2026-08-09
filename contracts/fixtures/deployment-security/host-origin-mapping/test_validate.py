@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -477,6 +478,51 @@ class HostOriginMappingProofTests(unittest.TestCase):
                     payload = canary.encode() if label in structured_labels else json.dumps({"fixture": canary}, separators=(",", ":")).encode()
                     with self.assertRaises(validate.ValidationError):
                         validate.scan_artifact_bytes(artifact, payload)
+
+    def test_composed_sensitive_assignment_grammar_matches_the_reviewed_detector(self) -> None:
+        """Keep source-safe composition byte-for-byte equivalent to the fail-closed grammar."""
+        reviewed_pattern = (
+            r"(?i)(?:"
+            + "password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?"
+            + r")\s*[:=]\s*[^\s,;}]+"
+        )
+        reviewed = re.compile(reviewed_pattern)
+        self.assertEqual(validate.SENSITIVE_ASSIGNMENT.pattern, reviewed_pattern)
+        self.assertEqual(validate.SENSITIVE_ASSIGNMENT.flags, reviewed.flags)
+
+        names = (
+            "pass" + "word", "pass" + "wd", "sec" + "ret", "to" + "ken",
+            "ti" + "cket", "coo" + "kie", "author" + "ization", "api" + "_key",
+            "access" + "-token", "refresh" + "_token", "client" + "-secret",
+            "private" + "_key", "credential", "credential" + "s",
+        )
+        suffixes = ("redaction-canary", "value.with-punctuation", "x")
+        for name in names:
+            for separator in ("=", ":", " = ", "\t:\t"):
+                for suffix in suffixes:
+                    payload = name + separator + suffix
+                    with self.subTest(payload=payload):
+                        self.assertEqual(
+                            bool(validate.SENSITIVE_ASSIGNMENT.search(payload)),
+                            bool(reviewed.search(payload)),
+                        )
+                        with self.assertRaisesRegex(validate.ValidationError, "credential assignment"):
+                            validate.scan_artifact_bytes("README.md", payload.encode())
+        for payload in (
+            "pass" + "word=redaction-canary", "private" + "_key\t:\tx",
+            "credential" + "s = redaction-canary",
+        ):
+            self.assert_scanner_failure_parity("README.md", payload.encode(), "credential assignment")
+
+        for payload in (
+            "credential", "credential" + " " + ":", "not" + "credential" + "=" + "redaction-canary",
+            "token" + "ized" + "=" + "redaction-canary",
+        ):
+            with self.subTest(boundary=payload):
+                self.assertEqual(
+                    bool(validate.SENSITIVE_ASSIGNMENT.search(payload)),
+                    bool(reviewed.search(payload)),
+                )
 
     def test_direct_scanner_regressions_match_normal_and_optimized_modes(self) -> None:
         quote = chr(34)

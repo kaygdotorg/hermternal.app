@@ -31,26 +31,52 @@ The legacy aggregate authority remains readable at
 introduced at `a96889c` and has the schema plus six legacy fields (seven total
 keys): `validator_path`/`validator_size_bytes`/`validator_sha256` plus
 `baseline_path`/`baseline_size_bytes`/`baseline_sha256` under the schema
-`hermternal.fixture-registry-authority.v1`.
+`hermternal.fixture-registry-authority.v1`. Its bytes remain unchanged.
 
 The `.v2.json` filename used by commits `3600975` and `70d5963` was a
-filename-only rotation: those historical documents still declared the v1
-schema plus six legacy fields (seven total keys). The independent bootstrap commit `8dad73e` then
-introduced a multi-artifact document at the legacy path while still claiming
-v1. Its published Git object is not rewritten. The corrective bootstrap keeps
-the legacy path readable and places the new multi-artifact authority at
-`scripts/fixture_registry_authority.v2.json` with the explicit schema
-`hermternal.fixture-registry-authority.v2`.
+filename-only rotation, and the corrected bootstrap at
+`scripts/fixture_registry_authority.v2.json` remains preserved as the reviewed
+external predecessor. The active final binding is the distinct
+`scripts/fixture_registry_authority.v2.final.json` path with the explicit
+schema `hermternal.fixture-registry-authority.v2` and role
+`aggregate_predecessor`.
 
-The standalone v2 verifier loads that separate path from its immutable Git
-introduction object. It can read the legacy v1 shape for migration checks, but
-it never treats the legacy path as a v2 fallback. The v2 trust root accepts
-only the approved external predecessor
-`abb6754bddd1cf18927b0172ed9fa3456235b035`; an arbitrary self-consistent
-ancestor is rejected. The trust root remains independent of the
-scanner-preparation change; after this authority is merged, that preparation
-must rebase onto the merged external predecessor before regenerating the index,
-baseline, and next authority.
+The standalone verifier authenticates that historical final path from its
+exact protected Git binding object. The aggregate validator authenticates the
+same historical record, then loads the distinct hardened path from its own
+protected binding and source pins. Each authority records the exact source
+commit and four artifact records for the combined checkout:
+`contracts/fixtures/index.json`, `contracts/fixtures/validator/test_validate.py`,
+`contracts/fixtures/validator/validate.py`, and
+`contracts/fixtures/validator/validation-baseline.json`. The source commit must
+be the authority binding commit's direct first parent, so the authority cannot
+self-authorize scanner or baseline changes in the same commit. Both loaders
+enforce exact key order, blob OIDs, byte sizes, SHA-256 digests,
+`synthetic_only: true`, and `live_claim: false` before comparing checkout bytes.
+The v1 and bootstrap v2 records remain historical compatibility evidence; they
+are not fallbacks for either exact-pinned v2 trust root. The historical final
+and active hardened bindings are independently pinned, so a restack may leave
+their introduction objects on separate reviewed ancestry lines; the direct
+first-parent rule still applies within each binding.
+
+This is not a self-authenticating bootstrap root. Before executing the helper,
+the aggregate validator reads its SHA-256 binding from the mutable
+`contracts/fixtures/validator/validate.py` source; active authority and source
+OIDs arrive through runtime pins and are checked only for the reviewed shape.
+Those checks are consistency checks, not independent custody. A trusted launcher
+or immutable external pin record must protect the verifier digest, active OIDs,
+artifact and manifest generation or digest, and rollback policy before launch.
+Ordinary environment variables do not establish that root. If a candidate
+checkout can rewrite the validator, helper, bindings, and pins together, this
+fixture cannot prove that the reviewed verifier ran. The external
+fixture-authority root dependency remains unresolved in this fixture lane.
+
+The active hardened pins are authenticated external CI inputs supplied through
+`HERMTERNAL_FIXTURE_AUTHORITY_COMMIT` and
+`HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT`. The checked-in
+`scripts/fixture_registry_authority.v2.hardened.pin.json` file is test
+provisioning data for the versioned offline bundle only; it is never a runtime
+authority fallback. Missing or malformed protected environment pins fail closed.
 
 The verifier's object repository must be a canonical absolute plain checkout,
 not a linked worktree or a checkout with symlinked `.git`, `gitdir`,
@@ -62,15 +88,23 @@ directory from those held descriptors. It copies the complete Git metadata tree
 into a private mode-700 temporary snapshot. The copy is chunked and
 category-bounded: ordinary metadata and loose objects use
 `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
-`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) for legitimate pack,
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (256 MiB) for legitimate pack,
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
-`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
-second) wall-clock deadline. The 8 MiB pack cap derives from the supported
-repository's fresh single-branch remote-clone observation of a roughly 2.1 MiB
-pack; it leaves measured growth headroom while keeping individual files
-bounded. The 1 MiB non-pack cap remains above the checked-in evidence and
-metadata sizes. It rejects symlinks/non-regular entries and checks source
-metadata before and after each copy. Git then runs only against that snapshot,
+`MAX_SNAPSHOT_TOTAL_BYTES` (384 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
+second) wall-clock deadline. An exact remote single-branch clone measured a
+236,463,602-byte pack, leaving 31,971,854 bytes under the finite per-pack cap.
+Its seeded snapshot total is 299,603,814 bytes, leaving 103,049,210 bytes under
+the independent aggregate cap. Local clone pack layout is not authoritative.
+without weakening the 1 MiB non-pack limit, entry/file/path budgets, output limits, or
+the deadline. The separately bounded strict Git process cap is 30 seconds;
+the measured seeded 96,034,354-byte snapshot completed strict fsck in 9.061 seconds on
+the fixture host, while a serial aggregate run showed 15 seconds was marginal
+for its optimized seeded clone. Snapshot entry count, directory count, file count, traversal
+depth, retained path storage, aggregate bytes, and deadline are bounded
+independently, so arbitrarily many zero-byte metadata entries cannot consume
+CI before the byte limits run. It rejects symlinks/non-regular entries and
+checks source metadata before and after each copy. Git then runs only against
+ that snapshot,
 so concurrent rename or symlink replacement of nested fanout/pack/ref paths,
 config, or metadata cannot redirect reads. The snapshot also descriptor-walks
 the full `objects` and `refs` trees with no-follow descriptors as a second
@@ -96,50 +130,160 @@ wire-neutral shape. Each ready fixture root lists every checked-in artifact,
 its byte count, and its SHA-256 digest. The aggregate validator also rejects
 unsafe paths, duplicate JSON keys, non-finite numbers, oversized input,
 malformed UTF-8, credential-shaped values, live claims, `http`/`https`/`ws`/`wss`
-live hosts, symlinks, and unindexed artifacts. Registered Python artifacts are
-parsed and their retained string literals and comments are scanned, including
-assignment-shaped `ticket=`, `cookie=`, `password=`, `secret=`, and `token=`
-values; detector regex definitions and explicit domain negative-test markers are
-not treated as retained credentials. Domain validators remain authoritative for
-case semantics; the aggregate layer does not run them and makes no network
-request.
+live hosts, URL userinfo passwords, symlinks, unsupported registered extensions,
+and unindexed artifacts. Credential routing covers `api_key`, `x-api-key`,
+`access_token`, `refresh_token`, `client_secret`, and their reviewed normalized
+aliases across text assignments, query strings, JSON redaction trees, and
+Python AST names, keyword arguments, dictionary keys, and request-like
+subscripts. C0/C1 controls and Unicode format characters are scanned in a
+compact and boundary-preserving form; JSON keys containing them are rejected.
+Registered Python artifacts are parsed and their retained string literals,
+comments, and bounded source constructions are scanned. Flow joins keep a name
+unknown after conflicting assignments, and dynamic Authorization schemes or
+secrets receive a bounded probe instead of being treated as safe. Regex URL
+hosts decode only bounded literal escapes and fail closed for escaped letters,
+uncertain character classes, verbose whitespace, comments, or other recovery
+gaps. Detector regex definitions and explicit domain negative-test markers are
+not treated as retained credentials. Reviewed source markers and negative-test
+samples use exact path/value allowances only. Reserved `.invalid` hosts are not
+accepted by suffix; comma-joined URLs, IPv6/address canaries, malformed ports,
+and backslash/bracket continuations are admitted only as exact raw URL tokens
+in the reviewed artifact that owns the negative case. Unknown Python runtime
+values use the exact synthetic host `synthetic.invalid` plus an explicit
+Authorization probe, so dynamic credential checks do not widen the URL policy.
+Domain validators remain authoritative for case semantics; the aggregate layer
+does not run them and makes no network request.
 
-The `--baseline` input is bound to the exact canonical path named by the
-registry (`validator/validation-baseline.json`). Its full canonical content is
-also checked against a reviewed SHA-256 trust anchor in the validator; only the
-validator's own manifest digest and derived byte total are normalized to avoid a
-self-referential cycle. A schema-valid copy or coordinated sample/distribution/
-manifest replacement cannot replace the checked-in benchmark evidence. Ready
-coverage may reference only
-ready fixture roots with real manifests. A registry can be structurally valid
-while coverage remains `partial`. A `pending`, `empty`, `failure`, `cancelled`,
-or `unknown` coverage row is never promoted to successful evidence. The
-checked-in index inventories the C-05 connection-restoration, C-07 session
-persistence, C-14 image attachment lifecycle, C-18 PTY detach-race, and DEP-10M
-PTY local-adapter artifacts. The C-05 coverage and C-08 stream-dependent
+The `--index`, `--schema`, and `--baseline` inputs are bound to their canonical
+reviewed paths. The exact central-validator, validator-test, index, and baseline
+bytes are pinned by the distinct v2 authority objects from immutable Git
+objects, not from checkout constants: the historical final path is the
+standalone verifier's trust input, and the hardened path is the aggregate
+validator's active trust input. Each exact binding is checked against its own
+first-parent source commit; the two v2 bindings are independently pinned and
+do not require the active restack to preserve the historical binding as an
+ancestor. Only the validator's own baseline-manifest digest and derived byte
+total are normalized to avoid a self-reference. A schema-valid copy or
+coordinated scanner, manifest, baseline, local anchor, and test-constant
+replacement cannot rebind an immutable external authority. This defense is
+conditional on the external verifier and pin root being trusted. The current
+coordinated-mutation probe rejected in both interpreter modes only because the
+f4 source changes left the checked-in baseline and manifest stale; that is not
+bootstrap authentication and does not predict behavior after a coordinated
+baseline/manifest regeneration. The probe therefore cannot replace the
+external fixture-authority root or deterministic authority-rotation tooling.
+
+Every ordinary file under a ready fixture root is inventoried, including hidden
+files, cache contents, bytecode, and binary artifacts. Symlinks and special files
+are rejected explicitly; unsupported extensions or unreviewed helpers are not
+silently skipped. The central `validator/` directory has an exact artifact
+allowlist. Ready-root metadata must name a supported executable Python validator
+role (`validate.py` or `test_*.py`) and a real manifest; `README.md`, `cases.json`,
+and arbitrary non-executable files are not validator roles. Coverage references
+must be reciprocal, and every coverage platform and required state must be
+supported by every referenced root. Ready coverage may reference only ready
+fixture roots with named validators and real manifests. A registry can be
+structurally valid while coverage remains `partial`. A `pending`, `empty`,
+`failure`, `cancelled`, or `unknown` coverage row is never promoted to
+successful evidence. The checked-in index inventories the C-05
+connection-restoration, C-06 uncertain delivery, C-07 session persistence,
+C-07A session search, C-07B session lineage, C-08 chat stream and completion,
+C-14 image attachment lifecycle, C-16 deep-link resolution, C-18 PTY
+detach-race, DEP-02 external method/path allowlist, DEP-03 Host/Origin mapping,
+DEP-10M PTY local-adapter, and DEP-11 direct-port-denial artifacts. The merged
+PR #260 compatibility-gate artifact manifests are also refreshed in this
+aggregate registry.
+`review-anchors/deep-link-resolution.sha256` is intentionally separate: it is
+the C-16 domain validator's reviewed digest authority, not a canonical fixture
+root. The aggregate permits that one exact path and still rejects any other
+unindexed review-anchor artifact. The C-05 coverage and C-08 stream-dependent
 coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
-consistency. The current blocked aggregate evidence is caused by three stale
-artifact records under `source-audit/compatibility-gate`; that current index
-problem is distinct from the three future scanner-preparation blockers listed
-in the authority migration document.
+consistency. The final combined tree has no stale
+`source-audit/compatibility-gate` rows: all three pre-existing records match
+mechanically derived bytes, and the twelve overlapping Caddy-owned records are
+bound to the approved `5b923fd38e056c37bdb86766f05551cd83687b66` descendant.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
-arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
-Python runs share the same checks:
+arguments, paths, keys, values, secrets, or tracebacks. The aggregate authority
+also requires a separate canonical plain Git object repository; the checkout
+being scanned must not be reused as that object repository. Supply the protected
+active authority pins and the object repository for both CLI modes:
 
 ```sh
-python3 contracts/fixtures/validator/validate.py
-python3 -O contracts/fixtures/validator/validate.py
-python3 contracts/fixtures/validator/test_validate.py
-python3 -O contracts/fixtures/validator/test_validate.py
-python3 -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
-python3 -O -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
-python3 -m py_compile \
+CHECKOUT="$PWD"
+OBJECT_REPO=/absolute/path/to/separate/plain-clone
+export HERMTERNAL_FIXTURE_AUTHORITY_COMMIT=<protected-authority-introduction>
+export HERMTERNAL_FIXTURE_AUTHORITY_SOURCE_COMMIT=<protected-source-predecessor>
+export PYTHONDONTWRITEBYTECODE=1
+python3 -B contracts/fixtures/validator/validate.py \
+  --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
+python3 -O -B contracts/fixtures/validator/validate.py \
+  --repo-root "$CHECKOUT" --object-repo "$OBJECT_REPO"
+python3 -B contracts/fixtures/validator/test_validate.py
+python3 -O -B contracts/fixtures/validator/test_validate.py
+python3 -B -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -O -B -m unittest discover -s contracts/fixtures/validator -p 'test_*.py'
+python3 -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=0) for path in sys.argv[1:]]' \
+  contracts/fixtures/validator/validate.py \
+  contracts/fixtures/validator/test_validate.py
+python3 -O -B -c 'from pathlib import Path; import sys; [compile(Path(path).read_text(encoding="utf-8"), path, "exec", optimize=1) for path in sys.argv[1:]]' \
   contracts/fixtures/validator/validate.py \
   contracts/fixtures/validator/test_validate.py
 ```
+
+`-B` and `PYTHONDONTWRITEBYTECODE=1` are intentional. The central validator
+rejects any unindexed `__pycache__` entry, and `py_compile` writes bytecode even
+when `-B` is supplied. The two compile-only commands therefore call Python's
+built-in `compile` without writing a cache.
+
+The protected values are review/CI inputs, not values inferred from a branch,
+tag, or the checkout. The plain clone must contain the exact protected
+historical and active authority/source objects, must not be a linked worktree,
+and must not use alternates, shallow or promisor metadata, replacement refs,
+grafts, or redirecting Git configuration. A fresh single-head clone does not
+necessarily retain those unreachable objects; seed all four protected OIDs into
+local `refs/fixture-authority/*` refs before running either validator mode. The
+aggregate and standalone suites consume the same explicit, offline,
+repository-versioned source at `scripts/fixture_registry_authority.objects.bundle`.
+Its 45,736,496 bytes are pinned by SHA-256
+`60be4d8ad08040c91d9960fc50a557f97d3987b43d4b59c5eef3d8b1341bce44`, and
+`git bundle list-heads` is required to contain exactly these four refs:
+
+```text
+refs/fixture-authority/active-authority bb4c0af0af0f96af6c9867c64e8a009fb25e82ec
+refs/fixture-authority/active-source 66680704bd0565d3f8fe06531d4abfa902639c78
+refs/fixture-authority/historical-authority 285acdcf9c11c049180a7844e689eee0f1490de4
+refs/fixture-authority/historical-source 263cb75adcf153d6fe252636b064e5fbc3e3f877
+```
+
+The shared test helper verifies the bundle digest, complete-bundle status, exact
+ref listing, and `commit` type/OID for each fetched object before installing the
+refs. Its explicit offline provisioning shape is:
+
+```sh
+git -C "$OBJECT_REPO" fetch --no-tags --quiet \
+  "$PWD/scripts/fixture_registry_authority.objects.bundle" \
+  285acdcf9c11c049180a7844e689eee0f1490de4:refs/fixture-authority/historical-authority \
+  263cb75adcf153d6fe252636b064e5fbc3e3f877:refs/fixture-authority/historical-source \
+  bb4c0af0af0f96af6c9867c64e8a009fb25e82ec:refs/fixture-authority/active-authority \
+  66680704bd0565d3f8fe06531d4abfa902639c78:refs/fixture-authority/active-source
+```
+
+The aggregate test classes assert that an unseeded clean clone is blocked before
+a seeded clone is accepted. No test fetches a remote or uses the reviewed
+checkout as authority.
+
+The repository does not yet have a checked-in GitHub Actions workflow that
+runs this aggregate validator, its test suite, and the `python -O` equivalents.
+The local normal/optimized commands above are the required gates for this
+fixture-only lane; no CI workflow is implied by passing them. The aggregate
+registry does not own the Caddy binary proof gate: `scripts/test_caddy_proof.py`
+is the separate PR #300 black-box lane and may skip when local Caddy or OpenSSL
+dependencies are unavailable. The registry records only reviewed redacted
+Caddy fixture bytes and approved source identities; a dependency skip cannot
+be promoted to live proof here.
 
 The validator is offline. It does not start Hermes, contact a proxy or
 identity provider, open a socket, follow a referenced URL, or claim deployment

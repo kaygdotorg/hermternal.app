@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Verify the v2 aggregate fixture authority from immutable Git objects.
+"""Verify the final v2 aggregate fixture authority from immutable Git objects.
 
-This verifier is intentionally separate from the aggregate scanner. The legacy v1 authority (its schema plus six legacy fields) remains readable
-at its historical path, while the new multi-artifact bootstrap uses the distinct
-v2 path and schema. Stage two pins
-the checked-in predecessor bytes only; the later scanner correction must rebase
-onto the merged predecessor and create its next authority independently. The
-checkout is compared with authority bytes read from the local Git object
-database, so replacing the visible authority file or refreshing local hashes
-cannot silently authorize different scanner inputs.
+This verifier is intentionally separate from the aggregate scanner. The legacy
+v1 authority and the historical bootstrap v2 authority remain readable in Git
+history, while this lane consumes a distinct final v2 path. The final authority
+is introduced only after its direct predecessor commit has finalized the
+scanner, index, tests, and baseline. The checkout is compared with authority
+bytes read from the local Git object database, so replacing the visible
+authority file or refreshing local hashes cannot silently authorize different
+scanner inputs.
 """
 
 from __future__ import annotations
@@ -32,6 +32,9 @@ from typing import Any, Iterator
 
 LEGACY_AUTHORITY_PATH = "scripts/fixture_registry_authority.json"
 LEGACY_AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v1"
+LEGACY_AUTHORITY_SIZE = 442
+LEGACY_AUTHORITY_SHA256 = "3792ee51370ec6b5cf7257d8473f71c7e810e03c7216969d079d933033734a14"
+LEGACY_AUTHORITY_BLOB_OID = "be0abad11385cddd7a93670f9641a77a285d9782"
 LEGACY_AUTHORITY_KEYS = (
     "schema",
     "validator_path",
@@ -43,13 +46,14 @@ LEGACY_AUTHORITY_KEYS = (
 )
 LEGACY_VALIDATOR_PATH = "contracts/fixtures/validator/validate.py"
 LEGACY_BASELINE_PATH = "contracts/fixtures/validator/validation-baseline.json"
-AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.json"
+AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.final.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
-AUTHORITY_ROLE = "bootstrap_predecessor"
-# The bootstrap is approved only for this reviewed external predecessor. An
-# ancestry check alone would let a self-consistent but unreviewed commit become
-# the authority source.
-APPROVED_SOURCE_COMMIT = "abb6754bddd1cf18927b0172ed9fa3456235b035"
+AUTHORITY_ROLE = "aggregate_predecessor"
+# These pins are outside the v2 manifest bytes. They prevent an otherwise
+# internally consistent synthetic history from selecting a caller-controlled
+# authority introduction and predecessor.
+EXPECTED_AUTHORITY_COMMIT = "285acdcf9c11c049180a7844e689eee0f1490de4"
+EXPECTED_SOURCE_COMMIT = "263cb75adcf153d6fe252636b064e5fbc3e3f877"
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
@@ -69,13 +73,35 @@ RECORD_KEYS = ("path", "blob_oid", "sha256", "size_bytes")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MAX_GIT_OUTPUT = 512 * 1024
-GIT_TIMEOUT_SECONDS = 10.0
+# A final seeded 96-MiB snapshot took 9.061 seconds for local strict fsck on
+# the measured macOS fixture host. A serial 77-test aggregate run still exposed
+# a 15-second optimized clean-clone timeout after earlier bounded snapshots.
+# Keep a separate finite 30-second process cap rather than letting the expanded
+# copy budget turn Git execution unbounded.
+GIT_TIMEOUT_SECONDS = 30.0
 # Ordinary metadata and loose objects stay at the conservative one-MiB cap.
-# Packed branch-only clones need a separate bound because one legitimate pack
-# in the supported repository is approximately 2.1 MiB.
+# Packed clones need a separate bound. The refreshed trusted four-ref bundle
+# produces a 33,787,115-byte pack in a fresh no-local single-head clone on
+# macOS after the versioned authority bundle rotation. A 48 MiB per-pack cap
+# retains 8,155,925 measured bytes of headroom. The seeded clone retains two
+# packs plus metadata, so its separate 96 MiB aggregate cap preserves bounded
+# copy accounting while leaving file-count, output, and timeout limits intact.
 MAX_SNAPSHOT_FILE_BYTES = 1 * 1024 * 1024
-MAX_SNAPSHOT_PACK_FILE_BYTES = 8 * 1024 * 1024
-MAX_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024
+# The exact remote single-branch clone packs all reachable bundle rotations;
+# its reproducible pack grew to 173,803,336 bytes, unlike local clone layout.
+# Keep a finite 256-MiB per-pack bound derived from that remote topology.
+MAX_SNAPSHOT_PACK_FILE_BYTES = 256 * 1024 * 1024
+# Seeded remote snapshots retain both the remote pack and reviewed bundle roots.
+# Keep an independent finite 384-MiB aggregate cap.
+MAX_SNAPSHOT_TOTAL_BYTES = 384 * 1024 * 1024
+# Snapshot metadata is bounded separately from copied bytes. A repository with
+# unlimited empty entries could otherwise exhaust directory listings, retained
+# names, or descriptor stacks before any byte budget is reached.
+MAX_SNAPSHOT_ENTRIES = 4_096
+MAX_SNAPSHOT_DIRECTORIES = 1_024
+MAX_SNAPSHOT_FILES = 3_072
+MAX_SNAPSHOT_DEPTH = 64
+MAX_SNAPSHOT_PATH_STORAGE_BYTES = 1 * 1024 * 1024
 SNAPSHOT_TIMEOUT_SECONDS = 30.0
 MAX_ERROR_LENGTH = 220
 SAFE_ERROR_MESSAGE = "fixture registry authority rejected"
@@ -328,7 +354,7 @@ def _validate_local_config(data: bytes) -> None:
         _require(key not in {"insteadof", "pushinsteadof"})
 
 
-def _walk_plain_tree(path: Path) -> None:
+def _walk_plain_tree(path: Path, budget: "_SnapshotBudget | None" = None) -> None:
     """Descriptor-walk a Git tree without following nested symlinks."""
 
     no_follow = getattr(os, "O_NOFOLLOW", None)
@@ -336,30 +362,49 @@ def _walk_plain_tree(path: Path) -> None:
     directory_flag = getattr(os, "O_DIRECTORY", None)
     _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
+    active_budget = budget or _SnapshotBudget.start()
     root_fd: int | None = None
-    pending: list[int] = []
+    pending: list[tuple[int, PurePosixPath, int]] = []
     try:
+        active_budget.check()
         root_fd = os.open(path, flags | directory_flag)
-        pending.append(root_fd)
+        pending.append((root_fd, PurePosixPath(), 0))
         root_fd = None
         while pending:
-            directory_fd = pending.pop()
+            active_budget.check()
+            directory_fd, relative_directory, depth = pending.pop()
             try:
                 _require(stat.S_ISDIR(os.fstat(directory_fd).st_mode))
-                for name in os.listdir(directory_fd):
-                    _require(name not in ("", ".", ".."))
-                    child_fd: int | None = None
-                    try:
-                        child_fd = os.open(name, flags, dir_fd=directory_fd)
-                        mode = os.fstat(child_fd).st_mode
-                        if stat.S_ISDIR(mode):
-                            pending.append(child_fd)
-                            child_fd = None
-                        else:
-                            _require(stat.S_ISREG(mode))
-                    finally:
-                        if child_fd is not None:
-                            os.close(child_fd)
+                with os.scandir(directory_fd) as entries:
+                    while True:
+                        active_budget.check()
+                        try:
+                            entry = next(entries)
+                        except StopIteration:
+                            break
+                        except OSError as exc:
+                            raise AuthorityError() from exc
+                        name = entry.name
+                        _require(name not in ("", ".", ".."))
+                        child_relative = relative_directory / name
+                        child_fd: int | None = None
+                        try:
+                            child_fd = os.open(name, flags, dir_fd=directory_fd)
+                            mode = os.fstat(child_fd).st_mode
+                            is_directory = stat.S_ISDIR(mode)
+                            active_budget.account_entry(
+                                child_relative,
+                                directory=is_directory,
+                                depth=depth + 1,
+                            )
+                            if is_directory:
+                                pending.append((child_fd, child_relative, depth + 1))
+                                child_fd = None
+                            else:
+                                _require(stat.S_ISREG(mode))
+                        finally:
+                            if child_fd is not None:
+                                os.close(child_fd)
             finally:
                 os.close(directory_fd)
     except AuthorityError:
@@ -373,7 +418,7 @@ def _walk_plain_tree(path: Path) -> None:
             except OSError:
                 pass
         while pending:
-            descriptor = pending.pop()
+            descriptor, _relative, _depth = pending.pop()
             try:
                 os.close(descriptor)
             except OSError:
@@ -397,6 +442,10 @@ class _SnapshotBudget:
 
     deadline: float
     total_bytes: int = 0
+    entries: int = 0
+    directories: int = 0
+    files: int = 0
+    path_storage_bytes: int = 0
 
     @classmethod
     def start(cls) -> "_SnapshotBudget":
@@ -404,6 +453,30 @@ class _SnapshotBudget:
 
     def check(self) -> None:
         _require(time.monotonic() <= self.deadline)
+
+    def account_entry(
+        self,
+        relative_path: PurePosixPath,
+        *,
+        directory: bool,
+        depth: int,
+    ) -> None:
+        self.check()
+        self.entries += 1
+        _require(self.entries <= MAX_SNAPSHOT_ENTRIES)
+        _require(depth <= MAX_SNAPSHOT_DEPTH)
+        try:
+            path_bytes = len(str(relative_path).encode("utf-8", "surrogatepass")) + 1
+        except (UnicodeError, ValueError) as exc:
+            raise AuthorityError() from exc
+        self.path_storage_bytes += path_bytes
+        _require(self.path_storage_bytes <= MAX_SNAPSHOT_PATH_STORAGE_BYTES)
+        if directory:
+            self.directories += 1
+            _require(self.directories <= MAX_SNAPSHOT_DIRECTORIES)
+        else:
+            self.files += 1
+            _require(self.files <= MAX_SNAPSHOT_FILES)
 
     def check_file_size(self, size: int, file_limit: int) -> None:
         self.check()
@@ -503,28 +576,42 @@ def _copy_git_tree(
     try:
         os.mkdir(destination, 0o700)
         budget.check()
-        for name in os.listdir(source_fd):
-            budget.check()
-            _require(name not in ("", ".", ".."))
-            child_fd: int | None = None
-            child_destination = destination / name
-            child_relative_path = relative_path / name
-            try:
-                child_fd = os.open(name, flags, dir_fd=source_fd)
-                mode = os.fstat(child_fd).st_mode
-                if stat.S_ISDIR(mode):
-                    _copy_git_tree(child_fd, child_destination, budget, child_relative_path)
-                else:
-                    _require(stat.S_ISREG(mode))
-                    _copy_regular_from_fd(
-                        child_fd,
-                        child_destination,
-                        budget,
+        with os.scandir(source_fd) as entries:
+            while True:
+                budget.check()
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                except OSError as exc:
+                    raise AuthorityError() from exc
+                name = entry.name
+                _require(name not in ("", ".", ".."))
+                child_fd: int | None = None
+                child_destination = destination / name
+                child_relative_path = relative_path / name
+                try:
+                    child_fd = os.open(name, flags, dir_fd=source_fd)
+                    mode = os.fstat(child_fd).st_mode
+                    is_directory = stat.S_ISDIR(mode)
+                    budget.account_entry(
                         child_relative_path,
+                        directory=is_directory,
+                        depth=len(child_relative_path.parts),
                     )
-            finally:
-                if child_fd is not None:
-                    os.close(child_fd)
+                    if is_directory:
+                        _copy_git_tree(child_fd, child_destination, budget, child_relative_path)
+                    else:
+                        _require(stat.S_ISREG(mode))
+                        _copy_regular_from_fd(
+                            child_fd,
+                            child_destination,
+                            budget,
+                            child_relative_path,
+                        )
+                finally:
+                    if child_fd is not None:
+                        os.close(child_fd)
         budget.check()
         _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(source_fd)))
     except AuthorityError:
@@ -533,31 +620,63 @@ def _copy_git_tree(
         raise AuthorityError() from exc
 
 
-def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    """Snapshot the caller repository before any path-based Git command runs."""
+def _read_bounded_fd(descriptor: int, limit: int) -> bytes:
+    """Read a stable regular descriptor without following a replacement."""
+
+    try:
+        before = os.fstat(descriptor)
+        _require(stat.S_ISREG(before.st_mode))
+        _require(0 <= before.st_size <= limit)
+        data = bytearray()
+        while len(data) < limit + 1:
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        _require(len(data) <= limit)
+        _require(_file_stat_fingerprint(before) == _file_stat_fingerprint(os.fstat(descriptor)))
+        return bytes(data)
+    except AuthorityError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+
+
+def _snapshot_object_repository(
+    object_repo: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    """Snapshot a canonical plain Git repository before path-based commands run.
+
+    Linked worktrees are deliberately outside this trust boundary. Callers must
+    provide a separate ordinary clone whose ``.git`` directory owns its object
+    database, refs, and configuration directly.
+    """
 
     no_follow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
     directory_flag = getattr(os, "O_DIRECTORY", None)
     _require(type(no_follow) is int and type(nonblock) is int and type(directory_flag) is int)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock | directory_flag
+    entry_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | no_follow | nonblock
     root_fd: int | None = None
-    git_fd: int | None = None
+    marker_fd: int | None = None
+    source_fd: int | None = None
     temporary: tempfile.TemporaryDirectory[str] | None = None
     budget = _SnapshotBudget.start()
     try:
         # Keep the root fd returned by the descriptor chain. Reopening the
         # caller path here would reintroduce an ancestor replacement race.
-        root, _ = _open_directory_chain(object_repo, deadline=budget.deadline)
-        root_fd = root
+        root_fd, _ = _open_directory_chain(object_repo, deadline=budget.deadline)
         budget.check()
-        git_fd = os.open(".git", flags, dir_fd=root_fd)
-        _require(stat.S_ISDIR(os.fstat(git_fd).st_mode))
+        marker_fd = os.open(".git", entry_flags, dir_fd=root_fd)
+        _require(stat.S_ISDIR(os.fstat(marker_fd).st_mode))
+        source_fd = marker_fd
+        marker_fd = None
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-snapshot-")
         snapshot_root = Path(temporary.name) / "repo"
         os.mkdir(snapshot_root, 0o700)
         budget.check()
-        _copy_git_tree(git_fd, snapshot_root / ".git", budget, PurePosixPath())
+        _copy_git_tree(source_fd, snapshot_root / ".git", budget, PurePosixPath())
         return temporary, snapshot_root
     except AuthorityError:
         if temporary is not None:
@@ -568,7 +687,7 @@ def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDi
             temporary.cleanup()
         raise AuthorityError() from exc
     finally:
-        for descriptor in (git_fd, root_fd):
+        for descriptor in (source_fd, marker_fd, root_fd):
             if descriptor is not None:
                 try:
                     os.close(descriptor)
@@ -615,7 +734,7 @@ def _validate_snapshot_repository(snapshot_root: Path) -> Path:
 
 @contextmanager
 def _validate_object_repository(object_repo: Path) -> Iterator[Path]:
-    """Validate a private snapshot so later Git opens cannot race the caller."""
+    """Validate a private plain-repository snapshot before Git reads."""
 
     temporary, snapshot_root = _snapshot_object_repository(object_repo)
     try:
@@ -891,7 +1010,47 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     return stdout
 
 
-def _authority_introduction_commit(object_repo: Path) -> str:
+def _authority_introduction_commit(
+    object_repo: Path,
+    authority_path: str = AUTHORITY_PATH,
+    expected_commit: str | None = None,
+) -> str:
+    """Resolve one exact authority introduction without trusting the checkout tip.
+
+    The historical and active authorities are protected by independent exact pins.
+    A rebased checkout can therefore have a different first-parent tip while the
+    pinned introduction object remains present in the plain object repository.
+    When a pin is supplied, verify that the pinned commit itself changes this
+    path instead of inferring a replacement from ``HEAD``. The unpinned form
+    remains useful for bounded-output regressions.
+    """
+
+    if expected_commit is not None:
+        _require(HEX40.fullmatch(expected_commit) is not None)
+        _require(_git(object_repo, "cat-file", "-t", expected_commit) == b"commit\n")
+        # An exact pin may identify a reviewed rotation that updates an
+        # already-existing path, so require the pinned commit to change this
+        # path rather than inferring an older path-addition from HEAD.
+        output = _git(
+            object_repo,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-status",
+            "-r",
+            expected_commit,
+            "--",
+            authority_path,
+        )
+        try:
+            changes = output.decode("ascii").splitlines()
+        except UnicodeError as exc:
+            raise AuthorityError() from exc
+        _require(
+            len(changes) == 1
+            and changes[0].split("\t")[-1] == authority_path
+            and changes[0].split("\t", 1)[0] in {"A", "M"}
+        )
+        return expected_commit
     output = _git(
         object_repo,
         "log",
@@ -900,7 +1059,7 @@ def _authority_introduction_commit(object_repo: Path) -> str:
         "--first-parent",
         "HEAD",
         "--",
-        AUTHORITY_PATH,
+        authority_path,
     )
     try:
         commits = output.decode("ascii").splitlines()
@@ -928,7 +1087,6 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
     _require(authority["role"] == AUTHORITY_ROLE)
     source_commit = authority["source_commit"]
     _require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None)
-    _require(source_commit == APPROVED_SOURCE_COMMIT)
     _require(authority["canonicalization"] == "exact_bytes")
     _require(authority["synthetic_only"] is True and authority["live_claim"] is False)
     manifest = authority["artifact_manifest"]
@@ -967,38 +1125,74 @@ def _validate_legacy_manifest(authority: dict[str, Any]) -> dict[str, Any]:
     return authority
 
 
+def _legacy_blob_oid(data: bytes) -> str:
+    """Compute Git's SHA-1 blob identity without invoking a mutable Git binary."""
+
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
 def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
-    """Load the preserved legacy v1 authority for migration compatibility."""
+    """Load the preserved legacy v1 authority with exact byte identity."""
 
     try:
-        return _validate_legacy_manifest(
-            _parse_json(_read_checkout_file(checkout_root, LEGACY_AUTHORITY_PATH))
-        )
+        authority_bytes = _read_checkout_file(checkout_root, LEGACY_AUTHORITY_PATH)
+        _require(len(authority_bytes) == LEGACY_AUTHORITY_SIZE)
+        _require(hashlib.sha256(authority_bytes).hexdigest() == LEGACY_AUTHORITY_SHA256)
+        _require(_legacy_blob_oid(authority_bytes) == LEGACY_AUTHORITY_BLOB_OID)
+        return _validate_legacy_manifest(_parse_json(authority_bytes))
     except AuthorityError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise AuthorityError() from exc
 
 
-def load_trusted_authority(object_repo: Path) -> dict[str, Any]:
-    """Load and verify the v2 authority from immutable Git history."""
+def load_trusted_authority(
+    object_repo: Path,
+    *,
+    authority_path: str = AUTHORITY_PATH,
+    expected_authority_commit: str | None = EXPECTED_AUTHORITY_COMMIT,
+    expected_source_commit: str | None = EXPECTED_SOURCE_COMMIT,
+    required_ancestor_commit: str | None = None,
+) -> dict[str, Any]:
+    """Load and verify a v2 authority from an isolated immutable Git snapshot."""
 
     try:
+        _require(type(authority_path) is str and authority_path and "\x00" not in authority_path)
+        if expected_authority_commit is not None:
+            _require(HEX40.fullmatch(expected_authority_commit) is not None)
+        if expected_source_commit is not None:
+            _require(HEX40.fullmatch(expected_source_commit) is not None)
+        if required_ancestor_commit is not None:
+            _require(HEX40.fullmatch(required_ancestor_commit) is not None)
         with _validate_object_repository(object_repo) as isolated_repo:
-            introduction = _authority_introduction_commit(isolated_repo)
-            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{AUTHORITY_PATH}")
+            introduction = _authority_introduction_commit(
+                isolated_repo,
+                authority_path,
+                expected_commit=expected_authority_commit,
+            )
+            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{authority_path}")
             authority = _parse_json(authority_bytes)
             source_commit, records = _validate_manifest(authority)
+            if expected_source_commit is not None:
+                _require(source_commit == expected_source_commit)
             _require(source_commit != introduction)
             _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
+            try:
+                first_parent = _git(isolated_repo, "rev-parse", f"{introduction}^1").decode("ascii").strip()
+            except UnicodeError as exc:
+                raise AuthorityError() from exc
+            _require(first_parent == source_commit)
             _require(_git(isolated_repo, "merge-base", "--is-ancestor", source_commit, introduction) == b"")
+            if required_ancestor_commit is not None:
+                _require(_git(isolated_repo, "merge-base", "--is-ancestor", required_ancestor_commit, introduction) == b"")
             for record in records:
                 blob_oid, data = _git_blob(isolated_repo, source_commit, record["path"])
                 _require(blob_oid == record["blob_oid"])
                 _require(len(data) == record["size_bytes"])
                 _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
-            "authority_path": AUTHORITY_PATH,
+            "authority_path": authority_path,
             "schema": AUTHORITY_SCHEMA,
             "authority_commit": introduction,
             "source_commit": source_commit,
@@ -1076,7 +1270,7 @@ def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
             _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
             "ok": True,
-            "stage": "bootstrap_predecessor_v2",
+            "stage": "aggregate_predecessor_v2",
             "authority_path": authority["authority_path"],
             "schema": authority["schema"],
             "authority_commit": authority["authority_commit"],

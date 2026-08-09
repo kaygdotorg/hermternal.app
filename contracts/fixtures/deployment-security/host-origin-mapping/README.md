@@ -94,6 +94,13 @@ absolute filesystem paths. JSON is also walked recursively so `user`,
 `role: user`, `content`, `transcript`, `messages`, and related user/transcript
 payloads fail closed.
 
+The sensitive-assignment detector composes its approved name grammar from a
+separate source-safe constant before compiling the reviewed expression. This
+prevents the detector implementation itself from being retained as a
+credential-shaped example. The compiled pattern is asserted byte-for-byte
+against the reviewed grammar and adversarial assignment variants still reject;
+this is a source representation change, not a scanner allowance.
+
 Exemptions are narrow and structural:
 
 - exact reserved `.invalid` fixture authorities and their frozen mutation forms;
@@ -176,11 +183,11 @@ and both normal and optimized validators fail closed if its commit, byte count,
 or digest drifts. The comma-joined origin
 cardinality canary is assembled from separate Python string fragments so the
 aggregate registry scanner does not mistake two synthetic URLs for one live
-host; its runtime mutation value is unchanged. The local scanner also rejects
-escaped compact JSON aliases such as `apikey`. The current aggregate scanner
-accepts that escaped-apikey canary without decoding its key; this is a documented
-downstream blocker for the registry lane and requires aggregate helper
-coordination. This fixture does not edit aggregate files.
+host; its runtime mutation value is unchanged. The aggregate scanner now
+handles escaped compact JSON aliases such as `apikey` in its own boundary.
+This fixture does not edit aggregate files. Synthetic Caddy `421`/`403` and
+no-upstream rows remain fixture evidence only; they do not claim a live public
+edge, arbitrary Host/Origin acceptance, or `4403` behavior.
 
 Run from the repository root:
 

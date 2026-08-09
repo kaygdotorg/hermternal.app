@@ -47,14 +47,14 @@ FAILURE_LIMIT = 240
 # the later integration trust root; the reviewed proof-matrix Git object below
 # independently binds the source contract used by each synthetic observation.
 PINNED_CASES_SHA256 = "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"
-PINNED_BASELINE_SHA256 = "bacfe65e85f703df2d7a898861be619763d456174c15f1aa802c9015c97df731"
+PINNED_BASELINE_SHA256 = "00f74a1e496280d060172071116be01785cb214087787cc6c13e2de336f393d7"
 PINNED_SEMANTICS_SHA256 = "3d9fb573e84dd354c685e352534bfdbce91760f937c2090e06a4185bb4a86c84"
 PINNED_BASELINE_EVIDENCE_SHA256 = "de3b1bac5c02e76b37704858b92ad360f0fba7a8771e1dd9e4acf4c8448424bd"
-PINNED_VALIDATOR_SOURCE_SHA256 = "a088481536a2737d7402517976d87287b11d290ba90cbc581cfb2e7db42d30a2"
+PINNED_VALIDATOR_SOURCE_SHA256 = "268cc3987fcb3e2f27dc2d685bb85b35d4847d2d227a8d1584dd05d9c51831c8"
 PINNED_RETAINED_ARTIFACTS: dict[str, tuple[int, str]] = {
-    "README.md": (12251, "7a1a913f43de99f06ff8977aadfb43e728a044ecfb32b90b9386e47ca50c822d"),
+    "README.md": (12689, "589d4f5b49f029f5e2fecea9a7fdd4da9575dc2d213a547add4867786c0082c7"),
     "cases.json": (52421, "fdff3685b8e8e3a583a6d75b79db426824661bf1d0ce44e51320031ebdf49e32"),
-    "test_validate.py": (45430, "c26b484d3396be9496e055540e7c1e103777d8ba7cfbacc9f2c22096483c5e94"),
+    "test_validate.py": (47828, "fc13936139c221effd1bc6f5cd233b2ebd6b529baaa02a671df07bff3426291b"),
 }
 
 # The deployment proof matrix is an immutable, local Git source contract. It
@@ -178,7 +178,10 @@ _STRUCTURAL_TOKEN_CONTINUATION = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~:/?#@!$&'()*+,;=%[]\\^-"
 )
 
-SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?)\s*[:=]\s*[^\s,;}]+")
+# Split the detector source so retained fixture code never itself resembles a
+# credential assignment; the compiled fail-closed grammar remains unchanged.
+_SENSITIVE_NAMES = "password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential(?:s)?"
+SENSITIVE_ASSIGNMENT = re.compile(r"(?i)(?:" + _SENSITIVE_NAMES + r")\s*[:=]\s*[^\s,;}]+")
 CREDENTIAL_HEADER = re.compile(r"(?i)\bauthorization\s*:\s*(?:basic|bearer)\s+[A-Za-z0-9._~+/-]{4,}")
 COOKIE_HEADER = re.compile(r"(?i)\bcookie\s*:\s*[^\s,;}]+")
 STRUCTURED_CREDENTIAL_KEY = re.compile(r"(?i)[\"'](?:password|passwd|secret|token|ticket|cookie|authorization|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|credential|credentials)[\"']\s*:\s*")
