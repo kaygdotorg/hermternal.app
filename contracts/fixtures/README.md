@@ -92,8 +92,8 @@ category-bounded: ordinary metadata and loose objects use
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (384 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
 second) wall-clock deadline. An exact remote single-branch clone measured a
-173,803,336-byte pack, leaving 94,632,120 bytes under the finite per-pack cap.
-Its seeded snapshot total is 174,094,678 bytes, leaving 228,558,506 bytes under
+236,463,602-byte pack, leaving 31,971,854 bytes under the finite per-pack cap.
+Its seeded snapshot total is 299,603,814 bytes, leaving 103,049,210 bytes under
 the independent aggregate cap. Local clone pack layout is not authoritative.
 without weakening the 1 MiB non-pack limit, entry/file/path budgets, output limits, or
 the deadline. The separately bounded strict Git process cap is 30 seconds;
