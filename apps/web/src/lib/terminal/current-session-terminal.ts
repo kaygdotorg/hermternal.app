@@ -46,7 +46,12 @@ export type CurrentSessionTerminalEvent =
       bytes: Uint8Array;
       outputMayBeTruncated: boolean;
     }>
-  | Readonly<{ type: "state"; state: CurrentSessionTerminalState }>
+  | Readonly<{
+      type: "state";
+      state: CurrentSessionTerminalState;
+      /** Producer-issued proof captured before terminal settlement can retire its lease. */
+      lifecycle?: CurrentSessionTerminalLifecycleStamp;
+    }>
   | Readonly<{
       type: "notice";
       generation: number;
@@ -64,6 +69,30 @@ export type CurrentSessionTerminalLifecycleIdentity = Readonly<{
   binding: TerminalBinding | undefined;
   nativeTransportGeneration: number;
 }>;
+
+/**
+ * A state callback receives this opaque producer capability instead of a
+ * structural identity. The backing map is module-private, so callers cannot
+ * forge root registration with a lookalike binding or generation object.
+ */
+export type CurrentSessionTerminalLifecycleStamp = object;
+
+const lifecycleStamps = new WeakMap<object, CurrentSessionTerminalLifecycleIdentity>();
+
+function createLifecycleStamp(
+  identity: CurrentSessionTerminalLifecycleIdentity,
+): CurrentSessionTerminalLifecycleStamp {
+  const stamp = {};
+  lifecycleStamps.set(stamp, identity);
+  return stamp;
+}
+
+/** Returns bridge-captured truth only for a producer-issued callback stamp. */
+export function getCurrentSessionTerminalLifecycleIdentity(
+  stamp: CurrentSessionTerminalLifecycleStamp,
+): CurrentSessionTerminalLifecycleIdentity | undefined {
+  return lifecycleStamps.get(stamp);
+}
 
 export type CurrentSessionTerminalListener = (
   event: CurrentSessionTerminalEvent,
@@ -264,7 +293,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       this.activeBinding !== undefined
     ) {
       try {
-        listener({ type: "state", state: this.currentState });
+        listener({
+          type: "state",
+          state: this.currentState,
+          lifecycle: createLifecycleStamp(this.lifecycleIdentity),
+        });
       } catch {
         // A presentation observer cannot interrupt bridge setup or transport flow.
       }
@@ -863,6 +896,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       event.type === "state"
         ? event.state.sessionId
         : this.currentState.sessionId;
+    const observedLifecycle = this.lifecycleIdentity;
     if (
       pending !== undefined &&
       !pending.invalidated &&
@@ -891,7 +925,11 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.activeBinding = undefined;
       }
       this.invalidatedSessionId = pending.sessionId;
-      this.publishState(projectState(event.state, this.explicitlyClosed), true);
+      this.publishState(
+        projectState(event.state, this.explicitlyClosed),
+        true,
+        observedLifecycle,
+      );
       return;
     }
     const quarantined = [...this.quarantinedTransportOperations].find(
@@ -1022,15 +1060,23 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       if (this.activeBinding) this.activeBinding.valid = false;
       this.activeBinding = undefined;
     }
-    this.publishState(projectState(event.state, this.explicitlyClosed));
+    this.publishState(
+      projectState(event.state, this.explicitlyClosed),
+      false,
+      observedLifecycle,
+    );
   }
 
   private publishState(
     state: CurrentSessionTerminalState,
     allowInvalidated = false,
+    lifecycle: CurrentSessionTerminalLifecycleIdentity = this.lifecycleIdentity,
   ): void {
     this.currentState = state;
-    this.emit({ type: "state", state }, allowInvalidated);
+    // State callbacks can synchronously cause coordinator cleanup. Stamp the
+    // producer's real lease before that reentrancy can retire it; no presentation
+    // layer must reconstruct identity from session or generation values.
+    this.emit({ type: "state", state, lifecycle: createLifecycleStamp(lifecycle) }, allowInvalidated);
   }
 
   private emit(

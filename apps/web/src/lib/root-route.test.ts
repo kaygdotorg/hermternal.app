@@ -187,6 +187,71 @@ describe('root route composition', () => {
     context.dispose();
   });
 
+  it('retires a bridge-stamped 4401 lease across reauthentication', async () => {
+    const sockets = [createPtySocketHarness(), createPtySocketHarness()];
+    let socketIndex = 0;
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (String(input) === '/api/auth/ws-ticket') return jsonResponse({ ticket: 'opaque-test-ticket', ttl_seconds: 30 });
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({
+      fetch,
+      createPtySocket: vi.fn(() => sockets[socketIndex++]!.socket)
+    });
+    const expire = vi.spyOn(context.auth, 'expire');
+    await context.auth.initialize();
+    const oldTerminal = context.workspace.terminal;
+    if (!oldTerminal) throw new Error('terminal bridge was not composed');
+    let observedStamp: object | undefined;
+    oldTerminal.subscribe((event) => {
+      if (event.type === 'state') observedStamp = event.lifecycle;
+    });
+    const oldAttach = oldTerminal.attach('session-1', new AbortController().signal);
+    await flush();
+    sockets[0]!.open();
+    await oldAttach;
+    const oldStamp = observedStamp;
+    const oldLease = context.registerTerminalLifecycle(oldTerminal, oldStamp!);
+    expect(oldLease).toBeDefined();
+
+    let replacementStamp: object | undefined;
+    oldTerminal.subscribe((event) => {
+      if (event.type === 'state') replacementStamp = event.lifecycle;
+    });
+    // Replacing a binding on the same bridge proves a new producer-issued stamp
+    // can authorize a successor lease without synthesizing an identity at root.
+    const replacementAttach = oldTerminal.attach('session-2', new AbortController().signal);
+    await flush();
+    sockets[1]!.open();
+    await replacementAttach;
+    const replacementLease = context.registerTerminalLifecycle(oldTerminal, replacementStamp!);
+    expect(replacementLease).toBeDefined();
+    expect(replacementLease).not.toBe(oldLease);
+
+    // The retired lease cannot expire the successor; the new lease is exact-once.
+    context.expireTerminalAuthentication(oldLease);
+    expect(expire).not.toHaveBeenCalled();
+    context.expireTerminalAuthentication(replacementLease);
+    context.expireTerminalAuthentication(replacementLease);
+    expect(expire).toHaveBeenCalledTimes(1);
+    await context.auth.initialize();
+
+    const newTerminal = context.workspace.terminal;
+    if (!newTerminal) throw new Error('replacement terminal bridge was not composed');
+    expect(newTerminal).not.toBe(oldTerminal);
+    // A caller-made structural lookalike and a replayed old producer stamp
+    // cannot mint a lease for the reauthenticated bridge.
+    const forgedStamp = Object.freeze({
+      binding: { sessionId: 'session-1', invalidate: () => {} },
+      nativeTransportGeneration: 1
+    });
+    expect(context.registerTerminalLifecycle(newTerminal, forgedStamp)).toBeUndefined();
+    expect(context.registerTerminalLifecycle(newTerminal, oldStamp!)).toBeUndefined();
+    expect(context.registerTerminalLifecycle(newTerminal, replacementStamp!)).toBeUndefined();
+    context.dispose();
+  });
+
   it('permanently disposes the root workspace exactly once', async () => {
     const fetch: LiveRestFetch = vi.fn(async (input) => {
       if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
