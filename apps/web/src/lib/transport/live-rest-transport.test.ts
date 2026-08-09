@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  captureLiveSessionProjection,
   consumeLiveRestCanonicalAlias,
   createLiveRestTransport,
   getLiveRestSessionForWorkspace,
@@ -197,6 +198,21 @@ function rawSession(session = LIVE_SESSION_FIXTURE): string {
     profile: session.profile,
     is_default_profile: session.isDefaultProfile
   });
+}
+
+function populateSessionObject(
+  target: object,
+  session: LiveSession = LIVE_SESSION_FIXTURE
+): object {
+  for (const [key, value] of Object.entries(session)) {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true
+    });
+  }
+  return target;
 }
 
 function rawSessionList(): string {
@@ -1117,6 +1133,93 @@ describe('createLiveRestTransport', () => {
     source.title = 'mutated source';
     expect(captured.id).toBe(LIVE_SESSION_FIXTURE.id);
     expect(captured.title).toBe(LIVE_SESSION_FIXTURE.title);
+  });
+
+  it('exposes one normalized frozen projection for later list consumers', () => {
+    const source = { ...LIVE_SESSION_FIXTURE, additive: 'ignored by the projection' };
+    const captured = captureLiveSessionProjection(source);
+    if (!captured) throw new Error('Expected a valid session projection.');
+
+    expect(captured).not.toBe(source);
+    expect(Object.isFrozen(captured)).toBe(true);
+    expect(captured).toEqual(LIVE_SESSION_FIXTURE);
+    source.id = 'foreign-session';
+    source.title = 'mutated source';
+    expect(captured.id).toBe(LIVE_SESSION_FIXTURE.id);
+    expect(captured.title).toBe(LIVE_SESSION_FIXTURE.title);
+  });
+
+  it('rejects wrappers and exotic objects before structuredClone traversal', async () => {
+    const customPrototype = Object.create(Object.prototype);
+    const wrappers: Array<[string, object]> = [
+      ['custom prototype', populateSessionObject(Object.create(customPrototype))],
+      ['Number', Object.setPrototypeOf(populateSessionObject(new Number(1)), Object.prototype)],
+      ['Boolean', Object.setPrototypeOf(populateSessionObject(new Boolean(true)), Object.prototype)],
+      ['boxed string', Object.setPrototypeOf(new String('boxed'), Object.prototype)],
+      ['Date', Object.setPrototypeOf(populateSessionObject(new Date()), Object.prototype)],
+      ['Map', Object.setPrototypeOf(populateSessionObject(new Map()), Object.prototype)],
+      ['Set', Object.setPrototypeOf(populateSessionObject(new Set()), Object.prototype)],
+      ['RegExp', Object.setPrototypeOf(populateSessionObject(/synthetic/u), Object.prototype)],
+      ['WeakMap', Object.setPrototypeOf(populateSessionObject(new WeakMap()), Object.prototype)],
+      ['WeakSet', Object.setPrototypeOf(populateSessionObject(new WeakSet()), Object.prototype)],
+      ['Promise', Object.setPrototypeOf(populateSessionObject(Promise.resolve()), Object.prototype)],
+      ['ArrayBuffer', Object.setPrototypeOf(populateSessionObject(new ArrayBuffer(1)), Object.prototype)],
+      ['DataView', Object.setPrototypeOf(populateSessionObject(new DataView(new ArrayBuffer(1))), Object.prototype)],
+      ['typed array', Object.setPrototypeOf(populateSessionObject(new Uint8Array([1])), Object.prototype)]
+    ];
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+
+    try {
+      for (const [label, wrapper] of wrappers) {
+        const adapter: LiveRestTransport = {
+          getProviders: vi.fn(),
+          getAuthState: vi.fn(),
+          listSessions: vi.fn(),
+          getSessions: vi.fn(),
+          getSession: vi.fn().mockResolvedValue(wrapper),
+          getSessionMessages: vi.fn()
+        };
+        await expect(
+          getLiveRestSessionForWorkspace(adapter, {}, LIVE_SESSION_FIXTURE.id)
+        ).rejects.toMatchObject({ code: 'invalid-response' });
+        expect(adapter.getSessionMessages, label).not.toHaveBeenCalled();
+      }
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  it('does not clone invalid details with expensive additive data', () => {
+    const invalid = {
+      ...LIVE_SESSION_FIXTURE,
+      id: '../invalid-session',
+      hostilePayload: 'x'.repeat(512 * 1024)
+    } as unknown;
+    const clone = vi.spyOn(globalThis, 'structuredClone');
+
+    try {
+      expect(captureLiveSessionProjection(invalid)).toBeUndefined();
+      expect(clone).not.toHaveBeenCalled();
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  it('accepts a null-prototype projection while Object.prototype is safely polluted', async () => {
+    const source = populateSessionObject(Object.create(null));
+    let captured: ReturnType<typeof captureLiveSessionProjection>;
+    await withObjectPrototypeValuePollution(
+      {
+        get: () => {
+          throw new Error('inherited descriptor value must not be read');
+        }
+      },
+      async () => {
+        captured = captureLiveSessionProjection(source);
+      }
+    );
+    expect(captured?.id).toBe(LIVE_SESSION_FIXTURE.id);
   });
 
   it('rejects inherited, accessor, Proxy, and descriptor-variant details before use', async () => {

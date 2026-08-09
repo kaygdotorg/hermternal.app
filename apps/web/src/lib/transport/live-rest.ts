@@ -1,4 +1,5 @@
 export {
+  captureLiveSessionProjection,
   createLiveRestTransport,
   createLiveTransport,
   LiveRestError,
@@ -7,6 +8,7 @@ export {
 } from './live-rest-transport';
 export { LIVE_REST_FIXTURE_IDS } from './live-rest-fixtures';
 export type {
+  CapturedLiveSession,
   LiveRestErrorCode,
   LiveRestFetch,
   LiveRestTransport,

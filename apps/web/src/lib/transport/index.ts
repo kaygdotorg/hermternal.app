@@ -15,6 +15,7 @@ export type {
 export {
   LIVE_REST_FIXTURE_IDS,
   LiveRestError,
+  captureLiveSessionProjection,
   createLiveRestTransport,
   createLiveTransport,
   normalizeApiBaseUrl,
@@ -22,6 +23,7 @@ export {
 } from './live-rest';
 export type {
   AuthIdentity,
+  CapturedLiveSession,
   LiveMessage,
   LiveMessageRole,
   LiveProvider,
