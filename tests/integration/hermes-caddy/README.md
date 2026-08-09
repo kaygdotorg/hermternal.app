@@ -60,7 +60,9 @@ checks actual response status, exact upstream path and body, one `/hermes`
 prefix, rebuilt forwarding headers, canonical deep-link vectors, and separate
 chat/PTY query grammars. The proof binds those parity vectors to the committed
 static-route grammar and deep-link fixture digests above; it does not contact
-Hermes or the VM during correction runs.
+Hermes or the VM during correction runs. The black-box check requires an
+available `caddy` tool and `openssl`; missing tools are a hard failure, not a
+skip, and a skipped check is not evidence.
 
 Browser JSON has two bounded input workflows, but neither is an execution
 attestation. For a standalone run, pass a temporary browser map and the
@@ -73,10 +75,22 @@ assertions only; fabricated values, including all-zero or all-one values, are
 rejected. A caller-authored complete event map is never enough to produce
 `browser_journey=passed`.
 
+Current product/static/Git provenance is separate from the historical task-244
+parity fixtures referenced by the retained manifest. Those fixtures are not a
+current product identity, and task-244 parity binding remains a blocker until
+an independent check verifies it; retaining their digests must not silently
+claim parity. Static-tree and Git trust boundaries have explicit resource and
+special-file limits: static provenance is bounded to regular-file data and
+rejects symlinks and other special files, while Git provenance uses timed
+commands with bounded output and diagnostics. Any limit, identity,
+malformed-output, or command failure fails closed.
+
 For the historical proof retained here, pass only the complete evidence file at
-the canonical committed path with `--retained-input`. Retained mode verifies the
-exact committed bytes against `caddy-proof-evidence-sha256.txt` before parsing
-fields, checks the anchored historical build pair, and uses deterministic
+the canonical committed path with `--retained-input`. Retained evidence uses a
+descriptor-verified canonical path and identity: the committed file is checked
+against `caddy-proof-evidence-sha256.txt` before parsing any field. Copies,
+aliases, replacements, symlinks, and anchor mismatches fail closed. Retained
+mode then checks the anchored historical build pair and uses deterministic
 runtime-input placeholders, so it remains usable without a local copy of the
 old static build. A copied or edited temporary manifest is rejected before any
 browser fields are consumed. Do not combine retained input with standalone
