@@ -14,8 +14,8 @@ export const PTY_BENCHMARK_TRUST_PIN_SOURCE =
 
 export const REVIEWED_PTY_BENCHMARK_TRUST_PIN = {
   sourceRevision:
-    "3e0147fe0476249d8ee8c836ef3c944d42ea4122",
-  sourceTree: "a40e5df1f3273e98f91d6408bb13a2c89c37ec00",
+    "8998ac6b2623f4d81c8f6a470e98ce44c0bf15f2",
+  sourceTree: "80d0136509b9c0c011e712f437c7efce77edf54c",
   sourceBlobs: [
     {
       path: "apps/web/src/lib/terminal/pty-reconnect-supersession.bench.ts",
@@ -57,9 +57,9 @@ export const REVIEWED_PTY_BENCHMARK_TRUST_PIN = {
   trustedCode: [
     {
       path: "apps/web/src/lib/terminal/validate-pty-benchmarks.ts",
-      gitBlobSha: "9074484c9a372cf144c744cca810f9ad95efd119",
+      gitBlobSha: "74bd953ee0ba7971b58b6cb5a9c70403a148b75c",
       sha256:
-        "97e719dcc55ceff38752693d1d3094135957dcf9e6b7189a589e06b139847400",
+        "9125acbfb9254123aa8fa1fe815a2feb0736e89345bfe23632103c9162fd05fc",
     },
     {
       path: "apps/web/src/lib/terminal/pty-benchmark-validator.ts",

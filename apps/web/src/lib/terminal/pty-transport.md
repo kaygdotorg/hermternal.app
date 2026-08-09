@@ -294,7 +294,7 @@ engine versions, and requires the host Node to match `package.json`; it also
 records OS release, architecture, CPU model, and CPU count. Detached checkout
 provenance describes evidence generation and is separate from PTY
 `detachedAtMs`. The reviewed correction uses a two-step trust record. Source S is the exact
-reviewed commit `3e0147fe0476249d8ee8c836ef3c944d42ea4122`; trust pin P is a
+reviewed commit `8998ac6b2623f4d81c8f6a470e98ce44c0bf15f2`; trust pin P is a
 separate later commit containing the immutable S manifest and the reviewed
 validator and CLI blobs. The validator must run from P, not from an evidence
 checkout, and the evidence checkout must descend from P before adding only the
