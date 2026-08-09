@@ -121,7 +121,11 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertIn("privacy-review-metadata-missing", codes, result)
         self.assertIn("terminal-runtime-proof-not-inventory-scope", codes, result)
         self.assertEqual(result["online_vulnerability_scan"], "not_run", result)
-        self.assertEqual(result["claims"], {"vulnerabilities": "none", "online_cve_audit": "not_run"}, result)
+        self.assertEqual(
+            result["claims"],
+            {"vulnerabilities": "not_assessed_offline", "online_cve_audit": "not_run"},
+            result,
+        )
         self.assertFalse(any("CVE" in json.dumps(item) for item in result["findings"]), result)
 
     def test_report_is_deterministic_and_sorted(self) -> None:

@@ -670,7 +670,7 @@ def _base_result(manifest_record: dict[str, Any], lock_record: dict[str, Any]) -
         "offline": True,
         "network_access": False,
         "online_vulnerability_scan": "not_run",
-        "claims": {"vulnerabilities": "none", "online_cve_audit": "not_run"},
+        "claims": {"vulnerabilities": "not_assessed_offline", "online_cve_audit": "not_run"},
         "inputs": {"manifest": manifest_record, "lockfile": lock_record},
         "limits": dict(LIMITS),
         "summary": {

@@ -5,7 +5,7 @@ Status: focused planning/security inventory for R-07A / issue #192.
 This unit reads only the web prototype's local dependency manifest and Bun
 lockfile. It does not install packages, update versions, rewrite `bun.lock`,
 contact a registry, call a vulnerability service, inspect a live proxy, or
-claim that an online CVE audit ran.
+claim that vulnerabilities are absent or that an online CVE audit ran.
 
 ## Scope and result contract
 
@@ -53,13 +53,16 @@ The report always states:
   "network_access": false,
   "online_vulnerability_scan": "not_run",
   "claims": {
-    "vulnerabilities": "none",
+    "vulnerabilities": "not_assessed_offline",
     "online_cve_audit": "not_run"
   }
 }
 ```
 
-These fields are scope controls. They are not a vulnerability assessment.
+`not_assessed_offline` is deliberate: the local inventory does not establish
+that vulnerabilities are absent. These fields are scope controls, not a
+vulnerability assessment, and the report must not imply that an online CVE audit
+ran when `online_cve_audit` is `not_run`.
 
 ## Inventory behavior
 
