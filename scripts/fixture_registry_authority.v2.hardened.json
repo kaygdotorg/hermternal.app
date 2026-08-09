@@ -1,7 +1,7 @@
 {
   "schema": "hermternal.fixture-registry-authority.v2",
   "role": "aggregate_predecessor",
-  "source_commit": "dda83ab73191ea696f941bfb18496e4f4a70e748",
+  "source_commit": "3e8ca2123bc042197a513674c1791229829c38bf",
   "artifact_manifest": [
     {
       "path": "contracts/fixtures/index.json",
