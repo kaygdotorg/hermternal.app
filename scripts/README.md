@@ -399,9 +399,14 @@ For the reviewed historical fixture, use the retained workflow explicitly and
 only with the canonical committed path:
 
 ```sh
-python3 scripts/caddy_proof.py evidence \
-  --retained-input tests/integration/hermes-caddy/caddy-proof-evidence.json
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+python3 "$REPO_ROOT/scripts/caddy_proof.py" evidence \
+  --retained-input "$REPO_ROOT/tests/integration/hermes-caddy/caddy-proof-evidence.json"
 ```
+
+`REPO_ROOT` expands to the checked-out absolute repository path. The retained
+loader intentionally rejects a relative pathname, so this command is the
+reproducible canonical invocation rather than a shorthand path example.
 
 Retained mode verifies the exact canonical file bytes against the fixed
 `caddy-proof-evidence-sha256.txt` anchor before consuming any fields, checks the
