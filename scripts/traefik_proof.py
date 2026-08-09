@@ -483,6 +483,8 @@ PARSER_HISTORY_MAX_BYTES = 64 << 20
 PARSER_GIT_OUTPUT_MAX_BYTES = 1 << 20
 PARSER_GIT_INPUT_MAX_BYTES = 8 << 20
 PARSER_GIT_METADATA_MAX_ENTRIES = 4096
+PARSER_GIT_REF_MAX_BYTES = 1 << 20
+PARSER_GIT_HEAD_MAX_BYTES = 4096
 PARSER_GIT_EXECUTABLE = Path("/usr/bin/git")
 PARSER_GIT_HELPER_PATH = "/usr/bin:/bin"
 PARSER_OBJECT_HASHES = MappingProxyType(
@@ -1162,6 +1164,90 @@ def _resolve_git_metadata_reference(base: Path, value: str, label: str) -> Path:
         _parser_close_fds(opened.descriptors)
 
 
+def _parser_head_ref(head_bytes: bytes) -> str | None:
+    """Parse the bounded HEAD file without asking Git to resolve it.
+
+    The first Git command must not be allowed to choose a branch after source
+    snapshots have started.  Restrict symbolic HEAD to a local branch ref so
+    the exact loose ref and packed-ref database can be pinned descriptor-first.
+    Detached OIDs remain supported for both repository object formats.
+    """
+
+    if len(head_bytes) > PARSER_GIT_HEAD_MAX_BYTES:
+        raise ValueError("parser provenance Git HEAD exceeds its bounded input")
+    try:
+        lines = head_bytes.decode("ascii").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ValueError("parser provenance Git HEAD is malformed") from exc
+    if len(lines) != 1:
+        raise ValueError("parser provenance Git HEAD is malformed")
+    line = lines[0]
+    if line.startswith("ref: "):
+        reference = line[5:]
+        if not reference.startswith("refs/heads/") or len(reference) <= len("refs/heads/"):
+            raise ValueError("parser provenance Git HEAD symbolic ref is unsupported")
+        try:
+            encoded = reference.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("parser provenance Git HEAD symbolic ref is malformed") from exc
+        if len(encoded) > PARSER_GIT_REF_MAX_BYTES:
+            raise ValueError("parser provenance Git HEAD symbolic ref exceeds its bounded input")
+        components = reference.split("/")
+        if any(
+            not component
+            or component in {".", ".."}
+            or component.endswith(".")
+            or component.endswith(".lock")
+            for component in components[2:]
+        ):
+            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
+        if any(
+            character in reference
+            for character in ("\\", ":", "?", "[", "*", "~", "^")
+        ) or ".." in reference or "@{" in reference:
+            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
+        if any(ord(character) < 0x21 or ord(character) == 0x7F for character in reference):
+            raise ValueError("parser provenance Git HEAD symbolic ref is malformed")
+        return reference
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", line):
+        raise ValueError("parser provenance Git HEAD is malformed")
+    return None
+
+
+def _parser_pin_head_refs(
+    pin: _ParserGitMetadataPin,
+    git_dir: Path,
+    common_dir: Path,
+) -> None:
+    """Pin HEAD and every ref database consulted to resolve symbolic HEAD.
+
+    Git resolves a linked-worktree HEAD from the per-worktree git directory,
+    then reads the target branch from the shared common directory.  Pin both
+    the loose ref and bounded packed-refs bytes before any Git process starts;
+    otherwise a replacement between source snapshots and the first rev-parse
+    could silently become the calculation's initial baseline.
+    """
+
+    head_path = git_dir / "HEAD"
+    pin.watch(head_path, "Git HEAD", required=True, byte_limit=PARSER_GIT_HEAD_MAX_BYTES)
+    head_bytes = pin.read_bytes(head_path, "Git HEAD")
+    reference = _parser_head_ref(head_bytes)
+    if reference is None:
+        return
+    pin.watch(
+        common_dir / reference,
+        "Git HEAD loose ref",
+        required=False,
+        byte_limit=PARSER_GIT_HEAD_MAX_BYTES,
+    )
+    pin.watch(
+        common_dir / "packed-refs",
+        "Git packed refs",
+        required=False,
+        byte_limit=PARSER_GIT_REF_MAX_BYTES,
+    )
+
+
 def _parser_canonical_project_root(value: Path) -> Path:
     """Canonicalize the caller root while rejecting a symlinked root itself.
 
@@ -1261,6 +1347,7 @@ def _parser_prepare_git_pin(project_root: Path, budget: _ParserGitBudget) -> _Pa
         if git_watcher.final_identity is None or common_watcher.final_identity is None:
             raise ValueError("parser provenance Git metadata is incomplete")
 
+        _parser_pin_head_refs(pin, git_dir, common_dir)
         pin.watch(common_dir / "config", "Git common config", required=True, byte_limit=256 * 1024)
         if git_dir != common_dir:
             pin.watch(git_dir / "config", "Git worktree config", required=False, byte_limit=256 * 1024)
