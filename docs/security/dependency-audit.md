@@ -75,8 +75,10 @@ roots. The report separates:
   platform records and parent-scoped Bun virtual locators;
 - `lockfile.unreachable`: lock records not reached from either root.
 
-Dependency, optional-dependency, and peer-dependency edges are counted. Missing
-ordinary or optional edges are blocking. A required peer edge is also blocking
+Dependency, optional-dependency, and peer-dependency edges are counted across
+the entire parsed lock graph, including records that are unreachable from the
+workspace roots. Missing ordinary or optional edges are blocking. A required
+peer edge is also blocking
 when no local version satisfies it or when its specification is unsupported or
 malformed; an explicitly optional peer may remain absent and is retained in the
 `peer_dependency_gaps` diagnostics. Exact manifest versions and exact `npm:`

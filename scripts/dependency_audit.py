@@ -873,6 +873,14 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     unreachable = sorted(set(inputs.packages) - set(reachable))
     for key in unreachable:
         findings.append(_finding("unreachable-lock-entry", "review", package=key))
+        # Reachability controls inventory membership, not resource accounting.
+        # Count every parsed edge, including edges on records that are already
+        # unreachable, so an adversarial disconnected graph cannot bypass the
+        # global traversal budget.
+        record = inputs.packages[key]
+        for field in DEPENDENCY_FIELDS:
+            for _dependency_name in record.dependencies.get(field, {}):
+                budget.add_edge()
 
     license_missing = sum(
         1

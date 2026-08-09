@@ -93,6 +93,7 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(result["summary"]["direct_dev"], 16, result)
         self.assertEqual(result["summary"]["locked"], 199, result)
         self.assertEqual(result["summary"]["transitive"], 181, result)
+        self.assertEqual(result["lockfile"]["dependency_edges"], 292, result)
         self.assertEqual(result["lockfile"]["integrity_missing"], [], result)
         self.assertEqual(result["lockfile"]["integrity_invalid"], [], result)
         self.assertEqual(result["lockfile"]["unpinned"], [], result)
@@ -327,6 +328,31 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(result["summary"]["direct_optional"], 1, result)
         self.assertEqual(result["inventory"]["direct"]["optional"][0]["name"], "optional", result)
         self.assertFalse(result["inventory"]["direct"]["optional"][0]["pinned"], result)
+
+    def test_edge_budget_counts_unreachable_lock_graph_edges(self) -> None:
+        manifest = json.dumps(
+            {"name": "@fixture/web", "dependencies": {"alpha": "1.0.0"}, "devDependencies": {}}
+        ).encode("utf-8")
+        lock_document = json.loads(
+            synthetic_lock(
+                {"alpha": "1.0.0"},
+                {},
+                {
+                    "alpha": package_record("alpha", "1.0.0"),
+                    "orphan": package_record("orphan", "1.0.0", {"dependencies": {"child": "1.0.0"}}),
+                    "child": package_record("child", "1.0.0"),
+                },
+            )
+        )
+        with patch.object(audit, "MAX_DEPENDENCY_EDGES", 0):
+            result = audit.audit_bytes(
+                manifest,
+                json.dumps(lock_document).encode("utf-8"),
+                manifest_label="fixture/package.json",
+                lockfile_label="fixture/bun.lock",
+            )
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("dependency-edge-limit", self.finding_codes(result), result)
 
     def test_json5_virtual_records_are_supported_by_real_lockfile(self) -> None:
         result = self.real_result()
