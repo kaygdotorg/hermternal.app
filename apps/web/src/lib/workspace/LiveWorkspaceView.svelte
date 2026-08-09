@@ -6,7 +6,7 @@
   import type { LiveWorkspaceSession, LiveWorkspaceSnapshot } from './live-workspace-session';
   import type {
     CurrentSessionTerminalBridge,
-    CurrentSessionTerminalLifecycleIdentity
+    CurrentSessionTerminalLifecycleStamp
   } from '$lib/terminal/current-session-terminal';
   import type { RootTerminalLifecycleLease } from '$lib/root-route';
   import type { Appearance, WorkspaceAction } from './types';
@@ -14,10 +14,10 @@
   export let session: LiveWorkspaceSession;
   export let appearance: Appearance = 'light';
   export let onReturnToSignIn: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
-  /** Root only accepts identity stamped by a concrete bridge state callback. */
+  /** Root accepts only an opaque stamp issued by a concrete bridge state callback. */
   export let registerTerminalLifecycle: ((
     terminal: CurrentSessionTerminalBridge,
-    identity: CurrentSessionTerminalLifecycleIdentity
+    stamp: CurrentSessionTerminalLifecycleStamp
   ) => RootTerminalLifecycleLease | undefined) | undefined = undefined;
   /** Terminal 4401 must carry the registered opaque lease; chat has its own path. */
   export let onTerminalAuthenticationFailure: (lease: RootTerminalLifecycleLease | undefined) => void = () => {};
@@ -50,10 +50,11 @@
     unsubscribeTerminalLifecycle = nextTerminal.subscribe((event) => {
       if (event.type !== 'state') return;
       // The bridge stamps this event before terminal settlement can invalidate
-      // its binding. Forward that exact object identity; never infer a root ID.
-      if (event.lifecycle) {
-        terminalAuthenticationLease = registerTerminalLifecycle(nextTerminal, event.lifecycle);
-      }
+      // its binding. Preserve an accepted lease when the terminal close stamp is
+      // no longer fresh: it still proves the already-registered lifecycle.
+      if (!event.lifecycle) return;
+      const replacement = registerTerminalLifecycle(nextTerminal, event.lifecycle);
+      if (replacement) terminalAuthenticationLease = replacement;
     });
   }
 

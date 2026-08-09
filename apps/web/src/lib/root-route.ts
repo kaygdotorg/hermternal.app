@@ -3,9 +3,11 @@ import type { BrowserWebSocketFactory } from '$lib/chat/browser-chat';
 import { createBrowserAuthClient } from '$lib/auth-ui/browser-auth';
 import {
   createBrowserPtyTransport,
+  getCurrentSessionTerminalLifecycleIdentity,
   type BrowserPtyWebSocketFactory,
   type CurrentSessionTerminalBridge,
-  type CurrentSessionTerminalLifecycleIdentity
+  type CurrentSessionTerminalLifecycleIdentity,
+  type CurrentSessionTerminalLifecycleStamp
 } from '$lib/terminal/current-session-terminal';
 import { BrowserAuthSession } from '$lib/auth-ui/browser-auth-session';
 import { discoverProviders } from '$lib/auth-ui/provider-discovery';
@@ -30,13 +32,12 @@ export interface LiveRootContext {
    */
   readonly workspace: LiveWorkspaceSession;
   /**
-   * Register only a concrete root-owned bridge lifecycle. The root records the
-   * bridge's coordinator binding by reference with its native generation; it
-   * never derives an identifier from session or transport properties.
+   * Register only a bridge-issued callback stamp. The root resolves its private
+   * producer record and never mints a lease from caller-controlled structure.
    */
   registerTerminalLifecycle(
     terminal: CurrentSessionTerminalBridge,
-    identity?: CurrentSessionTerminalLifecycleIdentity
+    stamp: CurrentSessionTerminalLifecycleStamp
   ): RootTerminalLifecycleLease | undefined;
   /**
    * The rendered 4401 route may expire auth once for the currently registered
@@ -128,19 +129,27 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
 
   function registerTerminalLifecycle(
     terminal: CurrentSessionTerminalBridge,
-    identity: CurrentSessionTerminalLifecycleIdentity = terminal.lifecycleIdentity
+    stamp: CurrentSessionTerminalLifecycleStamp
   ): RootTerminalLifecycleLease | undefined {
-    if (disposed || workspace.terminal !== terminal || !hasLiveBinding(identity)) return undefined;
+    const identity = getCurrentSessionTerminalLifecycleIdentity(stamp);
+    if (disposed || workspace.terminal !== terminal || !identity || !hasLiveBinding(identity)) return undefined;
     const active = activeTerminalLifecycle;
     if (
       active?.terminal === terminal &&
       active.identity.binding === identity.binding &&
       active.identity.nativeTransportGeneration === identity.nativeTransportGeneration
     ) {
+      // A terminal close callback can arrive after its bridge binding retires.
+      // Its previously accepted producer stamp remains the same lifecycle only.
       return active.lease;
     }
-    // Replacement is explicit even for the same session: binding reference and
-    // native generation are the transport-owned lifecycle truth.
+    const liveIdentity = terminal.lifecycleIdentity;
+    if (
+      liveIdentity.binding !== identity.binding ||
+      liveIdentity.nativeTransportGeneration !== identity.nativeTransportGeneration
+    ) return undefined;
+    // Fresh registration must prove the bridge still owns this exact binding and
+    // native generation. A caller-created object has no WeakMap producer record.
     retireTerminalLifecycle();
     const lease: RootTerminalLifecycleLease = {};
     activeTerminalLifecycle = { lease, terminal, identity };

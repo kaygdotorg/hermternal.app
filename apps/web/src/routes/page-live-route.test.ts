@@ -25,7 +25,8 @@ const identity: AuthIdentity = {
 
 function createWorkspace(
   permanentFailure: LiveWorkspaceSnapshot['permanentFailure'],
-  state: LiveWorkspaceSnapshot['state'] = 'permanent-error'
+  state: LiveWorkspaceSnapshot['state'] = 'permanent-error',
+  terminal?: object
 ) {
   let snapshot: LiveWorkspaceSnapshot = {
     state,
@@ -34,7 +35,10 @@ function createWorkspace(
     title: 'Live session',
     model: 'Hermes 4',
     timeline: [],
-    permanentFailure
+    permanentFailure,
+    ...(terminal ? {
+      terminal: { status: 'failed' as const, generation: 1, outputMayBeTruncated: false, explicitlyClosed: false, failure: 'authentication-required' as const }
+    } : {})
   };
   const subscribers = new Set<(next: Readonly<LiveWorkspaceSnapshot>) => void>();
   const workspace = {
@@ -64,16 +68,18 @@ function createWorkspace(
       };
       subscribers.forEach((subscriber) => subscriber(snapshot));
     }),
-    dispose: vi.fn()
+    dispose: vi.fn(),
+    terminal
   };
   return workspace as unknown as LiveWorkspaceSession & typeof workspace;
 }
 
 function createContext(
   permanentFailure: LiveWorkspaceSnapshot['permanentFailure'],
-  state: LiveWorkspaceSnapshot['state'] = 'permanent-error'
+  state: LiveWorkspaceSnapshot['state'] = 'permanent-error',
+  terminal?: object
 ) {
-  const workspace = createWorkspace(permanentFailure, state);
+  const workspace = createWorkspace(permanentFailure, state, terminal);
   const client: BrowserAuthClient = {
     verify: vi.fn(async () => identity),
     loginWithPassword: vi.fn(async () => ({ identity, next: '/' as const })),
@@ -85,9 +91,26 @@ function createContext(
     invalidateLocalSession: () => workspace.invalidate()
   });
   const dispose = vi.fn();
-  const context = { auth, workspace, dispose } as unknown as LiveRootContext;
+  const registerTerminalLifecycle = vi.fn(() => ({}));
+  const expireTerminalAuthentication = vi.fn();
+  const context = { auth, workspace, dispose, registerTerminalLifecycle, expireTerminalAuthentication } as unknown as LiveRootContext;
   mockRoot.context = context;
-  return { auth, workspace, dispose };
+  return { auth, workspace, dispose, registerTerminalLifecycle, expireTerminalAuthentication };
+}
+
+function createTerminalCallbackBridge() {
+  const stamp = {};
+  const state = { status: 'failed' as const, generation: 1, outputMayBeTruncated: false, explicitlyClosed: false, failure: 'authentication-required' as const };
+  return {
+    state,
+    lifecycleIdentity: { binding: undefined, nativeTransportGeneration: 1 },
+    subscribe: vi.fn((listener: (event: { type: 'state'; state: typeof state; lifecycle: object }) => void) => {
+      listener({ type: 'state', state, lifecycle: stamp });
+      return () => {};
+    }),
+    sendInput: vi.fn(), resize: vi.fn(), detach: vi.fn(), setRendererReady: vi.fn(),
+    stamp
+  };
 }
 
 describe('live root route composition', () => {
@@ -110,6 +133,24 @@ describe('live root route composition', () => {
     await waitFor(() => expect(screen.getByTestId('auth-preview')).toHaveAttribute('data-state', 'session-expired'));
     expect(workspace.dispose).not.toHaveBeenCalled();
     expect(screen.getByRole('heading', { name: 'Session expired' })).toBeInTheDocument();
+  });
+
+  it('forwards a bridge callback stamp and its exact lease to terminal root expiry', async () => {
+    const terminal = createTerminalCallbackBridge();
+    const { registerTerminalLifecycle, expireTerminalAuthentication, auth } = createContext({
+      reason: 'authentication-required', closeCode: 4401, closeClassification: 'authentication-rejected'
+    }, 'permanent-error', terminal);
+    const lease = {};
+    registerTerminalLifecycle.mockReturnValue(lease);
+
+    render(Page);
+
+    await screen.findByRole('button', { name: 'Back to sessions' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
+
+    expect(registerTerminalLifecycle).toHaveBeenCalledWith(terminal, terminal.stamp);
+    expect(expireTerminalAuthentication).toHaveBeenCalledWith(lease);
+    expect(auth.current.status).toBe('authenticated');
   });
 
   it('remounts the same workspace after rendered authentication expiry', async () => {

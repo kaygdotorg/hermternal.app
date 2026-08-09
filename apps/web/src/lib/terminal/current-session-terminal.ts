@@ -49,8 +49,8 @@ export type CurrentSessionTerminalEvent =
   | Readonly<{
       type: "state";
       state: CurrentSessionTerminalState;
-      /** Captured from this bridge before a terminal state can retire its lease. */
-      lifecycle?: CurrentSessionTerminalLifecycleIdentity;
+      /** Producer-issued proof captured before terminal settlement can retire its lease. */
+      lifecycle?: CurrentSessionTerminalLifecycleStamp;
     }>
   | Readonly<{
       type: "notice";
@@ -69,6 +69,30 @@ export type CurrentSessionTerminalLifecycleIdentity = Readonly<{
   binding: TerminalBinding | undefined;
   nativeTransportGeneration: number;
 }>;
+
+/**
+ * A state callback receives this opaque producer capability instead of a
+ * structural identity. The backing map is module-private, so callers cannot
+ * forge root registration with a lookalike binding or generation object.
+ */
+export type CurrentSessionTerminalLifecycleStamp = object;
+
+const lifecycleStamps = new WeakMap<object, CurrentSessionTerminalLifecycleIdentity>();
+
+function createLifecycleStamp(
+  identity: CurrentSessionTerminalLifecycleIdentity,
+): CurrentSessionTerminalLifecycleStamp {
+  const stamp = {};
+  lifecycleStamps.set(stamp, identity);
+  return stamp;
+}
+
+/** Returns bridge-captured truth only for a producer-issued callback stamp. */
+export function getCurrentSessionTerminalLifecycleIdentity(
+  stamp: CurrentSessionTerminalLifecycleStamp,
+): CurrentSessionTerminalLifecycleIdentity | undefined {
+  return lifecycleStamps.get(stamp);
+}
 
 export type CurrentSessionTerminalListener = (
   event: CurrentSessionTerminalEvent,
@@ -272,7 +296,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         listener({
           type: "state",
           state: this.currentState,
-          lifecycle: this.lifecycleIdentity,
+          lifecycle: createLifecycleStamp(this.lifecycleIdentity),
         });
       } catch {
         // A presentation observer cannot interrupt bridge setup or transport flow.
@@ -1052,7 +1076,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // State callbacks can synchronously cause coordinator cleanup. Stamp the
     // producer's real lease before that reentrancy can retire it; no presentation
     // layer must reconstruct identity from session or generation values.
-    this.emit({ type: "state", state, lifecycle }, allowInvalidated);
+    this.emit({ type: "state", state, lifecycle: createLifecycleStamp(lifecycle) }, allowInvalidated);
   }
 
   private emit(

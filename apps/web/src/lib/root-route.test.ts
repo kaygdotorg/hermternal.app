@@ -187,7 +187,7 @@ describe('root route composition', () => {
     context.dispose();
   });
 
-  it('retires a bridge-stamped 4401 lease after reauthentication and accepts the replacement lifecycle once', async () => {
+  it('retires a bridge-stamped 4401 lease across reauthentication', async () => {
     const sockets = [createPtySocketHarness(), createPtySocketHarness()];
     let socketIndex = 0;
     const fetch: LiveRestFetch = vi.fn(async (input) => {
@@ -203,11 +203,15 @@ describe('root route composition', () => {
     await context.auth.initialize();
     const oldTerminal = context.workspace.terminal;
     if (!oldTerminal) throw new Error('terminal bridge was not composed');
+    let oldStamp: object | undefined;
+    oldTerminal.subscribe((event) => {
+      if (event.type === 'state') oldStamp = event.lifecycle;
+    });
     const oldAttach = oldTerminal.attach('session-1', new AbortController().signal);
     await flush();
     sockets[0]!.open();
     await oldAttach;
-    const oldLease = context.registerTerminalLifecycle(oldTerminal);
+    const oldLease = context.registerTerminalLifecycle(oldTerminal, oldStamp!);
     expect(oldLease).toBeDefined();
 
     context.expireTerminalAuthentication(oldLease);
@@ -218,22 +222,12 @@ describe('root route composition', () => {
     const newTerminal = context.workspace.terminal;
     if (!newTerminal) throw new Error('replacement terminal bridge was not composed');
     expect(newTerminal).not.toBe(oldTerminal);
-    // Workspace selection normally owns this attachment. This root-only test
-    // supplies its bridge-stamped replacement identity directly to isolate the
-    // root retirement fence from coordinator selection fixtures.
-    const newLease = context.registerTerminalLifecycle(newTerminal, {
-      binding: { sessionId: 'session-1', invalidate: () => {} },
-      nativeTransportGeneration: 1
-    });
-    expect(newLease).toBeDefined();
-    expect(newLease).not.toBe(oldLease);
-
+    // A caller-made lookalike cannot mint a lease for the replacement bridge.
+    expect(context.registerTerminalLifecycle(newTerminal, {})).toBeUndefined();
     // A delayed 4401 callback carries only its retired opaque capability.
     context.expireTerminalAuthentication(oldLease);
+    context.expireTerminalAuthentication(oldLease);
     expect(expire).toHaveBeenCalledTimes(1);
-    context.expireTerminalAuthentication(newLease);
-    context.expireTerminalAuthentication(newLease);
-    expect(expire).toHaveBeenCalledTimes(2);
     context.dispose();
   });
 

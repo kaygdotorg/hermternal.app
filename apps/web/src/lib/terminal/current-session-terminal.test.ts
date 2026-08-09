@@ -10,6 +10,7 @@ import {
 import type { TerminalBinding } from "$lib/session/coordinator";
 import {
   CurrentSessionTerminalBridge,
+  getCurrentSessionTerminalLifecycleIdentity,
   createBrowserPtyTransport,
   type CurrentSessionTerminalEvent,
   type BrowserPtyWebSocketFactory,
@@ -194,7 +195,14 @@ describe("CurrentSessionTerminalBridge", () => {
       },
     });
 
-    expect(states.at(-1)?.lifecycle).toEqual({ binding, nativeTransportGeneration: 1 });
+    const stamp = states.at(-1)?.lifecycle;
+    expect(stamp).toBeDefined();
+    expect(getCurrentSessionTerminalLifecycleIdentity(stamp!)).toEqual({
+      binding,
+      nativeTransportGeneration: 1,
+    });
+    // A structural lookalike has no producer record and cannot cross the root fence.
+    expect(getCurrentSessionTerminalLifecycleIdentity({})).toBeUndefined();
     expect(bridge.lifecycleIdentity.binding).toBeUndefined();
   });
 

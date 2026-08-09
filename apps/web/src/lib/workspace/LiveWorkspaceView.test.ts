@@ -58,20 +58,20 @@ function createTerminalBridge() {
     outputMayBeTruncated: false,
     explicitlyClosed: false
   };
-  const listeners = new Set<(event: { type: 'state'; state: typeof state; lifecycle: { binding: object | undefined; nativeTransportGeneration: number } }) => void>();
-  const lifecycleIdentity = { binding: undefined as object | undefined, nativeTransportGeneration: 1 };
+  const listeners = new Set<(event: { type: 'state'; state: typeof state; lifecycle: object }) => void>();
+  let lifecycle = {};
   return {
     state,
-    lifecycleIdentity,
-    subscribe: vi.fn((listener: (event: { type: 'state'; state: typeof state; lifecycle: typeof lifecycleIdentity }) => void) => {
+    lifecycleIdentity: { binding: undefined, nativeTransportGeneration: 1 },
+    subscribe: vi.fn((listener: (event: { type: 'state'; state: typeof state; lifecycle: object }) => void) => {
       listeners.add(listener);
-      listener({ type: 'state', state, lifecycle: lifecycleIdentity });
+      listener({ type: 'state', state, lifecycle });
       return () => listeners.delete(listener);
     }),
-    emitLifecycle(binding: object, generation: number) {
-      lifecycleIdentity.binding = binding;
-      lifecycleIdentity.nativeTransportGeneration = generation;
-      for (const listener of listeners) listener({ type: 'state', state, lifecycle: { binding, nativeTransportGeneration: generation } });
+    emitLifecycle(_binding: object, _generation: number) {
+      lifecycle = {};
+      for (const listener of listeners) listener({ type: 'state', state, lifecycle });
+      return lifecycle;
     },
     sendInput: vi.fn(),
     resize: vi.fn(),
@@ -125,13 +125,10 @@ describe('LiveWorkspaceView', () => {
       onReturnToSignIn,
       onTerminalAuthenticationFailure: onReturnToSignIn
     });
-    terminal.emitLifecycle(binding, 7);
+    const stamp = terminal.emitLifecycle(binding, 7);
 
     await fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
-    expect(registerTerminalLifecycle).toHaveBeenLastCalledWith(terminal, {
-      binding,
-      nativeTransportGeneration: 7
-    });
+    expect(registerTerminalLifecycle).toHaveBeenLastCalledWith(terminal, stamp);
     expect(onReturnToSignIn).toHaveBeenCalledWith(lease);
   });
 
