@@ -85,6 +85,8 @@ class CaddyProofRendererTests(unittest.TestCase):
             "/tmp/caddy-proof/nul\x00path",
             "/tmp/caddy-proof/delete\x7fpath",
             "/tmp/caddy-proof/c1\x80path",
+            "/tmp/caddy-proof/{http.request.uri.path}",
+            "/tmp/caddy-proof/unmatched}",
         )
         for field in fields:
             for value in forbidden_values:
@@ -1088,6 +1090,54 @@ class CaddyProofStaticDigestBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
                     caddy_proof._build_static_digest(root)
 
+    def test_static_digest_deadline_covers_root_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            self._write(root, "file.txt")
+            real_resolve = Path.resolve
+            clock = [0.0]
+
+            def slow_resolve(path: Path, *args: object, **kwargs: object) -> Path:
+                resolved = real_resolve(path, *args, **kwargs)
+                clock[0] = 1.0
+                return resolved
+
+            with (
+                mock.patch.object(caddy_proof, "STATIC_BUILD_DEADLINE_SECONDS", 0.5),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(Path, "resolve", autospec=True, side_effect=slow_resolve),
+            ):
+                with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_deadline_covers_final_hexdigest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            self._write(root, "file.txt")
+            real_sha256 = caddy_proof.hashlib.sha256
+            clock = [0.0]
+
+            class SlowHasher:
+                def __init__(self) -> None:
+                    self._delegate = real_sha256()
+
+                def update(self, value: bytes) -> None:
+                    self._delegate.update(value)
+
+                def hexdigest(self) -> str:
+                    clock[0] = 1.0
+                    return self._delegate.hexdigest()
+
+            with (
+                mock.patch.object(caddy_proof, "STATIC_BUILD_DEADLINE_SECONDS", 0.5),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(caddy_proof.hashlib, "sha256", return_value=SlowHasher()),
+            ):
+                with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+
     def test_static_digest_rejects_scandir_that_finishes_after_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "site"
@@ -1389,6 +1439,92 @@ class CaddyProofGitBoundaryTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "promisor|lazy|partial"):
                     verifier(repository)
+
+    def test_key_only_partial_promisor_and_include_config_are_rejected(self) -> None:
+        configs = (
+            "[extensions]\n\tpartialClone\n",
+            "[remote \"origin\"]\n\tpromisor\n",
+            "[include]\n\tpath = /tmp/hostile-config\n",
+            "[includeIf \"gitdir:/tmp\"]\n\tpath = /tmp/hostile-config\n",
+        )
+        for config_fragment in configs:
+            with self.subTest(config=config_fragment), tempfile.TemporaryDirectory() as directory:
+                repository = self._init_repository(Path(directory) / "repo")
+                config = repository / ".git" / "config"
+                config.write_text(config.read_text(encoding="utf-8") + config_fragment, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "include|promisor|partial|lazy"):
+                    caddy_proof._verify_git_repository(repository)
+
+    def test_active_worktree_config_promisor_metadata_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            config = repository / ".git" / "config"
+            config.write_text(
+                config.read_text(encoding="utf-8")
+                + "[extensions]\n\tworktreeConfig = true\n",
+                encoding="utf-8",
+            )
+            (repository / ".git" / "config.worktree").write_text(
+                "[remote \"origin\"]\n\tpromisor\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "promisor|partial|lazy|worktree"):
+                caddy_proof._verify_git_repository(repository)
+
+    def test_nested_git_metadata_links_are_rejected(self) -> None:
+        for relative in (Path("objects"), Path("refs"), Path("objects") / "pack"):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                repository = self._init_repository(Path(directory) / "repo")
+                target = repository / ".git" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.mkdir(exist_ok=True)
+                outside = Path(directory) / "moved-metadata"
+                target.rename(outside)
+                target.symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "symlink|metadata|link"):
+                    caddy_proof._verify_git_repository(repository)
+
+    def test_linked_worktree_metadata_topology_remains_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._init_repository(Path(directory) / "repo")
+            (root / "fixture.txt").write_text("fixture\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "fixture.txt"], check=True, capture_output=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+                capture_output=True,
+            )
+            linked = Path(directory) / "linked"
+            subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "--detach", "--quiet", str(linked), "HEAD"],
+                check=True,
+                capture_output=True,
+            )
+            caddy_proof._verify_git_repository(linked)
+
+    def test_closed_git_stream_timeout_is_a_bounded_proof_error(self) -> None:
+        with mock.patch.object(caddy_proof, "GIT_COMMAND_TIMEOUT_SECONDS", 0.01):
+            with self.assertRaisesRegex(ValueError, "Git provenance command timed out"):
+                caddy_proof._run_bounded_git(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os,time; os.close(1); os.close(2); time.sleep(30)",
+                    ],
+                    caddy_proof._strict_git_environment(),
+                )
 
     def test_clean_repository_remains_accepted_by_metadata_checks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
