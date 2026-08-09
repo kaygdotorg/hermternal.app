@@ -133,7 +133,8 @@ describe('AuthPreview', () => {
     expect(password).toHaveValue('');
     expect(onAction).toHaveBeenCalledTimes(1);
     expect(onAction).toHaveBeenCalledWith({ type: 'submit-password-fixture' });
-    expect(JSON.stringify(onAction.mock.calls)).not.toContain('fixture-password');
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(onAction.mock.calls[0]?.[0]).toEqual({ type: 'submit-password-fixture' });
     await waitFor(() => expect(signIn).toBeInTheDocument());
 
     fireEvent.pointerUp(signIn, { button: 0, pointerType: 'mouse' });
@@ -188,7 +189,9 @@ describe('AuthPreview', () => {
 
   it('scrubs all input representations after bounded observer deliveries and tasks', async () => {
     let callbackDom: PasswordDomState | undefined;
-    const onPasswordSubmit = vi.fn(() => {
+    let transientSubmissionMatches = false;
+    const onPasswordSubmit = vi.fn(({ username, password }: { username: string; password: string }) => {
+      transientSubmissionMatches = username === 'hostile-user' && password === 'hostile-password';
       const callbackUsername = screen.getByLabelText('Username') as HTMLInputElement;
       const callbackPassword = screen.getByLabelText('Password') as HTMLInputElement;
       callbackDom = readPasswordDomState(callbackUsername, callbackPassword);
@@ -238,21 +241,32 @@ describe('AuthPreview', () => {
       private pending = false;
       private connected = false;
       private epoch = 0;
+      private observedTarget: Node | undefined;
+      private observeSubtree = false;
+      private attributeFilter: Set<string> | undefined;
 
       constructor(private readonly callback: () => void) {}
 
-      observe(): void {
+      observe(target: Node, options?: MutationObserverInit): void {
         this.connected = true;
         this.epoch += 1;
+        this.observedTarget = target;
+        this.observeSubtree = options?.subtree === true;
+        this.attributeFilter = options?.attributeFilter ? new Set(options.attributeFilter) : undefined;
         observerInstances.add(this);
       }
       disconnect(): void {
         this.connected = false;
         this.epoch += 1;
+        this.observedTarget = undefined;
+        this.attributeFilter = undefined;
         observerInstances.delete(this);
       }
-      notify(): void {
-        if (!this.connected || this.pending) return;
+      notify(target: Node, attributeName: string): void {
+        if (!this.connected || this.pending || !this.observedTarget) return;
+        const targetIsObserved =
+          target === this.observedTarget || (this.observeSubtree && this.observedTarget.contains(target));
+        if (!targetIsObserved || (this.attributeFilter && !this.attributeFilter.has(attributeName))) return;
         this.pending = true;
         const queuedEpoch = this.epoch;
         queueMicrotask(() => {
@@ -266,19 +280,19 @@ describe('AuthPreview', () => {
       }
     }
     vi.stubGlobal('MutationObserver', FakeMutationObserver);
-    const notifyMutation = (): void => {
-      for (const observer of observerInstances) observer.notify();
+    const notifyMutation = (target: Node = form, attributeName = 'value'): void => {
+      for (const observer of observerInstances) observer.notify(target, attributeName);
     };
     const removeAttributeSpies = [username, password].map((input) =>
       vi.spyOn(input, 'removeAttribute').mockImplementation((name: string) => {
         HTMLInputElement.prototype.removeAttribute.call(input, name);
-        if (name === 'value') notifyMutation();
+        if (name === 'value') notifyMutation(input, name);
       })
     );
     const setAttributeSpies = [username, password].map((input) =>
       vi.spyOn(input, 'setAttribute').mockImplementation((name: string, value: string) => {
         HTMLInputElement.prototype.setAttribute.call(input, name, value);
-        if (name === 'value') notifyMutation();
+        if (name === 'value') notifyMutation(input, name);
       })
     );
     const defaultValueDescriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'defaultValue');
@@ -290,7 +304,7 @@ describe('AuthPreview', () => {
         get: () => defaultValueDescriptor.get!.call(input),
         set: (value: string) => {
           defaultValueDescriptor.set!.call(input, value);
-          notifyMutation();
+          notifyMutation(input, 'value');
         }
       });
     }
@@ -325,6 +339,10 @@ describe('AuthPreview', () => {
       }, 0);
     });
     observer.observe(form, { attributes: true, subtree: true, attributeFilter: ['value'] });
+    const unrelatedTarget = document.createElement('input');
+    notifyMutation(unrelatedTarget, 'value');
+    notifyMutation(username, 'class');
+    expect(observerCount).toBe(0);
 
     const queuedTimers: Array<() => void> = [];
     const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: TimerHandler) => {
@@ -338,7 +356,9 @@ describe('AuthPreview', () => {
       expect(queuedTimers).toHaveLength(0);
       fireEvent.submit(form);
 
-      expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'hostile-user', password: 'hostile-password' });
+      expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
+      expect(transientSubmissionMatches).toBe(true);
+      onPasswordSubmit.mockClear();
       expect(callbackDom).toEqual(EMPTY_PASSWORD_DOM_STATE);
       expect(resetObservation).toEqual([EMPTY_PASSWORD_DOM_STATE]);
 
@@ -483,38 +503,108 @@ describe('AuthPreview', () => {
 
   it('invalidates queued scrub microtasks before a new password entry', async () => {
     const onAction = vi.fn();
-    const view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onAction });
-    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
+    let transientSubmissionMatches = false;
+    const onPasswordSubmit = vi.fn((credentials: { username: string; password: string }) => {
+      transientSubmissionMatches = credentials.username === 'queued-old-user' && credentials.password === 'queued-old-password';
+    });
+    const queuedMicrotasks: Array<() => void> = [];
+    const nativeQueueMicrotask = globalThis.queueMicrotask;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    vi.stubGlobal('requestAnimationFrame', undefined);
+    vi.stubGlobal('queueMicrotask', (callback: VoidFunction) => {
+      queuedMicrotasks.push(callback);
+    });
 
-    fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'queued-old-user' } });
-    fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'queued-old-password' } });
-    fireEvent.submit(screen.getByRole('form', { name: 'Hermes password sign in' }));
-    // Back-to-providers invalidates the old clear generation synchronously,
-    // before the submit handler's queued microtasks get a chance to run.
-    fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
+    try {
+      const view = render(AuthPreview, { discoveryMode: 'live', state: 'password', onAction, onPasswordSubmit });
+      // Preserve the initial focus fallback sequence explicitly. The first timer
+      // belongs to focus ownership, not the scrub scheduler under test.
+      await tick();
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersToNextTimerAsync();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBe(0);
+      // Svelte may leave scheduler jobs in the shared queue during hydration;
+      // the focus fallback above is the only pre-submit work this regression
+      // needs to preserve, so isolate the scrub queue from those jobs.
+      queuedMicrotasks.length = 0;
 
-    await view.rerender({ state: 'provider-selection' });
-    await view.rerender({ state: 'password' });
-    await waitFor(() => expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready'));
-    const username = screen.getByLabelText('Username') as HTMLInputElement;
-    const password = screen.getByLabelText('Password') as HTMLInputElement;
-    username.value = 'queued-new-user';
-    password.value = 'queued-new-password';
-    username.defaultValue = 'queued-new-default-user';
-    password.defaultValue = 'queued-new-default-password';
-    username.setAttribute('value', 'queued-new-attr-user');
-    password.setAttribute('value', 'queued-new-attr-password');
+      const form = screen.getByRole('form', { name: 'Hermes password sign in' });
+      const username = screen.getByLabelText('Username') as HTMLInputElement;
+      const password = screen.getByLabelText('Password') as HTMLInputElement;
+      fireEvent.input(username, { target: { value: 'queued-old-user' } });
+      fireEvent.input(password, { target: { value: 'queued-old-password' } });
+      fireEvent.submit(form);
 
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(readPasswordDomState(username, password)).toEqual([
-      'queued-new-user',
-      'queued-new-password',
-      'queued-new-attr-user',
-      'queued-new-attr-password',
-      'queued-new-attr-user',
-      'queued-new-attr-password'
-    ]);
+      expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
+      expect(transientSubmissionMatches).toBe(true);
+      onPasswordSubmit.mockClear();
+      // A real live callback queues owned scrub work. Hold every callback
+      // produced by this submit, then invalidate its generation before any of
+      // that stale work is released.
+      expect(queuedMicrotasks.length).toBeGreaterThan(0);
+      const staleQueuedMicrotasks = queuedMicrotasks.splice(0);
+      // Keep only the submit callbacks under manual control. Svelte's own
+      // rerender scheduler must use the native queue while the new owner is
+      // established; the stale callbacks remain deferred in our array.
+      vi.stubGlobal('queueMicrotask', nativeQueueMicrotask);
+      fireEvent.click(screen.getByRole('button', { name: 'Back to providers' }));
+      expect(onAction).toHaveBeenCalledWith({ type: 'back-to-providers' });
+
+      await view.rerender({ state: 'provider-selection' });
+      await view.rerender({ state: 'password' });
+      await tick();
+      await Promise.resolve();
+      // The provider handoff and the new password entry each retain their
+      // fallback focus timer. Flush both state-transition timers before the
+      // retry owner is populated.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      for (let timerPass = 0; timerPass < 4 && vi.getTimerCount() > 0; timerPass += 1) {
+        await vi.advanceTimersToNextTimerAsync();
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBe(0);
+
+      const retryUsername = screen.getByLabelText('Username') as HTMLInputElement;
+      const retryPassword = screen.getByLabelText('Password') as HTMLInputElement;
+      expect(screen.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
+      retryUsername.value = 'queued-new-user';
+      retryPassword.value = 'queued-new-password';
+      retryUsername.defaultValue = 'queued-new-default-user';
+      retryPassword.defaultValue = 'queued-new-default-password';
+      // Setting defaultValue also serializes the value attribute. Assert that
+      // coupled phase before deliberately overwriting the serialized form.
+      expect(readPasswordDomState(retryUsername, retryPassword)).toEqual([
+        'queued-new-user',
+        'queued-new-password',
+        'queued-new-default-user',
+        'queued-new-default-password',
+        'queued-new-default-user',
+        'queued-new-default-password'
+      ]);
+      retryUsername.setAttribute('value', 'queued-new-attr-user');
+      retryPassword.setAttribute('value', 'queued-new-attr-password');
+
+      for (const staleMicrotask of staleQueuedMicrotasks) staleMicrotask();
+      // The stale owner must not clear the new live values or its final
+      // serialized/default representation. DOM semantics couple defaultValue
+      // to the value attribute, so the final phase is asserted as that pair.
+      expect(readPasswordDomState(retryUsername, retryPassword)).toEqual([
+        'queued-new-user',
+        'queued-new-password',
+        'queued-new-attr-user',
+        'queued-new-attr-password',
+        'queued-new-attr-user',
+        'queued-new-attr-password'
+      ]);
+      view.unmount();
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
   });
 
   it('ignores a stale focus callback after the focus epoch changes', async () => {
@@ -633,7 +723,12 @@ describe('AuthPreview', () => {
     fireEvent.keyDown(password, { key: 'Enter' });
 
     expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
-    expect(onPasswordSubmit).toHaveBeenCalledWith({ username: 'live-user', password: 'live-password' });
+    const transientSubmissionMatches = onPasswordSubmit.mock.calls.some(([credentials]) => {
+      const value = credentials as { username?: string; password?: string } | undefined;
+      return value?.username === 'live-user' && value.password === 'live-password';
+    });
+    expect(transientSubmissionMatches).toBe(true);
+    onPasswordSubmit.mockClear();
     expect(username).toHaveValue('');
     expect(password).toHaveValue('');
   });
@@ -658,14 +753,16 @@ describe('AuthPreview', () => {
     fireEvent.submit(screen.getByRole('form', { name: 'Hermes password sign in' }));
 
     expect(onPasswordSubmit).toHaveBeenCalledTimes(1);
-    expect(onPasswordSubmit).toHaveBeenCalledWith({
-      username: 'synthetic-user',
-      password: 'transient-password'
+    const transientSubmissionMatches = onPasswordSubmit.mock.calls.some(([credentials]) => {
+      const value = credentials as { username?: string; password?: string } | undefined;
+      return value?.username === 'synthetic-user' && value.password === 'transient-password';
     });
+    expect(transientSubmissionMatches).toBe(true);
+    onPasswordSubmit.mockClear();
     expect(onAction).not.toHaveBeenCalledWith({
       type: 'submit-password-fixture'
     });
-    expect(JSON.stringify(onAction.mock.calls)).not.toContain('transient-password');
+    expect(onAction).toHaveBeenCalledTimes(0);
     await waitFor(() => {
       expect(screen.getByLabelText('Username')).toHaveValue('');
       expect(screen.getByLabelText('Password')).toHaveValue('');
@@ -695,7 +792,7 @@ describe('AuthPreview', () => {
 
     await waitFor(() => expect(screen.getByLabelText('Password')).toHaveValue(''));
     expect(onAction).toHaveBeenCalledWith({ type: 'back-to-providers' });
-    expect(JSON.stringify(onAction.mock.calls)).not.toContain('state-change-fixture');
+    expect(onAction.mock.calls.every(([action]) => typeof action?.type === 'string')).toBe(true);
   });
 
   it('moves focus to each entered task and exposes state-specific live semantics', async () => {

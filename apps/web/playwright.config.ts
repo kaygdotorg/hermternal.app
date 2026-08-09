@@ -25,7 +25,35 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      // Credential-bearing groups run only in the artifact-safe projects below.
+      grepInvert: /credential-safe/u,
       use: { ...devices['Desktop Chrome'] }
+    },
+    {
+      name: 'chromium-auth-safe',
+      // Playwright trace snapshots retain DOM and action arguments. Keep every
+      // credential-bearing lane in a worker whose public project config proves
+      // trace, screenshot, and video are disabled. The true no-JavaScript lane
+      // is isolated in the dedicated project below.
+      grep: /credential-safe/u,
+      grepInvert: /first-load no-script product route/u,
+      use: {
+        ...devices['Desktop Chrome'],
+        trace: 'off',
+        screenshot: 'off',
+        video: 'off'
+      }
+    },
+    {
+      name: 'chromium-js-disabled',
+      grep: /first-load no-script product route/u,
+      use: {
+        ...devices['Desktop Chrome'],
+        javaScriptEnabled: false,
+        trace: 'off',
+        screenshot: 'off',
+        video: 'off'
+      }
     }
   ]
 });

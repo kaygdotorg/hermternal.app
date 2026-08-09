@@ -2,11 +2,28 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { createServer } from 'node:net';
 import type { Readable } from 'node:stream';
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type Route } from '@playwright/test';
+import {
+  clearNativeStorage,
+  installNativeCredentialProof,
+  overwriteNativeStorage,
+  readNativeCredentialEvidence,
+  readStorageEvidence,
+  scrubNativeCredentialProof,
+  seedNativeStorage,
+  storageEvidenceEqual
+} from './auth-proof';
 
 let uiPreviewOrigin = '';
 let previewProcess: ChildProcessByStdio<null, Readable, Readable> | undefined;
 let previewDiagnostics = '';
+let previewLifecycleHandlers:
+  | {
+      collectDiagnostics: (chunk: Buffer) => void;
+      onError: (error: Error) => void;
+      onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
+    }
+  | undefined;
 
 async function reservePort(): Promise<number> {
   const server = createServer();
@@ -37,15 +54,25 @@ async function waitForPreview(url: string): Promise<void> {
       throw new Error(`The isolated UI preview exited before readiness: ${previewDiagnostics}`);
     }
 
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    // Bound every fetch independently so a hung preview cannot consume time
+    // past the shared readiness deadline or mask a process failure.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), remainingMs);
     try {
-      const response = await fetch(url, { redirect: 'manual' });
+      const response = await fetch(url, { redirect: 'manual', signal: controller.signal });
       if (response.status >= 200 && response.status < 400) return;
       lastFailure = `HTTP ${response.status}`;
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : String(error);
+    } finally {
+      clearTimeout(timeout);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const delayMs = Math.min(100, Math.max(0, deadline - Date.now()));
+    if (delayMs === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
   throw new Error(`The isolated UI preview did not become ready: ${lastFailure}. ${previewDiagnostics}`);
@@ -54,6 +81,155 @@ async function waitForPreview(url: string): Promise<void> {
 function previewUrl(path: string): string {
   if (!uiPreviewOrigin) throw new Error('The isolated UI preview server is not ready.');
   return `${uiPreviewOrigin}${path}`;
+}
+
+type PreviewCredentialEvidence = {
+  liveValueMatchCount: number;
+  liveNonEmptyCount: number;
+  crossFieldValueMatchCount: number;
+  defaultValueMatchCount: number;
+  serializedCredentialCount: number;
+  renderedCredentialCount: number;
+};
+
+const PREVIEW_CREDENTIAL_PROBE = '__uiPreviewCredentialProbe';
+
+// Keep one-use preview values inside the browser realm. The probe exposes only
+// bounded counts so Playwright never receives a credential through an action
+// argument, matcher, or reporter-visible result.
+async function installPreviewCredentialProbe(page: Page): Promise<void> {
+  await page.evaluate((probeName) => {
+    const windowRecord = window as unknown as Record<string, unknown>;
+    if (windowRecord[probeName]) throw new Error('Preview credential probe is already installed.');
+
+    let usernameSecret = '';
+    let passwordSecret = '';
+    let probe: {
+      seed: () => void;
+      read: () => PreviewCredentialEvidence;
+      scrub: () => void;
+    };
+
+    const findControls = (): {
+      form: HTMLFormElement | null;
+      username: HTMLInputElement | null;
+      password: HTMLInputElement | null;
+    } => {
+      const form = document.querySelector('form[aria-label="Hermes password sign in"]') as HTMLFormElement | null;
+      const username = form?.querySelector('input[data-fixture-field="username"]') as HTMLInputElement | null;
+      const password = form?.querySelector('input[data-fixture-field="password"]') as HTMLInputElement | null;
+      return { form, username, password };
+    };
+
+    const requireControls = (): {
+      form: HTMLFormElement;
+      username: HTMLInputElement;
+      password: HTMLInputElement;
+    } => {
+      const controls = findControls();
+      if (!controls.form || !controls.username || !controls.password) {
+        throw new Error('Preview credential controls are unavailable.');
+      }
+      return {
+        form: controls.form,
+        username: controls.username,
+        password: controls.password
+      };
+    };
+
+    const setInputValue = (input: HTMLInputElement, value: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (!setter) throw new Error('Preview credential value setter is unavailable.');
+      setter.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+
+    const seed = (): void => {
+      const { username, password } = requireControls();
+      usernameSecret = crypto.randomUUID();
+      passwordSecret = crypto.randomUUID();
+      setInputValue(username, usernameSecret);
+      setInputValue(password, passwordSecret);
+    };
+
+    const read = (): PreviewCredentialEvidence => {
+      const { form, username, password } = requireControls();
+      const liveValues = [username.value, password.value];
+      const expectedValues = [usernameSecret, passwordSecret];
+      const defaultValues = [username.defaultValue, password.defaultValue];
+      const serializedValues = [username.getAttribute('value'), password.getAttribute('value')];
+      const renderedText = form.textContent ?? '';
+
+      return {
+        liveValueMatchCount: liveValues.reduce(
+          (count, value, index) => count + Number(value !== '' && value === expectedValues[index]),
+          0
+        ),
+        liveNonEmptyCount: liveValues.filter((value) => value !== '').length,
+        crossFieldValueMatchCount:
+          Number(passwordSecret !== '' && username.value === passwordSecret) +
+          Number(usernameSecret !== '' && password.value === usernameSecret),
+        defaultValueMatchCount: defaultValues.reduce(
+          (count, value) => count + Number(value !== '' && (value === usernameSecret || value === passwordSecret)),
+          0
+        ),
+        serializedCredentialCount: serializedValues.reduce(
+          (count, value) => count + Number(value !== null && (value === usernameSecret || value === passwordSecret)),
+          0
+        ),
+        renderedCredentialCount:
+          Number(usernameSecret !== '' && renderedText.includes(usernameSecret)) +
+          Number(passwordSecret !== '' && renderedText.includes(passwordSecret))
+      };
+    };
+
+    const scrub = (): void => {
+      const { username, password } = findControls();
+      for (const input of [username, password]) {
+        if (!input) continue;
+        input.value = '';
+        input.defaultValue = '';
+        input.removeAttribute('value');
+      }
+      usernameSecret = '';
+      passwordSecret = '';
+      if (windowRecord[probeName] === probe) delete windowRecord[probeName];
+    };
+
+    probe = { seed, read, scrub };
+    windowRecord[probeName] = probe;
+  }, PREVIEW_CREDENTIAL_PROBE);
+}
+
+async function seedPreviewCredentials(page: Page): Promise<void> {
+  await page.evaluate((probeName) => {
+    const probe = (window as unknown as Record<string, unknown>)[probeName] as
+      | { seed?: () => void }
+      | undefined;
+    if (typeof probe?.seed !== 'function') throw new Error('Preview credential probe is unavailable.');
+    probe.seed();
+  }, PREVIEW_CREDENTIAL_PROBE);
+}
+
+async function readPreviewCredentialEvidence(page: Page): Promise<PreviewCredentialEvidence> {
+  return page.evaluate((probeName) => {
+    const probe = (window as unknown as Record<string, unknown>)[probeName] as
+      | { read?: () => PreviewCredentialEvidence }
+      | undefined;
+    if (typeof probe?.read !== 'function') throw new Error('Preview credential probe is unavailable.');
+    return probe.read();
+  }, PREVIEW_CREDENTIAL_PROBE);
+}
+
+async function scrubPreviewCredentialProbe(page: Page): Promise<void> {
+  await page
+    .evaluate((probeName) => {
+      const probe = (window as unknown as Record<string, unknown>)[probeName] as
+        | { scrub?: () => void }
+        | undefined;
+      probe?.scrub?.();
+    }, PREVIEW_CREDENTIAL_PROBE)
+    .catch(() => undefined);
 }
 
 test.beforeAll(async () => {
@@ -69,27 +245,76 @@ test.beforeAll(async () => {
   const collectDiagnostics = (chunk: Buffer): void => {
     previewDiagnostics = `${previewDiagnostics}${chunk.toString()}`.slice(-4_000);
   };
+  let rejectProcessFailure: (error: Error) => void = () => undefined;
+  const processFailure = new Promise<never>((_, reject) => {
+    rejectProcessFailure = reject;
+  });
+  const onProcessError = (error: Error): void => {
+    collectDiagnostics(Buffer.from(`\n[preview process error] ${error.message}\n`));
+    rejectProcessFailure(new Error(`The isolated UI preview failed before readiness: ${previewDiagnostics}`));
+  };
+  const onProcessExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    collectDiagnostics(Buffer.from(`\n[preview process exit] code=${code ?? 'null'} signal=${signal ?? 'null'}\n`));
+    rejectProcessFailure(new Error(`The isolated UI preview exited before readiness: ${previewDiagnostics}`));
+  };
   serverProcess.stdout.on('data', collectDiagnostics);
   serverProcess.stderr.on('data', collectDiagnostics);
-  await waitForPreview(previewUrl('/ui-preview'));
+  serverProcess.once('error', onProcessError);
+  serverProcess.once('exit', onProcessExit);
+  previewLifecycleHandlers = { collectDiagnostics, onError: onProcessError, onExit: onProcessExit };
+
+  await Promise.race([waitForPreview(previewUrl('/ui-preview')), processFailure]);
 });
 
 test.afterAll(async () => {
   const processToStop = previewProcess;
+  const lifecycleHandlers = previewLifecycleHandlers;
   previewProcess = undefined;
-  if (!processToStop || processToStop.exitCode !== null) return;
+  previewLifecycleHandlers = undefined;
+  if (!processToStop) return;
 
-  processToStop.kill('SIGTERM');
-  await new Promise<void>((resolve) => {
-    const timeout = setTimeout(() => {
-      processToStop.kill('SIGKILL');
-      resolve();
-    }, 2_000);
-    processToStop.once('exit', () => {
-      clearTimeout(timeout);
-      resolve();
+  if (lifecycleHandlers) {
+    processToStop.stdout.off('data', lifecycleHandlers.collectDiagnostics);
+    processToStop.stderr.off('data', lifecycleHandlers.collectDiagnostics);
+    processToStop.off('error', lifecycleHandlers.onError);
+    processToStop.off('exit', lifecycleHandlers.onExit);
+  }
+  if (processToStop.exitCode !== null) return;
+
+  const waitForExit = (timeoutMs: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      let settled = false;
+      const finish = (exited: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        processToStop.off('exit', onExit);
+        processToStop.off('error', onError);
+        resolve(exited);
+      };
+      const onExit = (): void => finish(true);
+      const onError = (): void => finish(false);
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      processToStop.once('exit', onExit);
+      processToStop.once('error', onError);
     });
-  });
+
+  const gracefulExit = waitForExit(2_000);
+  try {
+    processToStop.kill('SIGTERM');
+  } catch {
+    // The process may have exited between the exit check and termination.
+  }
+  if (await gracefulExit) return;
+  if (processToStop.exitCode !== null) return;
+
+  const forcedExit = waitForExit(1_000);
+  try {
+    processToStop.kill('SIGKILL');
+  } catch {
+    // Best-effort escalation when graceful termination did not complete.
+  }
+  await forcedExit;
 });
 
 for (const viewport of [
@@ -623,142 +848,198 @@ test('narrow title editing uses the compound island, separate workspace action, 
   await expect(island.getByRole('button', { name: 'Edit conversation title' })).toBeFocused();
 });
 
-test('password preview submits only a credential-free local fixture action', async ({ page }) => {
-  await page.goto(previewUrl('/ui-preview'));
-  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+// Auth controls are credential-bearing during setup. Keep this entire lane out
+// of Playwright traces, screenshots, and video; assertions return only bounded
+// counts or booleans, and cleanup scrubs controls before the lane exits.
+test.describe('credential-safe authentication preview lanes', () => {
 
-  const fixtureForm = page.getByRole('form', { name: 'Hermes password sign in' });
-  const username = page.getByLabel('Username');
-  const password = page.getByRole('textbox', { name: 'Password' });
-  await expect(fixtureForm).toHaveAttribute('autocomplete', 'off');
-  await expect(fixtureForm).toHaveAttribute('data-form-type', 'other');
-  await expect(fixtureForm).toHaveAttribute('method', 'dialog');
-  await expect(username).not.toHaveAttribute('name', /.+/);
-  await expect(username).toHaveAttribute('data-fixture-field', 'username');
-  await expect(username).toHaveAttribute('autocomplete', 'off');
-  await expect(password).not.toHaveAttribute('name', /.+/);
-  await expect(password).toHaveAttribute('data-fixture-field', 'password');
-  await expect(password).toHaveAttribute('autocomplete', 'off');
+  test('password preview submits only a credential-free local fixture action', async ({ page }) => {
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
 
-  await username.fill('fixture-user');
-  await password.fill('pointer-only-fixture');
-  const signIn = page.getByRole('button', { name: 'Sign in' });
-  await signIn.evaluate((button) => button.setAttribute('data-pointer-owner', 'password-submit'));
-  const signInBox = await signIn.boundingBox();
-  expect(signInBox).not.toBeNull();
-  await page.mouse.move(
-    (signInBox?.x ?? 0) + (signInBox?.width ?? 0) / 2,
-    (signInBox?.y ?? 0) + (signInBox?.height ?? 0) / 2
-  );
-  await page.mouse.down();
+    const fixtureForm = page.getByRole('form', { name: 'Hermes password sign in' });
+    const username = page.getByLabel('Username');
+    const password = page.getByRole('textbox', { name: 'Password' });
+    await expect(fixtureForm).toHaveAttribute('autocomplete', 'off');
+    await expect(fixtureForm).toHaveAttribute('data-form-type', 'other');
+    await expect(fixtureForm).toHaveAttribute('method', 'dialog');
+    await expect(fixtureForm).toHaveAttribute('data-field-ownership', 'ready');
+    await expect(username).not.toHaveAttribute('name', /.+/);
+    await expect(username).toHaveAttribute('data-fixture-field', 'username');
+    await expect(username).toHaveAttribute('autocomplete', 'off');
+    await expect(password).not.toHaveAttribute('name', /.+/);
+    await expect(password).toHaveAttribute('data-fixture-field', 'password');
+    await expect(password).toHaveAttribute('autocomplete', 'off');
 
-  // Pointer-down activation clears both controls and publishes the local action
-  // before pointer up. The button must stay mounted to consume its one matching
-  // compatibility click instead of replacing the form mid-gesture.
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
-  await expect(username).toHaveValue('');
-  await expect(password).toHaveValue('');
-  await expect(page.getByRole('button', { name: 'Signing in' })).toHaveAttribute(
-    'data-pointer-owner',
-    'password-submit'
-  );
-  const authActionNote = page.locator('.section-note').nth(1);
-  await expect(authActionNote).toHaveText('submit-password-fixture');
-  await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
-  await page.mouse.up();
+    await installPreviewCredentialProbe(page);
+    try {
+      await seedPreviewCredentials(page);
+      const seededEvidence = await readPreviewCredentialEvidence(page);
+      expect(seededEvidence.liveValueMatchCount).toBe(2);
+      expect(seededEvidence.liveNonEmptyCount).toBe(2);
+      expect(seededEvidence.crossFieldValueMatchCount).toBe(0);
+      const signIn = page.getByRole('button', { name: 'Sign in' });
+      await signIn.evaluate((button) => button.setAttribute('data-pointer-owner', 'password-submit'));
+      const signInBox = await signIn.boundingBox();
+      expect(signInBox).not.toBeNull();
+      await page.mouse.move(
+        (signInBox?.x ?? 0) + (signInBox?.width ?? 0) / 2,
+        (signInBox?.y ?? 0) + (signInBox?.height ?? 0) / 2
+      );
+      await page.mouse.down();
 
-  await expect(authActionNote).toHaveText('submit-password-fixture');
-  await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
-  expect(await page.locator('html').textContent()).not.toContain('pointer-only-fixture');
-  await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
-});
+      // Pointer-down activation clears both controls and publishes the local action
+      // before pointer up. The button must stay mounted to consume its one matching
+      // compatibility click instead of replacing the form mid-gesture.
+      await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
+      const pointerEvidence = await readPreviewCredentialEvidence(page);
+      expect(pointerEvidence.liveValueMatchCount).toBe(0);
+      expect(pointerEvidence.liveNonEmptyCount).toBe(0);
+      expect(pointerEvidence.defaultValueMatchCount).toBe(0);
+      expect(pointerEvidence.serializedCredentialCount).toBe(0);
+      expect(pointerEvidence.renderedCredentialCount).toBe(0);
+      await expect(page.getByRole('button', { name: 'Signing in' })).toHaveAttribute(
+        'data-pointer-owner',
+        'password-submit'
+      );
+      const authActionNote = page.locator('.section-note').nth(1);
+      await expect(authActionNote).toHaveText('submit-password-fixture');
+      await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
+      await page.mouse.up();
 
-test('hydrated password submission remains keyboard accessible and credential-free', async ({ page }) => {
-  await page.goto(previewUrl('/ui-preview'));
-  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-  const username = page.getByLabel('Username');
-  const password = page.getByRole('textbox', { name: 'Password' });
-  await username.fill('keyboard-fixture');
-  await password.fill('keyboard-only-value');
-  await password.press('Enter');
+      await expect(authActionNote).toHaveText('submit-password-fixture');
+      await expect(authActionNote).toHaveAttribute('data-auth-action-count', '1');
+      await expect(page.getByText(/sent only to the configured/i)).not.toBeVisible();
+    } finally {
+      await scrubPreviewCredentialProbe(page);
+    }
+  });
 
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password-submitting');
-  await expect(username).toHaveValue('');
-  await expect(password).toHaveValue('');
-  await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
-  await expect(page.locator('.section-note').nth(1)).toHaveAttribute('data-auth-action-count', '1');
-  expect(await page.locator('html').textContent()).not.toContain('keyboard-only-value');
-});
+  test('hydrated password submission remains keyboard accessible and credential-free', async ({ page }) => {
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    const auth = page.getByTestId('auth-preview');
+    const form = page.getByRole('form', { name: 'Hermes password sign in' });
+    const password = page.getByRole('textbox', { name: 'Password' });
+    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
 
-test('password cancellation keeps the current action name and returns to owned password entry', async ({ page }) => {
-  await page.goto(previewUrl('/ui-preview'));
-  await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    await installPreviewCredentialProbe(page);
+    try {
+      await seedPreviewCredentials(page);
+      const seededEvidence = await readPreviewCredentialEvidence(page);
+      expect(seededEvidence.liveValueMatchCount).toBe(2);
+      expect(seededEvidence.liveNonEmptyCount).toBe(2);
+      expect(seededEvidence.crossFieldValueMatchCount).toBe(0);
+      await password.press('Enter');
 
-  const auth = page.getByTestId('auth-preview');
-  const form = page.getByRole('form', { name: 'Hermes password sign in' });
-  const username = page.getByLabel('Username');
-  const password = page.getByRole('textbox', { name: 'Password' });
-  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-  await username.fill('cancel-user');
-  await password.fill('cancel-password');
-  await password.press('Enter');
-  await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+      await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+      const keyboardEvidence = await readPreviewCredentialEvidence(page);
+      expect(keyboardEvidence.liveValueMatchCount).toBe(0);
+      expect(keyboardEvidence.liveNonEmptyCount).toBe(0);
+      expect(keyboardEvidence.defaultValueMatchCount).toBe(0);
+      expect(keyboardEvidence.serializedCredentialCount).toBe(0);
+      expect(keyboardEvidence.renderedCredentialCount).toBe(0);
+      await expect(page.locator('.section-note').nth(1)).toHaveText('submit-password-fixture');
+      await expect(page.locator('.section-note').nth(1)).toHaveAttribute('data-auth-action-count', '1');
+    } finally {
+      await scrubPreviewCredentialProbe(page);
+    }
+  });
 
-  const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
-  await expect(cancel).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Back to providers' })).toHaveCount(0);
-  await cancel.click();
-
-  await expect(auth).toHaveAttribute('data-state', 'password');
-  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-  await expect(username).toHaveValue('');
-  await expect(password).toHaveValue('');
-  await expect(username).toBeFocused();
-  await expect(page.locator('.section-note').nth(1)).toHaveText('cancel-sign-in');
-});
-
-test('password cancellation preserves one Pill gesture across pointerup, pointercancel, and compatibility click', async ({ page }) => {
-  for (const terminalEvent of ['pointerup', 'pointercancel'] as const) {
+  test('password cancellation keeps the current action name and returns to owned password entry', async ({ page }) => {
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
 
     const auth = page.getByTestId('auth-preview');
     const form = page.getByRole('form', { name: 'Hermes password sign in' });
-    const username = page.getByLabel('Username');
     const password = page.getByRole('textbox', { name: 'Password' });
-    const actionNote = page.locator('.section-note').nth(1);
     await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-    await username.fill(`gesture-user-${terminalEvent}`);
-    await password.fill(`gesture-password-${terminalEvent}`);
-    await password.press('Enter');
-    await expect(auth).toHaveAttribute('data-state', 'password-submitting');
-    await expect(actionNote).toHaveAttribute('data-auth-action-count', '1');
 
-    const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
-    await cancel.evaluate((button) => button.setAttribute('data-pointer-owner', 'cancel-sign-in'));
-    await cancel.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
-    await expect(auth).toHaveAttribute('data-state', 'password');
+    await installPreviewCredentialProbe(page);
+    try {
+      await seedPreviewCredentials(page);
+      const seededEvidence = await readPreviewCredentialEvidence(page);
+      expect(seededEvidence.liveValueMatchCount).toBe(2);
+      expect(seededEvidence.liveNonEmptyCount).toBe(2);
+      expect(seededEvidence.crossFieldValueMatchCount).toBe(0);
+      await password.press('Enter');
+      await expect(auth).toHaveAttribute('data-state', 'password-submitting');
 
-    const returned = page.getByRole('button', { name: 'Back to providers' });
-    await expect(returned).toHaveAttribute('data-pointer-owner', 'cancel-sign-in');
-    if (terminalEvent === 'pointerup') {
-      await returned.dispatchEvent('pointerup', { button: 0, pointerType: 'mouse' });
-    } else {
-      await returned.dispatchEvent('pointercancel', { pointerType: 'mouse' });
+      const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
+      await expect(cancel).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Back to providers' })).toHaveCount(0);
+      await cancel.click();
+
+      await expect(auth).toHaveAttribute('data-state', 'password');
+      await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+      const cancellationEvidence = await readPreviewCredentialEvidence(page);
+      expect(cancellationEvidence.liveValueMatchCount).toBe(0);
+      expect(cancellationEvidence.liveNonEmptyCount).toBe(0);
+      expect(cancellationEvidence.defaultValueMatchCount).toBe(0);
+      expect(cancellationEvidence.serializedCredentialCount).toBe(0);
+      expect(cancellationEvidence.renderedCredentialCount).toBe(0);
+      await expect(page.getByLabel('Username')).toBeFocused();
+      await expect(page.locator('.section-note').nth(1)).toHaveText('cancel-sign-in');
+    } finally {
+      await scrubPreviewCredentialProbe(page);
     }
-    await returned.dispatchEvent('click', { detail: 1 });
+  });
 
-    await expect(auth).toHaveAttribute('data-state', 'password');
-    await expect(actionNote).toHaveText('cancel-sign-in');
-    await expect(actionNote).toHaveAttribute('data-auth-action-count', '2');
-    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-    await expect(username).toHaveValue('');
-    await expect(password).toHaveValue('');
-    await expect(username).toBeFocused();
-  }
-});
+  test('password cancellation preserves one Pill gesture across pointerup, pointercancel, and compatibility click', async ({ page }) => {
+    for (const terminalEvent of ['pointerup', 'pointercancel'] as const) {
+      await page.goto(previewUrl('/ui-preview'));
+      await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
 
-test('first-load no-script product route exposes only the inert loading boundary', async ({ page }) => {
+      const auth = page.getByTestId('auth-preview');
+      const form = page.getByRole('form', { name: 'Hermes password sign in' });
+      const password = page.getByRole('textbox', { name: 'Password' });
+      const actionNote = page.locator('.section-note').nth(1);
+      await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+
+      await installPreviewCredentialProbe(page);
+      try {
+        await seedPreviewCredentials(page);
+      const seededEvidence = await readPreviewCredentialEvidence(page);
+      expect(seededEvidence.liveValueMatchCount).toBe(2);
+      expect(seededEvidence.liveNonEmptyCount).toBe(2);
+      expect(seededEvidence.crossFieldValueMatchCount).toBe(0);
+        await password.press('Enter');
+        await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+        await expect(actionNote).toHaveAttribute('data-auth-action-count', '1');
+
+        const cancel = page.getByRole('button', { name: 'Cancel sign-in' });
+        await cancel.evaluate((button) => button.setAttribute('data-pointer-owner', 'cancel-sign-in'));
+        await cancel.dispatchEvent('pointerdown', { button: 0, pointerType: 'mouse' });
+        await expect(auth).toHaveAttribute('data-state', 'password');
+
+        const returned = page.getByRole('button', { name: 'Back to providers' });
+        await expect(returned).toHaveAttribute('data-pointer-owner', 'cancel-sign-in');
+        if (terminalEvent === 'pointerup') {
+          await returned.dispatchEvent('pointerup', { button: 0, pointerType: 'mouse' });
+        } else {
+          await returned.dispatchEvent('pointercancel', { pointerType: 'mouse' });
+        }
+        await returned.dispatchEvent('click', { detail: 1 });
+
+        await expect(auth).toHaveAttribute('data-state', 'password');
+        await expect(actionNote).toHaveText('cancel-sign-in');
+        await expect(actionNote).toHaveAttribute('data-auth-action-count', '2');
+        await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+        const gestureEvidence = await readPreviewCredentialEvidence(page);
+        expect(gestureEvidence.liveValueMatchCount).toBe(0);
+        expect(gestureEvidence.liveNonEmptyCount).toBe(0);
+        expect(gestureEvidence.defaultValueMatchCount).toBe(0);
+        expect(gestureEvidence.serializedCredentialCount).toBe(0);
+        expect(gestureEvidence.renderedCredentialCount).toBe(0);
+        await expect(page.getByLabel('Username')).toBeFocused();
+      } finally {
+        await scrubPreviewCredentialProbe(page);
+      }
+    }
+  });
+
+test('first-load no-script product route exposes only the inert loading boundary', async ({ page }, testInfo) => {
+  expect(testInfo.project.name).toBe('chromium-js-disabled');
   const cdp = await page.context().newCDPSession(page);
   let authRequestCount = 0;
   const onRequest = (request: { url(): string }) => {
@@ -774,7 +1055,7 @@ test('first-load no-script product route exposes only the inert loading boundary
     await expect(page.getByTestId('auth-preview')).toHaveCount(0);
     await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveCount(0);
     await expect(page.locator('input[type="password"]')).toHaveCount(0);
-    const passwordTextVisible = (await page.locator('html').textContent())?.includes('password') ?? false;
+    const passwordTextVisible = (await page.getByText(/password/i).count()) > 0;
     expect(passwordTextVisible).toBe(false);
     expect(authRequestCount).toBe(0);
   } finally {
@@ -784,82 +1065,421 @@ test('first-load no-script product route exposes only the inert loading boundary
   }
 });
 
-test('native password activation clears live values without navigation when script execution stops', async ({ page }) => {
+  test('native password activation clears live values without navigation, storage mutation, serialization, or retained artifacts', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
 
-  for (const activation of ['click', 'enter'] as const) {
-    const usernameValue = `visible-username-${activation}`;
-    const passwordValue = `raw-password-${activation}`;
-    let requestCount = 0;
-    let navigationCount = 0;
-    let credentialSeenInConsole = false;
-    const onRequest = (request: { isNavigationRequest(): boolean }) => {
-      requestCount += 1;
-      if (request.isNavigationRequest()) navigationCount += 1;
-    };
-    const onConsole = (message: { text(): string }) => {
-      const text = message.text();
-      credentialSeenInConsole ||= text.includes(usernameValue) || text.includes(passwordValue);
-    };
-    const cdp = await page.context().newCDPSession(page);
-    try {
-      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
-      await page.goto(previewUrl('/ui-preview'));
-      await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-      await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
-      const originalUrl = page.url();
-      const originalHistoryLength = await page.evaluate(() => history.length);
-
-      await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-      const username = page.getByLabel('Username');
-      const password = page.getByRole('textbox', { name: 'Password' });
-      await username.fill(usernameValue);
-      await password.fill(passwordValue);
-
-      // Start protocol and console evidence only after setup navigation and
-      // hydration have completed, so the assertion covers the disabled-script
-      // activation rather than the test fixture's own page load.
-      requestCount = 0;
-      navigationCount = 0;
-      page.on('request', onRequest);
-      page.on('console', onConsole);
-
-      const signIn = page.getByRole('button', { name: 'Sign in' });
-      if (activation === 'click') await signIn.click();
-      else {
+    for (const activation of ['click', 'enter'] as const) {
+      let requestCount = 0;
+      let navigationCount = 0;
+      let scriptDisabled = false;
+      const onRequest = (request: { isNavigationRequest(): boolean }) => {
+        requestCount += 1;
+        if (request.isNavigationRequest()) navigationCount += 1;
+      };
+      const cdp = await page.context().newCDPSession(page);
+      try {
+        await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+        await page.goto(previewUrl('/ui-preview'));
+        await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+        await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute('data-field-ownership', 'ready');
+        const originalUrl = page.url();
+        const originalHistoryLength = await page.evaluate(() => history.length);
+        const signIn = page.getByRole('button', { name: 'Sign in' });
+        const signInBox = await signIn.boundingBox();
+        expect(signInBox).not.toBeNull();
         await signIn.focus();
-        await signIn.press('Enter');
+        await expect(signIn).toBeFocused();
+
+        // Seed noncredentialed values so same-key overwrites are detectable,
+        // then prove the sanitizer distinguishes an overwrite before the native
+        // action begins. Only counts and digest equality leave the page.
+        await seedNativeStorage(page);
+        const seededStorage = await readStorageEvidence(page);
+        expect(seededStorage.cryptoSupported).toBe(true);
+        await overwriteNativeStorage(page);
+        const overwrittenStorage = await readStorageEvidence(page);
+        expect(storageEvidenceEqual(seededStorage, overwrittenStorage)).toBe(false);
+        await seedNativeStorage(page);
+        const storageBefore = await readStorageEvidence(page);
+        expect(storageEvidenceEqual(seededStorage, storageBefore)).toBe(true);
+
+        await installNativeCredentialProof(page);
+        await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+        scriptDisabled = true;
+
+        // The disabled-script action is the only period observed by protocol
+        // counters, so setup traffic cannot be misattributed to native proof.
+        requestCount = 0;
+        navigationCount = 0;
+        page.on('request', onRequest);
+        // Use protocol input only after script execution is disabled. The
+        // geometry and focus are captured above while locator actions remain safe.
+        if (activation === 'click') {
+          await page.mouse.click(
+            (signInBox?.x ?? 0) + (signInBox?.width ?? 0) / 2,
+            (signInBox?.y ?? 0) + (signInBox?.height ?? 0) / 2
+          );
+        } else {
+          await page.keyboard.press('Enter');
+        }
+
+        await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+        scriptDisabled = false;
+        const credentialEvidence = await readNativeCredentialEvidence(page);
+        expect(credentialEvidence.liveValueMatchCount).toBe(0);
+        expect(credentialEvidence.liveNonEmptyCount).toBe(0);
+        expect(credentialEvidence.defaultValueMatchCount).toBe(0);
+        expect(credentialEvidence.serializedCredentialCount).toBe(0);
+        expect(credentialEvidence.formDataEventCount).toBe(0);
+        expect(credentialEvidence.formDataConstructionCount).toBe(0);
+        expect(credentialEvidence.formDataCredentialEntryCount).toBe(0);
+        await expect(page).toHaveURL(originalUrl);
+        expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+        expect(navigationCount).toBe(0);
+        expect(requestCount).toBe(0);
+        expect(storageEvidenceEqual(storageBefore, await readStorageEvidence(page))).toBe(true);
+      } finally {
+        page.off('request', onRequest);
+        if (scriptDisabled) {
+          await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+        }
+        await scrubNativeCredentialProof(page);
+        await clearNativeStorage(page);
+        await cdp.detach().catch(() => undefined);
       }
-
-      const liveValuesCleared = (await username.inputValue()) === '' && (await password.inputValue()) === '';
-      expect(liveValuesCleared).toBe(true);
-      await expect(page).toHaveURL(originalUrl);
-      expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
-      expect(navigationCount).toBe(0);
-      expect(requestCount).toBe(0);
-      expect(credentialSeenInConsole).toBe(false);
-
-      // Compute only a credential-presence count inside the browser. This is
-      // not screenshot or full-DOM redaction evidence, and raw markup is not
-      // returned to the test trace.
-      const serializedCredentialCount = await page.evaluate(
-        ([usernameText, passwordText]) =>
-          [usernameText, passwordText].reduce(
-            (count, value) => count + Number(document.documentElement.outerHTML.includes(value)),
-            0
-          ),
-        [usernameValue, passwordValue]
-      );
-      expect(serializedCredentialCount).toBe(0);
-    } finally {
-      page.off('request', onRequest);
-      page.off('console', onConsole);
-      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
-      await cdp.detach().catch(() => undefined);
     }
-  }
-});
+  });
 
-test('password ownership fences delayed hydration, rapid focus transfer, and keyboard submission', async ({ page }) => {
+  test('storage evidence fails closed for injected crypto, signing, canonicalization, and truncation failures', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
+
+    const expectUnsupported = (evidence: Awaited<ReturnType<typeof readStorageEvidence>>): void => {
+      expect(evidence).toEqual({
+        cryptoSupported: false,
+        status: 'unsupported',
+        truncated: null,
+        readFailure: true,
+        recordCount: null,
+        digestCount: null,
+        recordLimit: null,
+        cookieCount: null,
+        localStorageEntryCount: null,
+        sessionStorageEntryCount: null,
+        indexedDbSupported: null,
+        indexedDbRecordCount: null,
+        indexedDbUnexpectedDatabaseCount: null,
+        indexedDbDatabaseCount: null,
+        indexedDbStoreCount: null,
+        cookieTruncated: null,
+        localStorageTruncated: null,
+        sessionStorageTruncated: null,
+        indexedDbTruncated: null,
+        truncation: { any: null, cookie: null, localStorage: null, sessionStorage: null, indexedDb: null },
+        fingerprint: null
+      });
+    };
+
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute(
+      'data-field-ownership',
+      'ready'
+    );
+
+    try {
+      await seedNativeStorage(page);
+      const supportedStorage = await readStorageEvidence(page);
+      expect(supportedStorage.status).toBe('supported');
+      expect(supportedStorage.cryptoSupported).toBe(true);
+      expect(supportedStorage.readFailure).toBe(false);
+      expect(supportedStorage.truncated).toBe(false);
+      expect(storageEvidenceEqual(supportedStorage, supportedStorage)).toBe(true);
+
+      for (const injectFailure of ['import-key', 'probe-sign', 'sign', 'canonicalization', 'truncation'] as const) {
+        const failedStorage = await readStorageEvidence(page, { injectFailure });
+        if (injectFailure === 'truncation') {
+          expect(failedStorage).toEqual({
+            cryptoSupported: true,
+            status: 'truncated',
+            truncated: true,
+            readFailure: false,
+            recordCount: null,
+            digestCount: null,
+            recordLimit: 2_048,
+            cookieCount: null,
+            localStorageEntryCount: null,
+            sessionStorageEntryCount: null,
+            indexedDbSupported: null,
+            indexedDbRecordCount: null,
+            indexedDbUnexpectedDatabaseCount: null,
+            indexedDbDatabaseCount: null,
+            indexedDbStoreCount: null,
+            cookieTruncated: true,
+            localStorageTruncated: false,
+            sessionStorageTruncated: false,
+            indexedDbTruncated: false,
+            truncation: { any: true, cookie: true, localStorage: false, sessionStorage: false, indexedDb: false },
+            fingerprint: null
+          });
+        } else {
+          expectUnsupported(failedStorage);
+        }
+        expect(storageEvidenceEqual(supportedStorage, failedStorage)).toBe(false);
+        expect(storageEvidenceEqual(failedStorage, failedStorage)).toBe(false);
+      }
+    } finally {
+      await scrubNativeCredentialProof(page);
+      await clearNativeStorage(page);
+    }
+  });
+
+  test('storage evidence opens only the reviewed IndexedDB database, store, and key', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
+
+    const reviewedLabels = {
+      database: '__hermternal_native_auth_proof__',
+      store: 'proof',
+      key: 'same-key'
+    } as const;
+    const spyGlobal = '__uiPreviewStorageEvidenceIndexedDbSpy';
+    let methodsRestored = false;
+
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+    await expect(page.getByRole('form', { name: 'Hermes password sign in' })).toHaveAttribute(
+      'data-field-ownership',
+      'ready'
+    );
+
+    try {
+      await seedNativeStorage(page);
+
+      // Install the spy only after seeding so setup writes cannot be mistaken for
+      // evidence reads. It retains only counts plus the reviewed labels; no raw
+      // IndexedDB names, keys, values, or thrown messages cross the page boundary.
+      const spyInstalled = await page.evaluate(
+        ({ databaseName, objectStoreName, objectKey, globalName }) => {
+          const windowRecord = window as unknown as Record<string, unknown>;
+          if (windowRecord[globalName]) return false;
+          if (
+            typeof indexedDB === 'undefined' ||
+            typeof indexedDB.open !== 'function' ||
+            typeof indexedDB.databases !== 'function' ||
+            typeof IDBDatabase === 'undefined' ||
+            typeof IDBObjectStore === 'undefined' ||
+            typeof IDBKeyRange === 'undefined'
+          ) {
+            return false;
+          }
+
+          const factory = indexedDB;
+          const originalOpen = factory.open;
+          const originalDatabases = factory.databases;
+          const originalTransaction = IDBDatabase.prototype.transaction;
+          const originalCount = IDBObjectStore.prototype.count;
+          const originalGet = IDBObjectStore.prototype.get;
+          const originalOpenDescriptor = Object.getOwnPropertyDescriptor(factory, 'open');
+          const originalDatabasesDescriptor = Object.getOwnPropertyDescriptor(factory, 'databases');
+          const originalTransactionDescriptor = Object.getOwnPropertyDescriptor(IDBDatabase.prototype, 'transaction');
+          const originalCountDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'count');
+          const originalGetDescriptor = Object.getOwnPropertyDescriptor(IDBObjectStore.prototype, 'get');
+
+          let databaseEnumerationCount = 0;
+          let databaseOpenCount = 0;
+          let reviewedDatabaseOpenCount = 0;
+          let unrelatedDatabaseOpenCount = 0;
+          let transactionInvocationCount = 0;
+          let reviewedStoreInvocationCount = 0;
+          let unrelatedStoreInvocationCount = 0;
+          let countInvocationCount = 0;
+          let getInvocationCount = 0;
+          let reviewedKeyInvocationCount = 0;
+          let unrelatedKeyInvocationCount = 0;
+
+          const defineWrapped = (target: object, property: string, descriptor: PropertyDescriptor | undefined, value: unknown): void => {
+            Object.defineProperty(
+              target,
+              property,
+              descriptor ? { ...descriptor, value } : { configurable: true, enumerable: false, writable: true, value }
+            );
+          };
+          const restoreDescriptor = (target: object, property: string, descriptor: PropertyDescriptor | undefined): boolean => {
+            try {
+              if (descriptor) Object.defineProperty(target, property, descriptor);
+              else delete (target as Record<string, unknown>)[property];
+              return true;
+            } catch {
+              return false;
+            }
+          };
+
+          const open = function (this: IDBFactory, name: string, version?: number): IDBOpenDBRequest {
+            databaseOpenCount += 1;
+            if (name === databaseName) reviewedDatabaseOpenCount += 1;
+            else unrelatedDatabaseOpenCount += 1;
+            const argumentsList = version === undefined ? [name] : [name, version];
+            return Reflect.apply(originalOpen, this, argumentsList) as IDBOpenDBRequest;
+          };
+          const databases = function (this: IDBFactory): Promise<IDBDatabaseInfo[]> {
+            databaseEnumerationCount += 1;
+            return Reflect.apply(originalDatabases, this, []) as Promise<IDBDatabaseInfo[]>;
+          };
+          const transaction = function (
+            this: IDBDatabase,
+            storeNames: string | string[],
+            mode?: IDBTransactionMode,
+            options?: IDBTransactionOptions
+          ): IDBTransaction {
+            transactionInvocationCount += 1;
+            const names = Array.isArray(storeNames) ? storeNames : [storeNames];
+            for (const name of names) {
+              if (name === objectStoreName) reviewedStoreInvocationCount += 1;
+              else unrelatedStoreInvocationCount += 1;
+            }
+            const argumentsList: unknown[] = [storeNames];
+            if (mode !== undefined) argumentsList.push(mode);
+            if (options !== undefined) argumentsList.push(options);
+            return Reflect.apply(originalTransaction, this, argumentsList) as IDBTransaction;
+          };
+          const count = function (this: IDBObjectStore, query?: IDBValidKey | IDBKeyRange): IDBRequest {
+            countInvocationCount += 1;
+            const reviewed = query instanceof IDBKeyRange
+              ? query.lower === objectKey && query.upper === objectKey && !query.lowerOpen && !query.upperOpen
+              : query === objectKey;
+            if (reviewed) reviewedKeyInvocationCount += 1;
+            else unrelatedKeyInvocationCount += 1;
+            const argumentsList = query === undefined ? [] : [query];
+            return Reflect.apply(originalCount, this, argumentsList) as IDBRequest;
+          };
+          const get = function (this: IDBObjectStore, query?: IDBValidKey): IDBRequest {
+            getInvocationCount += 1;
+            if (query === objectKey) reviewedKeyInvocationCount += 1;
+            else unrelatedKeyInvocationCount += 1;
+            const argumentsList = query === undefined ? [] : [query];
+            return Reflect.apply(originalGet, this, argumentsList) as IDBRequest;
+          };
+
+          try {
+            defineWrapped(factory, 'open', originalOpenDescriptor, open);
+            defineWrapped(factory, 'databases', originalDatabasesDescriptor, databases);
+            defineWrapped(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor, transaction);
+            defineWrapped(IDBObjectStore.prototype, 'count', originalCountDescriptor, count);
+            defineWrapped(IDBObjectStore.prototype, 'get', originalGetDescriptor, get);
+          } catch {
+            restoreDescriptor(factory, 'open', originalOpenDescriptor);
+            restoreDescriptor(factory, 'databases', originalDatabasesDescriptor);
+            restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor);
+            restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor);
+            restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor);
+            return false;
+          }
+
+          const read = (): {
+            databaseLabel: string;
+            storeLabel: string;
+            keyLabel: string;
+            databaseEnumerationCount: number;
+            databaseOpenCount: number;
+            reviewedDatabaseOpenCount: number;
+            unrelatedDatabaseOpenCount: number;
+            transactionInvocationCount: number;
+            reviewedStoreInvocationCount: number;
+            unrelatedStoreInvocationCount: number;
+            countInvocationCount: number;
+            getInvocationCount: number;
+            reviewedKeyInvocationCount: number;
+            unrelatedKeyInvocationCount: number;
+          } => ({
+            databaseLabel: databaseName,
+            storeLabel: objectStoreName,
+            keyLabel: objectKey,
+            databaseEnumerationCount,
+            databaseOpenCount,
+            reviewedDatabaseOpenCount,
+            unrelatedDatabaseOpenCount,
+            transactionInvocationCount,
+            reviewedStoreInvocationCount,
+            unrelatedStoreInvocationCount,
+            countInvocationCount,
+            getInvocationCount,
+            reviewedKeyInvocationCount,
+            unrelatedKeyInvocationCount
+          });
+          const restore = (): boolean => {
+            const restored = [
+              restoreDescriptor(factory, 'open', originalOpenDescriptor),
+              restoreDescriptor(factory, 'databases', originalDatabasesDescriptor),
+              restoreDescriptor(IDBDatabase.prototype, 'transaction', originalTransactionDescriptor),
+              restoreDescriptor(IDBObjectStore.prototype, 'count', originalCountDescriptor),
+              restoreDescriptor(IDBObjectStore.prototype, 'get', originalGetDescriptor)
+            ];
+            try {
+              delete windowRecord[globalName];
+            } catch {
+              restored.push(false);
+            }
+            return restored.every(Boolean);
+          };
+
+          windowRecord[globalName] = { read, restore };
+          return true;
+        },
+        { databaseName: reviewedLabels.database, objectStoreName: reviewedLabels.store, objectKey: reviewedLabels.key, globalName: spyGlobal }
+      );
+      expect(spyInstalled).toBe(true);
+
+      const storageEvidence = await readStorageEvidence(page);
+      expect(storageEvidence.status).toBe('supported');
+      expect(storageEvidence.cryptoSupported).toBe(true);
+      expect(storageEvidence.readFailure).toBe(false);
+      expect(storageEvidenceEqual(storageEvidence, storageEvidence)).toBe(true);
+
+      const observations = await page.evaluate((globalName) => {
+        const spy = (window as unknown as Record<string, unknown>)[globalName] as
+          | { read?: () => Record<string, string | number> }
+          | undefined;
+        return typeof spy?.read === 'function' ? spy.read() : null;
+      }, spyGlobal);
+      expect(observations?.databaseLabel).toBe(reviewedLabels.database);
+      expect(observations?.storeLabel).toBe(reviewedLabels.store);
+      expect(observations?.keyLabel).toBe(reviewedLabels.key);
+      expect(observations?.databaseEnumerationCount).toBe(1);
+      expect(observations?.databaseOpenCount).toBe(1);
+      expect(observations?.reviewedDatabaseOpenCount).toBe(1);
+      expect(observations?.unrelatedDatabaseOpenCount).toBe(0);
+      expect(observations?.transactionInvocationCount).toBe(1);
+      expect(observations?.reviewedStoreInvocationCount).toBe(1);
+      expect(observations?.unrelatedStoreInvocationCount).toBe(0);
+      expect(observations?.countInvocationCount).toBe(1);
+      expect(observations?.getInvocationCount).toBe(1);
+      expect(observations?.reviewedKeyInvocationCount).toBe(2);
+      expect(observations?.unrelatedKeyInvocationCount).toBe(0);
+    } finally {
+      methodsRestored = await page
+        .evaluate((globalName) => {
+          const spy = (window as unknown as Record<string, unknown>)[globalName] as
+            | { restore?: () => boolean }
+            | undefined;
+          return typeof spy?.restore === 'function' ? spy.restore() : true;
+        }, spyGlobal)
+        .catch(() => false);
+      await scrubNativeCredentialProof(page);
+      await clearNativeStorage(page);
+    }
+
+    expect(methodsRestored).toBe(true);
+  });
+
+ test('password ownership fences delayed hydration, rapid focus transfer, and keyboard submission', async ({ page }) => {
   await page.addInitScript(() => {
     const frames: Array<(timestamp: number) => void> = [];
     Object.defineProperty(window, 'requestAnimationFrame', {
@@ -892,136 +1512,140 @@ test('password ownership fences delayed hydration, rapid focus transfer, and key
   const form = page.getByRole('form', { name: 'Hermes password sign in' });
   const username = page.getByLabel('Username');
   const password = page.getByRole('textbox', { name: 'Password' });
-  await expect(form).toHaveAttribute('data-field-ownership', 'pending');
-  await expect(username).toHaveAttribute('readonly', '');
-  await expect(password).toHaveAttribute('readonly', '');
+  await installPreviewCredentialProbe(page);
+  try {
+    await expect(form).toHaveAttribute('data-field-ownership', 'pending');
+    await expect(username).toHaveAttribute('readonly', '');
+    await expect(password).toHaveAttribute('readonly', '');
 
-  // A rapid keyboard event while the focus transfer is queued cannot populate
-  // either field because both controls are still read-only.
-  await password.focus();
-  await page.keyboard.type('queued-password');
-  expect(await username.inputValue()).toBe('');
-  expect(await password.inputValue()).toBe('');
+    // A rapid keyboard event while the focus transfer is queued cannot populate
+    // either field because both controls are still read-only.
+    await password.focus();
+    await page.keyboard.press('KeyQ');
+    const pendingEvidence = await readPreviewCredentialEvidence(page);
+    expect(pendingEvidence.liveNonEmptyCount).toBe(0);
+    expect(pendingEvidence.liveValueMatchCount).toBe(0);
 
-  await page.evaluate(() => {
-    (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
-  });
-  await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-  await expect(username).toBeFocused();
+    await page.evaluate(() => {
+      (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
+    });
+    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+    await expect(username).toBeFocused();
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await page.keyboard.type(`fixture-user-${attempt}`);
-    await password.click();
-    await page.keyboard.type(`fixture-password-${attempt}`);
-    expect(await username.inputValue()).toBe(`fixture-user-${attempt}`);
-    expect(await password.inputValue()).toBe(`fixture-password-${attempt}`);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await password.click();
+      await expect(password).toBeFocused();
+      await seedPreviewCredentials(page);
+      const seededEvidence = await readPreviewCredentialEvidence(page);
+      expect(seededEvidence.liveValueMatchCount).toBe(2);
+      expect(seededEvidence.liveNonEmptyCount).toBe(2);
+      expect(seededEvidence.crossFieldValueMatchCount).toBe(0);
+      const populatedEvidence = await readPreviewCredentialEvidence(page);
+      expect(populatedEvidence.liveValueMatchCount).toBe(2);
+      expect(populatedEvidence.liveNonEmptyCount).toBe(2);
+      expect(populatedEvidence.crossFieldValueMatchCount).toBe(0);
 
-    await password.press('Enter');
-    await expect(auth).toHaveAttribute('data-state', 'password-submitting');
-    await expect(username).toHaveValue('');
-    await expect(password).toHaveValue('');
+      await password.press('Enter');
+      await expect(auth).toHaveAttribute('data-state', 'password-submitting');
+      const clearedEvidence = await readPreviewCredentialEvidence(page);
+      expect(clearedEvidence.liveValueMatchCount).toBe(0);
+      expect(clearedEvidence.liveNonEmptyCount).toBe(0);
+      expect(clearedEvidence.defaultValueMatchCount).toBe(0);
+      expect(clearedEvidence.serializedCredentialCount).toBe(0);
+      expect(clearedEvidence.renderedCredentialCount).toBe(0);
 
-    if (attempt < 2) {
-      await authState.selectOption('password');
-      await page.evaluate(() => {
-        (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
-      });
-      await expect(form).toHaveAttribute('data-field-ownership', 'ready');
-      await expect(username).toBeFocused();
+      if (attempt < 2) {
+        await authState.selectOption('password');
+        await page.evaluate(() => {
+          (window as unknown as Window & { releaseAuthFrames: () => void }).releaseAuthFrames();
+        });
+        await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+        await expect(username).toBeFocused();
+      }
     }
+  } finally {
+    await scrubPreviewCredentialProbe(page);
   }
 });
 
-test('native field Enter preserves live values while failing closed without navigation, requests, storage, or credential serialization', async ({ page }) => {
-  const cdp = await page.context().newCDPSession(page);
-  const usernameValue = 'native-field-enter-user';
-  const passwordValue = 'native-field-enter-password';
-  let requestCount = 0;
-  let navigationCount = 0;
-  const onRequest = (request: { isNavigationRequest(): boolean }) => {
-    requestCount += 1;
-    if (request.isNavigationRequest()) navigationCount += 1;
-  };
-  const storageSummary = async (): Promise<{ cookieCount: number; originCount: number; localStorageEntryCount: number }> => {
-    const storage = await page.context().storageState();
-    return {
-      cookieCount: storage.cookies.length,
-      originCount: storage.origins.length,
-      localStorageEntryCount: storage.origins.reduce((count, origin) => count + origin.localStorage.length, 0)
+  test('native field Enter preserves live values while failing closed without navigation, storage mutation, serialization, or observed FormData activity', async ({ page }, testInfo) => {
+    expect(testInfo.project.name).toBe('chromium-auth-safe');
+    expect(testInfo.project.use.trace).toBe('off');
+    expect(testInfo.project.use.screenshot).toBe('off');
+    expect(testInfo.project.use.video).toBe('off');
+
+    const cdp = await page.context().newCDPSession(page);
+    let requestCount = 0;
+    let navigationCount = 0;
+    let scriptDisabled = false;
+    const onRequest = (request: { isNavigationRequest(): boolean }) => {
+      requestCount += 1;
+      if (request.isNavigationRequest()) navigationCount += 1;
     };
-  };
 
-  try {
-    await page.goto(previewUrl('/ui-preview'));
-    await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
-    const form = page.getByRole('form', { name: 'Hermes password sign in' });
-    await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+    try {
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+      await page.goto(previewUrl('/ui-preview'));
+      await page.getByRole('combobox', { name: 'Authentication state' }).selectOption('password');
+      const form = page.getByRole('form', { name: 'Hermes password sign in' });
+      const password = page.getByRole('textbox', { name: 'Password' });
+      await expect(form).toHaveAttribute('data-field-ownership', 'ready');
+      const passwordBox = await password.boundingBox();
+      expect(passwordBox).not.toBeNull();
+      await password.focus();
+      await expect(password).toBeFocused();
 
-    const originalUrl = page.url();
-    const originalHistoryLength = await page.evaluate(() => history.length);
-    const storageBefore = await storageSummary();
+      const originalUrl = page.url();
+      const originalHistoryLength = await page.evaluate(() => history.length);
+      await seedNativeStorage(page);
+      const seededStorage = await readStorageEvidence(page);
+      expect(seededStorage.cryptoSupported).toBe(true);
+      await overwriteNativeStorage(page);
+      const overwrittenStorage = await readStorageEvidence(page);
+      expect(storageEvidenceEqual(seededStorage, overwrittenStorage)).toBe(false);
+      await seedNativeStorage(page);
+      const storageBefore = await readStorageEvidence(page);
+      expect(storageEvidenceEqual(seededStorage, storageBefore)).toBe(true);
 
-    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
-    const username = page.getByLabel('Username');
-    await username.fill(usernameValue);
-    const password = page.getByRole('textbox', { name: 'Password' });
-    await password.fill(passwordValue);
+      await installNativeCredentialProof(page);
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: true });
+      scriptDisabled = true;
 
-    // Observe only the disabled-script action. Setup navigation and hydration
-    // are outside this listener window, so counts cannot retain request data or
-    // misattribute fixture traffic to the native Enter proof.
-    requestCount = 0;
-    navigationCount = 0;
-    page.on('request', onRequest);
-    await password.press('Enter');
+      // Protocol request counts begin after setup. Enter from an input has no
+      // running handler or native reset target, so retaining live values is the
+      // expected bounded DOM-retention outcome while the action fails closed.
+      requestCount = 0;
+      navigationCount = 0;
+      page.on('request', onRequest);
+      // Focus and geometry were captured before script execution was disabled;
+      // raw keyboard input is the only action allowed in this interval.
+      await page.keyboard.press('Enter');
 
-    // With handlers disabled, input Enter has no native reset target. The live
-    // values may remain in their controls even though submission fails closed.
-    const nativeValuesRemain =
-      (await username.inputValue()) === usernameValue && (await password.inputValue()) === passwordValue;
-    expect(nativeValuesRemain).toBe(true);
-
-    await expect(page).toHaveURL(originalUrl);
-    expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
-    expect(navigationCount).toBe(0);
-    expect(requestCount).toBe(0);
-    const storageAfter = await storageSummary();
-    const storageUnchanged =
-      storageAfter.cookieCount === storageBefore.cookieCount &&
-      storageAfter.originCount === storageBefore.originCount &&
-      storageAfter.localStorageEntryCount === storageBefore.localStorageEntryCount;
-    expect(storageUnchanged).toBe(true);
-
-    // Compute only a credential-presence count inside the browser; do not
-    // return raw HTML or make a screenshot/full-DOM redaction claim.
-    const serializedCredentialCount = await page.evaluate(
-      ([usernameText, passwordText]) =>
-        [usernameText, passwordText].reduce(
-          (count, value) => count + Number(document.documentElement.outerHTML.includes(value)),
-          0
-        ),
-      [usernameValue, passwordValue]
-    );
-    expect(serializedCredentialCount).toBe(0);
-  } finally {
-    page.off('request', onRequest);
-    await page.unroute('**/api/auth/**').catch(() => undefined);
-    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
-    // Scrub any native values that remained after the negative proof before
-    // releasing the page and CDP resources, without retaining their payloads.
-    await page
-      .locator('input[type="text"], input[type="password"]')
-      .evaluateAll((controls) => {
-        for (const control of controls) {
-          const input = control as HTMLInputElement;
-          input.value = '';
-          input.defaultValue = '';
-          input.removeAttribute('value');
-        }
-      })
-      .catch(() => undefined);
-    await cdp.detach().catch(() => undefined);
-  }
+      await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
+      scriptDisabled = false;
+      const credentialEvidence = await readNativeCredentialEvidence(page);
+      expect(credentialEvidence.liveValueMatchCount).toBe(2);
+      expect(credentialEvidence.liveNonEmptyCount).toBe(2);
+      expect(credentialEvidence.defaultValueMatchCount).toBe(0);
+      expect(credentialEvidence.serializedCredentialCount).toBe(0);
+      expect(credentialEvidence.formDataEventCount).toBe(0);
+      expect(credentialEvidence.formDataConstructionCount).toBe(0);
+      expect(credentialEvidence.formDataCredentialEntryCount).toBe(0);
+      await expect(page).toHaveURL(originalUrl);
+      expect(await page.evaluate(() => history.length)).toBe(originalHistoryLength);
+      expect(navigationCount).toBe(0);
+      expect(requestCount).toBe(0);
+      expect(storageEvidenceEqual(storageBefore, await readStorageEvidence(page))).toBe(true);
+    } finally {
+      page.off('request', onRequest);
+      if (scriptDisabled) {
+        await cdp.send('Emulation.setScriptExecutionDisabled', { value: false }).catch(() => undefined);
+      }
+      await scrubNativeCredentialProof(page);
+      await clearNativeStorage(page);
+      await cdp.detach().catch(() => undefined);
+    }
+  });
 });
 
 test('Pill consumes one pointer gesture across leave, re-entry, and compatibility click', async ({ page }) => {
@@ -1058,15 +1682,26 @@ test('opt-in live provider discovery uses the same-origin GET boundary and trans
     'Set VITE_HERMES_LIVE_AUTH_DISCOVERY=true to build the opt-in live discovery lane.'
   );
 
-  const requests: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
+  let requestCount = 0;
+  let requestMethodIsGet = true;
+  let requestHasAuthorization = false;
+  let requestHasQuery = false;
   let releaseResponse!: () => void;
   const responseGate = new Promise<void>((resolve) => {
     releaseResponse = resolve;
   });
 
-  await page.route('**/api/auth/providers', async (route) => {
+  const routePattern = '**/api/auth/providers';
+  const routeHandler = async (route: Route): Promise<void> => {
     const request = route.request();
-    requests.push({ method: request.method(), url: request.url(), headers: request.headers() });
+    requestCount += 1;
+    requestMethodIsGet &&= request.method() === 'GET';
+    requestHasAuthorization ||= Boolean(request.headers().authorization);
+    try {
+      requestHasQuery ||= new URL(request.url()).search.length > 0;
+    } catch {
+      requestHasQuery = true;
+    }
     await responseGate;
     await route.fulfill({
       status: 200,
@@ -1078,39 +1713,44 @@ test('opt-in live provider discovery uses the same-origin GET boundary and trans
         ]
       })
     });
-  });
+  };
 
-  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
-  await expect(page.getByTestId('auth-preview').getByRole('status')).toContainText('Discovering sign-in methods');
-  await expect(page.getByRole('heading', { name: 'Discovering sign-in methods' })).toBeFocused();
-  const liveStateOutput = page.getByRole('combobox', { name: 'Authentication state' });
-  await expect(liveStateOutput).toBeDisabled();
+  try {
+    await page.route(routePattern, routeHandler);
+    await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-discovery-mode', 'live');
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
+    await expect(page.getByTestId('auth-preview').getByRole('status')).toContainText('Discovering sign-in methods');
+    await expect(page.getByRole('heading', { name: 'Discovering sign-in methods' })).toBeFocused();
+    const liveStateOutput = page.getByRole('combobox', { name: 'Authentication state' });
+    await expect(liveStateOutput).toBeDisabled();
 
-  releaseResponse();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
-  await expect(page.getByRole('button', { name: 'Nous, unavailable' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Hermes password' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Connect to Hermes' })).toBeFocused();
+    releaseResponse();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+    await expect(page.getByRole('button', { name: 'Nous, unavailable' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Hermes password' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Connect to Hermes' })).toBeFocused();
 
-  await liveStateOutput.evaluate((select: HTMLSelectElement) => {
-    select.value = 'discovery-empty';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-  });
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+    await liveStateOutput.evaluate((select: HTMLSelectElement) => {
+      select.value = 'discovery-empty';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
 
-  // `supports_password: false` does not prove OAuth capability. Only the
-  // password-capable provider advances through this reviewed response shape.
-  await page.getByRole('button', { name: 'Hermes password' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
-  await expect(page.getByLabel('Username')).toBeFocused();
+    // `supports_password: false` does not prove OAuth capability. Only the
+    // password-capable provider advances through this reviewed response shape.
+    await page.getByRole('button', { name: 'Hermes password' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+    await expect(page.getByLabel('Username')).toBeFocused();
 
-  expect(requests).toHaveLength(1);
-  expect(requests[0]?.method).toBe('GET');
-  expect(requests[0]?.url).toBe(`${uiPreviewOrigin}/api/auth/providers`);
-  expect(requests[0]?.headers.authorization).toBeUndefined();
-  expect(requests[0]?.url).not.toContain('?');
+    expect(requestCount).toBe(1);
+    expect(requestMethodIsGet).toBe(true);
+    expect(requestHasAuthorization).toBe(false);
+    expect(requestHasQuery).toBe(false);
+  } finally {
+    releaseResponse();
+    await page.unroute(routePattern, routeHandler).catch(() => undefined);
+  }
 });
 
 test('opt-in live provider discovery fails closed on reviewed 503 and retries idempotently', async ({ page }) => {
@@ -1120,7 +1760,8 @@ test('opt-in live provider discovery fails closed on reviewed 503 and retries id
   );
 
   let requestCount = 0;
-  await page.route('**/api/auth/providers', async (route) => {
+  const routePattern = '**/api/auth/providers';
+  const routeHandler = async (route: Route): Promise<void> => {
     requestCount += 1;
     if (requestCount === 1) {
       await route.fulfill({
@@ -1137,18 +1778,23 @@ test('opt-in live provider discovery fails closed on reviewed 503 and retries id
         providers: [{ name: 'nous', display_name: 'Nous', supports_password: false }]
       })
     });
-  });
+  };
 
-  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
-  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('No sign-in method is available');
-  await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
-  await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
+  try {
+    await page.route(routePattern, routeHandler);
+    await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-unavailable');
+    await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('No sign-in method is available');
+    await expect(page.getByRole('heading', { name: 'Provider discovery stopped' })).toBeFocused();
+    await expect(page.getByRole('combobox', { name: 'Authentication state' })).toBeDisabled();
 
-  await page.getByRole('button', { name: 'Retry discovery' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
-  await expect(page.getByRole('button', { name: 'Nous' })).toBeVisible();
-  expect(requestCount).toBe(2);
+    await page.getByRole('button', { name: 'Retry discovery' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+    await expect(page.getByRole('button', { name: 'Nous' })).toBeVisible();
+    expect(requestCount).toBe(2);
+  } finally {
+    await page.unroute(routePattern, routeHandler).catch(() => undefined);
+  }
 });
 
 test('opt-in live provider discovery exposes cancellation and retries after abort', async ({ page }) => {
@@ -1163,7 +1809,8 @@ test('opt-in live provider discovery exposes cancellation and retries after abor
     releaseFirstResponse = resolve;
   });
 
-  await page.route('**/api/auth/providers', async (route) => {
+  const routePattern = '**/api/auth/providers';
+  const routeHandler = async (route: Route): Promise<void> => {
     requestCount += 1;
     if (requestCount === 1) {
       await firstResponseGate;
@@ -1183,19 +1830,25 @@ test('opt-in live provider discovery exposes cancellation and retries after abor
       contentType: 'application/json',
       body: JSON.stringify({ providers: [{ name: 'nous', display_name: 'Nous', supports_password: false }] })
     });
-  });
+  };
 
-  await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
-  await page.getByRole('button', { name: 'Cancel discovery' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-aborted');
-  await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery was cancelled');
-  await expect(page.getByRole('heading', { name: 'Provider discovery was cancelled' })).toBeFocused();
+  try {
+    await page.route(routePattern, routeHandler);
+    await page.goto(previewUrl('/ui-preview?authDiscovery=live'));
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-pending');
+    await page.getByRole('button', { name: 'Cancel discovery' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'discovery-aborted');
+    await expect(page.getByTestId('auth-preview').getByRole('alert')).toContainText('Provider discovery was cancelled');
+    await expect(page.getByRole('heading', { name: 'Provider discovery was cancelled' })).toBeFocused();
 
-  releaseFirstResponse();
-  await page.getByRole('button', { name: 'Retry discovery' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
-  expect(requestCount).toBe(2);
+    releaseFirstResponse();
+    await page.getByRole('button', { name: 'Retry discovery' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'provider-selection');
+    expect(requestCount).toBe(2);
+  } finally {
+    releaseFirstResponse();
+    await page.unroute(routePattern, routeHandler).catch(() => undefined);
+  }
 });
 
 test('discovery fixture states remain accessible across empty, malformed, unavailable, aborted, and retry variants', async ({
@@ -1310,7 +1963,8 @@ test('visible UI controls keep the shared 44px effective target', async ({ page 
 
 test('narrow reduced-transparency mode computes fully opaque materials without blur or saturation', async ({ page }) => {
   const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Emulation.setEmulatedMedia', {
+  try {
+    await cdp.send('Emulation.setEmulatedMedia', {
     features: [{ name: 'prefers-reduced-transparency', value: 'reduce' }]
   });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1333,10 +1987,13 @@ test('narrow reduced-transparency mode computes fully opaque materials without b
     };
   });
 
-  for (const material of Object.values(materials)) {
-    expect(material.backdropFilter).toBe('none');
-    expect(material.backgroundColor).toMatch(/^rgb\(/);
-    expect(material.backgroundColor).not.toMatch(/^rgba\(/);
+    for (const material of Object.values(materials)) {
+      expect(material.backdropFilter).toBe('none');
+      expect(material.backgroundColor).toMatch(/^rgb\(/);
+      expect(material.backgroundColor).not.toMatch(/^rgba\(/);
+    }
+  } finally {
+    await cdp.detach().catch(() => undefined);
   }
 });
 
@@ -1366,49 +2023,56 @@ test('forced-colors mode keeps the workspace chrome and focus ring discoverable'
 });
 
 test('UI preview stays local at the 200% browser-zoom reflow equivalent with reduced motion', async ({ page }) => {
-  const unexpectedRequests: string[] = [];
+  let unexpectedRequestCount = 0;
   const expectedOrigin = uiPreviewOrigin;
 
-  await page.route('**/*', async (route) => {
+  const routePattern = '**/*';
+  const routeHandler = async (route: Route): Promise<void> => {
     const requestUrl = new URL(route.request().url());
     if (requestUrl.origin !== expectedOrigin) {
-      unexpectedRequests.push(requestUrl.href);
+      unexpectedRequestCount += 1;
       await route.abort();
       return;
     }
     await route.continue();
-  });
-  await page.emulateMedia({ reducedMotion: 'reduce' });
-  // Chromium exposes no stable cross-platform Ctrl-plus API. A real 640 CSS-pixel
-  // layout viewport reproduces a 1280px desktop viewport at 200% browser zoom
-  // without relying on the non-standard CSS zoom property.
-  await page.setViewportSize({ width: 640, height: 900 });
-  await page.goto(previewUrl('/ui-preview'));
-  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('compatibility-check-failed');
-  await page.getByRole('button', { name: 'Nous' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
-  await page.getByRole('button', { name: 'Cancel and return to providers' }).click();
-  await page.getByRole('button', { name: 'Hermes password' }).click();
-  await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
+  };
 
-  await expect(page.getByRole('heading', { name: 'Runtime and authentication states' })).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.clientWidth)).toBe(640);
-  expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
-  const hasReducedTransparencyFallback = await page.evaluate(() =>
-    Array.from(document.styleSheets).some((styleSheet) => {
-      try {
-        return Array.from(styleSheet.cssRules).some((rule) => rule.cssText.includes('prefers-reduced-transparency'));
-      } catch {
-        return false;
-      }
-    })
-  );
-  expect(hasReducedTransparencyFallback).toBe(true);
-  expect(unexpectedRequests).toEqual([]);
+  try {
+    await page.route(routePattern, routeHandler);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    // Chromium exposes no stable cross-platform Ctrl-plus API. A real 640 CSS-pixel
+    // layout viewport reproduces a 1280px desktop viewport at 200% browser zoom
+    // without relying on the non-standard CSS zoom property.
+    await page.setViewportSize({ width: 640, height: 900 });
+    await page.goto(previewUrl('/ui-preview'));
+    await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('compatibility-check-failed');
+    await page.getByRole('button', { name: 'Nous' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'callback');
+    await page.getByRole('button', { name: 'Cancel and return to providers' }).click();
+    await page.getByRole('button', { name: 'Hermes password' }).click();
+    await expect(page.getByTestId('auth-preview')).toHaveAttribute('data-state', 'password');
 
-  const overflow = await page.evaluate(() => ({
-    clientWidth: document.documentElement.clientWidth,
-    scrollWidth: document.documentElement.scrollWidth
-  }));
-  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+    await expect(page.getByRole('heading', { name: 'Runtime and authentication states' })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.clientWidth)).toBe(640);
+    expect(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches)).toBe(true);
+    const hasReducedTransparencyFallback = await page.evaluate(() =>
+      Array.from(document.styleSheets).some((styleSheet) => {
+        try {
+          return Array.from(styleSheet.cssRules).some((rule) => rule.cssText.includes('prefers-reduced-transparency'));
+        } catch {
+          return false;
+        }
+      })
+    );
+    expect(hasReducedTransparencyFallback).toBe(true);
+    expect(unexpectedRequestCount).toBe(0);
+
+    const overflow = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }));
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  } finally {
+    await page.unroute(routePattern, routeHandler).catch(() => undefined);
+  }
 });
