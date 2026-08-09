@@ -373,6 +373,20 @@ class CaddyProofEvidenceTests(unittest.TestCase):
             manifest["browser_execution"],
             {"mode": caddy_proof.BROWSER_NON_EXECUTION_MODE, "status": "not_proven"},
         )
+        self.assertEqual(manifest["provenance"]["current_git_static"]["status"], "not_bound")
+        self.assertEqual(manifest["provenance"]["historical_retained"]["status"], "not_bound")
+
+    def test_direct_retained_mode_requires_loader_token(self) -> None:
+        with self.assertRaisesRegex(ValueError, "canonical retained loader token"):
+            caddy_proof.render_manifest(
+                build_sha=EXPECTED_BUILD_SHA,
+                build_digest=EXPECTED_BUILD_DIGEST,
+                caddyfile_digest=EXPECTED_CADDYFILE_DIGEST,
+                browser_journey="blocked_provider",
+                browser_evidence=self.browser_evidence("blocked_provider"),
+                runtime_inputs=caddy_proof.reconstruction_inputs(),
+                provenance_mode="retained",
+            )
 
     def test_render_manifest_requires_matching_blocked_and_failed_evidence(self) -> None:
         blocked = self.render_manifest(browser_evidence=self.browser_evidence("blocked_provider"))
@@ -1284,6 +1298,21 @@ class CaddyBlackBoxToolAvailabilityTests(unittest.TestCase):
         self.assertFalse(getattr(CaddyBlackBoxTests, "__unittest_skip__", False))
 
 
+def _validated_tool_path(name: str) -> str:
+    """Resolve a required black-box tool once and reject unsafe binaries."""
+
+    located = shutil.which(name)
+    if located is None:
+        raise AssertionError(f"required black-box tool is unavailable: {name}")
+    path = Path(located).resolve(strict=True)
+    metadata = os.stat(path)
+    if not stat.S_ISREG(metadata.st_mode) or not metadata.st_mode & 0o111:
+        raise AssertionError(f"required black-box tool is not executable: {name}")
+    if metadata.st_uid not in {0, os.geteuid()} or stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise AssertionError(f"required black-box tool is unsafe: {name}")
+    return str(path)
+
+
 def _free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -1364,7 +1393,6 @@ def _https_request(
         connection.close()
 
 
-@unittest.skipUnless(shutil.which("caddy") and shutil.which("openssl"), "Caddy black-box tools are unavailable")
 class CaddyBlackBoxTests(unittest.TestCase):
     """Exercise the rendered boundary against Caddy and a recording upstream."""
 
@@ -1372,6 +1400,10 @@ class CaddyBlackBoxTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
+        # Availability is a hard prerequisite. A missing binary must fail this
+        # proof lane, not turn it green through unittest's skip machinery.
+        cls.caddy_executable = _validated_tool_path("caddy")
+        cls.openssl_executable = _validated_tool_path("openssl")
         cls.tempdir = tempfile.TemporaryDirectory(prefix="caddy-proof-black-box-")
         root = Path(cls.tempdir.name)
         cls.site_root = root / "site"
@@ -1396,7 +1428,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
         cls.storage_root.mkdir()
         subprocess.run(
             [
-                "openssl",
+                cls.openssl_executable,
                 "req",
                 "-x509",
                 "-newkey",
@@ -1431,7 +1463,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
             encoding="utf-8",
         )
         format_result = subprocess.run(
-            ["caddy", "fmt", "--overwrite", str(cls.caddyfile_path)],
+            [cls.caddy_executable, "fmt", "--overwrite", str(cls.caddyfile_path)],
             capture_output=True,
             text=True,
             check=False,
@@ -1440,7 +1472,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
             raise RuntimeError("Caddy formatter rejected the rendered proof file")
         cls.caddyfile = cls.caddyfile_path.read_text(encoding="utf-8")
         validate_result = subprocess.run(
-            ["caddy", "validate", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
+            [cls.caddy_executable, "validate", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
             capture_output=True,
             text=True,
             check=False,
@@ -1448,7 +1480,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
         if validate_result.returncode != 0:
             raise RuntimeError("Caddy validation rejected the formatted proof file")
         cls.caddy_process = subprocess.Popen(
-            ["caddy", "run", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
+            [cls.caddy_executable, "run", "--config", str(cls.caddyfile_path), "--adapter", "caddyfile"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1505,7 +1537,7 @@ class CaddyBlackBoxTests(unittest.TestCase):
 
     def test_formatted_renderer_output_passes_caddy_validate(self) -> None:
         result = subprocess.run(
-            ["caddy", "validate", "--config", str(self.caddyfile_path), "--adapter", "caddyfile"],
+            [self.caddy_executable, "validate", "--config", str(self.caddyfile_path), "--adapter", "caddyfile"],
             capture_output=True,
             text=True,
             check=False,
