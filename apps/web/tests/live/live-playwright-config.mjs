@@ -1,15 +1,25 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const LIVE_CONFIG_RELATIVE_PATH = '../../playwright.live.config.ts';
+
 /**
  * Derive every live-run path from the config module location. This module is
  * intentionally side-effect free: importing it must not inspect browser
  * provenance, create artifact roots, or mutate runner environment variables.
+ * The default is strict so production cannot guess a path when a bundler
+ * supplies a non-file import.meta.url; Vitest callers pass an explicit file URL.
  *
- * @param {string} [configUrl]
+ * @param {string | URL} [configUrl]
  */
-export function getLivePlaywrightPaths(configUrl = new URL('../../playwright.live.config.ts', import.meta.url).href) {
-  const configFile = fileURLToPath(configUrl);
+export function getLivePlaywrightPaths(
+  configUrl = new URL(LIVE_CONFIG_RELATIVE_PATH, import.meta.url).href
+) {
+  const parsedConfigUrl = new URL(configUrl);
+  if (parsedConfigUrl.protocol !== 'file:') {
+    throw new TypeError('live Playwright config URL must use the file: scheme');
+  }
+  const configFile = fileURLToPath(parsedConfigUrl);
   const appRoot = dirname(configFile);
   const liveTestsDirectory = join(appRoot, 'tests', 'live');
   return Object.freeze({

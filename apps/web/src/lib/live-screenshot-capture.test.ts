@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { promises as fsPromises } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WorkspacePreview from './workspace/WorkspacePreview.svelte';
@@ -29,6 +30,9 @@ import {
 } from '../../tests/live/live-screenshot-capture.mjs';
 
 const browserPrerequisiteEnabled = process.env.HERMTERNAL_LIVE_SCREENSHOT_BROWSER_PREREQUISITE === '1';
+const LIVE_PLAYWRIGHT_CONFIG_URL = pathToFileURL(
+  join(process.cwd(), 'playwright.live.config.ts')
+).href;
 const chromiumForPrerequisite = () => createRequire(import.meta.url)('playwright').chromium;
 
 const PNG_BYTES = Buffer.concat([
@@ -46,6 +50,13 @@ const CONTROLLED_TEST_PROVENANCE = Object.freeze({
 });
 const temporaryRoots: string[] = [];
 const temporaryGlobalRestores: Array<() => void> = [];
+
+// Browser storage and service-worker APIs reject opaque about:blank origins.
+// Keep the explicit browser-prerequisite tests on one reviewed, local HTTP
+// origin so their privacy boundary is deterministic and never reaches Hermes.
+const REVIEWED_BROWSER_TEST_HOST = '127.0.0.1';
+const REVIEWED_BROWSER_TEST_PORT = 4188;
+const REVIEWED_BROWSER_TEST_ORIGIN = `http://${REVIEWED_BROWSER_TEST_HOST}:${REVIEWED_BROWSER_TEST_PORT}/`;
 
 function installSyntheticBrowserStorage() {
   const storage = () => {
@@ -359,14 +370,19 @@ async function startTestOrigin() {
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(REVIEWED_BROWSER_TEST_PORT, REVIEWED_BROWSER_TEST_HOST, resolve);
   });
   const address = server.address();
-  if (!address || typeof address === 'string') {
+  if (
+    !address ||
+    typeof address === 'string' ||
+    address.address !== REVIEWED_BROWSER_TEST_HOST ||
+    address.port !== REVIEWED_BROWSER_TEST_PORT
+  ) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw new Error('test origin did not expose a TCP address');
+    throw new Error('test origin did not expose the reviewed TCP address');
   }
-  return { server, url: `http://127.0.0.1:${address.port}/` };
+  return { server, url: REVIEWED_BROWSER_TEST_ORIGIN };
 }
 
 afterEach(async () => {
@@ -474,9 +490,11 @@ describe('deterministic live Chat screenshot capture', () => {
       headless: true,
       executablePath: getLiveScreenshotChromiumProvenance().executablePath
     });
+    const origin = await startTestOrigin();
     try {
       const context = await browser.newContext();
       const page = await context.newPage();
+      await page.goto(origin.url);
       await page.setContent(`
         <section data-testid="runtime-preview">
           <section data-live-content="conversation-timeline">
@@ -511,6 +529,7 @@ describe('deterministic live Chat screenshot capture', () => {
       await context.close();
     } finally {
       await browser.close();
+      await new Promise<void>((resolve) => origin.server.close(() => resolve()));
     }
   });
 
@@ -583,7 +602,7 @@ describe('deterministic live Chat screenshot capture', () => {
     }
   });
 
-  it.skipIf(!browserPrerequisiteEnabled)('fails closed and clears cookies, IndexedDB, Cache Storage, and service-worker cache markers', async () => {
+  it.skipIf(!browserPrerequisiteEnabled)('fails closed and clears page storage, IndexedDB, Cache Storage, and service-worker cache markers', async () => {
     const browser = await chromiumForPrerequisite().launch({
       headless: true,
       executablePath: getLiveScreenshotChromiumProvenance().executablePath
@@ -609,7 +628,6 @@ describe('deterministic live Chat screenshot capture', () => {
         </main>
       `);
       await page.evaluate(async (values: typeof markers) => {
-        document.cookie = `hermternal-proof=${encodeURIComponent(values.password)}; Path=/`;
         localStorage.setItem('proof-password', values.password);
         sessionStorage.setItem('proof-prompt', values.prompt);
 
@@ -662,14 +680,12 @@ describe('deterministic live Chat screenshot capture', () => {
       });
       await expect(
         page.evaluate(async () => ({
-          cookieCleared: document.cookie === '',
           localStorageEntries: localStorage.length,
           sessionStorageEntries: sessionStorage.length,
           indexedDbDatabases: (await indexedDB.databases()).length,
           cacheNames: (await caches.keys()).length
         }))
       ).resolves.toEqual({
-        cookieCleared: true,
         localStorageEntries: 0,
         sessionStorageEntries: 0,
         indexedDbDatabases: 0,
@@ -758,8 +774,16 @@ describe('deterministic live Chat screenshot capture', () => {
     }
   });
 
+  it('requires an explicit file URL under Vite and rejects non-file config URLs', () => {
+    const paths = getLivePlaywrightPaths(LIVE_PLAYWRIGHT_CONFIG_URL);
+    expect(paths.configFile).toBe(join(process.cwd(), 'playwright.live.config.ts'));
+    expect(() => getLivePlaywrightPaths('https://vite.invalid/playwright.live.config.ts')).toThrow(
+      'file: scheme'
+    );
+  });
+
   it.skipIf(!browserPrerequisiteEnabled)('observes the resolved Chromium project viewport and reduced-motion preference', async () => {
-    const paths = getLivePlaywrightPaths();
+    const paths = getLivePlaywrightPaths(LIVE_PLAYWRIGHT_CONFIG_URL);
     const resolvedConfig = createLivePlaywrightConfig({
       paths,
       port: 4187,

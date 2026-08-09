@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // Capture every ECMAScript intrinsic used by the redaction boundary while this
@@ -74,6 +74,35 @@ function trustedApply(method, receiver, argumentsList = []) {
  */
 function trustedArrayAppend(target, value) {
   target[target.length] = value;
+}
+
+/**
+ * Build an absolute child path without invoking the ambient path.join
+ * implementation. Finalization runs beside test code that may poison
+ * Array.prototype.push, so strict validation and string concatenation keep
+ * cleanup bound to the already-reviewed parent and one directory-entry child.
+ *
+ * @param {string} parent
+ * @param {string} child
+ * @returns {string}
+ */
+function trustedChildPath(parent, child) {
+  if (
+    typeof parent !== 'string' ||
+    typeof child !== 'string' ||
+    parent.length === 0 ||
+    child.length === 0 ||
+    trustedStringIndexOf(parent, '\0') >= 0 ||
+    !trustedStringStartsWith(parent, sep) ||
+    (parent.length > sep.length && trustedStringSlice(parent, -sep.length) === sep) ||
+    trustedRegExpTest(/[\\/]/u, child) ||
+    trustedStringIndexOf(child, '\0') >= 0 ||
+    child === '.' ||
+    child === '..'
+  ) {
+    throw new SAFE_ERROR('live artifact child path is invalid');
+  }
+  return parent === sep ? `${parent}${child}` : `${parent}${sep}${child}`;
 }
 
 /**
@@ -249,9 +278,9 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 const HTML_UNTERMINATED_COMMENT = -2;
 const HTML_MALFORMED_TAG = -3;
 function createLiveArtifactRoot() {
-  const root = mkdtempSync(join(resolve(tmpdir()), LIVE_OUTPUT_PREFIX));
+  const root = mkdtempSync(trustedChildPath(resolve(tmpdir()), LIVE_OUTPUT_PREFIX));
   const ownerToken = randomBytes(32).toString('hex');
-  writeFileSync(join(root, LIVE_OUTPUT_OWNER_FILE), `${ownerToken}\n`, {
+  writeFileSync(trustedChildPath(root, LIVE_OUTPUT_OWNER_FILE), `${ownerToken}\n`, {
     encoding: 'utf8',
     flag: 'wx',
     mode: 0o600
@@ -324,7 +353,7 @@ export function assertLiveRunnerDebugDisabled(environment = process.env) {
 function hasOwnedRootMarker(run) {
   try {
     const rootStats = lstatSync(run.root);
-    const ownerPath = join(run.root, LIVE_OUTPUT_OWNER_FILE);
+    const ownerPath = trustedChildPath(run.root, LIVE_OUTPUT_OWNER_FILE);
     const ownerStats = lstatSync(ownerPath);
     return (
       rootStats.isDirectory() &&
@@ -437,7 +466,7 @@ export function isLiveArtifactDirectory(directory) {
   try {
     const rootStats = lstatSync(candidate);
     if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) return false;
-    const ownerPath = join(candidate, LIVE_OUTPUT_OWNER_FILE);
+    const ownerPath = trustedChildPath(candidate, LIVE_OUTPUT_OWNER_FILE);
     try {
       const ownerStats = lstatSync(ownerPath);
       if (!ownerStats.isFile() || ownerStats.isSymbolicLink()) return false;
@@ -472,7 +501,7 @@ function liveArtifactEvidence(directory) {
   if (!ownerToken) return undefined;
   try {
     const rootStats = lstatSync(candidate);
-    const ownerPath = join(candidate, LIVE_OUTPUT_OWNER_FILE);
+    const ownerPath = trustedChildPath(candidate, LIVE_OUTPUT_OWNER_FILE);
     const ownerStats = lstatSync(ownerPath);
     if (
       !rootStats.isDirectory() ||
@@ -502,7 +531,7 @@ function liveArtifactEvidence(directory) {
 function isVerifiedQuarantine(quarantinePath, evidence) {
   try {
     const rootStats = lstatSync(quarantinePath);
-    const ownerPath = join(quarantinePath, LIVE_OUTPUT_OWNER_FILE);
+    const ownerPath = trustedChildPath(quarantinePath, LIVE_OUTPUT_OWNER_FILE);
     const ownerStats = lstatSync(ownerPath);
     return (
       rootStats.isDirectory() &&
@@ -1662,6 +1691,7 @@ const SAFE_CLEANUP_MESSAGES = new SAFE_SET([
   'live artifact quarantine identity changed',
   'live artifact quarantine cleanup failed',
   'live artifact cleanup identity changed',
+  'live artifact child path is invalid',
   'live artifact cleanup handoff failed',
   'live artifact cleanup inspection failed',
   'live artifact cleanup child disappeared',
@@ -1727,7 +1757,7 @@ function combineCleanupFailures(primary, secondary, fallback) {
  * @returns {string}
  */
 function uniqueSiblingPath(parent, name, purpose) {
-  return join(parent, `.${name}-${purpose}-${randomBytes(16).toString('hex')}`);
+  return trustedChildPath(parent, `.${name}-${purpose}-${randomBytes(16).toString('hex')}`);
 }
 
 /**
@@ -1759,12 +1789,13 @@ function hasOwnedPathAncestors(root, candidate) {
     const remainder = relative(resolvedRoot, resolvedCandidate);
     const components = trustedStringSplit(remainder, sep);
     let current = resolvedRoot;
+    let expectedCanonical = canonicalRoot;
     for (let index = 0; index < components.length; index += 1) {
-      current = join(current, components[index]);
+      current = trustedChildPath(current, components[index]);
+      expectedCanonical = trustedChildPath(expectedCanonical, components[index]);
       const stats = lstatSync(current);
       if (!stats.isDirectory() || stats.isSymbolicLink()) return false;
       const canonicalCurrent = realpathSync(current);
-      const expectedCanonical = join(canonicalRoot, relative(resolvedRoot, current));
       if (canonicalCurrent !== expectedCanonical) return false;
     }
     return true;
@@ -1808,7 +1839,7 @@ async function removeOwnedTree(directory, expected) {
   }
 
   for (const entry of entries) {
-    const sourcePath = join(ownedPath, entry.name);
+    const sourcePath = trustedChildPath(ownedPath, entry.name);
     let childStats;
     try {
       childStats = lstatSync(sourcePath);
@@ -1894,20 +1925,20 @@ async function removeLiveTestArtifacts(directory) {
   let quarantineIdentity;
   let primaryError;
   try {
-    quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-test-quarantine-'));
+    quarantineParent = mkdtempSync(
+      trustedChildPath(resolve(tmpdir()), 'hermternal-live-test-quarantine-')
+    );
     quarantineIdentity = readDirectoryIdentity(quarantineParent);
-    await fsPromises.rename(candidate, join(quarantineParent, basename(candidate)));
+    const quarantinedPath = trustedChildPath(quarantineParent, basename(candidate));
+    await fsPromises.rename(candidate, quarantinedPath);
     if (!isLiveArtifactDirectory(root) || !sameDirectoryIdentity(root, rootEvidence)) {
       throw new SAFE_ERROR('live artifact root changed during test cleanup');
     }
-    const quarantinedStats = sameDirectoryIdentity(
-      join(quarantineParent, basename(candidate)),
-      candidateStats
-    );
+    const quarantinedStats = sameDirectoryIdentity(quarantinedPath, candidateStats);
     if (!quarantinedStats) {
       throw new SAFE_ERROR('live artifact test output identity changed');
     }
-    await removeOwnedTree(join(quarantineParent, basename(candidate)), quarantinedStats);
+    await removeOwnedTree(quarantinedPath, quarantinedStats);
   } catch (error) {
     primaryError = safeCleanupError(error, 'live artifact test output handoff failed');
   } finally {
@@ -1944,9 +1975,11 @@ export async function removeLiveArtifacts(directory) {
   let quarantineIdentity;
   let primaryError;
   try {
-    quarantineParent = mkdtempSync(join(resolve(tmpdir()), 'hermternal-live-quarantine-'));
+    quarantineParent = mkdtempSync(
+      trustedChildPath(resolve(tmpdir()), 'hermternal-live-quarantine-')
+    );
     quarantineIdentity = readDirectoryIdentity(quarantineParent);
-    const quarantinePath = join(quarantineParent, basename(evidence.candidate));
+    const quarantinePath = trustedChildPath(quarantineParent, basename(evidence.candidate));
     await fsPromises.rename(evidence.candidate, quarantinePath);
     if (!isVerifiedQuarantine(quarantinePath, evidence)) {
       throw new SAFE_ERROR('live artifact cleanup identity changed');

@@ -47,6 +47,115 @@ const playwrightEntryUrl = pathToFileURL(
 ).href;
 
 /**
+ * Keep the finalizer poison regression outside Vitest. The poisoned
+ * Array.prototype.push must remain installed across awaited filesystem cleanup,
+ * but Vitest's own reporter may continue using push after the test callback
+ * returns. The child also proves the shared root and owner marker survive while
+ * its nested owned output is removed.
+ */
+async function runPoisonedFinalizeChild(): Promise<{
+  scrubMessage?: string;
+  isAggregate: boolean;
+  cleanupFailure: boolean;
+  attachmentsLength: number;
+  errorsLength: number;
+  ownedFileExists: boolean;
+  nestedDirectoryExists: boolean;
+  testOutputExists: boolean;
+  outputRootExists: boolean;
+  ownerMarkerExists: boolean;
+}> {
+  const childScript = `
+    const { lstat, mkdir, writeFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const policy = await import(process.argv[1]);
+    const exists = async (path) => {
+      try {
+        await lstat(path);
+        return true;
+      } catch (error) {
+        if (error && error.code === 'ENOENT') return false;
+        throw error;
+      }
+    };
+    const outputRoot = policy.liveArtifactOutputDirectory();
+    const testOutput = join(outputRoot, 'poisoned-finalize-cleanup-child');
+    const nestedDirectory = join(testOutput, 'nested-output');
+    const ownedFile = join(nestedDirectory, 'owned-output.txt');
+    const ownerMarker = join(outputRoot, '.hermternal-live-artifact-owner');
+    await mkdir(nestedDirectory, { recursive: true });
+    await writeFile(ownedFile, 'owned output', 'utf8');
+
+    const pushDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, 'push');
+    if (!pushDescriptor) throw new Error('Array.prototype.push descriptor is unavailable');
+    let thrown;
+    Object.defineProperty(Array.prototype, 'push', {
+      configurable: true,
+      writable: true,
+      value: () => {
+        throw new Error('poisoned finalize cleanup push');
+      }
+    });
+    const testInfo = {
+      attachments: [],
+      errors: [],
+      outputDir: testOutput
+    };
+    try {
+      await policy.finalizeLiveTest({
+        testInfo,
+        scrubError: new Error('scrub failed synthetic-password'),
+        secrets: ['synthetic-password']
+      });
+    } catch (error) {
+      thrown = error;
+    } finally {
+      Object.defineProperty(Array.prototype, 'push', pushDescriptor);
+    }
+
+    const state = {
+      scrubMessage: thrown?.message,
+      isAggregate: thrown?.name === 'AggregateError',
+      cleanupFailure:
+        typeof thrown?.message === 'string' && thrown.message.includes('live artifact cleanup failed'),
+      attachmentsLength: testInfo.attachments.length,
+      errorsLength: testInfo.errors.length,
+      ownedFileExists: await exists(ownedFile),
+      nestedDirectoryExists: await exists(nestedDirectory),
+      testOutputExists: await exists(testOutput),
+      outputRootExists: await exists(outputRoot),
+      ownerMarkerExists: await exists(ownerMarker)
+    };
+    await policy.removeLiveArtifacts(outputRoot);
+    process.stdout.write(JSON.stringify(state));
+  `;
+  const childEnvironment = { ...process.env };
+  delete childEnvironment.PLAYWRIGHT_LIVE_OUTPUT_DIR;
+  delete childEnvironment.PLAYWRIGHT_LIVE_OUTPUT_TOKEN;
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ['--input-type=module', '-e', childScript, pathToFileURL(policyPath).href],
+    {
+      cwd: appRoot,
+      encoding: 'utf8',
+      env: childEnvironment
+    }
+  );
+  return JSON.parse(stdout) as {
+    scrubMessage?: string;
+      isAggregate: boolean;
+    cleanupFailure: boolean;
+    attachmentsLength: number;
+    errorsLength: number;
+    ownedFileExists: boolean;
+    nestedDirectoryExists: boolean;
+    testOutputExists: boolean;
+    outputRootExists: boolean;
+    ownerMarkerExists: boolean;
+  };
+}
+
+/**
  * Run an isolated Playwright 1.62.1 worker with the live policy imported before
  * the test body. The reporter serializes worker-mapped errors, stdio, and
  * attachment bodies, making a leaked credential observable without using the
@@ -733,6 +842,21 @@ describe('live Playwright artifact policy', () => {
     expect(snapshot).toHaveLength(1);
     expect(JSON.stringify(snapshot)).not.toContain('synthetic-password');
     expect(JSON.stringify(snapshot)).not.toContain('synthetic-user');
+  });
+
+  it('finalizes nested owned output when Array.prototype.push is poisoned', async () => {
+    const result = await runPoisonedFinalizeChild();
+
+    expect(result.scrubMessage).toBe(`scrub failed ${LIVE_ARTIFACT_REDACTION}`);
+    expect(result.isAggregate).toBe(false);
+    expect(result.cleanupFailure).toBe(false);
+    expect(result.attachmentsLength).toBe(0);
+    expect(result.errorsLength).toBe(0);
+    expect(result.ownedFileExists).toBe(false);
+    expect(result.nestedDirectoryExists).toBe(false);
+    expect(result.testOutputExists).toBe(false);
+    expect(result.outputRootExists).toBe(true);
+    expect(result.ownerMarkerExists).toBe(true);
   });
 
   it('scrubs exactly one stateful attachment array', async () => {
