@@ -127,15 +127,20 @@ export type CurrentSessionTerminalAttachmentProvider = (
   CurrentSessionTerminalAttachment | Promise<CurrentSessionTerminalAttachment>;
 
 export type CurrentSessionTerminalBridgeOptions = Readonly<{
-  /**
-   * The bridge serializes replacement until an invalidated operation settles.
-   * This keeps the merged PtyTransport's native generation as the sole late
-   * settlement owner; arbitrary adapters need no undocumented cleanup hook.
-   */
+  /** Creates the current raw-owner adapter and, after bounded isolation, its successor. */
   createTransport: () => PtyTransport;
   /** Optional reviewed attach issuance seam. Omitted normal-route PTYs stay legacy and cannot reconnect. */
   createAttachment?: CurrentSessionTerminalAttachmentProvider;
+  /**
+   * Test seam for the maximum time an abort-insensitive adapter may block its
+   * successor. Production uses the bounded default; the value never carries
+   * tickets, bytes, or native identity into presentation state.
+   */
+  replacementQuarantineTimeoutMs?: number;
 }>;
+
+const DEFAULT_REPLACEMENT_QUARANTINE_TIMEOUT_MS = 250;
+const MAX_REPLACEMENT_QUARANTINE_TIMEOUT_MS = 1_000;
 
 interface ActiveBinding extends TerminalBinding {
   readonly token: object;
@@ -163,10 +168,15 @@ interface PendingAttach {
 interface PendingTransportOperation {
   readonly token: object;
   readonly sessionId: string;
+  /** The adapter this operation owns, even after a bounded successor swap. */
+  readonly transport: PtyTransport;
   /** Native generation immediately before this operation claims the transport. */
   readonly nativeGeneration: number;
   transportStarted: boolean;
   transportSettled: boolean;
+  /** True after a non-settling adapter is detached from bridge publication. */
+  isolated: boolean;
+  replacementTimer: ReturnType<typeof setTimeout> | undefined;
   invalidated: boolean;
   terminalObserved: boolean;
   initialCleanupIssued: boolean;
@@ -175,7 +185,7 @@ interface PendingTransportOperation {
   /** Close may escalate a prior detach while this operation remains quarantined. */
   closeCleanupIssued: boolean;
   cleanup: TransportCleanup;
-  /** Resolves only after this call's one deferred cleanup has completed. */
+  /** Resolves once this call can no longer block a successor adapter owner. */
   readonly completion: Promise<void>;
   resolveCompletion: () => void;
 }
@@ -190,11 +200,13 @@ interface PendingTransportOperation {
  * attached.
  */
 export class CurrentSessionTerminalBridge implements TerminalSessionPort {
-  private readonly transport: PtyTransport;
+  private transport: PtyTransport;
+  private readonly createTransport: () => PtyTransport;
   private readonly createAttachment:
     CurrentSessionTerminalAttachmentProvider | undefined;
+  private readonly replacementQuarantineTimeoutMs: number;
   private readonly listeners = new Set<CurrentSessionTerminalListener>();
-  private readonly unsubscribeTransport: () => void;
+  private unsubscribeTransport: () => void = () => {};
   private currentState: CurrentSessionTerminalState;
   private activeBinding: ActiveBinding | undefined;
   /** Same-session callers share the original attach outcome, never a provisional lease. */
@@ -219,12 +231,51 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
   }>();
 
   constructor(options: CurrentSessionTerminalBridgeOptions) {
-    this.transport = options.createTransport();
+    this.createTransport = options.createTransport;
     this.createAttachment = options.createAttachment;
+    const requestedTimeout = options.replacementQuarantineTimeoutMs;
+    this.replacementQuarantineTimeoutMs =
+      requestedTimeout === undefined || !Number.isFinite(requestedTimeout)
+        ? DEFAULT_REPLACEMENT_QUARANTINE_TIMEOUT_MS
+        : Math.min(
+            Math.max(0, requestedTimeout),
+            MAX_REPLACEMENT_QUARANTINE_TIMEOUT_MS,
+          );
+    this.transport = this.createTransport();
     this.currentState = projectState(this.transport.state, false);
-    this.unsubscribeTransport = this.transport.subscribe((event) =>
-      this.handleTransportEvent(event),
-    );
+    this.subscribeToCurrentTransport();
+  }
+
+  private subscribeToCurrentTransport(): void {
+    const observedTransport = this.transport;
+    this.unsubscribeTransport = observedTransport.subscribe((event) => {
+      // Unsubscribe is advisory for injected adapters too. An old adapter that
+      // still calls its listener after bounded isolation cannot publish state or
+      // raw bytes into the successor's ownership domain.
+      if (this.transport !== observedTransport) return;
+      this.handleTransportEvent(event);
+    });
+  }
+
+  private isolateNonSettlingTransport(
+    operation: PendingTransportOperation,
+  ): void {
+    if (operation.transportSettled || operation.isolated || this.disposed)
+      return;
+    operation.isolated = true;
+    operation.replacementTimer = undefined;
+    if (this.transport !== operation.transport) return;
+
+    // A cannot safely share a generic adapter with B after it ignored abort.
+    // Move B to a fresh adapter without touching A: A remains quarantined and
+    // receives its one identity-scoped cleanup only if it eventually settles.
+    this.unsubscribeTransport();
+    this.transport = this.createTransport();
+    this.currentState = projectState(this.transport.state, false);
+    this.subscribeToCurrentTransport();
+    // Release B only after its adapter is physically separate from A. A's
+    // eventual settlement still runs its cleanup through `operation.transport`.
+    operation.resolveCompletion();
   }
 
   get lifecycleIdentity(): CurrentSessionTerminalLifecycleIdentity {
@@ -332,8 +383,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     // after its caller leaves. Invalidate A, then wait for its one cleanup before
     // allowing this attachment to touch the shared adapter.
     if (
-      this.pendingTransportOperation !== undefined ||
-      this.quarantinedTransportOperations.size > 0
+      this.hasBlockingTransportOperations()
     ) {
       this.invalidateActiveBinding();
       await this.waitForQuarantinedTransportOperations(signal);
@@ -392,7 +442,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       const operation = this.beginTransportOperation(token, sessionId);
       try {
         operation.transportStarted = true;
-        await this.transport.connect(
+        await operation.transport.connect(
           attachment === undefined
             ? { sessionId }
             : { sessionId, ...attachment },
@@ -507,8 +557,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       );
     }
     if (
-      this.pendingTransportOperation !== undefined ||
-      this.quarantinedTransportOperations.size > 0
+      this.hasBlockingTransportOperations()
     ) {
       this.invalidatePendingTransportOperation(undefined, "detach");
       await this.waitForQuarantinedTransportOperations(signal);
@@ -538,7 +587,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     );
     try {
       operation.transportStarted = true;
-      await this.transport.reconnect(signal);
+      await operation.transport.reconnect(signal);
       operation.transportSettled = true;
       if (
         this.disposed ||
@@ -624,6 +673,15 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     }
   }
 
+  private hasBlockingTransportOperations(): boolean {
+    return (
+      this.pendingTransportOperation !== undefined ||
+      [...this.quarantinedTransportOperations].some(
+        (operation) => !operation.isolated,
+      )
+    );
+  }
+
   private beginAttachAttempt(token: object, sessionId: string): PendingAttach {
     let resolveCompletion = (): void => {};
     const completion = new Promise<void>((resolve) => {
@@ -653,9 +711,12 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     const operation: PendingTransportOperation = {
       token,
       sessionId,
+      transport: this.transport,
       nativeGeneration: this.currentState.generation,
       transportStarted: false,
       transportSettled: false,
+      isolated: false,
+      replacementTimer: undefined,
       invalidated: false,
       terminalObserved: false,
       initialCleanupIssued: false,
@@ -698,10 +759,29 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         this.pendingTransportOperation = undefined;
         this.quarantinedTransportOperations.add(operation);
       }
+      // This attachment can no longer return its provisional lease. Let a
+      // successor wait on the quarantined transport owner, not an abandoned
+      // attach wrapper that an abort-insensitive adapter would otherwise hold.
+      if (this.pendingAttach?.token === operation.token) {
+        const attempt = this.pendingAttach;
+        this.pendingAttach = undefined;
+        attempt.resolveCompletion();
+      }
     } else if (cleanup === "close") {
       // Explicit close/disposal is stronger than a prior lease detach. Keep the
       // late-completion cleanup closed even if detachment was already requested.
       operation.cleanup = "close";
+    }
+
+    if (
+      operation.transportStarted &&
+      !operation.transportSettled &&
+      operation.replacementTimer === undefined &&
+      !operation.isolated
+    ) {
+      operation.replacementTimer = setTimeout(() => {
+        this.isolateNonSettlingTransport(operation);
+      }, this.replacementQuarantineTimeoutMs);
     }
 
     if (
@@ -716,7 +796,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       operation.initialCleanupIssued = true;
       operation.initialCleanupMode = operation.cleanup;
       if (operation.cleanup === "close") operation.closeCleanupIssued = true;
-      this.cleanupTransport(operation.cleanup);
+      this.cleanupTransport(operation.cleanup, operation.transport);
     }
 
     if (operation.transportSettled) this.finalizeTransportOperation(operation);
@@ -740,6 +820,10 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
     operation: PendingTransportOperation,
   ): void {
     operation.transportSettled = true;
+    if (operation.replacementTimer !== undefined) {
+      clearTimeout(operation.replacementTimer);
+      operation.replacementTimer = undefined;
+    }
     if (
       operation.invalidated &&
       operation.transportStarted &&
@@ -752,7 +836,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       operation.initialCleanupIssued = true;
       operation.initialCleanupMode = operation.cleanup;
       if (operation.cleanup === "close") operation.closeCleanupIssued = true;
-      this.cleanupTransport(operation.cleanup);
+      this.cleanupTransport(operation.cleanup, operation.transport);
     }
     this.finalizeTransportOperation(operation);
     if (this.pendingTransportOperation === operation)
@@ -769,7 +853,7 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
         ? []
         : [this.pendingTransportOperation]),
       ...this.quarantinedTransportOperations,
-    ];
+    ].filter((operation) => !operation.isolated);
     if (operations.length === 0) return Promise.resolve();
     if (signal?.aborted)
       return Promise.reject(new PtyTransportError("aborted"));
@@ -802,21 +886,24 @@ export class CurrentSessionTerminalBridge implements TerminalSessionPort {
       operation.closeCleanupIssued = true;
       // A close/dispose request outranks a prior advisory detach. This extra
       // close is scoped to the quarantined operation before any replacement can run.
-      this.cleanupTransport("close");
+      this.cleanupTransport("close", operation.transport);
     }
   }
 
-  private cleanupTransport(cleanup: TransportCleanup): void {
+  private cleanupTransport(
+    cleanup: TransportCleanup,
+    transport: PtyTransport = this.transport,
+  ): void {
     try {
-      if (cleanup === "close") this.transport.close();
-      else this.transport.detach();
+      if (cleanup === "close") transport.close();
+      else transport.detach();
     } catch {
       // A stale adapter must not escape the bridge's cleanup boundary. If a
       // detach implementation throws, close is the fail-closed fallback that
       // prevents an adapter from retaining raw PTY ownership indefinitely.
       if (cleanup === "detach") {
         try {
-          this.transport.close();
+          transport.close();
         } catch {
           // The adapter remains responsible for its own last-resort failure.
         }
