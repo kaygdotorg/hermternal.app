@@ -1108,7 +1108,13 @@ def _audit_parsed(inputs: ParsedInputs, manifest_record: dict[str, Any], lock_re
     result["lockfile"] = {
         "lockfile_version": inputs.lockfile.get("lockfileVersion"),
         "config_version": inputs.config_version,
-        "optional_dependencies": dict(sorted(inputs.lock_optional_dependencies.items())),
+        "optional_dependencies": {
+            _safe_token(name, max_length=MAX_PACKAGE_NAME_LENGTH): _safe_token(
+                spec,
+                max_length=MAX_SPEC_LENGTH,
+            )
+            for name, spec in sorted(inputs.lock_optional_dependencies.items())
+        },
         "package_count": len(inputs.packages),
         "integrity_present": len(inputs.packages) - len(integrity_missing) - len(integrity_invalid),
         "integrity_missing": integrity_missing,

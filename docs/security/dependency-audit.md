@@ -77,7 +77,8 @@ roots. The report separates:
 - `inventory.direct.optional`: direct optional dependencies;
 - `inventory.transitive`: all other reachable lock records, including optional
   platform records and parent-scoped Bun virtual locators;
-- `lockfile.unreachable`: lock records not reached from either root.
+- `lockfile.unreachable`: lock records not reached from the runtime, development,
+  or optional dependency roots.
 
 Dependency, optional-dependency, and peer-dependency edges are counted across
 the entire parsed lock graph, including records that are unreachable from the

@@ -348,6 +348,26 @@ class DependencyAuditTests(unittest.TestCase):
         self.assertEqual(result["inventory"]["direct"]["optional"][0]["name"], "optional", result)
         self.assertFalse(result["inventory"]["direct"]["optional"][0]["pinned"], result)
 
+    def test_optional_dependency_specs_are_sanitized_in_lock_output(self) -> None:
+        unsafe_spec = '^1.0.0\n"raw-optional-spec'
+        manifest_document = {
+            "name": "@fixture/web",
+            "dependencies": {},
+            "devDependencies": {},
+            "optionalDependencies": {"optional": unsafe_spec},
+        }
+        lock_document = json.loads(synthetic_lock({}, {}, {"optional": package_record("optional", "1.0.0")}))
+        lock_document["workspaces"][""]["optionalDependencies"] = {"optional": unsafe_spec}
+        result = audit.audit_bytes(
+            json.dumps(manifest_document).encode("utf-8"),
+            json.dumps(lock_document).encode("utf-8"),
+            manifest_label="fixture/package.json",
+            lockfile_label="fixture/bun.lock",
+        )
+        expected = audit._safe_token(unsafe_spec, max_length=audit.MAX_SPEC_LENGTH)
+        self.assertEqual(result["lockfile"]["optional_dependencies"], {"optional": expected}, result)
+        self.assertNotIn(unsafe_spec, json.dumps(result, sort_keys=True), result)
+
     def test_edge_budget_counts_unreachable_lock_graph_edges(self) -> None:
         manifest = json.dumps(
             {"name": "@fixture/web", "dependencies": {"alpha": "1.0.0"}, "devDependencies": {}}
