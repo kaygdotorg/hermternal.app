@@ -714,7 +714,7 @@
     white-space: nowrap;
   }
 
-  @container workspace-preview (max-width: 1407px) {
+  @container workspace-preview (max-width: 1439px) {
     .workspace-preview {
       height: 844px;
       min-height: 844px;
@@ -1113,7 +1113,7 @@
      controls but omit the simulated phone status bar. The conversation remains
      capped at 720px, and both secondary columns move to the existing modal
      drawers instead of compressing their text or action targets. */
-  @container workspace-preview (min-width: 761px) and (max-width: 1407px) {
+  @container workspace-preview (min-width: 761px) and (max-width: 1439px) {
     .workspace-preview {
       height: 100dvh;
       min-height: 0;

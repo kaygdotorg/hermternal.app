@@ -283,14 +283,14 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
 });
 
 test('Paper effective widths use deterministic narrow, intermediate, and desktop families', async ({ page }) => {
-  for (const width of [760, 761, 1407, 1408]) {
+  for (const width of [760, 761, 1439, 1440]) {
     await page.setViewportSize({ width, height: 844 });
     await page.goto(previewUrl('/ui-preview'));
     await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
     const workspace = page.locator('.workspace-preview');
     expect((await workspace.boundingBox())?.width).toBe(width);
 
-    if (width <= 1407) {
+    if (width <= 1439) {
       await expect(workspace.locator('.mobile-toolbar')).toBeVisible();
       await expect(workspace.locator('.conversation-header')).toBeHidden();
       await expect(workspace.locator('.sidebar')).toBeHidden();
@@ -305,6 +305,7 @@ test('Paper effective widths use deterministic narrow, intermediate, and desktop
       await expect(workspace.locator('.conversation-header')).toBeVisible();
       await expect(workspace.locator('.sidebar')).toBeVisible();
       await expect(workspace.locator('.desktop-inspector')).toBeVisible();
+      expect((await workspace.locator('.conversation-panel').boundingBox())?.width).toBe(720);
     }
 
     await expect(workspace.getByRole('tab', { name: /Chat|Terminal/ })).toHaveCount(0);
