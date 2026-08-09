@@ -24,6 +24,7 @@ import re
 import stat
 import statistics
 import string
+import struct
 import tokenize
 import unicodedata
 from dataclasses import dataclass
@@ -472,16 +473,26 @@ SYNTHETIC_FULL_VALUE_ALLOWANCES = {
 # turn structural test vocabulary into a live-host bypass.
 # Two historical domain fixtures intentionally preserve one NUL-bearing parser
 # input. They cannot be rewritten in this source-only commit because their bytes
-# are part of the indexed negative-test corpus. Keep the exception structural:
-# canonical artifact path, exact JSON pointer, and exact expected value. The
-# generic redaction scanner remains strict everywhere else.
+# are part of the indexed negative-test corpus. Keep each exception bound to the
+# canonical artifact path, exact JSON pointer/value, and reviewed ancestry:
+# root dict -> ``cases`` list -> case dict -> ``request`` dict -> field. The
+# ancestry check prevents a numeric object key from reproducing a list pointer.
 _NUL_CHARACTER = chr(0)
-NUL_FIELD_ALLOWANCES: dict[str, dict[str, str]] = {
+NUL_FIELD_ALLOWANCES: dict[
+    str,
+    dict[str, tuple[str, tuple[tuple[str, str | int], ...]]],
+] = {
     "attachment-policy/cases.json": {
-        "/cases/10/request/filename": "../unsafe name" + _NUL_CHARACTER + ".png",
+        "/cases/10/request/filename": (
+            "../unsafe name" + _NUL_CHARACTER + ".png",
+            (("dict", "cases"), ("list", 10), ("dict", "request"), ("dict", "filename")),
+        ),
     },
     "session-search/cases.json": {
-        "/cases/28/request/query": "atlas" + _NUL_CHARACTER,
+        "/cases/28/request/query": (
+            "atlas" + _NUL_CHARACTER,
+            (("dict", "cases"), ("list", 28), ("dict", "request"), ("dict", "query")),
+        ),
     },
 }
 # The aggregate scanner must preserve reviewed parser, signature, delimiter, and
@@ -490,111 +501,114 @@ NUL_FIELD_ALLOWANCES: dict[str, dict[str, str]] = {
 # controls to the validator source that it governs. The structural role includes
 # the enclosing scope, callee or binding path, and an occurrence ordinal for
 # repeated identical helper calls; line numbers are intentionally not authority.
+# Dynamic rows use ``unknown`` only for reviewed opaque operands whose exact
+# bytes cannot be recovered statically; a resolver/API name is never a blanket
+# allowance, and every decoded construction receives an exact kind and hex row.
 _PYTHON_CONTROL_LITERAL_ROWS: tuple[tuple[str, str, str, str, int], ...] = (
-    ("attachment-policy/test_attachment_policy.py", "bytes", "0000000049454e44", "fn:test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:iend|path:value/left", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "003b", "fn:test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/right", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "00", "fn:test_filename_control_byte_is_escaped_and_omitted_or_null_defaults|call:self.assertNotIn|arg:0|path:direct", 0),
-    ("attachment-policy/test_attachment_policy.py", "str", "00", "fn:test_filename_control_byte_is_escaped_and_omitted_or_null_defaults|call:self.assertIn|arg:0|path:direct", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "00", "fn:test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:chunk|path:value/right/left", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "00", "fn:test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:iend|path:value/right/left", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "89504e470d0a1a0a", "fn:test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|call:validate._format_from_bytes|arg:0|path:left", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "89504e470d0a1a0a", "fn:test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|call:validate._format_from_bytes|arg:0|path:left/left", 0),
-    ("attachment-policy/test_attachment_policy.py", "bytes", "00", "fn:test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/left/left/left/left/right/left", 0),
-    ("attachment-policy/validate.py", "bytes", "504b0304", "fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[1]", 0),
-    ("attachment-policy/validate.py", "bytes", "504b0506", "fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[2]", 0),
-    ("attachment-policy/validate.py", "bytes", "504b0708", "fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[3]", 0),
-    ("attachment-policy/validate.py", "bytes", "89504e470d0a1a0a", "fn:module|annassign:_FORMATS|path:value/elts[1]/elts[1]", 0),
-    ("behavioral-probe/validate.py", "str", "00", "fn:_validate_redaction|call:require|arg:0|path:left", 0),
-    ("chat-stream-completion/validate.py", "str", "00", "fn:_validate_redaction|call:_require|arg:0|path:values[0]/left", 0),
-    ("chat-stream-completion/validate.py", "str", "1f", "fn:_validate_redaction|call:_require|arg:0|path:values[1]/left", 0),
-    ("compatibility-attestation/test_validate.py", "str", "636f6e74726f6c016d61726b6572", "fn:test_baseline_text_redaction_rejects_hosts_material_and_controls|assign:mutations|path:value/elts[5]/elts[1]", 0),
-    ("compatibility-attestation/test_validate.py", "str", "6e756c006d61726b6572", "fn:test_baseline_text_redaction_rejects_hosts_material_and_controls|assign:mutations|path:value/elts[6]/elts[1]", 0),
-    ("connection-restoration/validate.py", "str", "00", "fn:_validate_redaction|call:_require|arg:0|path:values[0]/left", 0),
-    ("connection-restoration/validate.py", "str", "1f", "fn:_validate_redaction|call:_require|arg:0|path:values[1]/left", 0),
-    ("deep-link-grammar/test_validate.py", "str", "01", "fn:test_all_lexical_rejections_fail_closed|assign:controls|path:value/keys[2]", 0),
-    ("deep-link-grammar/validate.py", "str", "01", "fn:module|annassign:_EXPECTED_CASES|path:value/values[18]/values[0]/values[3]", 0),
-    ("deployment-security/browser-auth/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/browser-auth/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/direct-port-denial/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/direct-port-denial/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/external-allowlist/validate.py", "bytes", "00", "fn:artifact_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/external-allowlist/validate.py", "bytes", "00", "fn:artifact_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/host-origin-mapping/test_validate.py", "str", "687474707309", "fn:test_exact_scheme_serialization|assign:rejected|path:value/elts[6]", 0),
-    ("deployment-security/host-origin-mapping/test_validate.py", "bytes", "6c696e65206f6e650a096c696e652074776f0d0a", "fn:test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|call:validate.scan_artifact_bytes|arg:1|path:direct", 0),
-    ("deployment-security/host-origin-mapping/test_validate.py", "str", "636861742e7075626c69632e696e76616c696409", "fn:test_exact_host_serialization_and_cardinality|assign:mutations|path:value/elts[27]/elts[0]", 0),
-    ("deployment-security/private-network-firewall/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/private-network-firewall/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/pty-local-adapter/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/pty-local-adapter/validate.py", "bytes", "00", "fn:_artifact_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/pty-local-adapter/validate.py", "bytes", "00", "fn:_canonical_digest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/pty-local-adapter/validate.py", "bytes", "00", "fn:_canonical_digest|call:digest.update|arg:0|path:direct", 1),
-    ("deployment-security/ws-ticket/validate.py", "bytes", "20090d0a", "fn:module|call:frozenset|arg:0|path:direct", 0),
-    ("deployment-security/ws-ticket/validate.py", "str", "00", "fn:_validate_json_tree|call:require|arg:0|path:values[2]/left", 0),
-    ("provider-discovery/test_provider_discovery.py", "str", "00", "fn:_git_blob_sha|assign:header|path:value/func/value/values[2]", 0),
-    ("pty-contract/validate.py", "str", "00", "fn:artifact_manifest_digest|call:Constant.join|arg:0|path:elt/values[1]", 0),
-    ("pty-contract/validate.py", "str", "00", "fn:artifact_manifest_digest|call:Constant.join|arg:0|path:elt/values[3]", 0),
-    ("route-allowlist/test_route_allowlist.py", "str", "00", "fn:test_rest_paths_reject_noncanonical_components_and_tickets|assign:invalid_paths|path:value/elts[7]/left/right", 0),
-    ("session-lineage/validate.py", "str", "00", "fn:_semantic_string_is_safe|compare:In|path:left", 0),
-    ("session-lineage/validate.py", "str", "090a0d", "fn:_semantic_string_is_safe|call:any|arg:0|path:elt/values[1]/comparators[0]", 0),
-    ("session-persistence/validate.py", "str", "00", "fn:_semantic_string_is_safe|compare:In|path:left", 0),
-    ("session-search/validate.py", "str", "20090a", "fn:_canonical_cases|call:_request|arg:0|path:direct", 0),
-    ("source-audit/compatibility-gate/validate.py", "str", "00", "fn:_is_unsafe_relative_path|compare:In|path:left", 0),
-    ("source-audit/compatibility-gate/validate.py", "str", "00", "fn:_artifact_set_digest|assign:canonical|path:value/values[1]", 0),
-    ("source-audit/compatibility-gate/validate.py", "str", "00", "fn:_artifact_set_digest|assign:canonical|path:value/values[3]", 0),
-    ("source-audit/compatibility-gate/validate.py", "str", "00", "fn:_validate_redaction|call:require|arg:0|path:left", 0),
-    ("source-audit/native-password-provider/test_native_password_provider.py", "str", "5b636f72655d0a0962617265203d2066616c73650a09776f726b74726565203d202f746d702f61747461636b65722d776f726b747265650a", "fn:test_source_root_rejects_redirects_bare_and_child_shapes|call:BinOp.write_text|arg:0|path:direct", 0),
-    ("source-audit/native-password-provider/test_native_password_provider.py", "str", "7361666500636c61696d", "fn:test_source_claim_and_ticket_fragment_redaction_fail_closed|call:validate.validate_synthetic_keys|arg:0|path:values[0]", 0),
-    ("source-audit/native-password-provider/validate.py", "bytes", "00", "fn:_verify_git_checkout|call:tree_listing.split|arg:0|path:direct", 0),
-    ("source-audit/native-password-provider/validate.py", "str", "00", "fn:validate_untrusted_text|call:require|arg:0|path:values[1]/left", 0),
-    ("source-audit/native-password-provider/validate.py", "str", "00", "fn:validate_retained_artifacts|call:require|arg:0|path:left", 0),
-    ("source-audit/native-password-provider/validate.py", "bytes", "09", "fn:_verify_git_checkout|call:record.split|arg:0|path:direct", 0),
-    ("source-audit/pty-attach/validate.py", "str", "00", "fn:git_blob_sha|assign:header|path:value/func/value/values[2]", 0),
-    ("uncertain-delivery/validate.py", "str", "00", "fn:_reject_repository_metadata|call:local_config.split|arg:0|path:direct", 0),
-    ("uncertain-delivery/validate.py", "str", "00", "fn:_reject_repository_metadata|call:local_config.endswith|arg:0|path:direct", 0),
-    ("validator/test_validate.py", "str", "6c6976655f636c61696d00", "fn:test_invalid_unicode_live_claim_key_fails_before_normalization|call:validate._reject_live_claims|arg:0|path:keys[0]", 0),
-    ("validator/validate.py", "str", "00", "fn:_validate_text_value|call:require|arg:0|path:left", 0),
-    ("validator/validate.py", "str", "0d", "fn:_validate_regex_literal|compare:In|path:left", 0),
-    ("validator/validate.py", "str", "00", "fn:_safe_relative_path|call:require|arg:0|path:values[0]/left", 0),
-    ("validator/validate.py", "str", "00", "fn:_validate_json_tree|call:require|arg:0|path:left", 0),
-    ("validator/validate.py", "str", "0d0a", "fn:_scan_assignment_candidates|compare:In|path:comparators[0]", 0),
-    ("validator/validate.py", "str", "00", "fn:_validate_redaction_tree|call:value.replace|arg:0|path:direct", 0),
-    ("validator/validate.py", "str", "00", "fn:_validate_json_tree|call:require|arg:0|path:values[1]/left", 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_filename_control_byte_is_escaped_and_omitted_or_null_defaults|call:self.assertNotIn|arg:0|path:direct', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/left/left/left/left/right/left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:chunk|path:value/right/left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:iend|path:value/right/left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '0000000049454e44', 'fn:AttachmentPolicyTests.test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|assign:iend|path:value/left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '003b', 'fn:AttachmentPolicyTests.test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/right', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '89504e470d0a1a0a', 'fn:AttachmentPolicyTests.test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|call:validate._format_from_bytes|arg:0|path:left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '89504e470d0a1a0a', 'fn:AttachmentPolicyTests.test_polyglots_fail_closed_but_foreign_text_inside_a_valid_chunk_does_not|call:validate._format_from_bytes|arg:0|path:left/left', 0),
+    ('attachment-policy/test_attachment_policy.py', 'str', '00', 'fn:AttachmentPolicyTests.test_filename_control_byte_is_escaped_and_omitted_or_null_defaults|call:self.assertIn|arg:0|path:direct', 0),
+    ('attachment-policy/validate.py', 'bytes', '504b0304', 'fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[1]', 0),
+    ('attachment-policy/validate.py', 'bytes', '504b0506', 'fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[2]', 0),
+    ('attachment-policy/validate.py', 'bytes', '504b0708', 'fn:module|assign:_FOREIGN_SIGNATURES|path:value/elts[3]', 0),
+    ('attachment-policy/validate.py', 'bytes', '89504e470d0a1a0a', 'fn:module|annassign:_FORMATS|path:value/elts[1]/elts[1]', 0),
+    ('behavioral-probe/validate.py', 'str', '00', 'fn:_validate_redaction|call:require|arg:0|path:left', 0),
+    ('chat-stream-completion/validate.py', 'str', '00', 'fn:_validate_redaction|call:_require|arg:0|path:values[0]/left', 0),
+    ('chat-stream-completion/validate.py', 'str', '1f', 'fn:_validate_redaction|call:_require|arg:0|path:values[1]/left', 0),
+    ('compatibility-attestation/test_validate.py', 'str', '636f6e74726f6c016d61726b6572', 'fn:RevisionAttestationValidationTests.test_baseline_text_redaction_rejects_hosts_material_and_controls|assign:mutations|path:value/elts[5]/elts[1]', 0),
+    ('compatibility-attestation/test_validate.py', 'str', '6e756c006d61726b6572', 'fn:RevisionAttestationValidationTests.test_baseline_text_redaction_rejects_hosts_material_and_controls|assign:mutations|path:value/elts[6]/elts[1]', 0),
+    ('connection-restoration/validate.py', 'str', '00', 'fn:_validate_redaction|call:_require|arg:0|path:values[0]/left', 0),
+    ('connection-restoration/validate.py', 'str', '1f', 'fn:_validate_redaction|call:_require|arg:0|path:values[1]/left', 0),
+    ('deep-link-grammar/test_validate.py', 'str', '01', 'fn:DeepLinkGrammarTests.test_all_lexical_rejections_fail_closed|assign:controls|path:value/keys[2]', 0),
+    ('deep-link-grammar/validate.py', 'str', '01', 'fn:module|annassign:_EXPECTED_CASES|path:value/values[18]/values[0]/values[3]', 0),
+    ('deployment-security/browser-auth/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/browser-auth/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/direct-port-denial/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/direct-port-denial/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/external-allowlist/validate.py', 'bytes', '00', 'fn:artifact_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/external-allowlist/validate.py', 'bytes', '00', 'fn:artifact_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/host-origin-mapping/test_validate.py', 'bytes', '6c696e65206f6e650a096c696e652074776f0d0a', 'fn:HostOriginMappingProofTests.test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|call:validate.scan_artifact_bytes|arg:1|path:direct', 0),
+    ('deployment-security/host-origin-mapping/test_validate.py', 'str', '636861742e7075626c69632e696e76616c696409', 'fn:HostOriginMappingProofTests.test_exact_host_serialization_and_cardinality|assign:mutations|path:value/elts[27]/elts[0]', 0),
+    ('deployment-security/host-origin-mapping/test_validate.py', 'str', '687474707309', 'fn:HostOriginMappingProofTests.test_exact_scheme_serialization|assign:rejected|path:value/elts[6]', 0),
+    ('deployment-security/private-network-firewall/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/private-network-firewall/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/pty-local-adapter/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/pty-local-adapter/validate.py', 'bytes', '00', 'fn:_artifact_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/pty-local-adapter/validate.py', 'bytes', '00', 'fn:_canonical_digest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/pty-local-adapter/validate.py', 'bytes', '00', 'fn:_canonical_digest|call:digest.update|arg:0|path:direct', 1),
+    ('deployment-security/ws-ticket/validate.py', 'bytes', '20090d0a', 'fn:_BoundedJSONScanner|call:frozenset|arg:0|path:direct', 0),
+    ('deployment-security/ws-ticket/validate.py', 'str', '00', 'fn:_validate_json_tree|call:require|arg:0|path:values[2]/left', 0),
+    ('provider-discovery/test_provider_discovery.py', 'str', '00', 'fn:_git_blob_sha|assign:header|path:value/func/value/values[2]', 0),
+    ('pty-contract/validate.py', 'str', '00', 'fn:artifact_manifest_digest|call:Constant.join|arg:0|path:elt/values[1]', 0),
+    ('pty-contract/validate.py', 'str', '00', 'fn:artifact_manifest_digest|call:Constant.join|arg:0|path:elt/values[3]', 0),
+    ('route-allowlist/test_route_allowlist.py', 'str', '00', 'fn:RouteAllowlistTests.test_rest_paths_reject_noncanonical_components_and_tickets|assign:invalid_paths|path:value/elts[7]/left/right', 0),
+    ('session-lineage/validate.py', 'str', '00', 'fn:_semantic_string_is_safe|compare:In|path:left', 0),
+    ('session-lineage/validate.py', 'str', '090a0d', 'fn:_semantic_string_is_safe|call:any|arg:0|path:elt/values[1]/comparators[0]', 0),
+    ('session-persistence/validate.py', 'str', '00', 'fn:_semantic_string_is_safe|compare:In|path:left', 0),
+    ('session-search/validate.py', 'str', '20090a', 'fn:_canonical_cases|call:_request|arg:0|path:direct', 0),
+    ('source-audit/compatibility-gate/validate.py', 'str', '00', 'fn:_artifact_set_digest|assign:canonical|path:value/values[1]', 0),
+    ('source-audit/compatibility-gate/validate.py', 'str', '00', 'fn:_artifact_set_digest|assign:canonical|path:value/values[3]', 0),
+    ('source-audit/compatibility-gate/validate.py', 'str', '00', 'fn:_is_unsafe_relative_path|compare:In|path:left', 0),
+    ('source-audit/compatibility-gate/validate.py', 'str', '00', 'fn:_validate_redaction|call:require|arg:0|path:left', 0),
+    ('source-audit/native-password-provider/test_native_password_provider.py', 'str', '5b636f72655d0a0962617265203d2066616c73650a09776f726b74726565203d202f746d702f61747461636b65722d776f726b747265650a', 'fn:NativePasswordProviderFixtureTests.test_source_root_rejects_redirects_bare_and_child_shapes|call:BinOp.write_text|arg:0|path:direct', 0),
+    ('source-audit/native-password-provider/test_native_password_provider.py', 'str', '7361666500636c61696d', 'fn:NativePasswordProviderFixtureTests.test_source_claim_and_ticket_fragment_redaction_fail_closed|call:validate.validate_synthetic_keys|arg:0|path:values[0]', 0),
+    ('source-audit/native-password-provider/validate.py', 'bytes', '00', 'fn:_verify_git_checkout|call:tree_listing.split|arg:0|path:direct', 0),
+    ('source-audit/native-password-provider/validate.py', 'bytes', '09', 'fn:_verify_git_checkout|call:record.split|arg:0|path:direct', 0),
+    ('source-audit/native-password-provider/validate.py', 'str', '00', 'fn:validate_retained_artifacts|call:require|arg:0|path:left', 0),
+    ('source-audit/native-password-provider/validate.py', 'str', '00', 'fn:validate_untrusted_text|call:require|arg:0|path:values[1]/left', 0),
+    ('source-audit/pty-attach/validate.py', 'str', '00', 'fn:git_blob_sha|assign:header|path:value/func/value/values[2]', 0),
+    ('uncertain-delivery/validate.py', 'str', '00', 'fn:_reject_repository_metadata|call:local_config.endswith|arg:0|path:direct', 0),
+    ('uncertain-delivery/validate.py', 'str', '00', 'fn:_reject_repository_metadata|call:local_config.split|arg:0|path:direct', 0),
+    ('validator/test_validate.py', 'str', '6c6976655f636c61696d00', 'fn:RegistryTests.test_invalid_unicode_live_claim_key_fails_before_normalization|call:validate._reject_live_claims|arg:0|path:keys[0]', 0),
+    ('validator/validate.py', 'str', '00', 'fn:_safe_relative_path|call:require|arg:0|path:values[0]/left', 0),
+    ('validator/validate.py', 'str', '00', 'fn:_validate_json_tree|call:require|arg:0|path:left', 0),
+    ('validator/validate.py', 'str', '00', 'fn:_validate_json_tree|call:require|arg:0|path:values[1]/left', 0),
+    ('validator/validate.py', 'str', '00', 'fn:_validate_redaction_tree|call:value.replace|arg:0|path:direct', 0),
+    ('validator/validate.py', 'str', '00', 'fn:_validate_text_value|call:require|arg:0|path:left', 0),
+    ('validator/validate.py', 'str', '0d', 'fn:_validate_regex_literal|compare:In|path:left', 0),
+    ('validator/validate.py', 'str', '0d0a', 'fn:_scan_assignment_candidates|compare:In|path:comparators[0]', 0),
 )
 
 # Dynamic constructors are a separate finite policy. ``unknown`` is used only
 # for reviewed chr(variable) generators whose exact call role is itself the
 # negative-test or parser implementation boundary.
 _PYTHON_CONTROL_CONSTRUCTION_ROWS: tuple[tuple[str, str, str, str, str, int], ...] = (
-    ("attachment-policy/test_attachment_policy.py", "bytes", "07", "bytes", "fn:test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/left/left/right", 0),
-    ("chat-stream-completion/validate.py", "unknown", "", "bytes", "fn:_read_bounded_regular|module-path", 0),
-    ("deployment-security/host-origin-mapping/test_validate.py", "bytes", "00", "bytes", "fn:test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|container:Tuple|path:elts[0]/left/right", 0),
-    ("deployment-security/host-origin-mapping/test_validate.py", "bytes", "7f", "bytes", "fn:test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|container:Tuple|path:elts[1]/left/right", 0),
-    ("deployment-security/host-origin-mapping/validate.py", "bytes", "00", "bytes", "fn:artifact_manifest|call:digest.update|arg:0|path:direct", 0),
-    ("deployment-security/host-origin-mapping/validate.py", "bytes", "00", "bytes", "fn:artifact_manifest|call:digest.update|arg:0|path:direct", 1),
-    ("pty-contract/validate.py", "unknown", "", "bytes.fromhex", "fn:segment_bytes|module-path", 0),
-    ("pty-contract/validate.py", "unknown", "", "bytes.fromhex", "fn:validate_no_byte_logging|call:len|arg:0|path:direct", 0),
-    ("pty-contract/validate.py", "unknown", "", "bytes.fromhex", "fn:validate_no_byte_logging|call:len|arg:0|path:direct", 1),
-    ("pty-contract/validate.py", "unknown", "", "bytes.fromhex", "fn:resize_control|module-path", 0),
-    ("pty-contract/validate.py", "unknown", "", "bytes.fromhex", "fn:resize_control|module-path", 1),
-    ("pty-detach-race/validate.py", "unknown", "", "bytes.fromhex", "fn:segment_size|assign:raw|path:value", 0),
-    ("session-search/test_validate.py", "unknown", "", "chr", "fn:test_missing_empty_and_source_backed_normalization|call:validate._is_empty_query|arg:0|path:direct", 0),
-    ("session-search/test_validate.py", "unknown", "", "chr", "fn:test_missing_empty_and_source_backed_normalization|call:validate._request|arg:0|path:direct", 0),
-    ("session-search/validate.py", "unknown", "", "chr", "fn:module|call:frozenset|arg:0|path:elt", 0),
-    ("session-search/validate.py", "str", "1c", "chr", "fn:_canonical_cases|call:_request|arg:0|path:direct", 0),
-    ("session-search/validate.py", "str", "1f", "chr", "fn:_canonical_cases|call:_request|arg:0|path:direct", 0),
-    ("session-search/validate.py", "str", "00", "chr", "fn:_canonical_cases|call:_request|arg:0|path:right", 0),
-    ("uncertain-delivery/preflight.py", "unknown", "", "bytes", "fn:_git|module-path", 0),
-    ("uncertain-delivery/validate.py", "unknown", "", "bytes", "fn:_run_git|container:Tuple|path:elts[1]", 0),
-    ("uncertain-delivery/validate.py", "unknown", "", "bytes", "fn:_run_git|container:Tuple|path:elts[2]", 0),
-    ("validator/test_validate.py", "str", "00", "chr", "fn:test_historical_nul_parser_inputs_are_exactly_scoped|assign:nul|path:value", 0),
-    ("validator/validate.py", "str", "00", "chr", "fn:module|assign:_NUL_CHARACTER|path:value", 0),
-    ("validator/validate.py", "unknown", "", "bytes", "fn:_stable_file_bytes|module-path", 0),
-    ("validator/validate.py", "unknown", "", "chr", "fn:module|call:str.maketrans|arg:0|path:left/key", 0),
-    ("validator/validate.py", "unknown", "", "chr", "fn:module|call:str.maketrans|arg:0|path:left/value", 0),
-    ("validator/validate.py", "unknown", "", "chr", "fn:_decode_regex_escape|container:Tuple|path:elts[0]", 0),
-    ("validator/validate.py", "unknown", "", "chr", "fn:_decode_regex_escape|container:Tuple|path:elts[0]", 1),
-    ("validator/validate.py", "unknown", "", "chr", "fn:_regex_class_prefix_result|call:values.update|arg:0|path:elt", 0),
-    ("validator/validate.py", "unknown", "", "bytes", "fn:_decode_url_component|assign:result|path:value/func/value", 0),
+    ('attachment-policy/test_attachment_policy.py', 'bytes', '07', 'bytes', 'fn:AttachmentPolicyTests.test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/left/left/right', 0),
+    ('chat-stream-completion/validate.py', 'unknown', '', 'bytes', 'fn:_read_bounded_regular|module-path', 0),
+    ('deployment-security/host-origin-mapping/test_validate.py', 'bytes', '00', 'bytes', 'fn:HostOriginMappingProofTests.test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|container:Tuple|path:elts[0]/left/right', 0),
+    ('deployment-security/host-origin-mapping/test_validate.py', 'bytes', '7f', 'bytes', 'fn:HostOriginMappingProofTests.test_text_artifacts_reject_controls_but_preserve_reviewed_whitespace|container:Tuple|path:elts[1]/left/right', 0),
+    ('deployment-security/host-origin-mapping/validate.py', 'bytes', '00', 'bytes', 'fn:artifact_manifest|call:digest.update|arg:0|path:direct', 0),
+    ('deployment-security/host-origin-mapping/validate.py', 'bytes', '00', 'bytes', 'fn:artifact_manifest|call:digest.update|arg:0|path:direct', 1),
+    ('pty-contract/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:resize_control|module-path', 0),
+    ('pty-contract/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:resize_control|module-path', 1),
+    ('pty-contract/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:segment_bytes|module-path', 0),
+    ('pty-contract/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:validate_no_byte_logging|call:len|arg:0|path:direct', 0),
+    ('pty-contract/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:validate_no_byte_logging|call:len|arg:0|path:direct', 1),
+    ('pty-detach-race/validate.py', 'unknown', '', 'bytes.fromhex', 'fn:segment_size|assign:raw|path:value', 0),
+    ('session-search/test_validate.py', 'unknown', '', 'chr', 'fn:SessionSearchTests.test_missing_empty_and_source_backed_normalization|call:validate._is_empty_query|arg:0|path:direct', 0),
+    ('session-search/test_validate.py', 'unknown', '', 'chr', 'fn:SessionSearchTests.test_missing_empty_and_source_backed_normalization|call:validate._request|arg:0|path:direct', 0),
+    ('session-search/validate.py', 'str', '00', 'chr', 'fn:_canonical_cases|call:_request|arg:0|path:right', 0),
+    ('session-search/validate.py', 'str', '1c', 'chr', 'fn:_canonical_cases|call:_request|arg:0|path:direct', 0),
+    ('session-search/validate.py', 'str', '1f', 'chr', 'fn:_canonical_cases|call:_request|arg:0|path:direct', 0),
+    ('session-search/validate.py', 'unknown', '', 'chr', 'fn:module|call:frozenset|arg:0|path:elt', 0),
+    ('uncertain-delivery/preflight.py', 'unknown', '', 'bytes', 'fn:_git|module-path', 0),
+    ('uncertain-delivery/validate.py', 'unknown', '', 'bytes', 'fn:_run_git|container:Tuple|path:elts[1]', 0),
+    ('uncertain-delivery/validate.py', 'unknown', '', 'bytes', 'fn:_run_git|container:Tuple|path:elts[2]', 0),
+    ('validator/test_validate.py', 'str', '00', 'chr', 'fn:CliTests.test_historical_nul_parser_inputs_are_exactly_scoped|assign:nul|path:value', 0),
+    ('validator/validate.py', 'str', '00', 'chr', 'fn:module|assign:_NUL_CHARACTER|path:value', 0),
+    ('validator/validate.py', 'unknown', '', 'bytes', 'fn:_decode_url_component|assign:result|path:value/func/value', 0),
+    ('validator/validate.py', 'unknown', '', 'bytes', 'fn:_stable_file_bytes|module-path', 0),
+    ('validator/validate.py', 'unknown', '', 'chr', 'fn:_decode_regex_escape|container:Tuple|path:elts[0]', 0),
+    ('validator/validate.py', 'unknown', '', 'chr', 'fn:_decode_regex_escape|container:Tuple|path:elts[0]', 1),
+    ('validator/validate.py', 'unknown', '', 'chr', 'fn:_regex_class_prefix_result|call:values.update|arg:0|path:elt', 0),
+    ('validator/validate.py', 'unknown', '', 'chr', 'fn:module|call:str.maketrans|arg:0|path:left/key', 0),
+    ('validator/validate.py', 'unknown', '', 'chr', 'fn:module|call:str.maketrans|arg:0|path:left/value', 0),
 )
 
 STRUCTURAL_URL_ALLOWANCES = {
@@ -3459,8 +3473,9 @@ def _validate_redaction_tree(
     allowed_assignment_values: frozenset[str] = frozenset(),
     allowed_structural_urls: frozenset[str] = frozenset(),
     allowed_empty_assignment_values: frozenset[str] = frozenset(),
-    allowed_nul_fields: dict[str, str] | None = None,
+    allowed_nul_fields: dict[str, tuple[str, tuple[tuple[str, str | int], ...]]] | None = None,
     json_pointer: str = "",
+    json_ancestry: tuple[tuple[str, str | int], ...] = (),
 ) -> None:
     if allowed_nul_fields is None:
         allowed_nul_fields = {}
@@ -3489,6 +3504,7 @@ def _validate_redaction_tree(
                     allowed_empty_assignment_values=allowed_empty_assignment_values,
                     allowed_nul_fields=allowed_nul_fields,
                     json_pointer=child_pointer,
+                    json_ancestry=json_ancestry + (("dict", key),),
                 )
         return
     if type(value) is list:
@@ -3500,16 +3516,18 @@ def _validate_redaction_tree(
                 allowed_empty_assignment_values=allowed_empty_assignment_values,
                 allowed_nul_fields=allowed_nul_fields,
                 json_pointer=_json_pointer_child(json_pointer, index),
+                json_ancestry=json_ancestry + (("list", index),),
             )
         return
     if type(value) is str:
-        allowed_nul_value = allowed_nul_fields.get(json_pointer)
-        if allowed_nul_value is not None:
-            # The pointer and value must both match the reviewed parser input;
-            # a changed prefix, suffix, duplicate NUL, or moved copy is not an
-            # allowance. Scan a NUL-free projection so surrounding credential,
-            # assignment, and URL policy still applies to the retained bytes.
+        allowance = allowed_nul_fields.get(json_pointer)
+        if allowance is not None:
+            allowed_nul_value, allowed_ancestry = allowance
+            # Pointer text alone is not authority: a numeric object key can
+            # reproduce a list index. Require the exact reviewed container
+            # ancestry as well as the canonical value before projecting NUL.
             require(value == allowed_nul_value, "NUL field value is not reviewed")
+            require(json_ancestry == allowed_ancestry, "NUL field ancestry is not reviewed")
             _validate_text_value(
                 value.replace("\x00", ""),
                 allowed_assignment_values=allowed_assignment_values,
@@ -5046,13 +5064,17 @@ def _control_scope(
     parents: dict[int, tuple[ast.AST, str, int | None]],
     node: ast.AST,
 ) -> str:
+    # A bare function name is not authority: methods and nested helpers often
+    # reuse the same local name. Preserve every enclosing class/function in
+    # source order so a reviewed row cannot be moved to a same-local-name site.
+    scopes: list[str] = []
     current = node
     while id(current) in parents:
         parent, _field, _index = parents[id(current)]
-        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return parent.name
+        if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            scopes.append(parent.name)
         current = parent
-    return "module"
+    return ".".join(reversed(scopes)) if scopes else "module"
 
 
 def _control_role(
@@ -5160,8 +5182,11 @@ def _control_free_projection(value: str | bytes) -> str | None:
 
 def _control_projection_from_hex(kind: str, value_hex: str) -> str | None:
     try:
-        value = binascii.unhexlify(value_hex)
-    except (binascii.Error, ValueError) as exc:
+        value = struct.pack(
+            f"{len(value_hex) // 2}B",
+            *(int(value_hex[index:index + 2], 16) for index in range(0, len(value_hex), 2)),
+        )
+    except (struct.error, ValueError) as exc:
         raise ValidationError() from exc
     if kind not in {"str", "bytes"}:
         return None
@@ -5188,25 +5213,333 @@ def _control_static_bytes_hex(node: ast.AST) -> str | None:
     return None
 
 
+_CONTROL_MODULE_PREFIX = "module:"
+_CONTROL_INVALID = object()
+_CONTROL_DIRECT_APIS = frozenset({"chr", "bytes", "bytearray"})
+_CONTROL_MODULES = frozenset({"builtins", "binascii", "codecs"})
+_CONTROL_CANONICAL_APIS = frozenset({
+    "chr",
+    "bytes",
+    "bytearray",
+    "bytes.fromhex",
+    "bytearray.fromhex",
+    "binascii.unhexlify",
+    "binascii.a2b_hex",
+    "codecs.decode",
+})
+_CONTROL_SOURCE_APIS = {
+    "chr": "chr",
+    "bytes": "bytes",
+    "bytearray": "bytearray",
+    "builtins.chr": "chr",
+    "builtins.bytes": "bytes",
+    "builtins.bytearray": "bytearray",
+    "bytes.fromhex": "bytes.fromhex",
+    "bytearray.fromhex": "bytearray.fromhex",
+    "builtins.bytes.fromhex": "bytes.fromhex",
+    "builtins.bytearray.fromhex": "bytearray.fromhex",
+    "binascii.unhexlify": "binascii.unhexlify",
+    "binascii.a2b_hex": "binascii.a2b_hex",
+    "codecs.decode": "codecs.decode",
+}
+
+
+def _control_scope_chain(scope: str) -> tuple[str, ...]:
+    if scope == "module":
+        return ("module",)
+    parts = scope.split(".")
+    return tuple(
+        [".".join(parts[:index]) for index in range(len(parts), 0, -1)]
+        + ["module"]
+    )
+
+
+def _control_lookup_binding(
+    bindings: dict[tuple[str, str], object],
+    scope: str,
+    name: str,
+) -> tuple[bool, object | None]:
+    for candidate in _control_scope_chain(scope):
+        key = (candidate, name)
+        if key in bindings:
+            value = bindings[key]
+            return True, value
+    if name in _CONTROL_DIRECT_APIS:
+        return True, name
+    if name in _CONTROL_MODULES:
+        return True, f"{_CONTROL_MODULE_PREFIX}{name}"
+    return False, None
+
+
+def _control_resolve_expression(
+    node: ast.AST,
+    scope: str,
+    bindings: dict[tuple[str, str], object],
+) -> object | None:
+    if isinstance(node, ast.Name):
+        _found, value = _control_lookup_binding(bindings, scope, node.id)
+        return value
+    if not isinstance(node, ast.Attribute):
+        return None
+    base = _control_resolve_expression(node.value, scope, bindings)
+    if base is _CONTROL_INVALID:
+        return _CONTROL_INVALID
+    if base == f"{_CONTROL_MODULE_PREFIX}builtins" and node.attr in _CONTROL_DIRECT_APIS:
+        return node.attr
+    if base == f"{_CONTROL_MODULE_PREFIX}binascii" and node.attr in {"unhexlify", "a2b_hex"}:
+        return f"binascii.{node.attr}"
+    if base == f"{_CONTROL_MODULE_PREFIX}codecs" and node.attr == "decode":
+        return "codecs.decode"
+    if base in {"bytes", "bytearray"} and node.attr == "fromhex":
+        return f"{base}.fromhex"
+    return None
+
+
+def _control_bind_name(
+    bindings: dict[tuple[str, str], object],
+    scope: str,
+    name: str,
+    value: object,
+    *,
+    force: bool = False,
+) -> None:
+    key = (scope, name)
+    if force:
+        bindings[key] = value
+    elif key in bindings:
+        bindings[key] = _CONTROL_INVALID
+    else:
+        bindings[key] = value
+
+
+def _control_target_names_for_binding(node: ast.AST) -> tuple[str, ...]:
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for child in node.elts:
+            names.extend(_control_target_names_for_binding(child))
+        return tuple(names)
+    return ()
+
+
+def _control_alias_bindings(
+    tree: ast.AST,
+    parents: dict[int, tuple[ast.AST, str, int | None]],
+) -> dict[tuple[str, str], object]:
+    """Resolve only bounded import/simple-alias chains for control APIs.
+
+    This is deliberately not a general constant-propagation engine. A second
+    binding, shadowing parameter, dynamic assignment, or unknown imported API
+    invalidates a known alias; the caller then fails closed before generic AST
+    text handling can hide a constructed control value.
+    """
+    bindings: dict[tuple[str, str], object] = {}
+    nodes = sorted(ast.walk(tree), key=lambda item: (getattr(item, "lineno", -1), getattr(item, "col_offset", -1)))
+
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parent_scope = _control_scope(parents, node)
+            if node.name in _CONTROL_DIRECT_APIS or node.name in _CONTROL_MODULES or (parent_scope, node.name) in bindings:
+                _control_bind_name(bindings, parent_scope, node.name, _CONTROL_INVALID)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                local_scope = node.name if parent_scope == "module" else f"{parent_scope}.{node.name}"
+                # Ordinary parameters such as ``data`` and ``self`` must not
+                # make unrelated method calls look like shadowed constructors;
+                # invalidate only names that could hide a known control alias.
+                outer_scopes = _control_scope_chain(parent_scope)
+                for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                    if (
+                        argument.arg in _CONTROL_DIRECT_APIS
+                        or argument.arg in _CONTROL_MODULES
+                        or any((candidate, argument.arg) in bindings for candidate in outer_scopes)
+                    ):
+                        _control_bind_name(bindings, local_scope, argument.arg, _CONTROL_INVALID, force=True)
+                if node.args.vararg is not None and (
+                    node.args.vararg.arg in _CONTROL_DIRECT_APIS
+                    or node.args.vararg.arg in _CONTROL_MODULES
+                    or any((candidate, node.args.vararg.arg) in bindings for candidate in outer_scopes)
+                ):
+                    _control_bind_name(bindings, local_scope, node.args.vararg.arg, _CONTROL_INVALID, force=True)
+                if node.args.kwarg is not None and (
+                    node.args.kwarg.arg in _CONTROL_DIRECT_APIS
+                    or node.args.kwarg.arg in _CONTROL_MODULES
+                    or any((candidate, node.args.kwarg.arg) in bindings for candidate in outer_scopes)
+                ):
+                    _control_bind_name(bindings, local_scope, node.args.kwarg.arg, _CONTROL_INVALID, force=True)
+        elif isinstance(node, ast.Import):
+            scope = _control_scope(parents, node)
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, f"{_CONTROL_MODULE_PREFIX}{alias.name}")
+                elif bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, _CONTROL_INVALID)
+        elif isinstance(node, ast.ImportFrom):
+            scope = _control_scope(parents, node)
+            module = node.module or ""
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                canonical: object = _CONTROL_INVALID
+                if module == "builtins" and alias.name in _CONTROL_DIRECT_APIS:
+                    canonical = alias.name
+                elif module == "binascii" and alias.name in {"unhexlify", "a2b_hex"}:
+                    canonical = f"binascii.{alias.name}"
+                elif module == "codecs" and alias.name == "decode":
+                    canonical = "codecs.decode"
+                elif alias.name in _CONTROL_DIRECT_APIS or alias.name in _CONTROL_MODULES:
+                    canonical = _CONTROL_INVALID
+                if canonical is not _CONTROL_INVALID or bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, canonical)
+        elif isinstance(node, ast.Assign):
+            scope = _control_scope(parents, node)
+            resolved = _control_resolve_expression(node.value, scope, bindings)
+            for target in node.targets:
+                for name in _control_target_names_for_binding(target):
+                    if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                        _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+                    elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                        _control_bind_name(bindings, scope, name, resolved)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            scope = _control_scope(parents, node)
+            target = node.target if isinstance(node, ast.AnnAssign) else node.target
+            resolved = _control_resolve_expression(node.value, scope, bindings) if node.value is not None else None
+            for name in _control_target_names_for_binding(target):
+                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                    _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+                elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                    _control_bind_name(bindings, scope, name, resolved)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+            scope = _control_scope(parents, node)
+            target = node.target
+            for name in _control_target_names_for_binding(target):
+                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                    _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+    return bindings
+
+
+def _control_static_scalar(node: ast.AST) -> str | bytes | None:
+    if isinstance(node, ast.Constant) and type(node.value) in {str, bytes}:
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _control_static_scalar(node.left)
+        right = _control_static_scalar(node.right)
+        if type(left) is type(right) and left is not None and len(left) + len(right) <= MAX_ARTIFACT_BYTES:
+            return left + right
+    return None
+
+
+def _control_static_hex_payload(node: ast.AST) -> str | None:
+    value = _control_static_scalar(node)
+    if value is None:
+        return None
+    if type(value) is bytes:
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValidationError() from exc
+    payload = "".join(value.split())
+    if any(character not in "0123456789abcdefABCDEF" for character in payload) or len(payload) % 2:
+        raise ValidationError()
+    try:
+        return "".join(
+            f"{int(payload[index:index + 2], 16):02x}"
+            for index in range(0, len(payload), 2)
+        )
+    except ValueError as exc:
+        raise ValidationError() from exc
+
+
+def _control_has_static_controls(node: ast.Call, canonical: str) -> bool:
+    """Detect control evidence before rejecting an otherwise ordinary call shape.
+
+    Fixture code also uses ``bytes(text, encoding)`` and ``bytearray()`` for
+    ordinary serialization. Only reject a wrong-arity form when its static
+    operands prove that it is attempting to construct a control-bearing value;
+    fully valid control forms still fail closed below when their operands are
+    dynamic or malformed.
+    """
+    operands = [argument for argument in node.args]
+    operands.extend(keyword.value for keyword in node.keywords)
+    if canonical == "chr":
+        return any(
+            (code := _control_static_int(operand)) is not None
+            and (code < 32 or code == 127)
+            for operand in operands
+        )
+    if canonical in {"bytes", "bytearray"}:
+        for operand in operands:
+            value_hex = _control_static_bytes_hex(operand)
+            if value_hex is None:
+                continue
+            if any(
+                int(value_hex[index:index + 2], 16) < 32
+                or int(value_hex[index:index + 2], 16) == 127
+                for index in range(0, len(value_hex), 2)
+            ):
+                return True
+        return False
+    if canonical in {
+        "bytes.fromhex",
+        "bytearray.fromhex",
+        "binascii.unhexlify",
+        "binascii.a2b_hex",
+        "codecs.decode",
+    }:
+        for operand in operands[:1]:
+            value_hex = _control_static_hex_payload(operand)
+            if value_hex is None:
+                continue
+            if any(
+                int(value_hex[index:index + 2], 16) < 32
+                or int(value_hex[index:index + 2], 16) == 127
+                for index in range(0, len(value_hex), 2)
+            ):
+                return True
+    return False
+
+
 def _control_dynamic_constructor(
     node: ast.AST,
     parents: dict[int, tuple[ast.AST, str, int | None]],
+    bindings: dict[tuple[str, str], object],
 ) -> tuple[str, str, str, str] | None:
     if not isinstance(node, ast.Call):
         return None
     name = _control_dotted_name(node.func)
+    scope = _control_scope(parents, node)
+    resolved = _control_resolve_expression(node.func, scope, bindings)
+    if isinstance(node.func, ast.Call) and _control_dotted_name(node.func.func) == "getattr":
+        raise ValidationError()
+    canonical = resolved if isinstance(resolved, str) else _CONTROL_SOURCE_APIS.get(name)
+    if resolved is _CONTROL_INVALID:
+        raise ValidationError()
+    if canonical not in _CONTROL_CANONICAL_APIS:
+        return None
     role = _control_role(parents, node)
-    if name == "chr" and len(node.args) == 1 and not node.keywords:
+    if canonical == "chr":
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
         code = _control_static_int(node.args[0])
         if code is None:
-            return ("unknown", "", name, role)
-        if 0 <= code < 32 or code == 127:
-            return ("str", format(code, "02x"), name, _control_role(parents, node))
+            return ("unknown", "", canonical, role)
+        if not 0 <= code <= 0x10FFFF:
+            raise ValidationError()
+        if code < 32 or code == 127:
+            if code == 10:
+                return None
+            return ("str", format(code, "02x"), canonical, role)
         return None
-    if name in {"bytes", "bytearray"} and len(node.args) == 1 and not node.keywords:
+    if canonical in {"bytes", "bytearray"}:
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
         value_hex = _control_static_bytes_hex(node.args[0])
         if value_hex is None:
-            return ("unknown", "", name, role)
+            return ("unknown", "", canonical, role)
         controls = {
             int(value_hex[index:index + 2], 16)
             for index in range(0, len(value_hex), 2)
@@ -5214,10 +5547,47 @@ def _control_dynamic_constructor(
             or int(value_hex[index:index + 2], 16) == 127
         }
         if controls and controls != {10}:
-            return ("bytes", value_hex, name, _control_role(parents, node))
+            return ("bytes", value_hex, canonical, role)
         return None
-    if name in {"bytes.fromhex", "bytearray.fromhex"} and len(node.args) == 1 and not node.keywords:
-        return ("unknown", "", name, role)
+    if canonical in {"bytes.fromhex", "bytearray.fromhex", "binascii.unhexlify", "binascii.a2b_hex"}:
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
+        value_hex = _control_static_hex_payload(node.args[0])
+        if value_hex is None:
+            return ("unknown", "", canonical, role)
+        controls = {
+            int(value_hex[index:index + 2], 16)
+            for index in range(0, len(value_hex), 2)
+            if int(value_hex[index:index + 2], 16) < 32
+            or int(value_hex[index:index + 2], 16) == 127
+        }
+        if controls and controls != {10}:
+            return ("bytes", value_hex, canonical, role)
+        return None
+    if canonical == "codecs.decode":
+        if len(node.args) != 2 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
+        encoding = node.args[1]
+        if not isinstance(encoding, ast.Constant) or type(encoding.value) is not str:
+            raise ValidationError()
+        if encoding.value.casefold() not in {"hex", "hex_codec"}:
+            raise ValidationError()
+        value_hex = _control_static_hex_payload(node.args[0])
+        if value_hex is None:
+            return ("unknown", "", canonical, role)
+        controls = {
+            int(value_hex[index:index + 2], 16)
+            for index in range(0, len(value_hex), 2)
+            if int(value_hex[index:index + 2], 16) < 32
+            or int(value_hex[index:index + 2], 16) == 127
+        }
+        if controls and controls != {10}:
+            return ("bytes", value_hex, canonical, role)
+        return None
     return None
 
 
@@ -5309,6 +5679,7 @@ def _validate_python_file(
         else frozenset()
     )
     bindings = _collect_static_bindings(tree)
+    control_bindings = _control_alias_bindings(tree, _control_parent_map(tree))
     policy_root = FIXTURES_ROOT if control_policy_root is None else control_policy_root
     policy_path = _control_policy_path(path, control_policy_path, fixtures_root=policy_root)
     parents = _control_parent_map(tree)
@@ -5331,7 +5702,7 @@ def _validate_python_file(
     dynamic_control_records: list[tuple[ast.Call, str, str]] = []
     dynamic_control_ids: set[int] = set()
     for node in ast.walk(tree):
-        construction = _control_dynamic_constructor(node, parents)
+        construction = _control_dynamic_constructor(node, parents, control_bindings)
         if construction is None:
             continue
         kind, value_hex, constructor, role = construction

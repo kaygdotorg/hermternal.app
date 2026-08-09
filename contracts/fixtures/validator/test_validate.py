@@ -600,13 +600,14 @@ class CliTests(unittest.TestCase):
             parents: dict[int, tuple[ast.AST, str, int | None]],
             node: ast.AST,
         ) -> str:
+            scopes: list[str] = []
             current = node
             while id(current) in parents:
                 parent, _field, _index = parents[id(current)]
-                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return parent.name
+                if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scopes.append(parent.name)
                 current = parent
-            return "module"
+            return ".".join(reversed(scopes)) if scopes else "module"
 
         def role(
             parents: dict[int, tuple[ast.AST, str, int | None]],
@@ -678,56 +679,316 @@ class CliTests(unittest.TestCase):
                 return f"{0xE0 | (code >> 12):02x}{0x80 | ((code >> 6) & 0x3F):02x}{0x80 | (code & 0x3F):02x}"
             return f"{0xF0 | (code >> 18):02x}{0x80 | ((code >> 12) & 0x3F):02x}{0x80 | ((code >> 6) & 0x3F):02x}{0x80 | (code & 0x3F):02x}"
 
+        control_invalid = object()
+        control_module_prefix = "module:"
+        control_direct_apis = frozenset({"chr", "bytes", "bytearray"})
+        control_modules = frozenset({"builtins", "binascii", "codecs"})
+        control_canonical_apis = frozenset(
+            {
+                "chr",
+                "bytes",
+                "bytearray",
+                "bytes.fromhex",
+                "bytearray.fromhex",
+                "binascii.unhexlify",
+                "binascii.a2b_hex",
+                "codecs.decode",
+            }
+        )
+        control_source_apis = {
+            "chr": "chr",
+            "bytes": "bytes",
+            "bytearray": "bytearray",
+            "builtins.chr": "chr",
+            "builtins.bytes": "bytes",
+            "builtins.bytearray": "bytearray",
+            "bytes.fromhex": "bytes.fromhex",
+            "bytearray.fromhex": "bytearray.fromhex",
+            "builtins.bytes.fromhex": "bytes.fromhex",
+            "builtins.bytearray.fromhex": "bytearray.fromhex",
+            "binascii.unhexlify": "binascii.unhexlify",
+            "binascii.a2b_hex": "binascii.a2b_hex",
+            "codecs.decode": "codecs.decode",
+        }
+
+        def scope_chain(scope_name: str) -> tuple[str, ...]:
+            if scope_name == "module":
+                return ("module",)
+            parts = scope_name.split(".")
+            return tuple(
+                [".".join(parts[:index]) for index in range(len(parts), 0, -1)]
+                + ["module"]
+            )
+
+        def lookup_binding(
+            bindings: dict[tuple[str, str], object],
+            scope_name: str,
+            name: str,
+        ) -> tuple[bool, object | None]:
+            for candidate in scope_chain(scope_name):
+                key = (candidate, name)
+                if key in bindings:
+                    return True, bindings[key]
+            if name in control_direct_apis:
+                return True, name
+            if name in control_modules:
+                return True, control_module_prefix + name
+            return False, None
+
+        def resolve_expression(
+            node: ast.AST,
+            scope_name: str,
+            bindings: dict[tuple[str, str], object],
+        ) -> object | None:
+            if isinstance(node, ast.Name):
+                _found, value = lookup_binding(bindings, scope_name, node.id)
+                return value
+            if not isinstance(node, ast.Attribute):
+                return None
+            base = resolve_expression(node.value, scope_name, bindings)
+            if base is control_invalid:
+                return control_invalid
+            if base == control_module_prefix + "builtins" and node.attr in control_direct_apis:
+                return node.attr
+            if base == control_module_prefix + "binascii" and node.attr in {"unhexlify", "a2b_hex"}:
+                return "binascii." + node.attr
+            if base == control_module_prefix + "codecs" and node.attr == "decode":
+                return "codecs.decode"
+            if base in {"bytes", "bytearray"} and node.attr == "fromhex":
+                return base + ".fromhex"
+            return None
+
+        def bind_name(
+            bindings: dict[tuple[str, str], object],
+            scope_name: str,
+            name: str,
+            value: object,
+            *,
+            force: bool = False,
+        ) -> None:
+            key = (scope_name, name)
+            if force:
+                bindings[key] = value
+            elif key in bindings:
+                bindings[key] = control_invalid
+            else:
+                bindings[key] = value
+
+        def target_names_for_binding(node: ast.AST) -> tuple[str, ...]:
+            if isinstance(node, ast.Name):
+                return (node.id,)
+            if isinstance(node, (ast.Tuple, ast.List)):
+                names: list[str] = []
+                for child in node.elts:
+                    names.extend(target_names_for_binding(child))
+                return tuple(names)
+            return ()
+
+        def alias_bindings(
+            tree: ast.AST,
+            parents: dict[int, tuple[ast.AST, str, int | None]],
+        ) -> dict[tuple[str, str], object]:
+            bindings: dict[tuple[str, str], object] = {}
+            nodes = sorted(
+                ast.walk(tree),
+                key=lambda item: (getattr(item, "lineno", -1), getattr(item, "col_offset", -1)),
+            )
+            for node in nodes:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    parent_scope = scope(parents, node)
+                    if (
+                        node.name in control_direct_apis
+                        or node.name in control_modules
+                        or (parent_scope, node.name) in bindings
+                    ):
+                        bind_name(bindings, parent_scope, node.name, control_invalid)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        local_scope = node.name if parent_scope == "module" else f"{parent_scope}.{node.name}"
+                        outer_scopes = scope_chain(parent_scope)
+                        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                            if (
+                                argument.arg in control_direct_apis
+                                or argument.arg in control_modules
+                                or any((candidate, argument.arg) in bindings for candidate in outer_scopes)
+                            ):
+                                bind_name(bindings, local_scope, argument.arg, control_invalid, force=True)
+                        if node.args.vararg is not None and (
+                            node.args.vararg.arg in control_direct_apis
+                            or node.args.vararg.arg in control_modules
+                            or any((candidate, node.args.vararg.arg) in bindings for candidate in outer_scopes)
+                        ):
+                            bind_name(bindings, local_scope, node.args.vararg.arg, control_invalid, force=True)
+                        if node.args.kwarg is not None and (
+                            node.args.kwarg.arg in control_direct_apis
+                            or node.args.kwarg.arg in control_modules
+                            or any((candidate, node.args.kwarg.arg) in bindings for candidate in outer_scopes)
+                        ):
+                            bind_name(bindings, local_scope, node.args.kwarg.arg, control_invalid, force=True)
+                elif isinstance(node, ast.Import):
+                    scope_name = scope(parents, node)
+                    for imported in node.names:
+                        bound = imported.asname or imported.name.split(".", 1)[0]
+                        if imported.name in control_modules:
+                            bind_name(bindings, scope_name, bound, control_module_prefix + imported.name)
+                        elif bound in control_direct_apis or bound in control_modules:
+                            bind_name(bindings, scope_name, bound, control_invalid)
+                elif isinstance(node, ast.ImportFrom):
+                    scope_name = scope(parents, node)
+                    module = node.module or ""
+                    for imported in node.names:
+                        bound = imported.asname or imported.name
+                        canonical: object = control_invalid
+                        if module == "builtins" and imported.name in control_direct_apis:
+                            canonical = imported.name
+                        elif module == "binascii" and imported.name in {"unhexlify", "a2b_hex"}:
+                            canonical = "binascii." + imported.name
+                        elif module == "codecs" and imported.name == "decode":
+                            canonical = "codecs.decode"
+                        elif imported.name in control_direct_apis or imported.name in control_modules:
+                            canonical = control_invalid
+                        if canonical is not control_invalid or bound in control_direct_apis or bound in control_modules:
+                            bind_name(bindings, scope_name, bound, canonical)
+                elif isinstance(node, ast.Assign):
+                    scope_name = scope(parents, node)
+                    resolved = resolve_expression(node.value, scope_name, bindings)
+                    for target in node.targets:
+                        for name in target_names_for_binding(target):
+                            if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                                bind_name(bindings, scope_name, name, control_invalid)
+                            elif resolved in control_canonical_apis or (
+                                isinstance(resolved, str) and resolved.startswith(control_module_prefix)
+                            ):
+                                bind_name(bindings, scope_name, name, resolved)
+                elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                    scope_name = scope(parents, node)
+                    resolved = resolve_expression(node.value, scope_name, bindings) if node.value is not None else None
+                    for name in target_names_for_binding(node.target):
+                        if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                            bind_name(bindings, scope_name, name, control_invalid)
+                        elif resolved in control_canonical_apis or (
+                            isinstance(resolved, str) and resolved.startswith(control_module_prefix)
+                        ):
+                            bind_name(bindings, scope_name, name, resolved)
+                elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+                    scope_name = scope(parents, node)
+                    for name in target_names_for_binding(node.target):
+                        if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                            bind_name(bindings, scope_name, name, control_invalid)
+            return bindings
+
+        def static_scalar(node: ast.AST) -> str | bytes | None:
+            if isinstance(node, ast.Constant) and type(node.value) in {str, bytes}:
+                return node.value
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                left = static_scalar(node.left)
+                right = static_scalar(node.right)
+                if type(left) is type(right) and left is not None and len(left) + len(right) <= validate.MAX_ARTIFACT_BYTES:
+                    return left + right
+            return None
+
+        def static_hex_payload(node: ast.AST) -> str | None:
+            value = static_scalar(node)
+            if value is None:
+                return None
+            if type(value) is bytes:
+                try:
+                    value = value.decode("ascii")
+                except UnicodeDecodeError:
+                    return None
+            compact = "".join(value.split())
+            if len(compact) % 2 or any(digit not in "0123456789abcdefABCDEF" for digit in compact):
+                return None
+            try:
+                return "".join(
+                    f"{int(compact[index:index + 2], 16):02x}"
+                    for index in range(0, len(compact), 2)
+                )
+            except ValueError:
+                return None
+
         def construction(
             node: ast.AST,
             parents: dict[int, tuple[ast.AST, str, int | None]],
-        ) -> tuple[str, str, str, str] | tuple[str, str] | None:
+            bindings: dict[tuple[str, str], object],
+        ) -> tuple[str, str, str, str] | None:
             if not isinstance(node, ast.Call):
                 return None
             name = dotted(node.func)
-            encoded: str | None = None
-            controls: set[int] = set()
-            kind: str | None = None
-            if name == "chr" and len(node.args) == 1 and not node.keywords:
+            scope_name = scope(parents, node)
+            resolved = resolve_expression(node.func, scope_name, bindings)
+            canonical = resolved if isinstance(resolved, str) else control_source_apis.get(name)
+            if resolved is control_invalid or canonical not in control_canonical_apis:
+                return None
+            structural_role = role(parents, node)
+            if canonical == "chr":
+                if len(node.args) != 1 or node.keywords:
+                    return None
                 code = static_int(node.args[0])
                 if code is None:
-                    return ("unknown", name)
-                if 0 <= code <= 0x10FFFF:
-                    encoded = utf8_hex(code)
-                    controls = {code} if code < 32 or code == 127 else set()
-                    kind = "str"
-            elif name in {"bytes", "bytearray"} and len(node.args) == 1 and not node.keywords:
+                    return "unknown", "", canonical, structural_role
+                if not 0 <= code <= 0x10FFFF:
+                    return None
+                encoded = utf8_hex(code)
+                controls = {code} if code < 32 or code == 127 else set()
+                if controls and controls != {10}:
+                    return "str", encoded, canonical, structural_role
+                return None
+            if canonical in {"bytes", "bytearray"}:
+                if len(node.args) != 1 or node.keywords:
+                    return None
                 encoded = static_byte_hex(node.args[0])
                 if encoded is None:
-                    return ("unknown", name)
+                    return "unknown", "", canonical, structural_role
                 controls = {
-                    byte
+                    int(encoded[index:index + 2], 16)
                     for index in range(0, len(encoded), 2)
-                    for byte in (int(encoded[index:index + 2], 16),)
-                    if byte < 32 or byte == 127
+                    if int(encoded[index:index + 2], 16) < 32
+                    or int(encoded[index:index + 2], 16) == 127
                 }
-                kind = "bytes"
-            elif name in {"bytes.fromhex", "bytearray.fromhex"} and len(node.args) == 1 and not node.keywords:
-                argument = node.args[0]
-                if isinstance(argument, ast.Constant) and type(argument.value) is str:
-                    compact = "".join(argument.value.split())
-                    if len(compact) % 2 or any(digit not in "0123456789abcdefABCDEF" for digit in compact):
-                        return ("unknown", name)
-                    encoded = compact.lower()
-                    controls = {
-                        byte
-                        for index in range(0, len(encoded), 2)
-                        for byte in (int(encoded[index:index + 2], 16),)
-                        if byte < 32 or byte == 127
-                    }
-                    kind = "bytes"
-                else:
-                    return ("unknown", name)
-            else:
+                if controls and controls != {10}:
+                    return "bytes", encoded, canonical, structural_role
                 return None
-            if not encoded or not controls or controls == {10}:
+            if canonical in {
+                "bytes.fromhex",
+                "bytearray.fromhex",
+                "binascii.unhexlify",
+                "binascii.a2b_hex",
+            }:
+                if len(node.args) != 1 or node.keywords:
+                    return None
+                encoded = static_hex_payload(node.args[0])
+                if encoded is None:
+                    return "unknown", "", canonical, structural_role
+                controls = {
+                    int(encoded[index:index + 2], 16)
+                    for index in range(0, len(encoded), 2)
+                    if int(encoded[index:index + 2], 16) < 32
+                    or int(encoded[index:index + 2], 16) == 127
+                }
+                if controls and controls != {10}:
+                    return "bytes", encoded, canonical, structural_role
                 return None
-            return kind, encoded, name, role(parents, node)  # type: ignore[return-value]
+            if canonical == "codecs.decode":
+                if len(node.args) != 2 or node.keywords:
+                    return None
+                encoding = node.args[1]
+                if not isinstance(encoding, ast.Constant) or type(encoding.value) is not str:
+                    return None
+                if encoding.value.casefold() not in {"hex", "hex_codec"}:
+                    return None
+                encoded = static_hex_payload(node.args[0])
+                if encoded is None:
+                    return "unknown", "", canonical, structural_role
+                controls = {
+                    int(encoded[index:index + 2], 16)
+                    for index in range(0, len(encoded), 2)
+                    if int(encoded[index:index + 2], 16) < 32
+                    or int(encoded[index:index + 2], 16) == 127
+                }
+                if controls and controls != {10}:
+                    return "bytes", encoded, canonical, structural_role
+                return None
+            return None
 
         generated_literals: list[tuple[str, str, str, str, int]] = []
         generated_dynamic: list[tuple[str, str, str, str, str, int]] = []
@@ -738,6 +999,7 @@ class CliTests(unittest.TestCase):
                 continue
             relative = path.relative_to(validate.FIXTURES_ROOT).as_posix()
             parents = parent_map(tree)
+            control_bindings = alias_bindings(tree, parents)
             occurrences: dict[tuple[str, str, str], int] = {}
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes}:
@@ -758,12 +1020,12 @@ class CliTests(unittest.TestCase):
                 occurrences[key] = ordinal + 1
                 generated_literals.append((relative, kind, encoded, structural_role, ordinal))
             for node in ast.walk(tree):
-                result = construction(node, parents)
+                result = construction(node, parents, control_bindings)
                 if result is None:
                     continue
                 if result[0] == "unknown":
-                    _kind, constructor = result
-                    key = (_kind, constructor, role(parents, node))
+                    _kind, _encoded, constructor, structural_role = result
+                    key = (_kind, constructor, structural_role)
                     ordinal = occurrences.get(key, 0)
                     occurrences[key] = ordinal + 1
                     generated_dynamic.append((relative, "unknown", "", constructor, key[2], ordinal))
@@ -782,8 +1044,112 @@ class CliTests(unittest.TestCase):
             tuple(sorted(generated_dynamic)),
             tuple(sorted(validate._PYTHON_CONTROL_CONSTRUCTION_ROWS)),
         )
+        self.assertEqual(len(generated_literals), 68)
+        self.assertEqual(len(generated_dynamic), 30)
         self.assertEqual(len(generated_literals), len(set(generated_literals)))
         self.assertEqual(len(generated_dynamic), len(set(generated_dynamic)))
+
+    def test_control_scope_disambiguates_same_local_names(self) -> None:
+        source = (
+            'def same():\n    value = "\\x00"\n'
+            'class Alpha:\n    def same(self):\n        value = "\\x00"\n'
+            'class Beta:\n    def same(self):\n        value = "\\x00"\n'
+            'def outer():\n    def same():\n        value = "\\x00"\n'
+        )
+        tree = ast.parse(source)
+        parents = validate._control_parent_map(tree)
+        roles = [
+            validate._control_role(parents, node)
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and len(node.value) == 1
+                and ord(node.value) == 0
+            )
+        ]
+        self.assertEqual(
+            set(roles),
+            {
+                "fn:same|assign:value|path:value",
+                "fn:Alpha.same|assign:value|path:value",
+                "fn:Beta.same|assign:value|path:value",
+                "fn:outer.same|assign:value|path:value",
+            },
+        )
+
+    def test_control_aliases_and_static_decodes_have_canonical_rows(self) -> None:
+        payload_hex = "006170695f6b65793d756e72656461637465642d736563726574"
+        cases = (
+            ('builtins.chr(0)\n', ("str", "00", "chr")),
+            ('import builtins as b\nb.bytes([0, 65])\n', ("bytes", "0041", "bytes")),
+            ('from builtins import chr as make\nmake(0)\n', ("str", "00", "chr")),
+            ('from builtins import bytes as make_bytes\nmake_bytes([0])\n', ("bytes", "00", "bytes")),
+            (
+                f'from builtins import bytes as make_bytes\nmake_bytes.fromhex({payload_hex!r})\n',
+                ("bytes", payload_hex, "bytes.fromhex"),
+            ),
+            (
+                f'import binascii as bx\nbx.unhexlify({payload_hex!r})\n',
+                ("bytes", payload_hex, "binascii.unhexlify"),
+            ),
+            (
+                f'from binascii import a2b_hex as decode_hex\ndecode_hex({payload_hex!r})\n',
+                ("bytes", payload_hex, "binascii.a2b_hex"),
+            ),
+            (
+                f'import codecs as codec\ncodec.decode({payload_hex!r}, "hex")\n',
+                ("bytes", payload_hex, "codecs.decode"),
+            ),
+            (
+                f'from codecs import decode as decode_hex\ndecode_hex({payload_hex!r}, "hex_codec")\n',
+                ("bytes", payload_hex, "codecs.decode"),
+            ),
+        )
+        decoded_row: tuple[str, str, str, str] | None = None
+        for source, expected in cases:
+            with self.subTest(source=source):
+                tree = ast.parse(source)
+                parents = validate._control_parent_map(tree)
+                bindings = validate._control_alias_bindings(tree, parents)
+                call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call))
+                row = validate._control_dynamic_constructor(call, parents, bindings)
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertEqual(row[:3], expected)
+                self.assertEqual(row[3], "fn:module|module-path")
+                if expected[2] == "codecs.decode":
+                    decoded_row = row
+
+        self.assertIsNotNone(decoded_row)
+        assert decoded_row is not None
+        projection = validate._control_projection_from_hex(decoded_row[0], decoded_row[1])
+        self.assertEqual(projection, "api_key=unredacted-secret")
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_text_value(projection or "")
+
+    def test_unreviewed_control_aliases_and_api_forms_reject_in_both_modes(self) -> None:
+        sources = (
+            b'def same(chr):\n    return chr(0)\n',
+            b'from builtins import chr as make\nmake = object()\nmake(0)\n',
+            b'import builtins as b\nb = object()\nb.chr(0)\n',
+            b'chr(value)\n',
+            b'bytes(value)\n',
+            b'bytes.fromhex("0")\n',
+            b'import codecs\ncodecs.decode("00", "base64")\n',
+            b'import codecs\ncodecs.decode("00", encoding)\n',
+            b'chr(0, 1)\n',
+            b'chr(code=0)\n',
+            b'bytes.fromhex("00", "00")\n',
+            b'import binascii as b\nb.unhexlify(value)\n',
+            b'import builtins\ngetattr(builtins, "chr")(0)\n',
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source,
+                )
 
     def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
         repo_root = self._copy_fixture_repo()
@@ -875,8 +1241,29 @@ class CliTests(unittest.TestCase):
         repo_root = self._copy_fixture_repo()
         index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
         # These are the two retained negative inputs named by the canonical
-        # path/pointer/value policy; the unchanged indexed corpus must pass.
+        # path/pointer/value/ancestry policy; the unchanged indexed corpus must pass.
         validate._validate_index_document(index, repo_root)
+
+        # The pointer text is intentionally unchanged when the reviewed list is
+        # replaced by numeric object keys. The container-shape binding must still
+        # reject this array-to-object reuse for each historical allowance.
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/attachment-policy/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["cases"] = {str(index): case for index, case in enumerate(document["cases"])}
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/session-search/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["cases"] = {str(index): case for index, case in enumerate(document["cases"])}
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
 
         nul = chr(0)
         expected = "../unsafe name" + nul + ".png"
