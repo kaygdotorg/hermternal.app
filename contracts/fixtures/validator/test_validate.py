@@ -600,13 +600,14 @@ class CliTests(unittest.TestCase):
             parents: dict[int, tuple[ast.AST, str, int | None]],
             node: ast.AST,
         ) -> str:
+            scopes: list[str] = []
             current = node
             while id(current) in parents:
                 parent, _field, _index = parents[id(current)]
-                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return parent.name
+                if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scopes.append(parent.name)
                 current = parent
-            return "module"
+            return ".".join(reversed(scopes)) if scopes else "module"
 
         def role(
             parents: dict[int, tuple[ast.AST, str, int | None]],
@@ -782,8 +783,39 @@ class CliTests(unittest.TestCase):
             tuple(sorted(generated_dynamic)),
             tuple(sorted(validate._PYTHON_CONTROL_CONSTRUCTION_ROWS)),
         )
+        self.assertEqual(len(generated_literals), 68)
+        self.assertEqual(len(generated_dynamic), 30)
         self.assertEqual(len(generated_literals), len(set(generated_literals)))
         self.assertEqual(len(generated_dynamic), len(set(generated_dynamic)))
+
+    def test_control_scope_disambiguates_same_local_names(self) -> None:
+        source = (
+            'def same():\n    value = "\\x00"\n'
+            'class Alpha:\n    def same(self):\n        value = "\\x00"\n'
+            'class Beta:\n    def same(self):\n        value = "\\x00"\n'
+            'def outer():\n    def same():\n        value = "\\x00"\n'
+        )
+        tree = ast.parse(source)
+        parents = validate._control_parent_map(tree)
+        roles = [
+            validate._control_role(parents, node)
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and len(node.value) == 1
+                and ord(node.value) == 0
+            )
+        ]
+        self.assertEqual(
+            set(roles),
+            {
+                "fn:same|assign:value|path:value",
+                "fn:Alpha.same|assign:value|path:value",
+                "fn:Beta.same|assign:value|path:value",
+                "fn:outer.same|assign:value|path:value",
+            },
+        )
 
     def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
         repo_root = self._copy_fixture_repo()
