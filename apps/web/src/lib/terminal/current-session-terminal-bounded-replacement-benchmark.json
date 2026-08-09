@@ -1,0 +1,38 @@
+{
+  "schema": "hermternal.current-session-terminal-bounded-replacement-benchmark.v1",
+  "operation": "replace an abort-insensitive pending adapter",
+  "metric": {
+    "name": "successor_interactive_wall_time",
+    "unit": "ms",
+    "clock": "performance.now"
+  },
+  "method": "R-7 inclusive linear interpolation",
+  "provenance": {
+    "sourceRevision": "10e427443c3dfba23ff53adb74ffd2f12801f3dc",
+    "command": "GIT_SOURCE_REVISION=<source-sha> bun src/lib/terminal/current-session-terminal-bounded-replacement.bench.ts",
+    "runtime": "Bun 1.3.14",
+    "mode": "test"
+  },
+  "repetitions": 30,
+  "warmups": 5,
+  "exclusions": [
+    "network",
+    "Hermes",
+    "credentials",
+    "PTY bytes",
+    "rendering",
+    "tickets"
+  ],
+  "results": {
+    "min": 1.1032089999999926,
+    "median": 1.3586460000000002,
+    "p95": 1.7701789500000018,
+    "successorInteractive": 30,
+    "lateOldCleanups": 30,
+    "duplicateOrSuccessorCleanups": 0
+  },
+  "configuration": {
+    "replacementQuarantineTimeoutMs": 1
+  },
+  "threshold": null
+}
