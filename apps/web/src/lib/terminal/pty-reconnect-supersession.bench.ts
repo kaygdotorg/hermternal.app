@@ -63,11 +63,112 @@ interface CallbackSnapshot {
   readonly onclose: ((event?: { readonly code?: number }) => void) | null;
 }
 
+interface CallbackBindingLedger {
+  readonly socketId: string;
+  readonly onopenBound: boolean;
+  readonly onmessageBound: boolean;
+  readonly onerrorBound: boolean;
+  readonly oncloseBound: boolean;
+  readonly onopenNullAfterClose: boolean;
+  readonly onmessageNullAfterClose: boolean;
+  readonly onerrorNullAfterClose: boolean;
+  readonly oncloseNullAfterClose: boolean;
+}
+
 interface StaleCallbackDispatches {
   readonly onopen: number;
   readonly onmessage: number;
   readonly onerror: number;
   readonly onclose: number;
+}
+
+interface PublicationLedger {
+  readonly eventCount: number;
+  readonly stateCount: number;
+  readonly bytesCount: number;
+  readonly noticeCount: number;
+}
+
+type MutablePublicationLedger = {
+  -readonly [Key in keyof PublicationLedger]: number;
+};
+
+interface StalePublications {
+  readonly onEvent: PublicationLedger;
+  readonly subscribe: PublicationLedger;
+  readonly onStateChange: PublicationLedger;
+}
+
+interface DelayedBlobProof {
+  readonly scheduledCount: number;
+  readonly completionCount: number;
+  readonly dispatchedBeforeClose: boolean;
+  readonly conversionStartedBeforeClose: boolean;
+  readonly resolvedAfterClose: boolean;
+  readonly postCloseBytesRejected: boolean;
+  /** Raw lifecycle sequence; validator derives the temporal booleans from it. */
+  readonly events: readonly string[];
+}
+
+function createPublicationLedger(): MutablePublicationLedger {
+  return {
+    eventCount: 0,
+    stateCount: 0,
+    bytesCount: 0,
+    noticeCount: 0,
+  };
+}
+
+function recordEventPublication(
+  ledger: MutablePublicationLedger,
+  event: PtyTransportEvent,
+): void {
+  ledger.eventCount += 1;
+  if (event.type === "state") ledger.stateCount += 1;
+  if (event.type === "bytes") ledger.bytesCount += 1;
+  if (event.type === "notice") ledger.noticeCount += 1;
+}
+
+function recordStatePublication(ledger: MutablePublicationLedger): void {
+  ledger.eventCount += 1;
+  ledger.stateCount += 1;
+}
+
+/**
+ * The deferred frame is synthetic and stays unresolved until the benchmark
+ * explicitly releases it after cleanup. This keeps conversion in flight while
+ * ownership is revoked, so a late Blob completion cannot publish stale bytes.
+ */
+class DeferredBlob extends Blob {
+  scheduledCount = 0;
+  completionCount = 0;
+  private resolveBytes: ((value: ArrayBuffer) => void) | null = null;
+
+  constructor(
+    private readonly onConversionStart: () => void,
+    private readonly onCompletion: () => void,
+  ) {
+    super([new Uint8Array([0xaa])]);
+  }
+
+  override arrayBuffer(): Promise<ArrayBuffer> {
+    this.scheduledCount += 1;
+    this.onConversionStart();
+    return new Promise<ArrayBuffer>((resolve) => {
+      this.resolveBytes = (value) => {
+        this.completionCount += 1;
+        this.onCompletion();
+        resolve(value);
+      };
+    });
+  }
+
+  release(): void {
+    if (!this.resolveBytes) throw new Error("benchmark released an unscheduled Blob");
+    const resolve = this.resolveBytes;
+    this.resolveBytes = null;
+    resolve(new Uint8Array([0xaa]).buffer);
+  }
 }
 
 function dispatchCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
@@ -189,9 +290,13 @@ interface RunProof {
   readonly replacementSocketId: string;
   readonly replacementSocketIdentity: BenchmarkOwnerIdentity;
   readonly replacementSocketCloseCalls: number;
+  readonly replacementStateStatus: string;
   readonly socketClosures: readonly SocketClosure[];
-  readonly callbackProofApplicable: boolean;
   readonly callbackBoundSocketCount: number;
+  readonly callbackBoundSinkCount: number;
+  readonly callbackBoundSinkNames: readonly string[];
+  readonly callbackBindings: readonly CallbackBindingLedger[];
+  readonly callbackProofApplicable: boolean;
   readonly staleCleanupCalls: number;
   readonly staleOpenCalls: number;
   readonly allCallbacksNullAfterClose: boolean;
@@ -202,6 +307,8 @@ interface RunProof {
   readonly postCloseStateEvents: number;
   readonly postCloseBytesEvents: number;
   readonly postCloseNoticeEvents: number;
+  readonly stalePublications: StalePublications;
+  readonly delayedBlob: DelayedBlobProof;
   readonly assertions: Readonly<Record<string, boolean>>;
 }
 
@@ -227,7 +334,12 @@ async function flush(): Promise<void> {
   for (let index = 0; index < 96; index += 1) await Promise.resolve();
 }
 
-async function expectCode(operation: Promise<void>, code: string, label: string): Promise<void> {
+async function expectCode(
+  operation: Promise<void>,
+  codes: string | readonly string[],
+  label: string,
+): Promise<void> {
+  const expectedCodes = typeof codes === "string" ? [codes] : codes;
   try {
     await within(operation, label);
     throw new Error(`${label} unexpectedly resolved`);
@@ -236,7 +348,8 @@ async function expectCode(operation: Promise<void>, code: string, label: string)
       typeof error !== "object" ||
       error === null ||
       !("code" in error) ||
-      error.code !== code
+      typeof error.code !== "string" ||
+      !expectedCodes.includes(error.code)
     ) {
       throw error;
     }
@@ -257,6 +370,34 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const events: PtyTransportEvent[] = [];
   let staleSocket: BenchmarkSocket | undefined;
   let transport!: PtyTransport;
+  let ownershipLost = false;
+  // Keep one exact ledger per publication sink. It starts after close returns so
+  // cleanup's own closing/detached states are not misclassified as stale output.
+  const stalePublications: {
+    readonly onEvent: MutablePublicationLedger;
+    readonly subscribe: MutablePublicationLedger;
+    readonly onStateChange: MutablePublicationLedger;
+  } = {
+    onEvent: createPublicationLedger(),
+    subscribe: createPublicationLedger(),
+    onStateChange: createPublicationLedger(),
+  };
+  const boundSinks = new Set<"onEvent" | "subscribe" | "onStateChange">();
+  const delayedBlobEvents: string[] = [];
+
+  const onEvent = (event: PtyTransportEvent): void => {
+    boundSinks.add("onEvent");
+    events.push(event);
+    if (ownershipLost) recordEventPublication(stalePublications.onEvent, event);
+  };
+  const onStateChange = (): void => {
+    boundSinks.add("onStateChange");
+    if (ownershipLost) recordStatePublication(stalePublications.onStateChange);
+  };
+  const onSubscribe = (event: PtyTransportEvent): void => {
+    boundSinks.add("subscribe");
+    if (ownershipLost) recordEventPublication(stalePublications.subscribe, event);
+  };
 
   const validateAttachment = (): Promise<boolean> | true => {
     validatorCalls += 1;
@@ -299,8 +440,10 @@ async function runStage(stage: Stage): Promise<RunProof> {
     validateAttachment,
     ticketProvider,
     createWebSocket,
-    onEvent: (event) => events.push(event),
+    onEvent,
+    onStateChange,
   });
+  const unsubscribe = transport.subscribe(onSubscribe);
 
   // This clock intentionally starts before connect. It is a negative control:
   // validator and ticket setup must appear here, but not in the quarantine sample.
@@ -316,7 +459,16 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const quarantineStartedAt = performance.now();
   transport.detach();
   await expectCode(cancelledAttempt, "aborted", `${stage} cancelled attempt`);
-  await expectCode(transport.reconnect(), "aborted", `${stage} quarantined reconnect`);
+  // The caller-cancelled reconnect fence must reject before minting another
+  // ticket or asking the factory for a second socket. This keeps the reviewed
+  // quarantine sample independent of the transport's pre-open retention policy.
+  const reconnectController = new AbortController();
+  reconnectController.abort();
+  await expectCode(
+    transport.reconnect(reconnectController.signal),
+    "aborted",
+    `${stage} quarantined reconnect`,
+  );
 
   if (stage === "validator") resolveValidation(true);
   if (stage === "ticket") resolveTicket(`benchmark-ticket-${ticketRequests}`);
@@ -345,6 +497,9 @@ async function runStage(stage: Stage): Promise<RunProof> {
   openedSockets += 1;
   await within(recovery, `${stage} recovery open`);
   const recoveryAttached = transport.state.status === "attached";
+  // Capture the replacement state before cleanup transitions the transport to
+  // detached; this is the state the recovery proof is required to establish.
+  const replacementStateStatus = transport.state.status;
   const expectedOwnerIdentity = ownerIdentity;
   const activeSockets = sockets.filter((socket) => socket.opened && !socket.closed);
   const activeSocketIds = activeSockets.map((socket) => socket.socketId);
@@ -354,32 +509,88 @@ async function runStage(stage: Stage): Promise<RunProof> {
     socket,
     callbacks: socket.retainCallbacksForLateDispatch(),
   }));
-  const callbackBoundSocketCount = callbackSnapshots.filter(
-    ({ callbacks }) =>
-      callbacks.onopen !== null &&
-      callbacks.onmessage !== null &&
-      callbacks.onerror !== null &&
-      callbacks.onclose !== null,
+  const callbackBindingsBeforeClose = callbackSnapshots.map(
+    ({ socket, callbacks }): CallbackBindingLedger => ({
+      socketId: socket.socketId,
+      onopenBound: callbacks.onopen !== null,
+      onmessageBound: callbacks.onmessage !== null,
+      onerrorBound: callbacks.onerror !== null,
+      oncloseBound: callbacks.onclose !== null,
+      onopenNullAfterClose: false,
+      onmessageNullAfterClose: false,
+      onerrorNullAfterClose: false,
+      oncloseNullAfterClose: false,
+    }),
+  );
+  const callbackBoundSocketCount = callbackBindingsBeforeClose.filter(
+    (binding) =>
+      binding.onopenBound &&
+      binding.onmessageBound &&
+      binding.onerrorBound &&
+      binding.oncloseBound,
   ).length;
+  const callbackBoundSinkNames = (["onEvent", "subscribe", "onStateChange"] as const).filter(
+    (sink) => boundSinks.has(sink),
+  );
+  const callbackBoundSinkCount = callbackBoundSinkNames.length;
   const callbackProofApplicable =
-    callbackBoundSocketCount === 1 && activeOwnerCountBeforeCleanup === 1;
+    callbackBoundSocketCount === 1 &&
+    callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange" &&
+    activeOwnerCountBeforeCleanup === 1;
+
+  // Start a real Blob conversion before ownership is revoked. Its resolver is
+  // held until after Close, so completion and stale-byte rejection are distinct
+  // observations rather than a synchronous ArrayBuffer shortcut.
+  const delayedBlob = new DeferredBlob(
+    () => delayedBlobEvents.push("conversion-start"),
+    () => delayedBlobEvents.push("completion"),
+  );
+  let delayedBlobDispatched = false;
+  const replacementCallbacks = callbackSnapshots.find(
+    ({ socket }) => socket === replacement,
+  )?.callbacks;
+  if (callbackProofApplicable && replacementCallbacks?.onmessage) {
+    delayedBlobEvents.push("dispatch");
+    replacementCallbacks.onmessage({ data: delayedBlob });
+    delayedBlobDispatched = true;
+    await flush();
+  }
 
   // Close must detach every adapter callback before its safeClose call. Replay
   // each callback captured from the live socket after Close to prove stale
   // open, message, error, and close events cannot publish anything.
   transport.close();
-  const allCallbacksNullAfterClose = sockets.every(
-    (socket) =>
-      socket.onopen === null &&
-      socket.onmessage === null &&
-      socket.onerror === null &&
-      socket.onclose === null,
+  if (callbackProofApplicable) delayedBlobEvents.push("close");
+  ownershipLost = true;
+  const postCloseEventStart = events.length;
+  if (delayedBlobDispatched && delayedBlob.scheduledCount === 1) {
+    delayedBlob.release();
+    await flush();
+  }
+  const callbackBindings = callbackSnapshots.map(
+    ({ socket, callbacks }): CallbackBindingLedger => ({
+      socketId: socket.socketId,
+      onopenBound: callbacks.onopen !== null,
+      onmessageBound: callbacks.onmessage !== null,
+      onerrorBound: callbacks.onerror !== null,
+      oncloseBound: callbacks.onclose !== null,
+      onopenNullAfterClose: socket.onopen === null,
+      onmessageNullAfterClose: socket.onmessage === null,
+      onerrorNullAfterClose: socket.onerror === null,
+      oncloseNullAfterClose: socket.onclose === null,
+    }),
+  );
+  const allCallbacksNullAfterClose = callbackBindings.every(
+    (binding) =>
+      binding.onopenNullAfterClose &&
+      binding.onmessageNullAfterClose &&
+      binding.onerrorNullAfterClose &&
+      binding.oncloseNullAfterClose,
   );
   let staleOnopenDispatches = 0;
   let staleOnmessageDispatches = 0;
   let staleOnerrorDispatches = 0;
   let staleOncloseDispatches = 0;
-  const postCloseEventStart = events.length;
   for (const { socket } of callbackSnapshots) {
     const dispatches = socket.dispatchLateCallbacks();
     staleOnopenDispatches += dispatches.onopen;
@@ -402,6 +613,33 @@ async function runStage(stage: Stage): Promise<RunProof> {
   const replacementSocketId = replacement.socketId;
   const replacementSocketIdentity = replacement.ownerIdentity;
   const replacementSocketCloseCalls = replacement.closeCalls;
+  const delayedBlobEventOrder =
+    delayedBlobEvents.length === 4 &&
+    delayedBlobEvents[0] === "dispatch" &&
+    delayedBlobEvents[1] === "conversion-start" &&
+    delayedBlobEvents[2] === "close" &&
+    delayedBlobEvents[3] === "completion";
+  const delayedBlobProof: DelayedBlobProof = {
+    scheduledCount: delayedBlob.scheduledCount,
+    completionCount: delayedBlob.completionCount,
+    dispatchedBeforeClose: delayedBlobEventOrder,
+    conversionStartedBeforeClose: delayedBlobEventOrder,
+    resolvedAfterClose: delayedBlobEventOrder,
+    postCloseBytesRejected:
+      delayedBlobEventOrder &&
+      postCloseBytesEvents === 0 &&
+      stalePublications.onEvent.bytesCount === 0 &&
+      stalePublications.subscribe.bytesCount === 0 &&
+      stalePublications.onStateChange.bytesCount === 0,
+    events: [...delayedBlobEvents],
+  };
+  const staleSinkPublicationsRejected = Object.values(stalePublications).every(
+    (ledger) =>
+      ledger.eventCount === 0 &&
+      ledger.stateCount === 0 &&
+      ledger.bytesCount === 0 &&
+      ledger.noticeCount === 0,
+  );
   // Capture the post-close ledger: closeCalls and opened are exact per physical
   // socket, even when stale and replacement sockets share one PTY owner.
   const socketClosures = sockets.map(snapshotSocket);
@@ -470,10 +708,26 @@ async function runStage(stage: Stage): Promise<RunProof> {
     noDuplicateOwners: duplicateOwnerViolations === 0,
     callbackApplicabilityMatchesLedger:
       callbackProofApplicable ===
-      (callbackBoundSocketCount === 1 && activeOwnerCountBeforeCleanup === 1),
+      (callbackBoundSocketCount === 1 &&
+        callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange" &&
+        activeOwnerCountBeforeCleanup === 1),
     replacementCallbacksBound:
-      callbackProofApplicable && callbackBoundSocketCount === 1,
-    allCallbacksNullAfterClose,
+      callbackProofApplicable &&
+      callbackBoundSocketCount === 1 &&
+      callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange",
+    allCallbacksNullAfterClose: callbackProofApplicable && allCallbacksNullAfterClose,
+    callbackBindingCoversAllSinks:
+      callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange",
+    perSinkStalePublicationRejected: staleSinkPublicationsRejected,
+    delayedBlobConversionObserved:
+      !callbackProofApplicable ||
+      (delayedBlobProof.scheduledCount === 1 &&
+        delayedBlobProof.completionCount === 1 &&
+        delayedBlobProof.dispatchedBeforeClose &&
+        delayedBlobProof.conversionStartedBeforeClose &&
+        delayedBlobProof.resolvedAfterClose),
+    delayedBlobPostClosePublicationRejected:
+      !callbackProofApplicable || delayedBlobProof.postCloseBytesRejected,
     staleCallbacksExercised:
       callbackProofApplicable &&
       staleOnopenDispatches === callbackBoundSocketCount &&
@@ -504,7 +758,12 @@ async function runStage(stage: Stage): Promise<RunProof> {
       staleOncloseDispatches === callbackBoundSocketCount &&
       postCloseStateEvents === 0 &&
       postCloseBytesEvents === 0 &&
-      postCloseNoticeEvents === 0,
+      postCloseNoticeEvents === 0 &&
+      staleSinkPublicationsRejected &&
+      delayedBlobProof.dispatchedBeforeClose &&
+      delayedBlobProof.conversionStartedBeforeClose &&
+      delayedBlobProof.resolvedAfterClose &&
+      delayedBlobProof.postCloseBytesRejected,
     noPostCloseStateEvents: postCloseStateEvents === 0,
     noPostCloseBytesEvents: postCloseBytesEvents === 0,
     noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
@@ -538,9 +797,13 @@ async function runStage(stage: Stage): Promise<RunProof> {
     replacementSocketId,
     replacementSocketIdentity,
     replacementSocketCloseCalls,
+    replacementStateStatus,
     socketClosures,
-    callbackProofApplicable,
     callbackBoundSocketCount,
+    callbackBoundSinkCount,
+    callbackBoundSinkNames,
+    callbackBindings,
+    callbackProofApplicable,
     staleCleanupCalls,
     staleOpenCalls,
     allCallbacksNullAfterClose,
@@ -551,6 +814,8 @@ async function runStage(stage: Stage): Promise<RunProof> {
     postCloseStateEvents,
     postCloseBytesEvents,
     postCloseNoticeEvents,
+    stalePublications,
+    delayedBlob: delayedBlobProof,
     assertions,
   };
 }

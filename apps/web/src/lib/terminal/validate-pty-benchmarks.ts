@@ -107,7 +107,8 @@ const BENCHMARK_SPECS = {
       name: "quarantine_settle_wall_time",
       unit: "ms",
       clock: "performance.now",
-      start: "connect attempt starts",
+      start:
+        "performance.now immediately before ordinary detach begins quarantine settlement",
       end: "ignored adapter settles after detach and blocked reconnect",
     },
     method: REVIEWED_METHOD,
@@ -126,6 +127,8 @@ const BENCHMARK_SPECS = {
       "quarantineValidatorFence",
       "quarantineTicketFence",
       "quarantineFactoryFence",
+      "negativeControlUsesPreConnectClock",
+      "negativeControlIncludesStagedWork",
       "expectedValidatorCount",
       "expectedTicketCount",
       "expectedFactoryCount",
@@ -141,13 +144,21 @@ const BENCHMARK_SPECS = {
       "expectedOwnerIsOnlyActiveOwner",
       "activeSocketIsReplacement",
       "socketClosureLedgerExact",
+      "ownerSocketClosureLedgerExact",
       "noDuplicateOwners",
+      "callbackApplicabilityMatchesLedger",
+      "replacementCallbacksBound",
       "allCallbacksNullAfterClose",
+      "callbackBindingCoversAllSinks",
+      "perSinkStalePublicationRejected",
+      "delayedBlobConversionObserved",
+      "delayedBlobPostClosePublicationRejected",
       "staleCallbacksExercised",
       "staleOnopenIgnored",
       "staleOnmessageIgnored",
       "staleOnerrorIgnored",
       "staleOncloseIgnored",
+      "stalePublicationRejected",
       "noPostCloseStateEvents",
       "noPostCloseBytesEvents",
       "noPostCloseNoticeEvents",
@@ -155,6 +166,7 @@ const BENCHMARK_SPECS = {
     ],
     runKeys: [
       "sampleMs",
+      "negativeControlSampleMs",
       "validatorCalls",
       "validatorCallsBeforeRecovery",
       "ticketRequests",
@@ -176,7 +188,13 @@ const BENCHMARK_SPECS = {
       "replacementSocketId",
       "replacementSocketIdentity",
       "replacementSocketCloseCalls",
+      "replacementStateStatus",
       "socketClosures",
+      "callbackBoundSocketCount",
+      "callbackBoundSinkCount",
+      "callbackBoundSinkNames",
+      "callbackBindings",
+      "callbackProofApplicable",
       "staleCleanupCalls",
       "staleOpenCalls",
       "allCallbacksNullAfterClose",
@@ -187,6 +205,8 @@ const BENCHMARK_SPECS = {
       "postCloseStateEvents",
       "postCloseBytesEvents",
       "postCloseNoticeEvents",
+      "stalePublications",
+      "delayedBlob",
       "assertions",
     ],
     runCounters: [
@@ -228,7 +248,7 @@ const BENCHMARK_SPECS = {
       unit: "ms",
       clock: "performance.now",
       start:
-        "performance.now immediately before connecting observer cancellation or replacement action",
+        "performance.now at the connecting state lifecycle event before observer cancellation or replacement action",
       end: "cancelled operation rejects",
     },
     method: REVIEWED_METHOD,
@@ -249,6 +269,8 @@ const BENCHMARK_SPECS = {
       "expectedValidatorCount",
       "expectedFactoryCount",
       "expectedTicketCount",
+      "negativeControlUsesPreConnectClock",
+      "negativeControlIncludesSetupAndTicket",
       "replacementOpenedExactlyOnce",
       "replacementAttached",
       "expectedOwnerIsOnlyActiveOwner",
@@ -260,13 +282,20 @@ const BENCHMARK_SPECS = {
       "replacementSocketIdUnique",
       "replacementClosedExactlyOnce",
       "exactSocketCleanup",
+      "ownerSocketClosureLedgerExact",
+      "callbackApplicabilityMatchesAction",
       "allCallbacksNullAfterClose",
       "replacementCallbacksBound",
+      "callbackBindingCoversAllSinks",
+      "perSinkStalePublicationRejected",
+      "delayedBlobConversionObserved",
+      "delayedBlobPostClosePublicationRejected",
       "staleCallbacksExercised",
       "staleOnopenIgnored",
       "staleOnmessageIgnored",
       "staleOnerrorIgnored",
       "staleOncloseIgnored",
+      "stalePublicationRejected",
       "noPostCloseStateEvents",
       "noPostCloseBytesEvents",
       "noPostCloseNoticeEvents",
@@ -274,6 +303,7 @@ const BENCHMARK_SPECS = {
     ],
     runKeys: [
       "sampleMs",
+      "negativeControlSampleMs",
       "validatorCalls",
       "ticketRequests",
       "socketFactoryCalls",
@@ -292,7 +322,12 @@ const BENCHMARK_SPECS = {
       "replacementSocketId",
       "replacementSocketIdentity",
       "replacementSocketCloseCalls",
+      "replacementStateStatus",
       "socketClosures",
+      "callbackBoundSocketCount",
+      "callbackBoundSinkCount",
+      "callbackBoundSinkNames",
+      "callbackBindings",
       "callbackProofApplicable",
       "staleOpenCalls",
       "allCallbacksNullAfterClose",
@@ -303,6 +338,8 @@ const BENCHMARK_SPECS = {
       "postCloseStateEvents",
       "postCloseBytesEvents",
       "postCloseNoticeEvents",
+      "stalePublications",
+      "delayedBlob",
       "assertions",
     ],
     runCounters: [
@@ -339,6 +376,39 @@ type BenchmarkSchema = keyof typeof BENCHMARK_SPECS;
 type BenchmarkSpec = (typeof BENCHMARK_SPECS)[BenchmarkSchema];
 const RESULT_KEYS = ["stage", "samples", "distribution", "runs", "totals"] as const;
 const DISTRIBUTION_KEYS = ["min", "median", "p95"] as const;
+const SINK_PUBLICATION_KEYS = ["onEvent", "subscribe", "onStateChange"] as const;
+const SINK_COUNTER_KEYS = [
+  "eventCount",
+  "stateCount",
+  "bytesCount",
+  "noticeCount",
+] as const;
+const DELAYED_BLOB_KEYS = [
+  "scheduledCount",
+  "completionCount",
+  "dispatchedBeforeClose",
+  "conversionStartedBeforeClose",
+  "resolvedAfterClose",
+  "postCloseBytesRejected",
+  "events",
+] as const;
+const CALLBACK_BINDING_KEYS = [
+  "socketId",
+  "onopenBound",
+  "onmessageBound",
+  "onerrorBound",
+  "oncloseBound",
+  "onopenNullAfterClose",
+  "onmessageNullAfterClose",
+  "onerrorNullAfterClose",
+  "oncloseNullAfterClose",
+] as const;
+const DELAYED_BLOB_EVENT_SEQUENCE = [
+  "dispatch",
+  "conversion-start",
+  "close",
+  "completion",
+] as const;
 
 interface RecordLike {
   readonly [key: string]: unknown;
@@ -363,11 +433,24 @@ function asString(value: unknown, label: string): string {
   return value;
 }
 
+function asBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
+  return value;
+}
+
 function asFiniteNumber(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error(`${label} must be a finite non-negative number`);
   }
   return value;
+}
+
+function asCounter(value: unknown, label: string): number {
+  const counter = asFiniteNumber(value, label);
+  if (!Number.isInteger(counter)) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return counter;
 }
 
 function asSamples(value: unknown, label: string): number[] {
@@ -438,6 +521,58 @@ interface SocketClosure {
   readonly ownerIdentity: OwnerIdentity;
   readonly closeCalls: number;
   readonly opened: boolean;
+}
+
+interface CallbackBindingLedger {
+  readonly socketId: string;
+  readonly onopenBound: boolean;
+  readonly onmessageBound: boolean;
+  readonly onerrorBound: boolean;
+  readonly oncloseBound: boolean;
+  readonly onopenNullAfterClose: boolean;
+  readonly onmessageNullAfterClose: boolean;
+  readonly onerrorNullAfterClose: boolean;
+  readonly oncloseNullAfterClose: boolean;
+}
+
+function asCallbackBindings(
+  value: unknown,
+  label: string,
+  optimized: boolean,
+): CallbackBindingLedger[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((entry, index) => {
+    const binding = asRecord(entry, `${label}[${index}]`);
+    const bindingLabel = `${label}[${index}]`;
+    assertExactKeys(binding, CALLBACK_BINDING_KEYS, bindingLabel);
+    if (optimized) assertCanonicalKeys(binding, CALLBACK_BINDING_KEYS, bindingLabel);
+    return {
+      socketId: asString(binding.socketId, `${bindingLabel}.socketId`),
+      onopenBound: asBoolean(binding.onopenBound, `${bindingLabel}.onopenBound`),
+      onmessageBound: asBoolean(
+        binding.onmessageBound,
+        `${bindingLabel}.onmessageBound`,
+      ),
+      onerrorBound: asBoolean(binding.onerrorBound, `${bindingLabel}.onerrorBound`),
+      oncloseBound: asBoolean(binding.oncloseBound, `${bindingLabel}.oncloseBound`),
+      onopenNullAfterClose: asBoolean(
+        binding.onopenNullAfterClose,
+        `${bindingLabel}.onopenNullAfterClose`,
+      ),
+      onmessageNullAfterClose: asBoolean(
+        binding.onmessageNullAfterClose,
+        `${bindingLabel}.onmessageNullAfterClose`,
+      ),
+      onerrorNullAfterClose: asBoolean(
+        binding.onerrorNullAfterClose,
+        `${bindingLabel}.onerrorNullAfterClose`,
+      ),
+      oncloseNullAfterClose: asBoolean(
+        binding.oncloseNullAfterClose,
+        `${bindingLabel}.oncloseNullAfterClose`,
+      ),
+    };
+  });
 }
 
 function asSocketClosures(
@@ -809,12 +944,15 @@ function expectedRunCounters(
   return {
     validatorCalls: replacement ? 2 : 1,
     ticketRequests: replacement ? 2 : 1,
-    socketFactoryCalls: replacement ? 1 : 0,
+    // The approved transport may invoke the stale factory after a connecting
+    // observer cancels. It closes that unopened socket; replacement then owns a
+    // second socket and proves its callbacks separately.
+    socketFactoryCalls: replacement ? 2 : 1,
     openedSockets: replacement ? 1 : 0,
-    cleanupCalls: replacement ? 1 : 0,
+    cleanupCalls: replacement ? 2 : 1,
     duplicateOwnerViolations: 0,
     activeOwnerCount: replacement ? 1 : 0,
-    staleSocketCloseCalls: 0,
+    staleSocketCloseCalls: 1,
     replacementSocketCloseCalls: replacement ? 1 : 0,
     staleOpenCalls: 0,
     staleOnopenDispatches: replacement ? 1 : 0,
@@ -1179,6 +1317,554 @@ function validateDistribution(
   }
 }
 
+function validateStalePublications(
+  value: unknown,
+  label: string,
+  optimized: boolean,
+): void {
+  const publications = asRecord(value, label);
+  assertExactKeys(publications, SINK_PUBLICATION_KEYS, label);
+  if (optimized) assertCanonicalKeys(publications, SINK_PUBLICATION_KEYS, label);
+  for (const sink of SINK_PUBLICATION_KEYS) {
+    const counters = asRecord(publications[sink], `${label}.${sink}`);
+    assertExactKeys(counters, SINK_COUNTER_KEYS, `${label}.${sink}`);
+    if (optimized) {
+      assertCanonicalKeys(counters, SINK_COUNTER_KEYS, `${label}.${sink}`);
+    }
+    const counts = Object.fromEntries(
+      SINK_COUNTER_KEYS.map((counter) => [
+        counter,
+        asCounter(counters[counter], `${label}.${sink}.${counter}`),
+      ]),
+    ) as Record<(typeof SINK_COUNTER_KEYS)[number], number>;
+    if (
+      counts.eventCount !==
+      counts.stateCount + counts.bytesCount + counts.noticeCount
+    ) {
+      throw new Error(`${label}.${sink}.eventCount did not match its event categories`);
+    }
+    if (Object.values(counts).some((count) => count !== 0)) {
+      throw new Error(`${label}.${sink} recorded a stale publication`);
+    }
+  }
+}
+
+function validateDelayedBlob(
+  value: unknown,
+  label: string,
+  applicable: boolean,
+  optimized: boolean,
+): boolean {
+  const delayedBlob = asRecord(value, label);
+  assertExactKeys(delayedBlob, DELAYED_BLOB_KEYS, label);
+  if (optimized) assertCanonicalKeys(delayedBlob, DELAYED_BLOB_KEYS, label);
+  const expectedCount = applicable ? 1 : 0;
+  for (const counter of ["scheduledCount", "completionCount"] as const) {
+    if (asCounter(delayedBlob[counter], `${label}.${counter}`) !== expectedCount) {
+      throw new Error(`${label}.${counter} did not match callback applicability`);
+    }
+  }
+  const events = asStringArray(delayedBlob.events, `${label}.events`);
+  const expectedEvents = applicable ? DELAYED_BLOB_EVENT_SEQUENCE : [];
+  expectStringArray(events, expectedEvents, `${label}.events`);
+  const temporalOrder =
+    events.length === DELAYED_BLOB_EVENT_SEQUENCE.length &&
+    events.every((event, index) => event === DELAYED_BLOB_EVENT_SEQUENCE[index]);
+  for (const proof of [
+    "dispatchedBeforeClose",
+    "conversionStartedBeforeClose",
+    "resolvedAfterClose",
+  ] as const) {
+    const actual = asBoolean(delayedBlob[proof], `${label}.${proof}`);
+    const expected = applicable && temporalOrder;
+    if (actual !== expected) {
+      throw new Error(`${label}.${proof} was not derived from the raw Blob event ledger`);
+    }
+  }
+  const postCloseBytesRejected = asBoolean(
+    delayedBlob.postCloseBytesRejected,
+    `${label}.postCloseBytesRejected`,
+  );
+  if (!applicable && postCloseBytesRejected) {
+    throw new Error(`${label}.postCloseBytesRejected was true without a Blob proof`);
+  }
+  return applicable && temporalOrder;
+}
+
+// Callback and delayed-Blob proofs are non-vacuous: a real replacement or
+// recovery must bind one physical socket and all three publication sinks before
+// Close, then complete one delayed conversion after ownership is lost without
+// publishing to any sink. Stages that never allocate a socket must record the
+// inapplicable zero/false ledger rather than claiming an empty proof succeeded.
+function validateCallbackBindingProof(
+  schema: BenchmarkSchema,
+  stage: string,
+  run: RecordLike,
+  label: string,
+  optimized: boolean,
+): boolean {
+  const reconnect =
+    schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
+  const applicable = reconnect || stage === "replace";
+  const expectedSocketCount = applicable ? 1 : 0;
+  const callbackBindings = asCallbackBindings(
+    run.callbackBindings,
+    `${label}.callbackBindings`,
+    optimized,
+  );
+  const callbackBoundSinkNames = asStringArray(
+    run.callbackBoundSinkNames,
+    `${label}.callbackBoundSinkNames`,
+  );
+  expectStringArray(
+    callbackBoundSinkNames,
+    SINK_PUBLICATION_KEYS,
+    `${label}.callbackBoundSinkNames`,
+  );
+  const derivedSocketCount = callbackBindings.filter(
+    (binding) =>
+      binding.onopenBound &&
+      binding.onmessageBound &&
+      binding.onerrorBound &&
+      binding.oncloseBound,
+  ).length;
+  const allCallbacksNullAfterClose = callbackBindings.every(
+    (binding) =>
+      binding.onopenNullAfterClose &&
+      binding.onmessageNullAfterClose &&
+      binding.onerrorNullAfterClose &&
+      binding.oncloseNullAfterClose,
+  );
+  if (asCounter(run.callbackBoundSocketCount, `${label}.callbackBoundSocketCount`) !== derivedSocketCount) {
+    throw new Error(`${label}.callbackBoundSocketCount was not derived from callback bindings`);
+  }
+  if (asCounter(run.callbackBoundSinkCount, `${label}.callbackBoundSinkCount`) !== callbackBoundSinkNames.length) {
+    throw new Error(`${label}.callbackBoundSinkCount was not derived from sink bindings`);
+  }
+  if (derivedSocketCount !== expectedSocketCount) {
+    throw new Error(`${label}.callback bindings did not match callback applicability`);
+  }
+  if (run.callbackProofApplicable !== applicable) {
+    throw new Error(
+      `${label}.callbackProofApplicable did not match the expected replacement/recovery stage`,
+    );
+  }
+  if (!allCallbacksNullAfterClose) {
+    throw new Error(`${label}.callback bindings retained a callback after close`);
+  }
+  if (run.allCallbacksNullAfterClose !== allCallbacksNullAfterClose) {
+    throw new Error(`${label}.allCallbacksNullAfterClose was not derived from callback bindings`);
+  }
+  validateStalePublications(
+    run.stalePublications,
+    `${label}.stalePublications`,
+    optimized,
+  );
+  validateDelayedBlob(run.delayedBlob, `${label}.delayedBlob`, applicable, optimized);
+  return applicable;
+}
+
+// Every assertion is recomputed from the run ledger. This prevents a producer
+// or an evidence editor from changing a boolean independently of the counts,
+// socket identities, callback snapshots, or delayed Blob proof it claims.
+function expectedAssertionValues(
+  schema: BenchmarkSchema,
+  stage: string,
+  run: RecordLike,
+  label: string,
+  optimized: boolean,
+): Readonly<Record<string, boolean>> {
+  const reconnect =
+    schema === "hermternal.pty-reconnect-supersession-benchmark.v2";
+  const replacement = stage === "replace";
+  const applicable = reconnect || replacement;
+  const expectedCounters = expectedRunCounters(schema, stage);
+  const count = (key: string): number =>
+    asCounter(run[key], `${label}.${key}`);
+  const expectedCount = (key: string): number => expectedCounters[key]!;
+  const sampleMs = asFiniteNumber(run.sampleMs, `${label}.sampleMs`);
+  const negativeControlSampleMs = asFiniteNumber(
+    run.negativeControlSampleMs,
+    `${label}.negativeControlSampleMs`,
+  );
+  const publications = asRecord(run.stalePublications, `${label}.stalePublications`);
+  const stalePublicationsRejected = SINK_PUBLICATION_KEYS.every((sink) => {
+    const counters = asRecord(publications[sink], `${label}.stalePublications.${sink}`);
+    return SINK_COUNTER_KEYS.every(
+      (counter) =>
+        asCounter(
+          counters[counter],
+          `${label}.stalePublications.${sink}.${counter}`,
+        ) === 0,
+    );
+  });
+  const callbackBindings = asCallbackBindings(
+    run.callbackBindings,
+    `${label}.callbackBindings`,
+    optimized,
+  );
+  const callbackBoundSinkNames = asStringArray(
+    run.callbackBoundSinkNames,
+    `${label}.callbackBoundSinkNames`,
+  );
+  const callbackBoundSinkNamesMatch =
+    callbackBoundSinkNames.length === SINK_PUBLICATION_KEYS.length &&
+    callbackBoundSinkNames.every(
+      (sink, index) => sink === SINK_PUBLICATION_KEYS[index],
+    );
+  const derivedCallbackBoundSocketCount = callbackBindings.filter(
+    (binding) =>
+      binding.onopenBound &&
+      binding.onmessageBound &&
+      binding.onerrorBound &&
+      binding.oncloseBound,
+  ).length;
+  const derivedAllCallbacksNullAfterClose = callbackBindings.every(
+    (binding) =>
+      binding.onopenNullAfterClose &&
+      binding.onmessageNullAfterClose &&
+      binding.onerrorNullAfterClose &&
+      binding.oncloseNullAfterClose,
+  );
+  const callbackProofApplicable =
+    applicable &&
+    derivedCallbackBoundSocketCount === 1 &&
+    callbackBoundSinkNamesMatch;
+  const delayedBlob = asRecord(run.delayedBlob, `${label}.delayedBlob`);
+  const delayedBlobEvents = asStringArray(
+    delayedBlob.events,
+    `${label}.delayedBlob.events`,
+  );
+  const delayedEventOrder =
+    delayedBlobEvents.length === DELAYED_BLOB_EVENT_SEQUENCE.length &&
+    delayedBlobEvents.every(
+      (event, index) => event === DELAYED_BLOB_EVENT_SEQUENCE[index],
+    );
+  const delayedObserved =
+    !applicable ||
+    (asCounter(delayedBlob.scheduledCount, `${label}.delayedBlob.scheduledCount`) === 1 &&
+      asCounter(delayedBlob.completionCount, `${label}.delayedBlob.completionCount`) === 1 &&
+      delayedEventOrder);
+  const delayedRejected =
+    !applicable ||
+    (delayedObserved &&
+      count("postCloseBytesEvents") === 0 &&
+      stalePublicationsRejected &&
+      SINK_PUBLICATION_KEYS.every((sink) => {
+        const counters = asRecord(publications[sink], `${label}.stalePublications.${sink}`);
+        return asCounter(
+          counters.bytesCount,
+          `${label}.stalePublications.${sink}.bytesCount`,
+        ) === 0;
+      }));
+
+  const reconnectOwner: OwnerIdentity = {
+    sessionId: "benchmark-session",
+    attach: "benchmark-attach",
+    processIdentity: "benchmark-process",
+  };
+  const replacementOwner: OwnerIdentity = {
+    sessionId: "benchmark-session-b",
+    attach: "benchmark-attach-b",
+    processIdentity: "benchmark-process-b",
+  };
+  const expectedOwner = reconnect
+    ? reconnectOwner
+    : replacement
+      ? replacementOwner
+      : null;
+  const activeOwnerIdentities = asOwnerIdentityArray(
+    run.activeOwnerIdentities,
+    `${label}.activeOwnerIdentities`,
+    optimized,
+  );
+  const activeSocketIds = asStringArray(
+    run.activeSocketIds,
+    `${label}.activeSocketIds`,
+  );
+  const staleSocketIds = asStringArray(
+    run.staleSocketIds,
+    `${label}.staleSocketIds`,
+  );
+  const staleSocketIdentities = asOwnerIdentityArray(
+    run.staleSocketIdentities,
+    `${label}.staleSocketIdentities`,
+    optimized,
+  );
+  const staleSocketId =
+    run.staleSocketId === null
+      ? null
+      : asString(run.staleSocketId, `${label}.staleSocketId`);
+  const replacementSocketId =
+    run.replacementSocketId === null
+      ? null
+      : asString(run.replacementSocketId, `${label}.replacementSocketId`);
+  const replacementSocketIdentity =
+    run.replacementSocketIdentity === null
+      ? null
+      : asOwnerIdentity(
+          run.replacementSocketIdentity,
+          `${label}.replacementSocketIdentity`,
+          optimized,
+        );
+  const replacementStateStatus =
+    run.replacementStateStatus === null
+      ? null
+      : asString(run.replacementStateStatus, `${label}.replacementStateStatus`);
+  const expectedReplacementStateStatus = applicable ? "attached" : null;
+  const replacementStateMatchesExpected =
+    replacementStateStatus === expectedReplacementStateStatus;
+  const socketClosures = asSocketClosures(
+    run.socketClosures,
+    `${label}.socketClosures`,
+    optimized,
+  );
+  const replacementClosure = socketClosures.find(
+    (closure) => closure.socketId === replacementSocketId,
+  );
+  const replacementIdentityMatchesExpected =
+    expectedOwner === null
+      ? !replacement
+      : replacementSocketIdentity !== null &&
+        sameOwnerIdentity(replacementSocketIdentity, expectedOwner);
+  const replacementOpenedExactlyOnce =
+    replacementClosure?.opened === true && count("openedSockets") === 1;
+  const activeSocketIsReplacement =
+    (reconnect || replacement) &&
+    activeSocketIds.length === 1 &&
+    activeSocketIds[0] === replacementSocketId;
+  const expectedSocketCount = reconnect
+    ? stage === "factory"
+      ? 2
+      : 1
+    : replacement
+      ? 2
+      : 1;
+  const socketClosureLedgerExact = reconnect
+    ? socketClosures.length === expectedSocketCount &&
+      socketClosures.every(
+        (closure) =>
+          sameOwnerIdentity(closure.ownerIdentity, reconnectOwner) &&
+          closure.closeCalls === 1 &&
+          closure.opened === (closure.socketId === replacementSocketId),
+      )
+    : false;
+  const staleClosureExact =
+    staleSocketId !== null &&
+    socketClosures.some(
+      (closure) =>
+        closure.socketId === staleSocketId &&
+        sameOwnerIdentity(closure.ownerIdentity, reconnectOwner) &&
+        closure.closeCalls === 1 &&
+        !closure.opened,
+    );
+  const replacementClosureExact =
+    replacementSocketId !== null &&
+    expectedOwner !== null &&
+    socketClosures.some(
+      (closure) =>
+        closure.socketId === replacementSocketId &&
+        sameOwnerIdentity(closure.ownerIdentity, expectedOwner) &&
+        closure.closeCalls === 1 &&
+        closure.opened,
+    );
+  const ownerSocketClosureLedgerExact =
+    socketClosures.length === expectedSocketCount &&
+    (reconnect
+      ? replacementClosureExact && (stage !== "factory" ? staleSocketId === null : staleClosureExact)
+      : staleClosureExact && (!replacement || replacementClosureExact));
+  const callbackBoundSocketCount = derivedCallbackBoundSocketCount;
+  const callbackBoundSinkCount = callbackBoundSinkNames.length;
+  const callbackApplicability =
+    callbackBoundSocketCount === (applicable ? 1 : 0) &&
+    callbackBoundSinkNamesMatch &&
+    (!reconnect || count("activeOwnerCount") === 1);
+  const callbackBindingCoversAllSinks = callbackBoundSinkNamesMatch;
+  const allCallbacksNullAfterClose =
+    !applicable || derivedAllCallbacksNullAfterClose;
+  const staleDispatchesExercised =
+    count("staleOnopenDispatches") === (applicable ? 1 : 0) &&
+    count("staleOnmessageDispatches") === (applicable ? 1 : 0) &&
+    count("staleOnerrorDispatches") === (applicable ? 1 : 0) &&
+    count("staleOncloseDispatches") === (applicable ? 1 : 0);
+  const noPostCloseStateEvents = count("postCloseStateEvents") === 0;
+  const noPostCloseBytesEvents = count("postCloseBytesEvents") === 0;
+  const noPostCloseNoticeEvents = count("postCloseNoticeEvents") === 0;
+  const staleOnopenIgnored =
+    staleDispatchesExercised && noPostCloseStateEvents;
+  const staleOnmessageIgnored =
+    staleDispatchesExercised && noPostCloseBytesEvents;
+  const staleOnerrorIgnored =
+    staleDispatchesExercised && noPostCloseStateEvents;
+  const staleOncloseIgnored =
+    staleDispatchesExercised && noPostCloseStateEvents;
+  const stalePublicationRejected =
+    staleDispatchesExercised &&
+    noPostCloseStateEvents &&
+    noPostCloseBytesEvents &&
+    noPostCloseNoticeEvents &&
+    stalePublicationsRejected &&
+    delayedObserved &&
+    delayedRejected;
+  const cleanupRecorded = count("cleanupCalls") === expectedSocketCount;
+
+  if (reconnect) {
+    const factory = stage === "factory";
+    const ticket = stage !== "validator";
+    const negativeControlUsesPreConnectClock =
+      negativeControlSampleMs >= sampleMs &&
+      count("validatorCallsBeforeRecovery") === 1 &&
+      count("ticketRequestsBeforeRecovery") === (ticket ? 1 : 0);
+    const negativeControlIncludesStagedWork =
+      negativeControlUsesPreConnectClock &&
+      count("socketFactoryCallsBeforeRecovery") === (factory ? 1 : 0);
+    const expectedOwnerIsOnlyActiveOwner =
+      count("activeOwnerCount") === 1 &&
+      activeOwnerIdentities.length === 1 &&
+      sameOwnerIdentity(activeOwnerIdentities[0]!, reconnectOwner);
+    return {
+      quarantineValidatorFence:
+        count("validatorCallsBeforeRecovery") === 1,
+      quarantineTicketFence:
+        negativeControlUsesPreConnectClock,
+      quarantineFactoryFence:
+        count("socketFactoryCallsBeforeRecovery") === (factory ? 1 : 0),
+      negativeControlUsesPreConnectClock,
+      negativeControlIncludesStagedWork,
+      expectedValidatorCount: count("validatorCalls") === 2,
+      expectedTicketCount:
+        count("ticketRequests") === (stage === "validator" ? 1 : 2),
+      expectedFactoryCount:
+        count("socketFactoryCalls") === (factory ? 2 : 1),
+      staleSocketIdentityMatchesStage:
+        factory
+          ? staleSocketIdentities.length === 1 &&
+            sameOwnerIdentity(staleSocketIdentities[0]!, reconnectOwner)
+          : staleSocketIdentities.length === 0,
+      staleSocketIdMatchesStage:
+        !factory ||
+        (staleSocketIds.length === 1 && staleSocketIds[0] !== replacementSocketId),
+      staleSocketClosedExactly:
+        !factory || count("staleSocketCloseCalls") === 1,
+      staleSocketNeverOpened: count("staleOpenCalls") === 0,
+      replacementIdentityMatchesExpected,
+      replacementSocketIdUnique: replacementSocketId !== staleSocketId,
+      replacementOpenedExactlyOnce,
+      replacementClosedExactlyOnce:
+        count("replacementSocketCloseCalls") === 1,
+      replacementReachedAttached:
+        replacementOpenedExactlyOnce &&
+        activeSocketIsReplacement &&
+        replacementStateMatchesExpected,
+      expectedOwnerIsOnlyActiveOwner,
+      activeSocketIsReplacement,
+      socketClosureLedgerExact,
+      ownerSocketClosureLedgerExact,
+      noDuplicateOwners: count("duplicateOwnerViolations") === 0,
+      callbackApplicabilityMatchesLedger:
+        callbackProofApplicable === callbackApplicability,
+      replacementStateMatchesExpected,
+      replacementCallbacksBound:
+        callbackProofApplicable && callbackApplicability,
+      allCallbacksNullAfterClose,
+      callbackBindingCoversAllSinks,
+      perSinkStalePublicationRejected: stalePublicationsRejected,
+      delayedBlobConversionObserved: delayedObserved,
+      delayedBlobPostClosePublicationRejected: delayedRejected,
+      staleCallbacksExercised: staleDispatchesExercised,
+      staleOnopenIgnored,
+      staleOnmessageIgnored,
+      staleOnerrorIgnored,
+      staleOncloseIgnored,
+      stalePublicationRejected,
+      noPostCloseStateEvents,
+      noPostCloseBytesEvents,
+      noPostCloseNoticeEvents,
+      cleanupRecorded,
+    };
+  }
+
+  const expectedOwnerIsOnlyActiveOwner =
+    count("activeOwnerCount") === (replacement ? 1 : 0) &&
+    activeOwnerIdentities.length === (replacement ? 1 : 0) &&
+    (!replacement ||
+      (expectedOwner !== null &&
+        sameOwnerIdentity(activeOwnerIdentities[0]!, expectedOwner)));
+  const exactSocketCleanup =
+    socketClosures.length === expectedSocketCount &&
+    socketClosures.every(
+      (closure) =>
+        closure.closeCalls === 1 &&
+        (closure.socketId === replacementSocketId
+          ? closure.opened &&
+            expectedOwner !== null &&
+            sameOwnerIdentity(closure.ownerIdentity, expectedOwner)
+          : !closure.opened &&
+            sameOwnerIdentity(closure.ownerIdentity, reconnectOwner)),
+    );
+  const callbackApplicabilityMatchesAction =
+    callbackProofApplicable === (replacement && callbackApplicability);
+  return {
+    connectingGuard:
+      staleSocketIds.length === 1 &&
+      staleSocketIdentities.length === 1 &&
+      count("staleOpenCalls") === 0 &&
+      count("staleSocketCloseCalls") === 1 &&
+      count("activeOwnerCount") === (replacement ? 1 : 0),
+    staleSocketNeverOpened: count("staleOpenCalls") === 0,
+    expectedValidatorCount:
+      count("validatorCalls") === expectedCount("validatorCalls"),
+    expectedFactoryCount:
+      count("socketFactoryCalls") === expectedCount("socketFactoryCalls"),
+    expectedTicketCount:
+      count("ticketRequests") === expectedCount("ticketRequests"),
+    negativeControlUsesPreConnectClock:
+      negativeControlSampleMs >= sampleMs,
+    negativeControlIncludesSetupAndTicket:
+      negativeControlSampleMs >= sampleMs && count("validatorCalls") >= 1 && count("ticketRequests") >= 1,
+    replacementOpenedExactlyOnce: !replacement || replacementOpenedExactlyOnce,
+    replacementAttached:
+      !replacement ||
+      (replacementOpenedExactlyOnce &&
+        activeSocketIsReplacement &&
+        replacementStateMatchesExpected),
+    expectedOwnerIsOnlyActiveOwner,
+    activeSocketIsReplacement: !replacement || activeSocketIsReplacement,
+    noDuplicateOwners: count("duplicateOwnerViolations") === 0,
+    staleSocketIdentityFence:
+      staleSocketIdentities.length === 1 &&
+      sameOwnerIdentity(staleSocketIdentities[0]!, reconnectOwner) &&
+      count("staleSocketCloseCalls") === 1,
+    staleSocketIdFence:
+      staleSocketIds.length === 1 &&
+      staleSocketId !== null &&
+      staleSocketId !== replacementSocketId,
+    replacementIdentityMatchesExpected: !replacement || replacementIdentityMatchesExpected,
+    replacementStateMatchesExpected,
+    replacementSocketIdUnique: !replacement || (replacementSocketId !== null && replacementSocketId !== staleSocketId),
+    replacementClosedExactlyOnce: !replacement || count("replacementSocketCloseCalls") === 1,
+    exactSocketCleanup,
+    ownerSocketClosureLedgerExact,
+    callbackApplicabilityMatchesAction,
+    allCallbacksNullAfterClose,
+    replacementCallbacksBound: !replacement || (callbackProofApplicable && callbackApplicability),
+    callbackBindingCoversAllSinks,
+    perSinkStalePublicationRejected: stalePublicationsRejected,
+    delayedBlobConversionObserved: delayedObserved,
+    delayedBlobPostClosePublicationRejected: delayedRejected,
+    staleCallbacksExercised: !replacement || staleDispatchesExercised,
+    staleOnopenIgnored: !replacement || staleOnopenIgnored,
+    staleOnmessageIgnored: !replacement || staleOnmessageIgnored,
+    staleOnerrorIgnored: !replacement || staleOnerrorIgnored,
+    staleOncloseIgnored: !replacement || staleOncloseIgnored,
+    stalePublicationRejected: !replacement || stalePublicationRejected,
+    noPostCloseStateEvents,
+    noPostCloseBytesEvents,
+    noPostCloseNoticeEvents,
+    cleanupRecorded,
+  };
+}
+
 function validateOwnershipProof(
   schema: BenchmarkSchema,
   stage: string,
@@ -1206,21 +1892,38 @@ function validateOwnershipProof(
       : null;
   const expectedActiveIdentities =
     expectedOwnerIdentity === null ? [] : [expectedOwnerIdentity];
+  const connectingStale = !reconnect;
   const expectedActiveSocketIds =
     expectedOwnerIdentity === null
       ? []
-      : [reconnect && stage === "factory" ? "socket-2" : "socket-1"];
+      : [
+          reconnect && stage === "factory"
+            ? "socket-2"
+            : !reconnect
+              ? "socket-2"
+              : "socket-1",
+        ];
   const expectedStaleIdentities =
-    reconnect && stage === "factory" ? [reconnectOwner] : [];
+    reconnect && stage === "factory"
+      ? [reconnectOwner]
+      : connectingStale
+        ? [reconnectOwner]
+        : [];
   const expectedStaleSocketIds =
-    reconnect && stage === "factory" ? ["socket-1"] : [];
+    reconnect && stage === "factory"
+      ? ["socket-1"]
+      : connectingStale
+        ? ["socket-1"]
+        : [];
   const expectedStaleSocketId = expectedStaleSocketIds[0] ?? null;
   const expectedReplacementSocketId =
     expectedOwnerIdentity === null
       ? null
       : reconnect && stage === "factory"
         ? "socket-2"
-        : "socket-1";
+        : !reconnect
+          ? "socket-2"
+          : "socket-1";
   const expectedSocketClosures: SocketClosure[] = reconnect
     ? stage === "factory"
       ? [
@@ -1245,16 +1948,42 @@ function validateOwnershipProof(
             opened: true,
           },
         ]
-    : replacement
-      ? [
-          {
-            socketId: "socket-1",
-            ownerIdentity: replacementOwner,
-            closeCalls: 1,
-            opened: true,
-          },
-        ]
-      : [];
+    : [
+        {
+          socketId: "socket-1",
+          ownerIdentity: reconnectOwner,
+          closeCalls: 1,
+          opened: false,
+        },
+        ...(replacement
+          ? [
+              {
+                socketId: "socket-2",
+                ownerIdentity: replacementOwner,
+                closeCalls: 1,
+                opened: true,
+              },
+            ]
+          : []),
+      ];
+
+  const callbackProofApplicable = validateCallbackBindingProof(
+    schema,
+    stage,
+    run,
+    label,
+    optimized,
+  );
+  const replacementStateStatus =
+    run.replacementStateStatus === null
+      ? null
+      : asString(run.replacementStateStatus, `${label}.replacementStateStatus`);
+  const expectedReplacementStateStatus = reconnect || replacement ? "attached" : null;
+  if (replacementStateStatus !== expectedReplacementStateStatus) {
+    throw new Error(
+      `${label}.replacementStateStatus did not match the ownership stage`,
+    );
+  }
 
   const activeSocketIds = asStringArray(
     run.activeSocketIds,
@@ -1370,19 +2099,13 @@ function validateOwnershipProof(
   );
 
   if (!reconnect) {
-    // Abort, close, and detach allocate no socket; only replacement can prove
-    // callback binding and stale-event replay, so enforce that split explicitly.
-    if (typeof run.callbackProofApplicable !== "boolean") {
-      throw new Error(`${label}.callbackProofApplicable must be a boolean`);
-    }
-    if (run.callbackProofApplicable !== replacement) {
+    // A connecting observer can lose ownership before the factory promise
+    // settles. The approved transport retains that late value as one unopened,
+    // callback-free stale socket; replacement adds one opened socket whose
+    // callbacks are exercised and then nulled during cleanup.
+    if (run.allCallbacksNullAfterClose !== true) {
       throw new Error(
-        `${label}.callbackProofApplicable did not match the action`,
-      );
-    }
-    if (run.allCallbacksNullAfterClose !== replacement) {
-      throw new Error(
-        `${label}.allCallbacksNullAfterClose did not match callback-proof applicability`,
+        `${label}.allCallbacksNullAfterClose did not prove callback disownership`,
       );
     }
     const expectedCallbackDispatches = replacement ? 1 : 0;
@@ -1397,7 +2120,7 @@ function validateOwnershipProof(
         expectedCallbackDispatches
       ) {
         throw new Error(
-          `${label}.${key} did not match callback-proof applicability`,
+          `${label}.${key} did not match the connecting callback dispatch ledger`,
         );
       }
     }
@@ -1513,9 +2236,18 @@ function validateResults(
       if (optimized) {
         assertCanonicalKeys(assertions, spec.assertionKeys, `${runLabel}.assertions`);
       }
+      const expectedAssertions = expectedAssertionValues(
+        schema,
+        stage,
+        run,
+        runLabel,
+        optimized,
+      );
       for (const key of spec.assertionKeys) {
-        if (assertions[key] !== true) {
-          throw new Error(`${runLabel}.assertions.${key} was not proven true`);
+        if (!(key in expectedAssertions) || assertions[key] !== expectedAssertions[key]) {
+          throw new Error(
+            `${runLabel}.assertions.${key} was not bound to its proof ledger`,
+          );
         }
       }
     }

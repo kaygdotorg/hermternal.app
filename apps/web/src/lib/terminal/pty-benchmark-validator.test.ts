@@ -339,8 +339,8 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
   it("rejects prototype schema names before any v2 metadata checks", () => {
     const artifact = cloneArtifact(reconnectArtifactPath);
     for (const schema of ["__proto__", "constructor", "toString"]) {
-      const candidate = { ...artifact, schema };
-      delete candidate.metric;
+      const candidate: MutableArtifact = { ...artifact, schema };
+      Reflect.deleteProperty(candidate, "metric");
       expect(() => validatePtyBenchmarkArtifact(candidate)).toThrow(
         new RegExp(`^unsupported PTY benchmark schema ${schema}$`, "iu"),
       );
@@ -441,7 +441,8 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
           name: "quarantine_settle_wall_time",
           unit: "ms",
           clock: "performance.now",
-          start: "connect attempt starts",
+          start:
+            "performance.now immediately before ordinary detach begins quarantine settlement",
           end: "ignored adapter settles after detach and blocked reconnect",
         },
       },
@@ -454,7 +455,7 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
           unit: "ms",
           clock: "performance.now",
           start:
-            "performance.now immediately before connecting observer cancellation or replacement action",
+            "performance.now at the connecting state lifecycle event before observer cancellation or replacement action",
           end: "cancelled operation rejects",
         },
       },
@@ -586,7 +587,7 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
 
     const falseProof = cloneArtifact(reconnectArtifactPath);
     falseProof.results[0].runs[0].assertions.cleanupRecorded = false;
-    expectCliFailure(falseProof, /not proven true/iu);
+    expectCliFailure(falseProof, /not bound to its proof ledger|not proven true/iu);
 
     const fabricated = cloneArtifact(reconnectArtifactPath);
     fabricated.results[0].runs[0].assertions = { foo: true };
@@ -634,9 +635,95 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
     callbackProofApplicable.results[3].runs[0].callbackProofApplicable = false;
     expectCliFailure(
       callbackProofApplicable,
-      /callbackProofApplicable did not match the action/iu,
+      /callbackProofApplicable did not match the expected replacement\/recovery stage/iu,
+    );
+
+    const callbackBoundSocketCount = cloneArtifact(reconnectArtifactPath);
+    callbackBoundSocketCount.results[0].runs[0].callbackBoundSocketCount -= 1;
+    expectCliFailure(
+      callbackBoundSocketCount,
+      /callbackBoundSocketCount|callbackProofApplicable|callback.*(?:binding|applicability|proof)/iu,
     );
   });
+
+  it("rejects edits to retained callback, Blob, and replacement-state ledgers", () => {
+    const sinkNames = cloneArtifact(connectingArtifactPath);
+    sinkNames.results[3].runs[0].callbackBoundSinkNames.reverse();
+    expectCliFailure(sinkNames, /callbackBoundSinkNames|sink bindings/iu);
+
+    const sinkCount = cloneArtifact(connectingArtifactPath);
+    sinkCount.results[3].runs[0].callbackBoundSinkCount -= 1;
+    expectCliFailure(sinkCount, /callbackBoundSinkCount|sink bindings/iu);
+
+    const boundFlag = cloneArtifact(reconnectArtifactPath);
+    boundFlag.results[0].runs[0].callbackBindings[0].onmessageBound = false;
+    expectCliFailure(boundFlag, /callback bindings|callbackBoundSocketCount/iu);
+
+    const nullFlag = cloneArtifact(reconnectArtifactPath);
+    nullFlag.results[0].runs[0].callbackBindings[0].onmessageNullAfterClose = false;
+    expectCliFailure(nullFlag, /callback bindings|allCallbacksNullAfterClose/iu);
+
+    const nullSummary = cloneArtifact(reconnectArtifactPath);
+    nullSummary.results[0].runs[0].allCallbacksNullAfterClose = false;
+    expectCliFailure(nullSummary, /allCallbacksNullAfterClose|callback bindings/iu);
+
+    const blobEvents = cloneArtifact(reconnectArtifactPath);
+    blobEvents.results[0].runs[0].delayedBlob.events = [
+      "dispatch",
+      "close",
+      "conversion-start",
+      "completion",
+    ];
+    expectCliFailure(blobEvents, /delayedBlob|Blob event ledger/iu);
+
+    const replacementState = cloneArtifact(connectingArtifactPath);
+    replacementState.results[3].runs[0].replacementStateStatus = "failed";
+    expectCliFailure(replacementState, /replacementStateStatus/iu);
+  }, 30_000);
+
+  it("rejects non-zero stale publications at every named sink", () => {
+    const sinks = ["onEvent", "subscribe", "onStateChange"] as const;
+    const counters = ["eventCount", "stateCount", "bytesCount", "noticeCount"] as const;
+    for (const path of [reconnectArtifactPath, connectingArtifactPath]) {
+      for (const sink of sinks) {
+        for (const counter of counters) {
+          const artifact = cloneArtifact(path);
+          artifact.results[0].runs[0].stalePublications[sink][counter] = 1;
+          expectCliFailure(
+            artifact,
+            new RegExp(`stalePublications\\.${sink}|stale publication|event categories`, "iu"),
+          );
+        }
+      }
+    }
+  }, 30_000);
+
+  it("rejects delayed Blob count, ordering, and publication-proof drift", () => {
+    const applicableCases = [
+      { path: reconnectArtifactPath, resultIndex: 0 },
+      { path: connectingArtifactPath, resultIndex: 3 },
+    ] as const;
+    for (const { path, resultIndex } of applicableCases) {
+      for (const field of [
+        "scheduledCount",
+        "completionCount",
+        "dispatchedBeforeClose",
+        "conversionStartedBeforeClose",
+        "resolvedAfterClose",
+        "postCloseBytesRejected",
+      ] as const) {
+        const artifact = cloneArtifact(path);
+        const delayedBlob = artifact.results[resultIndex].runs[0].delayedBlob;
+        delayedBlob[field] =
+          typeof delayedBlob[field] === "number" ? delayedBlob[field] + 1 : false;
+        expectCliFailure(artifact, /delayedBlob/iu);
+      }
+    }
+
+    const inapplicable = cloneArtifact(connectingArtifactPath);
+    inapplicable.results[0].runs[0].delayedBlob.scheduledCount = 1;
+    expectCliFailure(inapplicable, /delayedBlob/iu);
+  }, 30_000);
 
   it("rejects totals, distributions, repetition, and warmup drift", () => {
     const totals = cloneArtifact(reconnectArtifactPath);

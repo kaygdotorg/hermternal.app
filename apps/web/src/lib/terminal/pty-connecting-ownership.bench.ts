@@ -68,11 +68,112 @@ interface CallbackSnapshot {
   readonly onclose: ((event?: { readonly code?: number }) => void) | null;
 }
 
+interface CallbackBindingLedger {
+  readonly socketId: string;
+  readonly onopenBound: boolean;
+  readonly onmessageBound: boolean;
+  readonly onerrorBound: boolean;
+  readonly oncloseBound: boolean;
+  readonly onopenNullAfterClose: boolean;
+  readonly onmessageNullAfterClose: boolean;
+  readonly onerrorNullAfterClose: boolean;
+  readonly oncloseNullAfterClose: boolean;
+}
+
 interface StaleCallbackDispatches {
   readonly onopen: number;
   readonly onmessage: number;
   readonly onerror: number;
   readonly onclose: number;
+}
+
+interface PublicationLedger {
+  readonly eventCount: number;
+  readonly stateCount: number;
+  readonly bytesCount: number;
+  readonly noticeCount: number;
+}
+
+type MutablePublicationLedger = {
+  -readonly [Key in keyof PublicationLedger]: number;
+};
+
+interface StalePublications {
+  readonly onEvent: PublicationLedger;
+  readonly subscribe: PublicationLedger;
+  readonly onStateChange: PublicationLedger;
+}
+
+interface DelayedBlobProof {
+  readonly scheduledCount: number;
+  readonly completionCount: number;
+  readonly dispatchedBeforeClose: boolean;
+  readonly conversionStartedBeforeClose: boolean;
+  readonly resolvedAfterClose: boolean;
+  readonly postCloseBytesRejected: boolean;
+  /** Raw lifecycle sequence; validator derives the temporal booleans from it. */
+  readonly events: readonly string[];
+}
+
+function createPublicationLedger(): MutablePublicationLedger {
+  return {
+    eventCount: 0,
+    stateCount: 0,
+    bytesCount: 0,
+    noticeCount: 0,
+  };
+}
+
+function recordEventPublication(
+  ledger: MutablePublicationLedger,
+  event: PtyTransportEvent,
+): void {
+  ledger.eventCount += 1;
+  if (event.type === "state") ledger.stateCount += 1;
+  if (event.type === "bytes") ledger.bytesCount += 1;
+  if (event.type === "notice") ledger.noticeCount += 1;
+}
+
+function recordStatePublication(ledger: MutablePublicationLedger): void {
+  ledger.eventCount += 1;
+  ledger.stateCount += 1;
+}
+
+/**
+ * The deferred frame is synthetic and stays unresolved until the benchmark
+ * explicitly releases it after cleanup. This keeps conversion in flight while
+ * ownership is revoked, so a late Blob completion cannot publish stale bytes.
+ */
+class DeferredBlob extends Blob {
+  scheduledCount = 0;
+  completionCount = 0;
+  private resolveBytes: ((value: ArrayBuffer) => void) | null = null;
+
+  constructor(
+    private readonly onConversionStart: () => void,
+    private readonly onCompletion: () => void,
+  ) {
+    super([new Uint8Array([0xaa])]);
+  }
+
+  override arrayBuffer(): Promise<ArrayBuffer> {
+    this.scheduledCount += 1;
+    this.onConversionStart();
+    return new Promise<ArrayBuffer>((resolve) => {
+      this.resolveBytes = (value) => {
+        this.completionCount += 1;
+        this.onCompletion();
+        resolve(value);
+      };
+    });
+  }
+
+  release(): void {
+    if (!this.resolveBytes) throw new Error("benchmark released an unscheduled Blob");
+    const resolve = this.resolveBytes;
+    this.resolveBytes = null;
+    resolve(new Uint8Array([0xaa]).buffer);
+  }
 }
 
 function dispatchCallbacks(callbacks: CallbackSnapshot): StaleCallbackDispatches {
@@ -191,7 +292,12 @@ interface RunProof {
   readonly replacementSocketId: string | null;
   readonly replacementSocketIdentity: BenchmarkOwnerIdentity | null;
   readonly replacementSocketCloseCalls: number;
+  readonly replacementStateStatus: string | null;
   readonly socketClosures: readonly SocketClosure[];
+  readonly callbackBoundSocketCount: number;
+  readonly callbackBoundSinkCount: number;
+  readonly callbackBoundSinkNames: readonly string[];
+  readonly callbackBindings: readonly CallbackBindingLedger[];
   readonly callbackProofApplicable: boolean;
   readonly staleOpenCalls: number;
   readonly allCallbacksNullAfterClose: boolean;
@@ -202,6 +308,8 @@ interface RunProof {
   readonly postCloseStateEvents: number;
   readonly postCloseBytesEvents: number;
   readonly postCloseNoticeEvents: number;
+  readonly stalePublications: StalePublications;
+  readonly delayedBlob: DelayedBlobProof;
   readonly assertions: Readonly<Record<string, boolean>>;
 }
 
@@ -253,11 +361,27 @@ async function runAction(action: Action): Promise<RunProof> {
   let socketFactoryCalls = 0;
   let openedSockets = 0;
   let nextSocketId = 0;
+  let ownershipLost = false;
   const inputOwnerIdentity = ownerIdentityFor(INPUT);
   const replacementOwnerIdentity = ownerIdentityFor(REPLACEMENT_INPUT);
+  // Keep one exact ledger per publication sink. It starts after close returns so
+  // cleanup's own closing/detached states are not misclassified as stale output.
+  const stalePublications: {
+    readonly onEvent: MutablePublicationLedger;
+    readonly subscribe: MutablePublicationLedger;
+    readonly onStateChange: MutablePublicationLedger;
+  } = {
+    onEvent: createPublicationLedger(),
+    subscribe: createPublicationLedger(),
+    onStateChange: createPublicationLedger(),
+  };
+  const boundSinks = new Set<"onEvent" | "subscribe" | "onStateChange">();
+  const delayedBlobEvents: string[] = [];
 
   const onEvent = (event: PtyTransportEvent): void => {
+    boundSinks.add("onEvent");
     events.push(event);
+    if (ownershipLost) recordEventPublication(stalePublications.onEvent, event);
     if (actionTaken || event.type !== "state" || event.state.status !== "connecting") return;
     actionTaken = true;
     // The declared lifecycle boundary is the observable `connecting` state.
@@ -269,6 +393,15 @@ async function runAction(action: Action): Promise<RunProof> {
     if (action === "detach") transport.detach();
     if (action === "replace") replacementPromise = transport.connect(REPLACEMENT_INPUT);
   };
+  const onStateChange = (): void => {
+    boundSinks.add("onStateChange");
+    if (ownershipLost) recordStatePublication(stalePublications.onStateChange);
+  };
+  const onSubscribe = (event: PtyTransportEvent): void => {
+    boundSinks.add("subscribe");
+    if (ownershipLost) recordEventPublication(stalePublications.subscribe, event);
+  };
+
   const createWebSocket = (upgrade: PtyWebSocketUpgradeRequest): BenchmarkSocket => {
     socketFactoryCalls += 1;
     const ownerIdentity =
@@ -298,7 +431,9 @@ async function runAction(action: Action): Promise<RunProof> {
     },
     createWebSocket,
     onEvent,
+    onStateChange,
   });
+  const unsubscribe = transport.subscribe(onSubscribe);
 
   // This clock intentionally starts before connect. It is a negative control:
   // validator and ticket setup are expected to appear here, but not in sampleMs.
@@ -329,6 +464,9 @@ async function runAction(action: Action): Promise<RunProof> {
     await within(replacementPromise, "replacement onopen");
   }
   const replacementAttached = action !== "replace" || transport.state.status === "attached";
+  // Capture the replacement state before cleanup transitions the transport to
+  // detached; non-replacement stages intentionally retain a null state.
+  const replacementStateStatus = action === "replace" ? transport.state.status : null;
   const staleSockets = sockets.filter((socket) =>
     sameOwnerIdentity(socket.ownerIdentity, inputOwnerIdentity),
   );
@@ -339,44 +477,96 @@ async function runAction(action: Action): Promise<RunProof> {
   const activeOwnerIdentities = activeSockets.map((socket) => socket.ownerIdentity);
   const activeOwnerCount = activeOwnerIdentities.length;
   const duplicateOwnerViolations = activeOwnerCount > 1 ? 1 : 0;
-  // The connecting guard intentionally allocates no socket for abort, Close, or
-  // detach. Their callback proof is inapplicable, while replacement must bind
-  // every callback on its allocated socket before cleanup.
+  // The connecting guard prevents the stale pre-replacement adapter from
+  // becoming an active owner. The approved transport may still return that
+  // late factory value, so its unopened callback-free socket is retained for
+  // exact cleanup while replacement must bind every socket callback and sink.
   const callbackSnapshots = sockets.map((socket) => ({
     socket,
     callbacks: socket.retainCallbacksForLateDispatch(),
   }));
-  const callbackBoundSocketCount = callbackSnapshots.filter(
-    ({ callbacks }) =>
-      callbacks.onopen !== null &&
-      callbacks.onmessage !== null &&
-      callbacks.onerror !== null &&
-      callbacks.onclose !== null,
+  const callbackBindingsBeforeClose = callbackSnapshots.map(
+    ({ socket, callbacks }): CallbackBindingLedger => ({
+      socketId: socket.socketId,
+      onopenBound: callbacks.onopen !== null,
+      onmessageBound: callbacks.onmessage !== null,
+      onerrorBound: callbacks.onerror !== null,
+      oncloseBound: callbacks.onclose !== null,
+      onopenNullAfterClose: false,
+      onmessageNullAfterClose: false,
+      onerrorNullAfterClose: false,
+      oncloseNullAfterClose: false,
+    }),
+  );
+  const callbackBoundSocketCount = callbackBindingsBeforeClose.filter(
+    (binding) =>
+      binding.onopenBound &&
+      binding.onmessageBound &&
+      binding.onerrorBound &&
+      binding.oncloseBound,
   ).length;
+  const callbackBoundSinkNames = (["onEvent", "subscribe", "onStateChange"] as const).filter(
+    (sink) => boundSinks.has(sink),
+  );
+  const callbackBoundSinkCount = callbackBoundSinkNames.length;
   const callbackProofApplicable =
-    action === "replace" && callbackBoundSocketCount === 1;
+    action === "replace" &&
+    callbackBoundSocketCount === 1 &&
+    callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange";
+
+  // Start a real Blob conversion before ownership is revoked. Its resolver is
+  // held until after Close, so completion and stale-byte rejection are distinct
+  // observations rather than a synchronous ArrayBuffer shortcut.
+  const delayedBlob = new DeferredBlob(
+    () => delayedBlobEvents.push("conversion-start"),
+    () => delayedBlobEvents.push("completion"),
+  );
+  let delayedBlobDispatched = false;
+  const replacementCallbacks = callbackSnapshots.find(
+    ({ socket }) => socket === replacementSocket,
+  )?.callbacks;
+  if (callbackProofApplicable && replacementCallbacks?.onmessage) {
+    delayedBlobEvents.push("dispatch");
+    replacementCallbacks.onmessage({ data: delayedBlob });
+    delayedBlobDispatched = true;
+    await flush();
+  }
 
   // Close must detach every adapter callback before its safeClose call. Replay
   // each callback captured from the live socket after Close to prove stale
   // open, message, error, and close events cannot publish anything.
   transport.close();
-  // A pre-factory cancellation has no socket callbacks to inspect. Keep that
-  // proof explicitly inapplicable instead of recording a vacuous every([])
-  // success; replacement runs must prove callback nulling on the real socket.
-  const allCallbacksNullAfterClose =
-    callbackProofApplicable &&
-    sockets.every(
-      (socket) =>
-        socket.onopen === null &&
-        socket.onmessage === null &&
-        socket.onerror === null &&
-        socket.onclose === null,
-    );
+  if (callbackProofApplicable) delayedBlobEvents.push("close");
+  ownershipLost = true;
+  const postCloseEventStart = events.length;
+  if (delayedBlobDispatched && delayedBlob.scheduledCount === 1) {
+    delayedBlob.release();
+    await flush();
+  }
+  const callbackBindings = callbackSnapshots.map(
+    ({ socket, callbacks }): CallbackBindingLedger => ({
+      socketId: socket.socketId,
+      onopenBound: callbacks.onopen !== null,
+      onmessageBound: callbacks.onmessage !== null,
+      onerrorBound: callbacks.onerror !== null,
+      oncloseBound: callbacks.onclose !== null,
+      onopenNullAfterClose: socket.onopen === null,
+      onmessageNullAfterClose: socket.onmessage === null,
+      onerrorNullAfterClose: socket.onerror === null,
+      oncloseNullAfterClose: socket.onclose === null,
+    }),
+  );
+  const allCallbacksNullAfterClose = callbackBindings.every(
+    (binding) =>
+      binding.onopenNullAfterClose &&
+      binding.onmessageNullAfterClose &&
+      binding.onerrorNullAfterClose &&
+      binding.oncloseNullAfterClose,
+  );
   let staleOnopenDispatches = 0;
   let staleOnmessageDispatches = 0;
   let staleOnerrorDispatches = 0;
   let staleOncloseDispatches = 0;
-  const postCloseEventStart = events.length;
   for (const { socket } of callbackSnapshots) {
     const dispatches = socket.dispatchLateCallbacks();
     staleOnopenDispatches += dispatches.onopen;
@@ -398,14 +588,48 @@ async function runAction(action: Action): Promise<RunProof> {
   const replacementSocketId = replacementSocket?.socketId ?? null;
   const replacementSocketIdentity = replacementSocket?.ownerIdentity ?? null;
   const replacementSocketCloseCalls = replacementSocket?.closeCalls ?? 0;
+  const delayedBlobEventOrder =
+    delayedBlobEvents.length === 4 &&
+    delayedBlobEvents[0] === "dispatch" &&
+    delayedBlobEvents[1] === "conversion-start" &&
+    delayedBlobEvents[2] === "close" &&
+    delayedBlobEvents[3] === "completion";
+  const delayedBlobProof: DelayedBlobProof = {
+    scheduledCount: delayedBlob.scheduledCount,
+    completionCount: delayedBlob.completionCount,
+    dispatchedBeforeClose: delayedBlobEventOrder,
+    conversionStartedBeforeClose: delayedBlobEventOrder,
+    resolvedAfterClose: delayedBlobEventOrder,
+    postCloseBytesRejected:
+      delayedBlobEventOrder &&
+      postCloseBytesEvents === 0 &&
+      stalePublications.onEvent.bytesCount === 0 &&
+      stalePublications.subscribe.bytesCount === 0 &&
+      stalePublications.onStateChange.bytesCount === 0,
+    events: [...delayedBlobEvents],
+  };
+  const staleSinkPublicationsRejected = Object.values(stalePublications).every(
+    (ledger) =>
+      ledger.eventCount === 0 &&
+      ledger.stateCount === 0 &&
+      ledger.bytesCount === 0 &&
+      ledger.noticeCount === 0,
+  );
   // Record the exact post-close state for every allocated physical socket.
   const socketClosures = sockets.map(snapshotSocket);
-  const expectedSocketCount = action === "replace" ? 1 : 0;
+  // The approved transport may invoke the factory after a connecting observer
+  // cancels. That adapter value is retained as one unopened stale socket and
+  // closed exactly once; only replacement owns a second, opened socket.
+  const expectedSocketCount = action === "replace" ? 2 : 1;
   const assertions = {
-    connectingGuard: staleSockets.length === 0,
+    connectingGuard:
+      staleSockets.length === 1 &&
+      staleOpenCalls === 0 &&
+      staleSocketCloseCalls === 1 &&
+      activeOwnerCount === (action === "replace" ? 1 : 0),
     staleSocketNeverOpened: staleOpenCalls === 0,
     expectedValidatorCount: validatorCalls === (action === "replace" ? 2 : 1),
-    expectedFactoryCount: socketFactoryCalls === (action === "replace" ? 1 : 0),
+    expectedFactoryCount: socketFactoryCalls === (action === "replace" ? 2 : 1),
     expectedTicketCount: ticketRequests === (action === "replace" ? 2 : 1),
     negativeControlUsesPreConnectClock:
       connectStartedAt !== undefined &&
@@ -425,8 +649,14 @@ async function runAction(action: Action): Promise<RunProof> {
       action !== "replace" ||
       (activeSocketIds.length === 1 && activeSocketIds[0] === replacementSocketId),
     noDuplicateOwners: duplicateOwnerViolations === 0,
-    staleSocketIdentityFence: staleSocketIdentities.length === 0 && staleSocketCloseCalls === 0,
-    staleSocketIdFence: staleSocketIds.length === 0 && staleSocketId === null,
+    staleSocketIdentityFence:
+      staleSocketIdentities.length === 1 &&
+      sameOwnerIdentity(staleSocketIdentities[0]!, inputOwnerIdentity) &&
+      staleSocketCloseCalls === 1,
+    staleSocketIdFence:
+      staleSocketIds.length === 1 &&
+      staleSocketId !== null &&
+      staleSocketId !== replacementSocketId,
     replacementIdentityMatchesExpected:
       action !== "replace" ||
       (replacementSocketIdentity !== null &&
@@ -439,51 +669,91 @@ async function runAction(action: Action): Promise<RunProof> {
       socketClosures.every(
         (socket) =>
           socket.closeCalls === 1 &&
-          socket.opened &&
-          (expectedOwnerIdentity === null ||
-            sameOwnerIdentity(socket.ownerIdentity, expectedOwnerIdentity)),
+          (socket.socketId === replacementSocketId
+            ? socket.opened &&
+              expectedOwnerIdentity !== null &&
+              sameOwnerIdentity(socket.ownerIdentity, expectedOwnerIdentity)
+            : !socket.opened &&
+              sameOwnerIdentity(socket.ownerIdentity, inputOwnerIdentity)),
       ),
     ownerSocketClosureLedgerExact:
       socketClosures.length === expectedSocketCount &&
+      socketClosures.some(
+        (socket) =>
+          socket.socketId === staleSocketId &&
+          socket.closeCalls === 1 &&
+          !socket.opened &&
+          sameOwnerIdentity(socket.ownerIdentity, inputOwnerIdentity),
+      ) &&
       (action !== "replace" ||
         (replacementSocketId !== null &&
-          socketClosures[0]?.socketId === replacementSocketId &&
-          socketClosures[0]?.closeCalls === 1 &&
-          socketClosures[0]?.opened === true)),
+          socketClosures.some(
+            (socket) =>
+              socket.socketId === replacementSocketId &&
+              socket.closeCalls === 1 &&
+              socket.opened &&
+              expectedOwnerIdentity !== null &&
+              sameOwnerIdentity(socket.ownerIdentity, expectedOwnerIdentity),
+          ))),
     callbackApplicabilityMatchesAction:
-      callbackProofApplicable === (action === "replace" && callbackBoundSocketCount === 1),
+      callbackProofApplicable ===
+      (action === "replace" &&
+        callbackBoundSocketCount === 1 &&
+        callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange"),
     allCallbacksNullAfterClose:
-      !callbackProofApplicable || allCallbacksNullAfterClose,
+      action !== "replace" || (callbackProofApplicable && allCallbacksNullAfterClose),
     replacementCallbacksBound:
+      action !== "replace" ||
+      (callbackProofApplicable &&
+        callbackSnapshots.length === 2 &&
+        callbackBoundSocketCount === 1 &&
+        callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange"),
+    callbackBindingCoversAllSinks:
+      callbackBoundSinkNames.join("|") === "onEvent|subscribe|onStateChange",
+    perSinkStalePublicationRejected: staleSinkPublicationsRejected,
+    delayedBlobConversionObserved:
       !callbackProofApplicable ||
-      (callbackSnapshots.length === 1 && callbackBoundSocketCount === 1),
+      (delayedBlobProof.scheduledCount === 1 &&
+        delayedBlobProof.completionCount === 1 &&
+        delayedBlobProof.dispatchedBeforeClose &&
+        delayedBlobProof.conversionStartedBeforeClose &&
+        delayedBlobProof.resolvedAfterClose),
+    delayedBlobPostClosePublicationRejected:
+      !callbackProofApplicable || delayedBlobProof.postCloseBytesRejected,
     staleCallbacksExercised:
-      !callbackProofApplicable ||
-      (staleOnopenDispatches === 1 &&
+      action !== "replace" ||
+      (callbackProofApplicable &&
+        staleOnopenDispatches === 1 &&
         staleOnmessageDispatches === 1 &&
         staleOnerrorDispatches === 1 &&
         staleOncloseDispatches === 1),
     staleOnopenIgnored:
-      !callbackProofApplicable || staleOnopenDispatches === 1 && postCloseStateEvents === 0,
+      action !== "replace" ||
+      (callbackProofApplicable && staleOnopenDispatches === 1 && postCloseStateEvents === 0),
     staleOnmessageIgnored:
-      !callbackProofApplicable || staleOnmessageDispatches === 1 && postCloseBytesEvents === 0,
+      action !== "replace" ||
+      (callbackProofApplicable && staleOnmessageDispatches === 1 && postCloseBytesEvents === 0),
     staleOnerrorIgnored:
-      !callbackProofApplicable || staleOnerrorDispatches === 1 && postCloseStateEvents === 0,
+      action !== "replace" ||
+      (callbackProofApplicable && staleOnerrorDispatches === 1 && postCloseStateEvents === 0),
     staleOncloseIgnored:
-      !callbackProofApplicable || staleOncloseDispatches === 1 && postCloseStateEvents === 0,
+      action !== "replace" ||
+      (callbackProofApplicable && staleOncloseDispatches === 1 && postCloseStateEvents === 0),
     stalePublicationRejected:
-      callbackProofApplicable
-        ? staleOnopenDispatches === 1 &&
-          staleOnmessageDispatches === 1 &&
-          staleOnerrorDispatches === 1 &&
-          staleOncloseDispatches === 1 &&
-          postCloseStateEvents === 0 &&
-          postCloseBytesEvents === 0 &&
-          postCloseNoticeEvents === 0
-        : sockets.length === 0 &&
-          postCloseStateEvents === 0 &&
-          postCloseBytesEvents === 0 &&
-          postCloseNoticeEvents === 0,
+      action !== "replace" ||
+      (callbackProofApplicable &&
+        staleOnopenDispatches === 1 &&
+        staleOnmessageDispatches === 1 &&
+        staleOnerrorDispatches === 1 &&
+        staleOncloseDispatches === 1 &&
+        postCloseStateEvents === 0 &&
+        postCloseBytesEvents === 0 &&
+        postCloseNoticeEvents === 0 &&
+        staleSinkPublicationsRejected &&
+        delayedBlobProof.dispatchedBeforeClose &&
+        delayedBlobProof.conversionStartedBeforeClose &&
+        delayedBlobProof.resolvedAfterClose &&
+        delayedBlobProof.postCloseBytesRejected),
     noPostCloseStateEvents: postCloseStateEvents === 0,
     noPostCloseBytesEvents: postCloseBytesEvents === 0,
     noPostCloseNoticeEvents: postCloseNoticeEvents === 0,
@@ -514,8 +784,13 @@ async function runAction(action: Action): Promise<RunProof> {
     replacementSocketId,
     replacementSocketIdentity,
     replacementSocketCloseCalls,
+    replacementStateStatus,
     socketClosures,
-    callbackProofApplicable: callbackProofApplicable,
+    callbackBoundSocketCount,
+    callbackBoundSinkCount,
+    callbackBoundSinkNames,
+    callbackBindings,
+    callbackProofApplicable,
     staleOpenCalls,
     allCallbacksNullAfterClose,
     staleOnopenDispatches,
@@ -525,6 +800,8 @@ async function runAction(action: Action): Promise<RunProof> {
     postCloseStateEvents,
     postCloseBytesEvents,
     postCloseNoticeEvents,
+    stalePublications,
+    delayedBlob: delayedBlobProof,
     assertions,
   };
 }

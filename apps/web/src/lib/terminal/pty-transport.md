@@ -170,7 +170,13 @@ any release validation includes them.
 
 `pty-reconnect-supersession.bench.ts` captures 30 deterministic cancellation
 runs for each ignored adapter stage (`validator`, `ticket`, and `factory`), after
-five warmups. Stages execute sequentially, never with `Promise.all`. The
+five warmups. Stages execute sequentially, never with `Promise.all`. Its measured
+`sampleMs` starts immediately before ordinary `detach()` begins quarantine
+settlement, after the relevant validator, ticket, or factory work has been staged,
+and ends when the ignored adapter settles after `detach()` and the blocked
+reconnect. A pre-connect `negativeControlSampleMs` includes staged work only as a
+control; it is not part of `sampleMs`. Recovery, close, all-sink publication
+checks, and delayed-Blob completion remain outside the measured interval. The
 transport's PTY owner is the full structured tuple `{ sessionId, attach,
 processIdentity }`; `detachedAtMs` is local expiry evidence and is not part of
 that identity. The v2 JSON proof intentionally records that complete
@@ -199,23 +205,55 @@ Recovery is outside the measured quarantine-settlement interval. The checked-in
 artifact is evidence of behavior and cleanup, not a latency claim;
 `threshold` remains `null` because no reviewed budget exists.
 
-`pty-connecting-ownership.bench.ts` measures only the ownership decision after
-the `connecting` state observer runs. Its timer starts immediately before the
-observer's Abort, Close, Detach, or replacement action and ends when the
-cancelled operation rejects; ticket/connect setup before that observer is not in
-the metric. It excludes network, Hermes, credentials, PTY bytes, rendering, and
-unsupported latency budgets. Its synthetic validator returns immediately and
-is not a timed or serialized validator-call metric. For Abort, Close, and
-Detach, the connecting guard wins before socket allocation: the artifact must
-show one ticket request, zero socket-factory calls, no socket allocation,
-identity row, or callbacks, and zero late-event dispatches. In those runs,
-`connectingGuard` is the primary proof; callback-null and late-callback
-assertions are conditional over the
-empty socket set, not fabricated callback coverage. Replacement allocates one
-identity-owned socket, proves its real `onopen`, and then proves callback nulling,
-late-event suppression, and exactly-once close. The v2 artifact retains raw
-samples, expected ticket/factory counts, duplicate-owner checks, the ordered
-per-socket cleanup ledger, and the conditional callback proof.
+`pty-connecting-ownership.bench.ts` measures only the ownership decision at the
+`connecting` lifecycle boundary. Its measured `sampleMs` starts at
+`performance.now()` immediately before the observer's Abort, Close, Detach, or
+replacement action and ends when the cancelled operation rejects. A separate
+pre-connect `negativeControlSampleMs` starts before `connect()` and intentionally
+includes validation and ticket setup; it is a control that proves those stages are
+outside `sampleMs`, not a second latency metric. Recovery, socket opening, late
+callback dispatch, delayed-Blob completion, sink assertions, and final cleanup
+remain outside the measured ownership interval. It excludes network, Hermes,
+credentials, PTY bytes, rendering, and unsupported latency budgets. Its synthetic
+validator returns immediately and is not a timed or serialized validator-call
+metric. For Abort, Close, and Detach, the connecting guard prevents the stale attempt
+from becoming an active owner. The approved transport may still invoke the
+socket factory after the observer cancels; the returned value is retained as one
+unopened stale socket and closed exactly once. The artifact therefore records one
+ticket request, one stale factory value, one exact unopened cleanup row, no active
+owner, no bound socket callbacks, and zero late-event dispatches. In those runs,
+`connectingGuard` proves stale ownership was fenced; callback-null and
+late-callback assertions are conditional over the callback-free stale adapter,
+not fabricated callback coverage. Replacement invokes the stale factory once,
+then allocates one identity-owned replacement socket, proves its real `onopen`,
+and then proves callback nulling, late-event suppression, and exactly-once close.
+The v2 artifact retains raw samples, expected ticket/factory counts,
+duplicate-owner checks, the ordered per-socket cleanup ledger, and the
+conditional callback proof.
+
+The current-v2 all-sink/delayed-Blob proof contract for both artifacts is
+implemented in this source correction. It retains every issued stale callback
+and requires suppression at every transport
+publication sink. Each v2 run records
+`callbackBoundSocketCount`, `callbackBoundSinkCount`, and
+`callbackProofApplicable`, plus the pre-cleanup `replacementStateStatus`
+(`attached` for an applicable recovery/replacement and `null` for an
+inapplicable connecting cancellation), and a `stalePublications` ledger for
+`onEvent`, `subscribe`, and `onStateChange`; `callbackProofApplicable` must agree
+with those counts: replacement runs require one bound socket and three bound
+sinks, while pre-factory cancellation runs prove callback inapplicability rather
+than vacuous coverage. Each sink row has exact
+`eventCount`, `stateCount`, `bytesCount`, and `noticeCount` fields, all four of
+which must be zero after close. The browser bridge's transport subscriber remains
+covered by the subscriber path. The delayed-Blob proof records `scheduledCount`,
+`completionCount`,
+`dispatchedBeforeClose`, `conversionStartedBeforeClose`, `resolvedAfterClose`,
+and `postCloseBytesRejected`. On applicable runs, the counts must be exactly
+`1`/`1` and every delayed-Blob boolean must be true: a synthetic
+`Blob.arrayBuffer()` is dispatched and conversion starts before cleanup, its
+completion resolves only after cleanup, and it publishes no bytes, state, or
+notice. All sink ledgers and delayed-Blob assertions are required proof fields
+and remain outside the timed interval.
 
 The validator recomputes every distribution from rounded raw samples and every
 total from the raw run counters. It enforces exact schema-specific run,
@@ -251,9 +289,15 @@ source manifest or its non-evidence descendant paths. Changed paths are read as
 exact NUL-delimited Git bytes; leading/trailing whitespace, controls,
 newlines, duplicate names, and invalid UTF-8 are rejected without trimming.
 The helper derives `sourceRevision` from the actual `HEAD` and rejects an
-arbitrary `GIT_SOURCE_REVISION` override. Generate evidence from a clean
-detached source checkout, writing outside the repository so the output file
-cannot make the checkout dirty:
+arbitrary `GIT_SOURCE_REVISION` override. Evidence generation remains blocked
+until independent review approves the all-sink/delayed-Blob proof
+contract and the corrected metric boundaries. Legacy v1 remains outside current
+v2 scope, and current v2 evidence requires exactly five source blobs, including
+its helper. Do not regenerate or copy either retained v2 JSON; the retained
+reconnect and connecting files remain historical
+proof inputs and must stay byte-for-byte untouched. Once that review gate is
+cleared, generate new evidence from a clean detached source checkout, writing
+outside the repository so the output file cannot make the checkout dirty:
 
 ```sh
 git switch --detach <sourceRevision>
@@ -261,15 +305,15 @@ bun src/lib/terminal/pty-reconnect-supersession.bench.ts > /tmp/pty-reconnect.js
 bun src/lib/terminal/pty-connecting-ownership.bench.ts > /tmp/pty-connecting.json
 ```
 
-Run those commands from `apps/web`, then create a detached evidence checkout
-from trust pin P, copy the two JSON files into `src/lib/terminal/`, and commit
-them in a later evidence-only change. Invoke the validator and CLI from the P
-checkout while pointing at that evidence checkout; do not run validator code
-loaded from E. The two retained JSON files in this source tree are historical,
-not-current evidence under the S-to-P trust pin. They remain byte-for-byte
-untouched by this correction; the focused harness writes temporary E artifacts
-for current standard and optimized validation. Validate both artifacts from
-`apps/web` with
-`bun run test:benchmark:pty`, which runs standard and `--optimized` validator
-modes. The benchmark command is synthetic-only and never contacts Hermes, opens
-a live endpoint, logs a ticket, or uses credentials.
+After independent review clears the gate, run those commands from `apps/web`,
+then create a detached evidence checkout from trust pin P. Only newly generated,
+independently reviewed outputs may be added in a later evidence-only change; do
+not copy either retained v2 JSON into that checkout. Invoke the validator and CLI
+from the P checkout while pointing at that evidence checkout; do not run
+validator code loaded from E. The two retained JSON files in this source tree are
+historical, not-current evidence under the S-to-P trust pin. They remain
+byte-for-byte untouched by this correction; the focused harness writes temporary
+E artifacts for current standard and optimized validation. Validate both
+artifacts from `apps/web` with `bun run test:benchmark:pty`, which runs standard
+and `--optimized` validator modes. The benchmark command is synthetic-only and
+never contacts Hermes, opens a live endpoint, logs a ticket, or uses credentials.
