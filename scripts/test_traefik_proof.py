@@ -2008,6 +2008,110 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 "Git objects directory identity changed",
             )
 
+    def _assert_first_git_command_rejects_runtime_mutation(
+        self,
+        root: Path,
+        mutate: object,
+        restore: object,
+        pattern: str,
+    ) -> None:
+        """Mutate metadata after a real Git process starts, then restore it."""
+
+        real_popen = traefik_proof.subprocess.Popen
+        mutated = False
+
+        def popen(command: object, *arguments: object, **kwargs: object) -> object:
+            nonlocal mutated
+            process = real_popen(command, *arguments, **kwargs)
+            if (
+                not mutated
+                and isinstance(command, list)
+                and command
+                and command[0] == str(traefik_proof.PARSER_GIT_EXECUTABLE)
+            ):
+                mutate()  # type: ignore[operator]
+                mutated = True
+            return process
+
+        try:
+            with mock.patch.object(traefik_proof.subprocess, "Popen", side_effect=popen):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    traefik_proof._current_parser_provenance(root)
+            self.assertTrue(mutated)
+        finally:
+            restore()  # type: ignore[operator]
+
+    def test_first_git_command_is_fenced_by_head_bytes_during_real_execution(self) -> None:
+        """HEAD replacement during the real first Git command cannot set the baseline."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _implementation, _tests, source_commit, _evidence_commit = self._repo_with_evidence(root)
+            head = root / ".git" / "HEAD"
+            original_head = head.read_bytes()
+            prepared_ref = root / ".git" / "refs" / "heads" / "prepared-evil"
+            prepared_ref.write_text(source_commit + "\n", encoding="ascii")
+
+            def mutate() -> None:
+                head.write_bytes(b"ref: refs/heads/prepared-evil\n")
+
+            def restore() -> None:
+                head.write_bytes(original_head)
+                prepared_ref.unlink()
+
+            self._assert_first_git_command_rejects_runtime_mutation(
+                root,
+                mutate,
+                restore,
+                "Git HEAD bytes changed|Git HEAD identity changed|Git HEAD exceeds",
+            )
+
+    def test_first_git_command_is_fenced_by_head_ref_during_real_execution(self) -> None:
+        """Loose HEAD ref content replacement during Git cannot set the baseline."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _implementation, _tests, source_commit, _evidence_commit = self._repo_with_evidence(root)
+            reference = _run_git(root, "symbolic-ref", "--quiet", "HEAD")
+            loose_ref = root / ".git" / reference
+            original_ref = loose_ref.read_bytes()
+
+            def mutate() -> None:
+                loose_ref.write_bytes((source_commit + "\n").encode("ascii"))
+
+            def restore() -> None:
+                loose_ref.write_bytes(original_ref)
+
+            self._assert_first_git_command_rejects_runtime_mutation(
+                root,
+                mutate,
+                restore,
+                "Git HEAD loose ref bytes changed|Git HEAD loose ref identity changed",
+            )
+
+    def test_first_git_command_is_fenced_by_packed_refs_during_real_execution(self) -> None:
+        """Packed symbolic HEAD metadata cannot change during the first Git command."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            _run_git(root, "pack-refs", "--all", "--prune")
+            packed_refs = root / ".git" / "packed-refs"
+            original_refs = packed_refs.read_bytes()
+
+            def mutate() -> None:
+                packed_refs.write_bytes(original_refs + b"# prepared mutation\\n")
+
+            def restore() -> None:
+                packed_refs.write_bytes(original_refs)
+
+            self._assert_first_git_command_rejects_runtime_mutation(
+                root,
+                mutate,
+                restore,
+                "Git packed refs bytes changed|Git packed refs identity changed|Git packed refs exceeds",
+            )
+
     def test_pack_metadata_entry_bound_fails_closed(self) -> None:
         """A huge objects/pack directory cannot consume unbounded scan time."""
 

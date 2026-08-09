@@ -236,9 +236,12 @@ escapes fail closed. Standalone `--separate-git-dir` checkouts remain explicitly
 unsupported because they do not provide the required structural anchor. The
 initial pin is built directly from the no-follow marker and reciprocal
 `commondir`/`gitdir` metadata before the first topology-discovery `rev-parse`;
-common config, worktree config, objects, and forbidden indirection paths are
-already retained at that point. The first and every later Git command rechecks
-the pin before and after execution, so a config or objects replacement cannot
+common config, worktree config, objects, forbidden indirection paths, and the
+per-worktree `HEAD` file are already retained at that point. A symbolic
+`HEAD` also pins its bounded `refs/heads/<branch>` loose ref and the bounded
+`packed-refs` database; detached `HEAD` is pinned by its bounded OID file.
+The first and every later Git command rechecks the pin before and after
+execution, so a config, objects, HEAD, ref, or packed-refs replacement cannot
 slip through the initial discovery fence. The preflight returns a bounded
 topology snapshot and repeats it after traversal so forbidden metadata or
 same-path swaps cannot authorize a result.
