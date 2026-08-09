@@ -115,9 +115,9 @@ copy is chunked and category-bounded: ordinary metadata and loose objects use
 index, reverse-index, bitmap, and related pack metadata. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (96 MiB), and the copy has a
 `SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The refreshed
-four-ref trusted bundle measured a 41,693,163-byte macOS fresh-clone pack, so the
-48 MiB per-pack cap retains 249,877 bytes of headroom. A seeded clone retains
-two packs plus metadata; its measured snapshot total is 79,918,215 bytes, and the independent 96 MiB total cap keeps that composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
+four-ref trusted bundle measured a 45,716,934-byte macOS fresh-clone pack, so the
+48 MiB per-pack cap retains 4,614,714 bytes of headroom. A seeded clone retains
+two packs plus metadata; its measured snapshot total is 87,921,346 bytes, and the independent 96 MiB total cap keeps that composition bounded without widening the 1 MiB non-pack cap. Snapshot entry,
 directory, file, depth, and retained path-storage budgets remain independent of
 those byte limits, so arbitrarily many zero-byte metadata entries cannot exhaust
 CI before content accounting. It rejects symlinks/non-regular entries
