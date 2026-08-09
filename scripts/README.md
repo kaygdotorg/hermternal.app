@@ -328,7 +328,9 @@ SHA-256 identities of the shared static-route grammar and deep-link fixture.
 The black-box test starts local Caddy beside a recording mock upstream and
 checks actual paths, bodies, prefixes, headers, deep links, query denials, and
 upgrade results. It does not contact Hermes or the disposable VM during this
-correction lane.
+correction lane. The black-box check requires an available `caddy` tool and
+`openssl`; missing tools are a hard failure, not a skip, and a skipped check is
+not evidence.
 
 Offline verification from the repository root:
 
@@ -348,6 +350,11 @@ execution attestation. JSON-only output is labeled
 `historical_non_execution`/`not_proven`, and a caller-authored event map cannot
 produce `browser_journey=passed`.
 
+Retained evidence uses a descriptor-verified canonical path and identity: the
+committed file and its fixed anchor are checked before any JSON field is
+consumed. Copies, aliases, replacements, symlinks, and anchor mismatches fail
+closed. This retained trust root is historical only.
+
 For a new standalone observation, keep the browser map outside the static
 output directory because the static digest covers every file in that tree:
 
@@ -362,8 +369,19 @@ python3 scripts/caddy_proof.py evidence \
 `manifest.webmanifest`, and `service-worker.js` entry points. The command
 derives the checked-out Git `HEAD` and the digest of the actual static bytes;
 optional `--build-sha` and `--build-digest` values are compatibility
-assertions only and fail when they differ from those derived values. The
-browser map must use the fixed
+assertions only and fail when they differ from those derived values.
+
+Current product/static/Git provenance is a separate trust path from the
+historical task-244 parity fixtures referenced by the retained manifest. Those
+fixtures do not establish current product identity, and task-244 parity binding
+remains a blocker until an independent check verifies it; this lane must not
+silently claim parity. Static-tree and Git trust boundaries have explicit
+resource and special-file limits: static provenance accepts only bounded
+regular-file data, rejects symlinks and other special files, and Git provenance
+uses timed commands with bounded output and diagnostics. Any limit, identity,
+malformed-output, or command failure fails closed.
+
+The browser map must use the fixed
 `hermternal.caddy-proof.browser-evidence.v1` schema and bind its status to the
 verified build pair, Caddyfile digest, and runtime-input digest. Reads are
 bounded to 4096 bytes, require UTF-8 JSON, reject duplicate object keys and
