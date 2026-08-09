@@ -41,6 +41,11 @@ HEX64_RE = re.compile(r"[0-9a-f]{64}")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RETAINED_EVIDENCE_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence.json"
 RETAINED_EVIDENCE_ANCHOR_PATH = PROJECT_ROOT / "tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt"
+# This source-pinned digest prevents a caller from replacing both the retained
+# JSON and its adjacent checksum file to create a new historical trust root.
+RETAINED_EVIDENCE_ANCHOR = "fefbf385921a2c156e2c4cd7397e7ef3e003707f4f8fcf25e3b2b3ed3d36ec33"
+BROWSER_NON_EXECUTION_MODE = "historical_non_execution"
+BROWSER_NON_EXECUTION_STATUS = "not_proven"
 STATIC_BUILD_REQUIRED_FILES = (
     "index.html",
     "200.html",
@@ -629,14 +634,19 @@ def _decode_bounded_json(raw: bytes, label: str) -> object:
 
 
 def _read_bounded_bytes(path: Path, limit: int, label: str) -> bytes:
-    """Read at most one byte beyond a fixture limit before rejecting it."""
+    """Read one bounded regular file without following a caller link."""
 
     if type(limit) is not int or limit < 0:
         raise ValueError(f"{label} has an invalid bounded input size")
+    candidate = Path(path)
     try:
-        with Path(path).open("rb") as handle:
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"{label} is not a regular file")
+        with candidate.open("rb") as handle:
             data = handle.read(limit + 1)
-    except (OSError, TypeError, ValueError) as exc:
+    except ValueError:
+        raise
+    except (OSError, TypeError, RuntimeError) as exc:
         raise ValueError(f"{label} could not be read") from exc
     if not isinstance(data, bytes):
         raise ValueError(f"{label} could not be read")
@@ -768,13 +778,17 @@ def _derive_git_static_build_provenance(
     static_build_root: Path,
     repository_root: Path = PROJECT_ROOT,
 ) -> dict[str, str]:
-    """Identify a local static artifact without claiming browser execution."""
+    """Identify a plain local static artifact without following links."""
 
-    root = Path(static_build_root).resolve()
+    supplied_root = Path(static_build_root)
+    if supplied_root.is_symlink():
+        raise ValueError("static build root must not be a symlink")
+    root = supplied_root.resolve()
     if not root.is_dir():
         raise ValueError("static build root is unavailable")
     for relative_path in STATIC_BUILD_REQUIRED_FILES:
-        if not (root / relative_path).is_file():
+        entry = root / relative_path
+        if entry.is_symlink() or not entry.is_file():
             raise ValueError("static build is missing a reviewed entry point")
     build_sha = _git_head(repository_root)
     build_digest = _build_static_digest(root)
@@ -793,12 +807,12 @@ def _canonical_retained_path(path: Path) -> Path:
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("retained input path could not be resolved") from exc
     if candidate != expected:
-        raise ValueError("retained input must use the canonical committed path")
+        raise ValueError("retained input must use the canonical committed evidence path")
     return candidate
 
 
 def _retained_anchor() -> str:
-    """Read the fixed one-line digest without accepting unbounded anchor data."""
+    """Read and source-validate the fixed one-line digest."""
 
     if RETAINED_EVIDENCE_ANCHOR_PATH.is_symlink():
         raise ValueError("committed retained evidence anchor must not be a symlink")
@@ -810,12 +824,12 @@ def _retained_anchor() -> str:
     try:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:
-        raise ValueError("committed retained evidence anchor is malformed") from exc
+        raise ValueError("committed retained evidence anchor is malformed or stale") from exc
     # The committed anchor is exactly one lowercase SHA-256 line. Do not use
     # strip() here: accepting extra bytes would weaken the fixed trust boundary.
-    if re.fullmatch(r"[0-9a-f]{64}\n", text) is None:
-        raise ValueError("committed retained evidence anchor is malformed")
-    return text[:-1]
+    if text != f"{RETAINED_EVIDENCE_ANCHOR}\n":
+        raise ValueError("committed retained evidence anchor is malformed or stale")
+    return RETAINED_EVIDENCE_ANCHOR
 
 
 def _read_verified_retained_bytes(path: Path) -> bytes:
@@ -1057,6 +1071,13 @@ def render_manifest(
         },
         "browser_journey": resolved_journey,
         "browser_evidence": normalized_evidence,
+        # JSON observations are historical/non-execution data. Keep this
+        # machine-readable so downstream tooling cannot mistake them for a
+        # verifier-controlled browser receipt.
+        "browser_execution": {
+            "mode": BROWSER_NON_EXECUTION_MODE,
+            "status": BROWSER_NON_EXECUTION_STATUS,
+        },
         "retention": {
             "credentials": "redacted",
             "cookies": "redacted",
@@ -1071,10 +1092,22 @@ def render_manifest(
 
 
 def _build_static_digest(site_root: Path) -> str:
+    """Hash a plain static tree without following links or special files."""
+
+    root = Path(site_root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("static build root is unavailable")
     entries: list[bytes] = []
-    for path in sorted(p for p in site_root.rglob("*") if p.is_file()):
-        relative = path.relative_to(site_root).as_posix().encode("utf-8")
-        content = path.read_bytes()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("static build must not contain symlinks")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise ValueError("static build could not be read") from exc
         entries.append(relative + b"\0" + str(len(content)).encode("ascii") + b"\0" + content)
     return digest_bytes(b"".join(entries))
 
