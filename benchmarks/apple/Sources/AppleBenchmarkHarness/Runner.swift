@@ -16,8 +16,13 @@ public struct AppleBenchmarkRunner: Sendable {
     public typealias MonotonicNow = @Sendable () -> UInt64
 
     private let now: MonotonicNow
+    private let enforceReleaseConfiguration: Bool
 
-    public init(now: @escaping MonotonicNow = { DispatchTime.now().uptimeNanoseconds }) {
+    public init(
+        enforceReleaseConfiguration: Bool = true,
+        now: @escaping MonotonicNow = { DispatchTime.now().uptimeNanoseconds }
+    ) {
+        self.enforceReleaseConfiguration = enforceReleaseConfiguration
         self.now = now
     }
 
@@ -28,7 +33,10 @@ public struct AppleBenchmarkRunner: Sendable {
         build: ReleaseBuildMetadata = ReleaseBuildMetadataFactory.current()
     ) throws -> BenchmarkRunResult {
         try WorkloadValidator.validate(workload)
-        guard build.mode == "release", build.optimization == "swiftc -O" else {
+        guard !enforceReleaseConfiguration || !ReleaseBuildConfiguration.debugAssertionsEnabled,
+              build.mode == "release",
+              build.optimization == "swiftc -O"
+        else {
             throw AppleBenchmarkError.releaseBuildRequired
         }
         guard sourceCommitSHA == "not_collected" || isCommitSHA(sourceCommitSHA) else {

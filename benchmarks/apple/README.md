@@ -37,8 +37,10 @@ revision record is an approved contract reference only; no Hermes behavior is
 executed. The target platform labels (`ios`, `ipados`, and `macos`) describe
 schema lanes for the same deterministic mock, not device runs.
 
-A release-build record must be collected explicitly. The CLI fails closed when
-it is run from a debug build or without a source commit SHA. Missing or malformed
+A release-build record must be collected explicitly. The CLI checks the compiler's
+actual debug-assert configuration, including an explicit `-Onone`, rather than
+trusting only a `DEBUG` flag or claimed metadata. It fails closed when run from
+a debug build or without a source commit SHA. Missing or malformed
 workload/evidence data produces one bounded JSON error on stderr with exit code
 `2`; raw paths, arguments, environment values, and decoder details are not
 printed.
