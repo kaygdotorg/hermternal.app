@@ -1919,6 +1919,73 @@ marker.write_text("ready")
             # implementation while allowing the root/path traversal descriptors.
             self.assertLessEqual(peak, 64)
 
+    def test_git_metadata_deadline_covers_slow_scan_before_spawn(self) -> None:
+        """A real slow scandir must time out before Git can spawn."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            clock = [0.0]
+            scan_count = [0]
+            close_calls: list[int] = []
+            real_scandir = caddy_proof.os.scandir
+            real_close = caddy_proof._close_git_metadata_pins
+
+            class SlowScan:
+                def __init__(self, iterator: object) -> None:
+                    self.iterator = iterator
+
+                def __enter__(self) -> "SlowScan":
+                    scan_count[0] += 1
+                    self.iterator.__enter__()  # type: ignore[attr-defined]
+                    return self
+
+                def __exit__(self, *args: object) -> object:
+                    # Expire only after the real iterator has been consumed;
+                    # the post-with deadline check must classify the timeout.
+                    clock[0] = 2.0
+                    return self.iterator.__exit__(*args)  # type: ignore[attr-defined]
+
+                def __iter__(self) -> "SlowScan":
+                    return self
+
+                def __next__(self) -> object:
+                    return next(self.iterator)  # type: ignore[arg-type]
+
+            def slow_scandir(*args: object, **kwargs: object) -> SlowScan:
+                return SlowScan(real_scandir(*args, **kwargs))  # type: ignore[arg-type]
+
+            def fake_monotonic() -> float:
+                return clock[0]
+
+            def track_close(pins: tuple[object, ...]) -> None:
+                close_calls.append(len(pins))
+                real_close(pins)  # type: ignore[arg-type]
+
+            with (
+                mock.patch.object(caddy_proof, "GIT_COMMAND_TIMEOUT_SECONDS", 1.0),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=fake_monotonic),
+                mock.patch.object(caddy_proof.os, "scandir", side_effect=slow_scandir),
+                mock.patch.object(caddy_proof, "_close_git_metadata_pins", side_effect=track_close),
+                mock.patch.object(
+                    caddy_proof,
+                    "_fork_exec_git",
+                    side_effect=AssertionError("Git spawn reached"),
+                ) as spawn,
+                mock.patch.object(
+                    caddy_proof.subprocess,
+                    "Popen",
+                    side_effect=AssertionError("Popen reached"),
+                ) as popen,
+            ):
+                with self.assertRaisesRegex(ValueError, "timed out|deadline"):
+                    caddy_proof._verify_git_repository(repository)
+
+            self.assertGreater(scan_count[0], 0)
+            spawn.assert_not_called()
+            popen.assert_not_called()
+            self.assertTrue(close_calls)
+            self.assertGreater(close_calls[0], 0)
+
     def test_nested_git_metadata_links_are_rejected(self) -> None:
         for relative in (Path("objects"), Path("refs"), Path("objects") / "pack"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
