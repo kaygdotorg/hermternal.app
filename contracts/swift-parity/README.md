@@ -50,13 +50,18 @@ bytes with `/usr/bin/python3 -I -B -c` and a stdin pipe (the reviewed path is
 only the compile filename and `__file__` value, never a script reopen). The
 interpreter runs from a fresh private empty directory with a minimal environment;
 isolated mode excludes repository imports, `PYTHONPATH`, `PYTHONHOME`, and
-user-site customizations. `PYTHONDONTWRITEBYTECODE=1`, a fixed host `PATH`, bounded
+user-site customizations. The success output must have exactly the reviewed
+keys `ok`, `complete`, `evidence_status`, `compatible`, `live_claim`,
+`fixture_count`, and `coverage_count`; it requires `ok: true`,
+`compatible: false`, `live_claim: false`, a matching `partial`/`complete`
+evidence status, and bounded non-negative counts. `PYTHONDONTWRITEBYTECODE=1`, bounded
 stdin/stdout/stderr, and one five-second deadline remain enforced. A blocked,
-unavailable, malformed, truncated, timed-out, failed, or live-claiming validator
-result returns a blocked report with a specific `errorCode`, zero proven cases,
-and `liveClaim: false`. On iOS and other non-host builds, the public runner
-always fails closed with `c19_validator_unavailable`; no caller-supplied preflight
-status or evidence can replace the host validator. The internal `@testable`
+unavailable, malformed, truncated, timed-out, failed, contract-invalid, or
+live-claiming validator result returns a blocked report with a specific
+`errorCode`, zero proven cases, and `liveClaim: false`. On iOS and other
+non-host builds, the public runner always fails closed with
+`c19_validator_unavailable`; no caller-supplied preflight status or evidence can
+replace the host validator. The internal `@testable`
 `runParityForTests(at:)` helper exists only for synthetic projection tests and is
 not part of the public API or CLI report path.
 

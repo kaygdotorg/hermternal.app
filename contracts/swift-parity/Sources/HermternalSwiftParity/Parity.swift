@@ -1748,6 +1748,42 @@ private func stopValidator(
     _ = waitForDrain(group, until: deadline)
 }
 
+private let c19SuccessOutputKeys: Set<String> = [
+    "ok",
+    "complete",
+    "evidence_status",
+    "compatible",
+    "live_claim",
+    "fixture_count",
+    "coverage_count",
+]
+
+private func validateC19SuccessOutput(_ value: JSONValue) throws {
+    let output = try object(value, "C-19 validator output")
+    guard Set(output.keys) == c19SuccessOutputKeys else {
+        throw reject(.malformedInput, "C-19 validator output keys are not the reviewed success schema")
+    }
+    guard try boolean(output["ok"], "C-19 validator output.ok") else {
+        throw reject(.malformedInput, "C-19 validator output.ok is not true")
+    }
+    let complete = try boolean(output["complete"], "C-19 validator output.complete")
+    let evidenceStatus = try string(output["evidence_status"], "C-19 validator output.evidence_status")
+    guard evidenceStatus == "partial" || evidenceStatus == "complete",
+          complete == (evidenceStatus == "complete") else {
+        throw reject(.malformedInput, "C-19 validator output evidence status is invalid")
+    }
+    guard !(try boolean(output["compatible"], "C-19 validator output.compatible")),
+          !(try boolean(output["live_claim"], "C-19 validator output.live_claim")) else {
+        throw reject(.malformedInput, "C-19 validator output makes a live or compatibility claim")
+    }
+    let fixtureCount = try nonNegativeInteger(output["fixture_count"], "C-19 validator output.fixture_count")
+    let coverageCount = try nonNegativeInteger(output["coverage_count"], "C-19 validator output.coverage_count")
+    guard fixtureCount <= ParityBounds.maxInventoryFiles,
+          coverageCount <= ParityBounds.maxInventoryFiles else {
+        throw reject(.malformedInput, "C-19 validator output counts exceed the inventory bound")
+    }
+}
+
 private func runC19Validator(
     at repoRoot: URL,
     beforeLaunch: ((URL) throws -> Void)? = nil
@@ -1775,6 +1811,7 @@ private func runC19Validator(
             attributes: [.posixPermissions: 0o700]
         )
         defer { try? FileManager.default.removeItem(at: executionDirectory) }
+
         let bootstrap = """
         import sys
         reviewed_path = sys.argv[1]
@@ -1872,16 +1909,33 @@ private func runC19Validator(
             return .blocked("c19_validator_output_bound")
         }
 
-        let value = try decodeJSON(stdoutResult.data, "C-19 validator output")
-        let output = try object(value, "C-19 validator output")
-        let liveClaim = try boolean(output["live_claim"], "C-19 validator output.live_claim")
-        guard !liveClaim else { return .blocked("c19_validator_live_claim") }
-        let ok = try boolean(output["ok"], "C-19 validator output.ok")
-        guard ok, process.terminationStatus == 0 else {
-            let evidenceStatus = try string(output["evidence_status"], "C-19 validator output.evidence_status")
+        let value: JSONValue
+        do {
+            value = try decodeJSON(stdoutResult.data, "C-19 validator output")
+        } catch {
+            return .blocked("c19_validator_output_contract")
+        }
+        let output: [String: JSONValue]
+        do {
+            output = try object(value, "C-19 validator output")
+        } catch {
+            return .blocked("c19_validator_output_contract")
+        }
+
+        if process.terminationStatus != 0 {
+            let evidenceStatus = try? string(
+                output["evidence_status"],
+                "C-19 validator output.evidence_status"
+            )
             return evidenceStatus == "blocked"
                 ? .blocked("c19_validator_blocked")
                 : .blocked("c19_validator_failed")
+        }
+
+        do {
+            try validateC19SuccessOutput(value)
+        } catch {
+            return .blocked("c19_validator_output_contract")
         }
         return .passed
     } catch {

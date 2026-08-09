@@ -319,11 +319,27 @@ final class ParityTests: XCTestCase {
         import sys
         if __file__ != sys.argv[0]:
             raise RuntimeError("validator bootstrap context mismatch")
-        print(json.dumps({"ok": False, "evidence_status": "blocked", "live_claim": False}))
+        print(json.dumps({
+            "ok": False,
+            "complete": False,
+            "evidence_status": "blocked",
+            "compatible": False,
+            "live_claim": False,
+            "error": {"code": "fixture_index_invalid", "message": "blocked"},
+        }))
+        raise SystemExit(1)
         """
         let maliciousValidator = """
         import json
-        print(json.dumps({"ok": True, "evidence_status": "ready", "live_claim": False}))
+        print(json.dumps({
+            "ok": True,
+            "complete": False,
+            "evidence_status": "partial",
+            "compatible": False,
+            "live_claim": False,
+            "fixture_count": 0,
+            "coverage_count": 0,
+        }))
         """
         try Data(safeValidator.utf8).write(to: validatorURL, options: .atomic)
 
@@ -333,6 +349,7 @@ final class ParityTests: XCTestCase {
         XCTAssertFalse(result.passed)
         XCTAssertEqual(result.errorCode, "c19_validator_blocked")
     }
+
     func testValidatorIsolationBlocksRepositoryPythonImports() throws {
         let temporaryRoot = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: temporaryRoot) }
@@ -371,6 +388,129 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    func testValidatorRequiresExactSuccessOutputSchema() throws {
+        let temporaryRoot = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+        let minimal = """
+        import json
+        print(json.dumps({"ok": True}))
+        """
+        let minimalResult = try runValidatorSource(at: temporaryRoot, source: minimal)
+        XCTAssertFalse(minimalResult.passed)
+        XCTAssertEqual(minimalResult.errorCode, "c19_validator_output_contract")
+
+        let partial = """
+        import json
+        print(json.dumps({
+            "ok": True,
+            "complete": False,
+            "evidence_status": "partial",
+            "compatible": False,
+            "live_claim": False,
+            "fixture_count": 22,
+            "coverage_count": 22,
+        }))
+        """
+        let partialResult = try runValidatorSource(at: temporaryRoot, source: partial)
+        XCTAssertTrue(partialResult.passed)
+        XCTAssertNil(partialResult.errorCode)
+    }
+
+    func testValidatorRejectsHostileSuccessOutputs() throws {
+        let temporaryRoot = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let hostileSources: [(source: String, code: String)] = [
+            (
+                """
+                import json
+                print(json.dumps({
+                    "ok": "true",
+                    "complete": False,
+                    "evidence_status": "partial",
+                    "compatible": False,
+                    "live_claim": False,
+                    "fixture_count": 22,
+                    "coverage_count": 22,
+                }))
+                """,
+                "c19_validator_output_contract"
+            ),
+            (
+                """
+                import json
+                print(json.dumps({
+                    "ok": True,
+                    "complete": False,
+                    "evidence_status": "partial",
+                    "compatible": False,
+                    "live_claim": False,
+                    "fixture_count": 22,
+                    "coverage_count": 22,
+                    "unexpected": False,
+                }))
+                """,
+                "c19_validator_output_contract"
+            ),
+            (
+                """
+                import json
+                print(json.dumps({
+                    "ok": True,
+                    "complete": True,
+                    "evidence_status": "partial",
+                    "compatible": False,
+                    "live_claim": False,
+                    "fixture_count": 22,
+                    "coverage_count": 22,
+                }))
+                """,
+                "c19_validator_output_contract"
+            ),
+            (
+                """
+                print('{"ok":true,"complete":false,"evidence_status":"partial","compatible":false,"live_claim":false,"fixture_count":22,"coverage_count":22,"ok":true}')
+                """,
+                "c19_validator_output_contract"
+            ),
+            (
+                """
+                import json
+                print(json.dumps({
+                    "ok": True,
+                    "complete": False,
+                    "evidence_status": "partial",
+                    "compatible": False,
+                    "live_claim": False,
+                    "fixture_count": 513,
+                    "coverage_count": 22,
+                }))
+                """,
+                "c19_validator_output_contract"
+            ),
+            (
+                """
+                import json
+                print(json.dumps({
+                    "ok": True,
+                    "complete": False,
+                    "evidence_status": "partial",
+                    "compatible": False,
+                    "live_claim": False,
+                    "fixture_count": 22,
+                    "coverage_count": 22,
+                    "padding": "x" * 20000,
+                }))
+                """,
+                "c19_validator_output_bound"
+            ),
+        ]
+        for (source, expectedCode) in hostileSources {
+            let result = try runValidatorSource(at: temporaryRoot, source: source)
+            XCTAssertFalse(result.passed)
+            XCTAssertEqual(result.errorCode, expectedCode)
+        }
+    }
     #endif
 
     func testStrictJSONRejectsDuplicateKeysAndBoundsErrors() throws {
@@ -610,7 +750,15 @@ final class ParityTests: XCTestCase {
             .appendingPathComponent("validate.py")
         let source = """
         import json
-        print(json.dumps({"ok": True, "evidence_status": "ready", "live_claim": False}))
+        print(json.dumps({
+            "ok": True,
+            "complete": False,
+            "evidence_status": "partial",
+            "compatible": False,
+            "live_claim": False,
+            "fixture_count": 0,
+            "coverage_count": 0,
+        }))
         """
         try Data(source.utf8).write(to: validatorURL, options: .atomic)
     }
