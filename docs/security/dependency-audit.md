@@ -163,11 +163,15 @@ The script applies these fixed limits before or during traversal:
 | Sanitized output | 2 MiB |
 | Audit wall-clock budget | 10 seconds |
 
-The audit uses only Python's standard library. It reads at most one extra byte
-to detect an oversized file, rejects invalid UTF-8, rejects duplicate JSON keys,
-accepts only Bun's bounded JSON5 comments/trailing-comma form, and maps
-unexpected failures to stable codes without a traceback. No subprocess,
-socket, HTTP client, package manager, registry, or vulnerability API is used.
+The audit uses only Python's standard library. Input paths must remain inside
+the repository root; each path component and the final file are opened through
+no-follow descriptors, and only regular files are read. Symlinks, FIFOs, devices,
+and other special-file races fail without waiting for a writer. The reader takes
+at most one extra byte to detect an oversized file, rejects invalid UTF-8, rejects
+duplicate JSON keys, accepts only Bun's bounded JSON5 comments/trailing-comma
+form, and maps unexpected failures to stable codes without a traceback. No
+subprocess, socket, HTTP client, package manager, registry, or vulnerability API
+is used.
 The report omits runtime duration so repeated runs remain byte-for-byte stable
 for identical input bytes.
 

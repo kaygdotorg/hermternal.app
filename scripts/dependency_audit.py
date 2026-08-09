@@ -15,9 +15,12 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 import time
 from collections import deque
@@ -29,6 +32,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 SCHEMA = "hermternal.dependency-audit.v1"
 DEFAULT_MANIFEST = Path("apps/web/package.json")
 DEFAULT_LOCKFILE = Path("apps/web/bun.lock")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MAX_INPUT_BYTES = 1 * 1024 * 1024
 MAX_PACKAGE_COUNT = 4_096
 MAX_DEPENDENCY_EDGES = 65_536
@@ -66,6 +70,10 @@ TERMINAL_PACKAGES = ("@wterm/dom", "@wterm/ghostty")
 REASONS = {
     "manifest-read-failed": "The manifest could not be read as a bounded local file.",
     "lockfile-read-failed": "The lockfile could not be read as a bounded local file.",
+    "manifest-path-invalid": "The manifest path was outside the approved repository tree or used a symlink.",
+    "lockfile-path-invalid": "The lockfile path was outside the approved repository tree or used a symlink.",
+    "manifest-not-regular": "The manifest path was not a regular file.",
+    "lockfile-not-regular": "The lockfile path was not a regular file.",
     "manifest-too-large": "The manifest exceeded the local input bound.",
     "lockfile-too-large": "The lockfile exceeded the local input bound.",
     "manifest-invalid-utf8": "The manifest was not valid UTF-8.",
@@ -958,12 +966,72 @@ def audit_bytes(
     return result
 
 
-def _read_bounded(path: Path, input_name: str) -> bytes:
+def _relative_input_parts(path: Path, input_name: str) -> tuple[str, ...]:
+    candidate = path if path.is_absolute() else REPOSITORY_ROOT / path
     try:
-        with path.open("rb") as stream:
-            data = stream.read(MAX_INPUT_BYTES + 1)
-    except (OSError, ValueError) as error:
+        relative = candidate.relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise AuditError(f"{input_name}-path-invalid") from error
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise AuditError(f"{input_name}-path-invalid")
+    return parts
+
+
+def _read_bounded(path: Path, input_name: str) -> bytes:
+    parts = _relative_input_parts(path, input_name)
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        parent_fd = os.open(REPOSITORY_ROOT, directory_flags)
+    except OSError as error:
         raise AuditError(f"{input_name}-read-failed") from error
+    try:
+        for part in parts[:-1]:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise AuditError(f"{input_name}-path-invalid") from error
+                raise AuditError(f"{input_name}-read-failed") from error
+            os.close(parent_fd)
+            parent_fd = child_fd
+        try:
+            file_fd = os.open(parts[-1], file_flags, dir_fd=parent_fd)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise AuditError(f"{input_name}-path-invalid") from error
+            raise AuditError(f"{input_name}-read-failed") from error
+        try:
+            if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                raise AuditError(f"{input_name}-not-regular")
+            chunks: list[bytes] = []
+            remaining = MAX_INPUT_BYTES + 1
+            while remaining:
+                chunk = os.read(file_fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+        except AuditError:
+            raise
+        except (OSError, ValueError) as error:
+            raise AuditError(f"{input_name}-read-failed") from error
+        finally:
+            os.close(file_fd)
+    finally:
+        os.close(parent_fd)
     if len(data) > MAX_INPUT_BYTES:
         raise AuditError(f"{input_name}-too-large")
     return data

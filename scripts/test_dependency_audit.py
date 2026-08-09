@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -286,6 +289,25 @@ class DependencyAuditTests(unittest.TestCase):
         oversized = audit.audit_bytes(b"{}" + b"x" * audit.MAX_INPUT_BYTES, self.lockfile_bytes)
         self.assertEqual(oversized["status"], "fail", oversized)
         self.assertIn("manifest-too-large", self.finding_codes(oversized), oversized)
+
+    def test_file_inputs_reject_repository_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            link = Path(directory) / "package.json"
+            link.symlink_to(MANIFEST)
+            result = audit.audit_files(link, LOCKFILE)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("manifest-path-invalid", self.finding_codes(result), result)
+
+    def test_file_inputs_reject_special_files_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            fifo = Path(directory) / "manifest.fifo"
+            os.mkfifo(fifo)
+            started = time.monotonic()
+            result = audit.audit_files(fifo, LOCKFILE)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.0, result)
+        self.assertEqual(result["status"], "fail", result)
+        self.assertIn("manifest-not-regular", self.finding_codes(result), result)
 
     def test_unknown_cli_argument_has_stable_json_failure(self) -> None:
         completed = subprocess.run(
