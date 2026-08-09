@@ -164,7 +164,9 @@
     if (value === 'retry') return 'Retry provider discovery';
     if (value === 'empty') return 'No sign-in methods available';
     if (value === 'malformed') return 'Provider discovery returned incompatible data';
-    if (value === 'aborted') return 'Provider discovery was cancelled';
+    // Cancellation is still the approved generic discovery-stop family. Keep
+    // the Paper heading stable while the detail copy records the abort reason.
+    if (value === 'aborted') return 'Provider discovery stopped';
     return 'Provider discovery stopped';
   }
 

@@ -6,6 +6,7 @@ import AuthPreview from './AuthPreview.svelte';
 import { DEFAULT_PROVIDERS } from './fixtures';
 
 const APPROVED_PARENT = 'd88cd9adfcef94980ae674f40d99c65e1cf9b666';
+const CORRECTION_PARENT = 'f87ce048b5afc4fad7ac361baa589d47745b580b';
 
 function parentAuthPreviewSource(): string {
   return execFileSync(
@@ -42,6 +43,23 @@ describe('AuthPreview', () => {
     render(AuthPreview, { state: 'provider-selection' });
     expect(screen.getByRole('button', { name: 'Continue with Nous' })).toBeInTheDocument();
     expect(screen.getByText('OAuth · opens the provider')).toBeInTheDocument();
+  });
+
+  it('restores the approved cancellation heading after the exact correction parent', async () => {
+    const parent = execFileSync(
+      'git',
+      ['show', `${CORRECTION_PARENT}:apps/web/src/lib/auth-ui/AuthPreview.svelte`],
+      { cwd: resolve(process.cwd(), '../..'), encoding: 'utf8' }
+    );
+
+    // The exact correction parent exposed a child-only heading drift. Keep this
+    // source anchor so a future rerun proves the intended parent fails at the
+    // rendered heading assertion instead of silently moving the baseline.
+    expect(parent).toContain("if (value === 'aborted') return 'Provider discovery was cancelled';");
+
+    render(AuthPreview, { state: 'discovery-aborted' });
+    expect(screen.getByRole('heading', { name: 'Provider discovery stopped' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Provider discovery was cancelled' })).not.toBeInTheDocument();
   });
 
   it('fails closed for live pending discovery and never renders fixture providers', () => {
@@ -257,7 +275,7 @@ describe('AuthPreview', () => {
       },
       {
         state: 'discovery-aborted',
-        heading: 'Provider discovery was cancelled',
+        heading: 'Provider discovery stopped',
         copy: 'The provider discovery request was cancelled before a usable registry was received. No provider action is available.',
         detail: 'aborted',
         detailCopy: 'Cancellation leaves no provider list and does not expose response data.',
