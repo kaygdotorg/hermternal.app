@@ -1198,7 +1198,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             self.assert_bounded_failure(optimized)
 
     def test_fifo_checkout_read_exits_bounded_in_both_modes(self) -> None:
-        """Allow the measured 64-MiB snapshot budget, never a blocking checkout read."""
+        """Allow the measured 80-MiB snapshot budget, never a blocking checkout read."""
 
         with self.copy_checkout() as temporary:
             checkout = Path(temporary).resolve()
