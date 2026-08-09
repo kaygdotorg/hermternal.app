@@ -216,11 +216,16 @@ before a source predecessor can be selected. The preflight also rejects grafts,
 replacement refs, local or HTTP alternates, promisor/partial-clone metadata,
 lazy-fetch controls, and unsafe Git indirection. Normal repositories and validated
 linked worktrees are supported; their common directory, object directory, gitfile,
-and worktree metadata must resolve inside the expected repository context. A
-relative linked-worktree `gitdir:` is resolved against the containing `.git` file,
-then checked against the common worktree directory; escapes fail closed. The
-preflight returns a bounded topology snapshot and repeats it after traversal so
-forbidden metadata created mid-calculation cannot authorize a result.
+and worktree metadata must resolve inside the expected repository context. The
+trusted common directory is the canonical non-symlink `.git` directory on the
+checkout's ancestor chain, so a linked worktree may keep common metadata outside
+itself but copied sibling metadata cannot authorize provenance. A relative linked-
+worktree `gitdir:` is resolved against the containing `.git` file with component-
+wise `O_NOFOLLOW` traversal; direct `..` paths remain supported, while symlinked
+redirects and escapes fail closed. Standalone `--separate-git-dir` checkouts are
+explicitly unsupported because they do not provide this trusted ancestor root.
+The preflight returns a bounded topology snapshot and repeats it after traversal
+so forbidden metadata created mid-calculation cannot authorize a result.
 
 It treats the implementation/test blob pair as the source identity, ignores
 mode-only commits (`100644` versus `100755`) and descendants that do not change

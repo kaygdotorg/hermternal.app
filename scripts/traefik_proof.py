@@ -821,17 +821,114 @@ class _ParserGitMetadataSnapshot(NamedTuple):
 
 
 def _resolve_git_metadata_reference(base: Path, value: str, label: str) -> Path:
-    """Resolve Git's relative metadata references against their containing file."""
+    """Resolve a Git metadata reference without following any path symlink.
 
-    if not value or "\x00" in value:
+    Git accepts symlinked ``gitdir`` and ``commondir`` components, but that
+    turns a relative metadata reference into an attacker-controlled redirect.
+    Walk every component from a directory descriptor with ``O_NOFOLLOW`` so the
+    returned canonical path is backed by the same no-symlink path that was
+    inspected. ``..`` remains valid for ordinary linked-worktree metadata and
+    is checked component by component rather than normalized away first.
+    """
+
+    if type(value) is not str or not value or "\x00" in value:
         raise ValueError(f"parser provenance {label} is malformed")
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = base / candidate
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("parser provenance requires O_NOFOLLOW Git metadata traversal")
+    directory_flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0)
+    leaf_flags = os.O_RDONLY | nofollow
+    raw_path = Path(value)
     try:
-        return candidate.resolve(strict=True)
+        canonical_base = base.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError(f"parser provenance {label} cannot be resolved") from exc
+        raise ValueError(f"parser provenance {label} base cannot be resolved") from exc
+    if not canonical_base.is_dir():
+        raise ValueError(f"parser provenance {label} base is not a directory")
+
+    descriptors: list[int] = []
+    try:
+        if raw_path.is_absolute():
+            anchor = raw_path.anchor or os.sep
+            current = os.open(anchor, directory_flags)
+            descriptors.append(current)
+            components = raw_path.parts[1:]
+            canonical = Path(anchor)
+        else:
+            current = os.open(str(canonical_base), directory_flags)
+            descriptors.append(current)
+            components = raw_path.parts
+            canonical = canonical_base
+
+        meaningful = tuple(component for component in components if component not in {"", "."})
+        for index, component in enumerate(meaningful):
+            if component == "..":
+                try:
+                    child = os.open("..", directory_flags, dir_fd=current)
+                except OSError as exc:
+                    raise ValueError(f"parser provenance {label} cannot traverse safely") from exc
+                descriptors.append(child)
+                current = child
+                canonical = canonical.parent
+                continue
+            try:
+                metadata = os.lstat(component, dir_fd=current)
+            except OSError as exc:
+                raise ValueError(f"parser provenance {label} cannot be inspected safely") from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(f"parser provenance {label} contains a symlinked path component")
+            final = index == len(meaningful) - 1
+            try:
+                child = os.open(component, leaf_flags if final else directory_flags, dir_fd=current)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise ValueError(f"parser provenance {label} contains a symlinked path component") from exc
+                raise ValueError(f"parser provenance {label} cannot be opened safely") from exc
+            descriptors.append(child)
+            opened = os.fstat(child)
+            if not final and not stat.S_ISDIR(opened.st_mode):
+                raise ValueError(f"parser provenance {label} contains a non-directory path component")
+            current = child
+            canonical = canonical / component
+
+        return Path(os.path.normpath(str(canonical)))
+    except ValueError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"parser provenance {label} cannot be resolved safely") from exc
+    finally:
+        _parser_close_fds(descriptors)
+
+
+def _parser_trusted_metadata_root(project_root: Path) -> Path:
+    """Find the trusted common Git directory from the checkout's ancestors.
+
+    A linked worktree legitimately keeps its common directory outside the
+    worktree itself, so containment in ``project_root`` would be wrong. The
+    source checkout's ancestor ``.git`` directory is the independent trust
+    anchor instead. A standalone ``--separate-git-dir`` marker has no such
+    trusted ancestor in this contract and therefore fails closed.
+    """
+
+    current = project_root
+    while True:
+        marker = current / ".git"
+        try:
+            metadata = os.lstat(marker)
+        except FileNotFoundError:
+            metadata = None
+        except OSError as exc:
+            raise ValueError("parser provenance trusted Git metadata cannot be inspected") from exc
+        if metadata is not None:
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError("parser provenance trusted Git metadata cannot use a symlink")
+            if stat.S_ISDIR(metadata.st_mode):
+                return _resolve_git_metadata_reference(current, ".git", "trusted repository metadata root")
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    raise ValueError("parser provenance requires a trusted repository metadata root")
 
 
 def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> _ParserGitMetadataSnapshot:
@@ -879,12 +976,22 @@ def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> _P
     if shallow != "false":
         raise ValueError("parser provenance rejects shallow repositories")
     try:
-        git_dir = Path(git_dir_text).resolve(strict=True)
-        common_dir = Path(common_dir_text).resolve(strict=True)
-        objects_dir = Path(objects_text).resolve(strict=True)
+        git_dir = _resolve_git_metadata_reference(project_root, git_dir_text, "Git directory")
+        common_dir = _resolve_git_metadata_reference(project_root, common_dir_text, "Git common directory")
+        objects_dir = _resolve_git_metadata_reference(project_root, objects_text, "Git objects directory")
     except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise
         raise ValueError("parser provenance Git metadata cannot be resolved") from exc
-    if not git_dir.is_dir() or not common_dir.is_dir() or not objects_dir.is_dir() or objects_dir != common_dir / "objects":
+    trusted_metadata_root = _parser_trusted_metadata_root(project_root)
+    if common_dir != trusted_metadata_root:
+        raise ValueError("parser provenance Git metadata is outside the trusted repository metadata root")
+    if (
+        not git_dir.is_dir()
+        or not common_dir.is_dir()
+        or not objects_dir.is_dir()
+        or objects_dir != trusted_metadata_root / "objects"
+    ):
         raise ValueError("parser provenance Git metadata points outside the repository")
 
     marker = project_root / ".git"
