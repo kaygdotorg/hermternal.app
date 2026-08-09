@@ -990,6 +990,16 @@ class CliTests(unittest.TestCase):
         self._add_json_expected_value(document, "control", split_bearer)
         self._assert_json_document_rejects("connection-restoration/cases.json", document)
 
+    def test_route_document_empty_legacy_query_marker_is_exactly_bounded(self) -> None:
+        """Keep a documented query key without allowing a retained query value."""
+
+        relative_path = "route-allowlist/README.md"
+        self._assert_scanner_accepts_in_both_modes(relative_path, b"?token=\n")
+        self._assert_scanner_rejects_in_both_modes(
+            relative_path,
+            b"?token=unredacted-secret-value-123456\n",
+        )
+
     def test_markdown_assignment_value_is_rejected_in_both_modes(self) -> None:
         self._append_artifact_and_block(
             "connection-restoration/README.md",

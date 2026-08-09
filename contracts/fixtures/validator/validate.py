@@ -209,7 +209,7 @@ AUTHORITY_ARTIFACT_PATHS = (
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
 )
-BASELINE_CANONICAL_SHA256 = "b94dfa44c0bc553e4c5c7a1c9cdc80184cbfd09396bd8be23fb4453c479d4196"
+BASELINE_CANONICAL_SHA256 = "7c9545a028b506c5434f8fe2cf85e0d3ab53274bc55ef91fc8b53bf868380f71"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1259,14 +1259,10 @@ def _scan_assignment_candidates(
             value_index += 1
         candidate = text[value_start:value_index]
         if not candidate:
-            if separator == "=":
-                _validate_assignment_candidate(
-                    key,
-                    candidate,
-                    allow_synthetic_markers=allow_synthetic_markers,
-                    allowed_assignment_values=allowed_assignment_values,
-                    exact_full_allowance=exact_full_allowance,
-                )
+            # An empty assignment only names a key; it cannot retain a
+            # credential. Treat it as structural documentation so query-key
+            # references such as ``?token=`` do not require a broad allowance.
+            # Any following value still reaches the fail-closed policy below.
             continue
         # Existing prose and typed annotations intentionally use short words
         # after a colon (``token: str`` or ``Authorization: Basic``). Only a
