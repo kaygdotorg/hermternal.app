@@ -1,6 +1,56 @@
 {
-  "schema": "hermternal.fixture-registry-authority-pin.v1",
+  "schema": "hermternal.fixture-registry-authority-pin.v2",
   "authority_path": "scripts/fixture_registry_authority.v2.hardened.json",
-  "authority_commit": "fc33b1f461321f319b8c2566d9f0faf6c535b77b",
-  "source_commit": "a707f5af9612118d6d41450c5090e5c11c3e5c10"
+  "authority_commit": "8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9",
+  "source_commit": "5919c41473cfd6eda9647647c30ff15ab4aa5134",
+  "source_prefix": "5919c414",
+  "bundle_path": "scripts/fixture_registry_authority.objects.bundle",
+  "bundle_sha256": "da68bbf816f60c3d8c898830231cc7a8b08ed68937e1efda7e6d53306aabba64",
+  "bundle_size_bytes": 5939513,
+  "closure": {
+    "object_count": 5225,
+    "loose_object_count": 5225,
+    "pack_file_count": 0,
+    "type_counts": {
+      "blob": 2040,
+      "commit": 517,
+      "tag": 0,
+      "tree": 2668
+    },
+    "rows_sha256": "fe8ffdf8078d7ce4599d3bc451e7ce727034c90606fc4b779a1a92254f74f84a"
+  },
+  "expected_refs": [
+    {
+      "name": "bootstrap-authority",
+      "ref": "refs/fixture-authority/bootstrap-authority",
+      "object": "f92f339cf26c1da760e99af6508dfabfb6bfb383"
+    },
+    {
+      "name": "bootstrap-source",
+      "ref": "refs/fixture-authority/bootstrap-source",
+      "object": "abb6754bddd1cf18927b0172ed9fa3456235b035"
+    },
+    {
+      "name": "hardened-authority",
+      "ref": "refs/fixture-authority/hardened-authority",
+      "object": "8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9"
+    },
+    {
+      "name": "hardened-source",
+      "ref": "refs/fixture-authority/hardened-source",
+      "object": "5919c41473cfd6eda9647647c30ff15ab4aa5134"
+    }
+  ],
+  "verifier": {
+    "max_git_output_bytes": 524288,
+    "git_timeout_seconds": 10.0,
+    "max_snapshot_file_bytes": 1048576,
+    "max_snapshot_pack_file_bytes": 8388608,
+    "max_snapshot_total_bytes": 33554432,
+    "snapshot_timeout_seconds": 30.0,
+    "max_error_length": 220,
+    "reviewed_large_loose_object": "12c6d69bb82efcecad0e2905003af814a8622917",
+    "trusted_git_executable": "/usr/bin/git",
+    "trusted_helper_path": "/usr/bin:/bin"
+  }
 }

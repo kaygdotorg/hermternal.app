@@ -44,22 +44,29 @@ The hardened document is introduced at:
 
 `scripts/fixture_registry_authority.v2.hardened.json`
 
-Its role is `aggregate_predecessor`, its source is the exact external commit
-`a707f5af9612118d6d41450c5090e5c11c3e5c10`, and its introduction commit is the
+Its role is `aggregate_predecessor`, its source is the exact refreshed commit
+`5919c41473cfd6eda9647647c30ff15ab4aa5134`, and its introduction commit is the
 direct child
-`fc33b1f461321f319b8c2566d9f0faf6c535b77b`. The checked-in pin and offline
-object bundle bind those exact commits without accepting a self-consistent
-replacement history.
+`8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9`. The checked-in
+`scripts/fixture_registry_authority.v2.hardened.pin.json` and offline object
+bundle bind those exact commits, the bundle digest and size, the 5,225-object
+loose closure, the four protected refs, and the verifier constants without
+accepting a self-consistent replacement history.
 
 ## Active hardened v2 loading rule
 
-The standalone verifier reads only the hardened v2 authority path from its
+The standalone verifier first reads and strictly validates the hardened pin
+from the checkout, then reads only the hardened v2 authority path from its
 exact pinned Git commit. It does not use the visible checkout copy as its
-authority source. It reads the authority bytes from the local Git object
-database, validates the schema and key order, and requires all of the following:
+authority source and it never discovers an introduction from `HEAD`. The pin
+binds its schema, authority/source commits, bundle path/digest/size, closure
+counts and canonical row digest, exact four protected refs, and all verifier
+limits. After those checks, the verifier reads the authority bytes from the
+local Git object database, validates the schema and key order, and requires all
+of the following:
 
 - the pinned introduction commit changes the hardened authority path and its
-  first parent is exactly `a707f5af9612118d6d41450c5090e5c11c3e5c10`;
+  first parent is exactly `5919c41473cfd6eda9647647c30ff15ab4aa5134`;
 - the four declared paths resolve at that predecessor to the recorded Git blob
   object IDs;
 - each predecessor object has the recorded byte length and SHA-256 digest; and
@@ -83,11 +90,16 @@ copy is chunked and category-bounded: ordinary metadata and loose objects use
 `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) so hostile packed
 inputs fail within the existing budget. The aggregate cap is
 `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), and the copy has a
-`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The active success
-fixture is materialized from the checked-in bundle as the exact reachable
-closure of loose objects; after the bounded snapshot, any nonempty pack
-metadata directory is rejected rather than trusted. The 1 MiB non-pack cap and
-8 MiB pack cap remain unchanged. The verifier rejects symlinks/non-regular
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The active success fixture is materialized from the checked-in bundle as the
+exact 5,225-object reachable closure of loose objects; after the bounded
+snapshot, `objects/info` and `objects/pack` must be empty and the ref set must
+be exactly the four protected loose commit refs with detached `HEAD` at the
+hardened authority. Packed-refs, MIDX, commit-graph, alternates, promisor,
+grafts, shallow, reflog, replacement, and other fallback metadata are rejected.
+The exact-parent ancestry retains one reviewed historical bundle blob above the
+ordinary loose cap; its fixed OID is allowlisted by the pin and closure check.
+The ordinary 1 MiB cap, 8 MiB pack cap, 32 MiB aggregate cap, and 30 second
+deadline otherwise remain unchanged. The verifier rejects symlinks/non-regular
 entries and checks source metadata before and after each copy. Git is invoked
 only against that snapshot, so a concurrent rename or symlink replacement of
 the caller's `.git`, nested fanout/pack/ref path, config, or metadata cannot
@@ -186,34 +198,24 @@ local scanner or baseline rewrite.
 
 ## Current aggregate sequencing
 
-The current aggregate validator remains intentionally blocked in this
-hardened authority adoption. The present blocked evidence is caused by three
-stale artifact records
-under `source-audit/compatibility-gate` in the current aggregate index; those
-records are not the future scanner-boundary blockers. Normal and optimized
-validator runs have the same bounded result:
+The aggregate validator/test bytes and baseline records were refreshed before
+this authority rotation. The stale evidence was in the aggregate validator and
+test records, not three `source-audit/compatibility-gate` rows; the canonical
+baseline anchor was regenerated without weakening validation. Normal and
+optimized validator runs now have the same successful partial-evidence result:
 
 ```json
-{"compatible":false,"complete":false,"error":{"code":"fixture_index_invalid","message":"fixture registry input rejected"},"evidence_status":"blocked","live_claim":false,"ok":false}
+{"compatible":false,"complete":false,"coverage_count":29,"evidence_status":"partial","fixture_count":30,"live_claim":false,"ok":true}
 ```
 
-The existing aggregate launcher remains 22 tests with two CLI failures and one
-checked-in-registry error against the stale index/baseline state. No pending-root
-exemption or scanner weakening is added here.
-
-The exact three scanner blockers owned by the subsequent `70d5963`
-preparation rebase are:
-
-- `contracts/fixtures/chat-stream-completion/test_validate.py`
-- `contracts/fixtures/deployment-security/external-allowlist/test_validate.py`
-- `contracts/fixtures/uncertain-delivery/test_validate.py`
-
-After this hardened authority adoption is independently reviewed and merged,
-the scanner-preparation lane must rebase onto the merged external predecessor,
-correct those three scanner cases without weakening aggregate trust, regenerate
-the complete index and baseline, and create its next authority from that merged
-external predecessor. The historical v1 and bootstrap v2 paths must remain
-readable while that migration is reviewed.
+The standalone aggregate suite currently contains 48 tests and passes in both
+interpreter modes. `complete:false` and `live_claim:false` remain intentional:
+this proves synthetic registry integrity only, while pending coverage is not
+promoted to live or complete evidence. No pending-root exemption or scanner
+weakening is added here. Any later scanner preparation must rebase onto the
+merged external predecessor, regenerate the complete index and baseline, and
+create its next authority from that merged predecessor. The historical v1 and
+bootstrap v2 paths remain readable while that migration is reviewed.
 
 ## Scope and evidence
 

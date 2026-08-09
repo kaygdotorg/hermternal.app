@@ -54,19 +54,72 @@ BOOTSTRAP_AUTHORITY_COMMIT = "f92f339cf26c1da760e99af6508dfabfb6bfb383"
 AUTHORITY_PATH = "scripts/fixture_registry_authority.v2.hardened.json"
 AUTHORITY_SCHEMA = "hermternal.fixture-registry-authority.v2"
 AUTHORITY_ROLE = "aggregate_predecessor"
+PIN_PATH = "scripts/fixture_registry_authority.v2.hardened.pin.json"
+PIN_SCHEMA = "hermternal.fixture-registry-authority-pin.v2"
+BUNDLE_PATH = "scripts/fixture_registry_authority.objects.bundle"
 # These exact pins keep a self-consistent but unreviewed history from selecting
 # the active authority. The hardened authority commit is a direct child of its
-# aggregate predecessor and is read from the local Git object database only.
-EXPECTED_AUTHORITY_COMMIT = "fc33b1f461321f319b8c2566d9f0faf6c535b77b"
-EXPECTED_SOURCE_COMMIT = "a707f5af9612118d6d41450c5090e5c11c3e5c10"
+# refreshed aggregate predecessor and is read from the local Git object database
+# only. The bundle and closure values are separately bound by the pin below.
+EXPECTED_AUTHORITY_COMMIT = "8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9"
+EXPECTED_SOURCE_COMMIT = "5919c41473cfd6eda9647647c30ff15ab4aa5134"
+EXPECTED_SOURCE_PREFIX = "5919c414"
+EXPECTED_BUNDLE_SIZE_BYTES = 5_939_513
+EXPECTED_BUNDLE_SHA256 = "da68bbf816f60c3d8c898830231cc7a8b08ed68937e1efda7e6d53306aabba64"
+# The exact-parent ancestry necessarily retains the prior repository-versioned
+# bundle blob. It is the sole reviewed loose object above the ordinary cap; its
+# OID is fixed by the pinned closure and never grants an unverified object.
+REVIEWED_LARGE_LOOSE_OBJECT = "12c6d69bb82efcecad0e2905003af814a8622917"
 # Retain the old name for focused historical tests and callers while the active
-# trust root moves from the bootstrap predecessor to the hardened predecessor.
+# trust root moves from the bootstrap predecessor to the refreshed predecessor.
 APPROVED_SOURCE_COMMIT = EXPECTED_SOURCE_COMMIT
 EXPECTED_ARTIFACT_PATHS = (
     "contracts/fixtures/index.json",
     "contracts/fixtures/validator/test_validate.py",
     "contracts/fixtures/validator/validate.py",
     "contracts/fixtures/validator/validation-baseline.json",
+)
+EXPECTED_REF_RECORDS = (
+    ("bootstrap-authority", "refs/fixture-authority/bootstrap-authority", BOOTSTRAP_AUTHORITY_COMMIT),
+    ("bootstrap-source", "refs/fixture-authority/bootstrap-source", BOOTSTRAP_SOURCE_COMMIT),
+    ("hardened-authority", "refs/fixture-authority/hardened-authority", EXPECTED_AUTHORITY_COMMIT),
+    ("hardened-source", "refs/fixture-authority/hardened-source", EXPECTED_SOURCE_COMMIT),
+)
+EXPECTED_REF_MAP = {ref: object_id for _, ref, object_id in EXPECTED_REF_RECORDS}
+EXPECTED_CLOSURE = {
+    "object_count": 5_225,
+    "loose_object_count": 5_225,
+    "pack_file_count": 0,
+    "type_counts": {"blob": 2_040, "commit": 517, "tag": 0, "tree": 2_668},
+    "rows_sha256": "fe8ffdf8078d7ce4599d3bc451e7ce727034c90606fc4b779a1a92254f74f84a",
+}
+PIN_KEYS = (
+    "schema",
+    "authority_path",
+    "authority_commit",
+    "source_commit",
+    "source_prefix",
+    "bundle_path",
+    "bundle_sha256",
+    "bundle_size_bytes",
+    "closure",
+    "expected_refs",
+    "verifier",
+)
+PIN_CLOSURE_KEYS = ("object_count", "loose_object_count", "pack_file_count", "type_counts", "rows_sha256")
+PIN_TYPE_COUNT_KEYS = ("blob", "commit", "tag", "tree")
+PIN_REF_KEYS = ("name", "ref", "object")
+PIN_VERIFIER_KEYS = (
+    "max_git_output_bytes",
+    "git_timeout_seconds",
+    "max_snapshot_file_bytes",
+    "max_snapshot_pack_file_bytes",
+    "max_snapshot_total_bytes",
+    "snapshot_timeout_seconds",
+    "max_error_length",
+    "reviewed_large_loose_object",
+    "trusted_git_executable",
+    "trusted_helper_path",
 )
 AUTHORITY_KEYS = (
     "schema",
@@ -436,9 +489,15 @@ class _SnapshotBudget:
 
 
 def _snapshot_file_limit(relative_path: PurePosixPath) -> int:
-    """Use pack-directory headroom without widening loose-file limits."""
+    """Keep ordinary loose files capped while allowing the reviewed parent blob."""
 
     if relative_path.parts[:2] == ("objects", "pack"):
+        return MAX_SNAPSHOT_PACK_FILE_BYTES
+    if relative_path.parts == (
+        "objects",
+        REVIEWED_LARGE_LOOSE_OBJECT[:2],
+        REVIEWED_LARGE_LOOSE_OBJECT[2:],
+    ):
         return MAX_SNAPSHOT_PACK_FILE_BYTES
     return MAX_SNAPSHOT_FILE_BYTES
 
@@ -588,6 +647,122 @@ def _snapshot_object_repository(object_repo: Path) -> tuple[tempfile.TemporaryDi
                     pass
 
 
+def _directory_names(path: Path) -> tuple[str, ...]:
+    try:
+        names = os.listdir(path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise AuthorityError() from exc
+    _require(all(type(name) is str and name not in {"", ".", ".."} for name in names))
+    return tuple(names)
+
+
+def _validate_exact_refs(root: Path) -> None:
+    """Require four detached, loose commit refs and no ref namespace extras."""
+
+    git_dir = root / ".git"
+    head = _read_bounded_regular_path(git_dir / "HEAD", 128)
+    _require(head == f"{EXPECTED_AUTHORITY_COMMIT}\n".encode("ascii"))
+    refs_root = git_dir / "refs"
+    _require(set(_directory_names(refs_root)) == {"fixture-authority"})
+    authority_refs = refs_root / "fixture-authority"
+    _require(
+        set(_directory_names(authority_refs))
+        == {name for name, _, _ in EXPECTED_REF_RECORDS}
+    )
+    for name, ref, object_id in EXPECTED_REF_RECORDS:
+        relative = PurePosixPath(ref)
+        target = git_dir.joinpath(*relative.parts)
+        metadata = _lstat_optional(target)
+        _require(metadata is not None and stat.S_ISREG(metadata.st_mode))
+        _require(_read_bounded_regular_path(target, 64) == f"{object_id}\n".encode("ascii"))
+
+    listed = _git(
+        root,
+        "for-each-ref",
+        "--format=%(refname)\t%(objectname)\t%(symref)",
+    )
+    try:
+        lines = listed.decode("ascii").splitlines()
+    except UnicodeError as exc:
+        raise AuthorityError() from exc
+    actual: dict[str, str] = {}
+    for line in lines:
+        fields = line.split("\t")
+        _require(len(fields) == 3 and fields[0] not in actual)
+        ref, object_id, symref = fields
+        _require(not symref and ref in EXPECTED_REF_MAP and HEX40.fullmatch(object_id) is not None)
+        actual[ref] = object_id
+    _require(actual == EXPECTED_REF_MAP)
+
+
+def _validate_loose_closure(root: Path) -> None:
+    """Require exactly the pinned loose object closure and no fallback files."""
+
+    objects = root / ".git" / "objects"
+    children = set(_directory_names(objects))
+    _require({"info", "pack"}.issubset(children))
+    for special in ("info", "pack"):
+        special_path = objects / special
+        metadata = _lstat_optional(special_path)
+        _require(metadata is not None and stat.S_ISDIR(metadata.st_mode))
+        _require(not _directory_names(special_path))
+    fanout_names = children - {"info", "pack"}
+    _require(all(re.fullmatch(r"[0-9a-f]{2}", name) is not None for name in fanout_names))
+
+    filesystem_oids: set[str] = set()
+    for fanout in sorted(fanout_names):
+        fanout_path = objects / fanout
+        metadata = _lstat_optional(fanout_path)
+        _require(metadata is not None and stat.S_ISDIR(metadata.st_mode))
+        entries = _directory_names(fanout_path)
+        _require(entries and all(re.fullmatch(r"[0-9a-f]{38}", name) is not None for name in entries))
+        for name in entries:
+            target = fanout_path / name
+            target_metadata = _lstat_optional(target)
+            _require(target_metadata is not None and stat.S_ISREG(target_metadata.st_mode))
+            filesystem_oids.add(fanout + name)
+
+    checked = _git(
+        root,
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+    )
+    rows: list[tuple[str, str, int]] = []
+    try:
+        checked_lines = checked.decode("ascii").splitlines()
+    except UnicodeError as exc:
+        raise AuthorityError() from exc
+    for line in checked_lines:
+        fields = line.split()
+        _require(len(fields) == 3 and HEX40.fullmatch(fields[0]) is not None)
+        object_id, object_type, raw_size = fields
+        _require(object_type in {"blob", "tree", "commit", "tag"})
+        try:
+            object_size = int(raw_size)
+        except (TypeError, ValueError) as exc:
+            raise AuthorityError() from exc
+        _require(object_size >= 0)
+        rows.append((object_id, object_type, object_size))
+    _require(rows and len(rows) == len(set(row[0] for row in rows)))
+    _require(filesystem_oids == {row[0] for row in rows})
+    ordered = sorted(rows)
+    type_counts = {object_type: 0 for object_type in ("blob", "commit", "tag", "tree")}
+    for _, object_type, _ in ordered:
+        type_counts[object_type] += 1
+    rows_digest = hashlib.sha256(
+        "".join(f"{object_id}\t{object_type}\t{object_size}\n" for object_id, object_type, object_size in ordered).encode("ascii")
+    ).hexdigest()
+    observed = {
+        "object_count": len(ordered),
+        "loose_object_count": len(filesystem_oids),
+        "pack_file_count": 0,
+        "type_counts": type_counts,
+        "rows_sha256": rows_digest,
+    }
+    _require(observed == EXPECTED_CLOSURE)
+
+
 def _validate_snapshot_repository(snapshot_root: Path) -> Path:
     """Validate and use only the private snapshot, never the caller paths."""
 
@@ -609,23 +784,21 @@ def _validate_snapshot_repository(snapshot_root: Path) -> Path:
             _require(stat.S_ISREG(metadata.st_mode))
     for relative in GIT_FORBIDDEN_METADATA:
         _require_missing(git_dir / relative)
-    for relative in ("gitdir", "commondir", "config.worktree"):
+    for relative in (
+        "gitdir",
+        "commondir",
+        "config.worktree",
+        "packed-refs",
+        "shallow",
+        "index",
+        "logs",
+    ):
         _require_missing(git_dir / relative)
     _validate_local_config(_read_bounded_regular_path(git_dir / "config", MAX_GIT_OUTPUT))
     _walk_plain_tree(git_dir / "objects")
-    pack_directory = git_dir / "objects" / "pack"
-    pack_metadata = _lstat_optional(pack_directory)
-    if pack_metadata is not None:
-        _require(stat.S_ISDIR(pack_metadata.st_mode))
-        try:
-            # The standalone success fixture is deliberately materialized as
-            # loose objects. A retained pack can hide a dependency on an
-            # unreviewed or promisor-backed object source, so packed inputs are
-            # rejected instead of relying on the pack-size budget as trust.
-            _require(not any(pack_directory.iterdir()))
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise AuthorityError() from exc
     _walk_plain_tree(git_dir / "refs")
+    _validate_exact_refs(root)
+    _validate_loose_closure(root)
     # Verify every copied object before trusting any authority or artifact blob.
     _git(root, "fsck", "--full", "--strict", "--no-reflogs", "--no-progress")
 
@@ -633,7 +806,6 @@ def _validate_snapshot_repository(snapshot_root: Path) -> Path:
     _require(_git(root, "rev-parse", "--is-inside-work-tree") == b"true\n")
     _require(_git(root, "rev-parse", "--is-bare-repository") == b"false\n")
     _require(_git(root, "rev-parse", "--is-shallow-repository") == b"false\n")
-    _require(_git(root, "for-each-ref", "--format=%(refname)", "refs/replace") == b"")
     return root
 
 
@@ -918,58 +1090,38 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
 def _authority_introduction_commit(
     object_repo: Path,
     authority_path: str = AUTHORITY_PATH,
-    expected_commit: str | None = None,
+    expected_commit: str = EXPECTED_AUTHORITY_COMMIT,
 ) -> str:
-    """Resolve a pinned authority introduction without trusting the checkout tip.
+    """Resolve only the reviewed authority introduction commit.
 
-    The active hardened authority is an exact reviewed Git object that may be
-    absent from a fresh single-head clone until the offline bundle seeds it.
-    When a pin is supplied, verify that the pinned commit changes this path
-    instead of inferring a replacement from ``HEAD``. The unpinned form remains
-    useful for bounded-output regressions and historical callers.
+    Discovery from ``HEAD`` is deliberately absent. A caller that supplies
+    ``None`` or another commit cannot turn a new local history into authority.
     """
 
-    if expected_commit is not None:
-        _require(HEX40.fullmatch(expected_commit) is not None)
-        _require(_git(object_repo, "cat-file", "-t", expected_commit) == b"commit\n")
-        changes = _git(
-            object_repo,
-            "diff-tree",
-            "--no-commit-id",
-            "--name-status",
-            "-r",
-            expected_commit,
-            "--",
-            authority_path,
-        )
-        try:
-            entries = changes.decode("ascii").splitlines()
-        except UnicodeError as exc:
-            raise AuthorityError() from exc
-        _require(
-            len(entries) == 1
-            and entries[0].split("\t")[-1] == authority_path
-            and entries[0].split("\t", 1)[0] in {"A", "M"}
-        )
-        return expected_commit
-
-    output = _git(
+    _require(authority_path == AUTHORITY_PATH)
+    _require(type(expected_commit) is str and HEX40.fullmatch(expected_commit) is not None)
+    _require(expected_commit == EXPECTED_AUTHORITY_COMMIT)
+    _require(_git(object_repo, "cat-file", "-t", expected_commit) == b"commit\n")
+    changes = _git(
         object_repo,
-        "log",
-        "--format=%H",
-        "--diff-filter=A",
-        "--first-parent",
-        "HEAD",
+        "diff-tree",
+        "--no-commit-id",
+        "--name-status",
+        "-r",
+        expected_commit,
         "--",
         authority_path,
     )
     try:
-        commits = output.decode("ascii").splitlines()
+        entries = changes.decode("ascii").splitlines()
     except UnicodeError as exc:
         raise AuthorityError() from exc
-    _require(len(commits) == 1 and HEX40.fullmatch(commits[0]) is not None)
-    _require(_git(object_repo, "cat-file", "-t", commits[0]) == b"commit\n")
-    return commits[0]
+    _require(
+        len(entries) == 1
+        and entries[0].split("\t")[-1] == authority_path
+        and entries[0].split("\t", 1)[0] in {"A", "M"}
+    )
+    return expected_commit
 
 
 def _git_blob(object_repo: Path, revision: str, path: str) -> tuple[str, bytes]:
@@ -1013,6 +1165,67 @@ def _validate_manifest(authority: dict[str, Any]) -> tuple[str, list[dict[str, A
     return source_commit, records
 
 
+def _validate_pin(pin: dict[str, Any]) -> dict[str, Any]:
+    """Validate the checked-in trust root before using any pin-controlled value."""
+
+    _require(tuple(pin.keys()) == PIN_KEYS)
+    _require(pin["schema"] == PIN_SCHEMA)
+    _require(pin["authority_path"] == AUTHORITY_PATH)
+    authority_commit = pin["authority_commit"]
+    source_commit = pin["source_commit"]
+    _require(type(authority_commit) is str and HEX40.fullmatch(authority_commit) is not None)
+    _require(type(source_commit) is str and HEX40.fullmatch(source_commit) is not None)
+    _require(authority_commit == EXPECTED_AUTHORITY_COMMIT)
+    _require(source_commit == EXPECTED_SOURCE_COMMIT)
+    _require(pin["source_prefix"] == EXPECTED_SOURCE_PREFIX)
+    _require(source_commit.startswith(pin["source_prefix"]))
+    _require(pin["bundle_path"] == BUNDLE_PATH)
+    bundle_sha256 = pin["bundle_sha256"]
+    bundle_size = pin["bundle_size_bytes"]
+    _require(type(bundle_sha256) is str and HEX64.fullmatch(bundle_sha256) is not None)
+    _require(type(bundle_size) is int and type(bundle_size) is not bool)
+    _require(bundle_sha256 == EXPECTED_BUNDLE_SHA256 and bundle_size == EXPECTED_BUNDLE_SIZE_BYTES)
+
+    closure = pin["closure"]
+    _require(type(closure) is dict and tuple(closure.keys()) == PIN_CLOSURE_KEYS)
+    _require(type(closure["object_count"]) is int and type(closure["object_count"]) is not bool)
+    _require(type(closure["loose_object_count"]) is int and type(closure["loose_object_count"]) is not bool)
+    _require(type(closure["pack_file_count"]) is int and type(closure["pack_file_count"]) is not bool)
+    _require(type(closure["rows_sha256"]) is str and HEX64.fullmatch(closure["rows_sha256"]) is not None)
+    type_counts = closure["type_counts"]
+    _require(type(type_counts) is dict and tuple(type_counts.keys()) == PIN_TYPE_COUNT_KEYS)
+    _require(all(type(type_counts[key]) is int and type(type_counts[key]) is not bool for key in PIN_TYPE_COUNT_KEYS))
+    _require(closure == EXPECTED_CLOSURE)
+
+    expected_refs = pin["expected_refs"]
+    _require(type(expected_refs) is list and len(expected_refs) == len(EXPECTED_REF_RECORDS))
+    actual_ref_records: list[tuple[str, str, str]] = []
+    for raw in expected_refs:
+        _require(type(raw) is dict and tuple(raw.keys()) == PIN_REF_KEYS)
+        name, ref, object_id = raw["name"], raw["ref"], raw["object"]
+        _require(type(name) is str and type(ref) is str and type(object_id) is str)
+        _require(HEX40.fullmatch(object_id) is not None)
+        actual_ref_records.append((name, ref, object_id))
+    _require(tuple(actual_ref_records) == EXPECTED_REF_RECORDS)
+
+    verifier = pin["verifier"]
+    _require(type(verifier) is dict and tuple(verifier.keys()) == PIN_VERIFIER_KEYS)
+    expected_verifier = {
+        "max_git_output_bytes": MAX_GIT_OUTPUT,
+        "git_timeout_seconds": GIT_TIMEOUT_SECONDS,
+        "max_snapshot_file_bytes": MAX_SNAPSHOT_FILE_BYTES,
+        "max_snapshot_pack_file_bytes": MAX_SNAPSHOT_PACK_FILE_BYTES,
+        "max_snapshot_total_bytes": MAX_SNAPSHOT_TOTAL_BYTES,
+        "snapshot_timeout_seconds": SNAPSHOT_TIMEOUT_SECONDS,
+        "max_error_length": MAX_ERROR_LENGTH,
+        "reviewed_large_loose_object": REVIEWED_LARGE_LOOSE_OBJECT,
+        "trusted_git_executable": str(TRUSTED_GIT_EXECUTABLE),
+        "trusted_helper_path": TRUSTED_HELPER_PATH,
+    }
+    _require(verifier == expected_verifier)
+    return pin
+
+
 def _validate_legacy_manifest(authority: dict[str, Any]) -> dict[str, Any]:
     """Read the historical v1 schema plus six legacy fields (seven total keys) without treating it as v2 trust."""
 
@@ -1044,29 +1257,43 @@ def load_legacy_authority(checkout_root: Path) -> dict[str, Any]:
 def load_trusted_authority(
     object_repo: Path,
     *,
+    checkout_root: Path | None = None,
     authority_path: str = AUTHORITY_PATH,
-    expected_authority_commit: str | None = EXPECTED_AUTHORITY_COMMIT,
-    expected_source_commit: str | None = EXPECTED_SOURCE_COMMIT,
+    expected_authority_commit: str = EXPECTED_AUTHORITY_COMMIT,
+    expected_source_commit: str = EXPECTED_SOURCE_COMMIT,
 ) -> dict[str, Any]:
     """Load and verify the pinned hardened authority from an isolated snapshot."""
 
     try:
-        _require(type(authority_path) is str and authority_path and "\x00" not in authority_path)
-        if expected_authority_commit is not None:
-            _require(HEX40.fullmatch(expected_authority_commit) is not None)
-        if expected_source_commit is not None:
-            _require(HEX40.fullmatch(expected_source_commit) is not None)
+        if checkout_root is None:
+            checkout_root = _resolve_path(Path(__file__).resolve().parents[1], strict=True)
+        _require(type(authority_path) is str and authority_path == AUTHORITY_PATH)
+        # None is not an opt-out. The active loader never discovers an authority
+        # introduction or accepts a caller-selected source commit.
+        _require(type(expected_authority_commit) is str)
+        _require(type(expected_source_commit) is str)
+        _require(expected_authority_commit == EXPECTED_AUTHORITY_COMMIT)
+        _require(expected_source_commit == EXPECTED_SOURCE_COMMIT)
+        _require(HEX40.fullmatch(expected_authority_commit) is not None)
+        _require(HEX40.fullmatch(expected_source_commit) is not None)
+        pin = _validate_pin(_parse_json(_read_checkout_file(checkout_root, PIN_PATH)))
+        bundle = _read_checkout_file(
+            checkout_root,
+            BUNDLE_PATH,
+            limit=MAX_SNAPSHOT_PACK_FILE_BYTES,
+        )
+        _require(len(bundle) == pin["bundle_size_bytes"])
+        _require(hashlib.sha256(bundle).hexdigest() == pin["bundle_sha256"])
         with _validate_object_repository(object_repo) as isolated_repo:
             introduction = _authority_introduction_commit(
                 isolated_repo,
-                authority_path,
-                expected_commit=expected_authority_commit,
+                pin["authority_path"],
+                expected_commit=pin["authority_commit"],
             )
-            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{authority_path}")
+            authority_bytes = _git(isolated_repo, "show", f"{introduction}:{pin['authority_path']}")
             authority = _parse_json(authority_bytes)
             source_commit, records = _validate_manifest(authority)
-            if expected_source_commit is not None:
-                _require(source_commit == expected_source_commit)
+            _require(source_commit == pin["source_commit"])
             _require(source_commit != introduction)
             _require(_git(isolated_repo, "cat-file", "-t", source_commit) == b"commit\n")
             try:
@@ -1084,12 +1311,13 @@ def load_trusted_authority(
                 _require(len(data) == record["size_bytes"])
                 _require(hashlib.sha256(data).hexdigest() == record["sha256"])
         return {
-            "authority_path": authority_path,
+            "authority_path": pin["authority_path"],
             "schema": AUTHORITY_SCHEMA,
             "authority_commit": introduction,
             "source_commit": source_commit,
             "authority_bytes": authority_bytes,
             "artifact_manifest": records,
+            "pin": pin,
         }
     except AuthorityError:
         raise
@@ -1097,8 +1325,15 @@ def load_trusted_authority(
         raise AuthorityError() from exc
 
 
-def _read_checkout_file(checkout_root: Path, path: str) -> bytes:
+def _read_checkout_file(
+    checkout_root: Path,
+    path: str,
+    *,
+    limit: int = MAX_GIT_OUTPUT,
+) -> bytes:
     """Read a bounded regular file without traversing checkout symlinks."""
+
+    _require(type(limit) is int and type(limit) is not bool and 0 < limit <= MAX_SNAPSHOT_TOTAL_BYTES)
 
     _require(type(path) is str and path and "\\" not in path and "\x00" not in path)
     relative = PurePosixPath(path)
@@ -1126,12 +1361,12 @@ def _read_checkout_file(checkout_root: Path, path: str) -> bytes:
         file_fd = os.open(relative.parts[-1], file_flags, dir_fd=current_fd)
         _require(stat.S_ISREG(os.fstat(file_fd).st_mode))
         data = bytearray()
-        while len(data) < MAX_GIT_OUTPUT + 1:
-            chunk = os.read(file_fd, min(64 * 1024, MAX_GIT_OUTPUT + 1 - len(data)))
+        while len(data) < limit + 1:
+            chunk = os.read(file_fd, min(64 * 1024, limit + 1 - len(data)))
             if not chunk:
                 break
             data.extend(chunk)
-        _require(len(data) <= MAX_GIT_OUTPUT)
+        _require(len(data) <= limit)
         return bytes(data)
     except AuthorityError:
         raise
@@ -1154,7 +1389,7 @@ def verify_checkout(checkout_root: Path, object_repo: Path) -> dict[str, Any]:
     """Compare checkout trust inputs with the immutable predecessor manifest."""
 
     try:
-        authority = load_trusted_authority(object_repo)
+        authority = load_trusted_authority(object_repo, checkout_root=checkout_root)
         _require(_read_checkout_file(checkout_root, AUTHORITY_PATH) == authority["authority_bytes"])
         for record in authority["artifact_manifest"]:
             data = _read_checkout_file(checkout_root, record["path"])

@@ -22,8 +22,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRUSTED_BUNDLE_PATH = REPO_ROOT / "scripts" / "fixture_registry_authority.objects.bundle"
-TRUSTED_BUNDLE_SIZE_BYTES = 2_986_828
-TRUSTED_BUNDLE_SHA256 = "d61bf4316acbeca06863f527ffcf1cc6bce04d2ffa0261d8548c3a1867b15050"
+TRUSTED_BUNDLE_SIZE_BYTES = 5_939_513
+TRUSTED_BUNDLE_SHA256 = "da68bbf816f60c3d8c898830231cc7a8b08ed68937e1efda7e6d53306aabba64"
 
 # Keep the historical bootstrap and legacy trust roots separate from the
 # active hardened predecessor. The bundle advertises exactly these four refs;
@@ -31,8 +31,8 @@ TRUSTED_BUNDLE_SHA256 = "d61bf4316acbeca06863f527ffcf1cc6bce04d2ffa0261d8548c3a1
 PROTECTED_OBJECTS = (
     ("bootstrap-authority", "f92f339cf26c1da760e99af6508dfabfb6bfb383"),
     ("bootstrap-source", "abb6754bddd1cf18927b0172ed9fa3456235b035"),
-    ("hardened-authority", "fc33b1f461321f319b8c2566d9f0faf6c535b77b"),
-    ("hardened-source", "a707f5af9612118d6d41450c5090e5c11c3e5c10"),
+    ("hardened-authority", "8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9"),
+    ("hardened-source", "5919c41473cfd6eda9647647c30ff15ab4aa5134"),
 )
 EXPECTED_BUNDLE_REFS = {
     f"refs/fixture-authority/{name}": commit for name, commit in PROTECTED_OBJECTS

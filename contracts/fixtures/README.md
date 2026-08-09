@@ -44,12 +44,16 @@ the legacy path readable and places the new multi-artifact authority at
 
 The bootstrap v2 verifier record remains readable historical evidence. The
 active standalone verifier instead loads
+`scripts/fixture_registry_authority.v2.hardened.pin.json`, strictly validates
+its schema, exact four protected refs, bundle digest/size, loose-closure rows,
+and verifier limits, and then reads
 `scripts/fixture_registry_authority.v2.hardened.json` from its exact immutable
 Git introduction object. It can read the legacy v1 and bootstrap v2 shapes for
 migration checks, but it never treats either historical path as an active
-fallback. The hardened trust root accepts only source commit
-`a707f5af9612118d6d41450c5090e5c11c3e5c10`, requires direct parentage from
-introduction commit `fc33b1f461321f319b8c2566d9f0faf6c535b77b`, and rejects an
+fallback and it never discovers an authority from `HEAD`. The refreshed trust
+root accepts only source commit
+`5919c41473cfd6eda9647647c30ff15ab4aa5134`, requires direct parentage from
+introduction commit `8bf435b69c67b49b2a7e9ba503fa237c63a0fbd9`, and rejects an
 arbitrary self-consistent ancestor. The trust root remains independent of the
 scanner-preparation change; a later preparation must rebase onto the merged
 external predecessor before regenerating the index, baseline, and next
@@ -64,31 +68,36 @@ closure of loose objects. Before any path-based Git command, the verifier opens
 flags, allowing only the explicit host aliases `/tmp`, `/var`, `/var/folders`,
 and `/var/tmp`; it then opens the caller root and `.git` directory from those
 held descriptors. It copies the complete Git metadata tree into a private
-mode-700 temporary snapshot. The copy is chunked and category-bounded: ordinary
-metadata and loose objects use `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every
-regular file under `objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) so
-packed hostile inputs fail within the existing budget. The aggregate cap is
-`MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a `SNAPSHOT_TIMEOUT_SECONDS` (30
-second) wall-clock deadline. The 1 MiB non-pack and 8 MiB pack caps remain
-unchanged. After the bounded snapshot, any nonempty pack metadata directory is
-rejected; the verifier accepts only the loose-object success fixture. It
-rejects symlinks/non-regular entries and checks source metadata before and after
-each copy. Git then runs only against that snapshot, so concurrent rename or
-symlink replacement of nested fanout/pack/ref paths, config, or metadata cannot
-redirect reads. The snapshot also descriptor-walks the full `objects` and
+mode-700 temporary snapshot. The copy is chunked and category-bounded: ordinary metadata and loose objects
+use `MAX_SNAPSHOT_FILE_BYTES` (1 MiB), while every regular file under
+`objects/pack` uses `MAX_SNAPSHOT_PACK_FILE_BYTES` (8 MiB) so packed hostile
+inputs fail within the existing budget. The exact-parent ancestry retains one
+reviewed historical bundle blob above the ordinary loose cap; its fixed OID is
+allowlisted by the pin and the final closure check, not by caller input. The
+aggregate cap is `MAX_SNAPSHOT_TOTAL_BYTES` (32 MiB), with a
+`SNAPSHOT_TIMEOUT_SECONDS` (30 second) wall-clock deadline. The 1 MiB ordinary
+and 8 MiB pack caps remain unchanged. After the bounded snapshot, pack and
+objects/info directories must be empty, all 5,225 objects must be the pinned
+loose closure, and the ref set must be exactly the four protected commit refs
+with detached `HEAD` at the hardened authority. Packed-refs, MIDX,
+commit-graph, alternates, promisor, graft, shallow, reflog, replacement, and
+other fallback metadata fail closed. It rejects symlinks/non-regular entries and checks source metadata before and
+after each copy. Git then runs only against that snapshot, so concurrent rename
+or symlink replacement of nested fanout/pack/ref paths, config, or metadata
+cannot redirect reads. The snapshot also descriptor-walks the full `objects` and
 `refs` trees with no-follow descriptors as a second structural check. It fails
-closed on local grafts, shallow metadata, alternates and HTTP alternates,
-replacement refs, partial-clone/promisor settings, and local include or
-URL-redirection config. Git is invoked only through validated `/usr/bin/git`
-with fixed helper `PATH` `/usr/bin:/bin`; inherited Git redirects and
-system/global config are removed. This is a trusted-host boundary for
-synthetic local evidence, not a production attestation. Before object reads,
-bounded `git fsck --full --strict` verifies compressed object contents against
-their OIDs, including loose objects. Checkout artifact reads are bounded
-nonblocking regular-file reads. Git stdout and stderr are streamed into
-separate bounded buffers; reaching the cap, a timeout, or selector setup
-failure kills the isolated child session and drains both pipes. All normal and
-optimized failures remain one redacted `live_claim:false` JSON line.
+closed on partial-clone/promisor settings and local include or URL-redirection
+config. Git is invoked only through validated `/usr/bin/git` with fixed helper
+`PATH` `/usr/bin:/bin`; inherited Git redirects and system/global config are
+removed. This is a trusted-host boundary for synthetic local evidence, not a
+production attestation. Before object reads, bounded `git fsck --full --strict`
+verifies compressed object contents against their OIDs, including loose
+objects. Checkout artifact and pin reads are bounded nonblocking regular-file
+reads; the bundle is checked against its pinned digest and size. Git stdout and
+stderr are streamed into separate bounded buffers; reaching the cap, a timeout,
+or selector setup failure kills the isolated child session and drains both
+pipes. All normal and optimized failures remain one redacted
+`live_claim:false` JSON line.
 
 ## C-19 aggregate registry
 
@@ -122,10 +131,11 @@ PTY local-adapter artifacts. The C-05 coverage and C-08 stream-dependent
 coverage remain pending until their dependency gates complete; C-07 is connected
 to the pending chat-stream coverage row. `live_claim` is always `false`; a
 passing validator proves only synthetic artifact integrity and registry
-consistency. The current blocked aggregate evidence is caused by three stale
-artifact records under `source-audit/compatibility-gate`; that current index
-problem is distinct from the three future scanner-preparation blockers listed
-in the authority migration document.
+consistency. The aggregate index and baseline were regenerated for the actual
+validator and test bytes after the stale evidence was identified. The current
+normal and optimized CLI result is a successful partial-evidence line, not a
+blocked stale-baseline failure; the standalone aggregate suite contains 48
+tests.
 
 The validator emits one bounded semantic JSON line. Failures do not echo
 arguments, paths, keys, values, secrets, or tracebacks. Normal and optimized
