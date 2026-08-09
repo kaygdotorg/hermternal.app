@@ -1719,7 +1719,18 @@ function expectedAssertionValues(
           closure.opened === (closure.socketId === replacementSocketId),
       )
     : false;
-  const staleClosureExact =
+  const reconnectStaleClosureExact =
+    reconnect &&
+    staleSocketId !== null &&
+    socketClosures.some(
+      (closure) =>
+        closure.socketId === staleSocketId &&
+        sameOwnerIdentity(closure.ownerIdentity, reconnectOwner) &&
+        closure.closeCalls === 1 &&
+        !closure.opened,
+    );
+  const connectingStaleClosureExact =
+    !reconnect &&
     staleSocketId !== null &&
     socketClosures.some(
       (closure) =>
@@ -1741,8 +1752,9 @@ function expectedAssertionValues(
   const ownerSocketClosureLedgerExact =
     socketClosures.length === expectedSocketCount &&
     (reconnect
-      ? replacementClosureExact && (stage !== "factory" ? staleSocketId === null : staleClosureExact)
-      : staleClosureExact && (!replacement || replacementClosureExact));
+      ? replacementClosureExact &&
+        (stage !== "factory" ? staleSocketId === null : reconnectStaleClosureExact)
+      : connectingStaleClosureExact && (!replacement || replacementClosureExact));
   const callbackBoundSocketCount = derivedCallbackBoundSocketCount;
   const callbackBoundSinkCount = callbackBoundSinkNames.length;
   const callbackApplicability =

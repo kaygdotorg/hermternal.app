@@ -703,6 +703,32 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
     );
   }, 30_000);
 
+  it("keeps reconnect closure rows on the separate reconnect owner tuple", () => {
+    const reconnectOwner = {
+      sessionId: "benchmark-session",
+      attach: "benchmark-attach",
+      processIdentity: "benchmark-process",
+    };
+    const exact = cloneArtifact(reconnectArtifactPath);
+    for (const result of exact.results) {
+      const run = result.runs[0];
+      expect(run.socketClosures[0].ownerIdentity).toEqual(reconnectOwner);
+    }
+    withTempArtifact(exact, (path) => {
+      expect(runCli(path).ok).toBe(true);
+      expect(runCli(path, true).ok).toBe(true);
+    });
+
+    const connectingOwner = {
+      sessionId: "benchmark-session-a",
+      attach: "benchmark-attach-a",
+      processIdentity: "benchmark-process-a",
+    };
+    const forged = cloneArtifact(reconnectArtifactPath);
+    forged.results[2].runs[0].socketClosures[0].ownerIdentity = connectingOwner;
+    expectCliFailure(forged, /exact per-socket cleanup ledger|ownership identities/iu);
+  }, 30_000);
+
   it("rejects edits to retained callback, Blob, and replacement-state ledgers", () => {
     const sinkNames = cloneArtifact(connectingArtifactPath);
     sinkNames.results[3].runs[0].callbackBoundSinkNames.reverse();
@@ -748,7 +774,10 @@ describe("PTY benchmark evidence validator", { timeout: 30_000 }, () => {
           artifact.results[0].runs[0].stalePublications[sink][counter] = 1;
           expectCliFailure(
             artifact,
-            new RegExp(`stalePublications\\.${sink}|stale publication|event categories`, "iu"),
+            new RegExp(
+              `stalePublications\\.${sink}|stale publication|event categories|postCloseBytesRejected.*derived`,
+              "iu",
+            ),
           );
         }
       }

@@ -234,7 +234,10 @@ processIdentity: "benchmark-process-a" }`. The validator uses that tuple for
 and connecting cleanup proofs, including the replacement stage. The unsuffixed
 `benchmark-session` / `benchmark-attach` / `benchmark-process` tuple belongs only
 to the separate reconnect schema; it must not satisfy connecting evidence.
-The v2 artifact retains raw samples, expected ticket/factory counts,
+Reconnect rows retain that unsuffixed tuple in every stale and replacement
+closure ledger; the validator keeps those comparisons schema-specific rather
+than sharing the connecting stale-closure check. The v2 artifact retains raw
+samples, expected ticket/factory counts,
 duplicate-owner checks, the ordered per-socket cleanup ledger, and the
 conditional callback proof.
 
