@@ -65,6 +65,7 @@ STATIC_BUILD_MAX_DEADLINE = STATIC_BUILD_MAX_DEADLINE_SECONDS
 GIT_COMMAND_TIMEOUT_SECONDS = 5
 GIT_OUTPUT_MAX_BYTES = 4096
 GIT_CONFIG_MAX_BYTES = 64 * 1024
+GIT_PACK_ENTRY_MAX = 4096
 TRUSTED_GIT_EXECUTABLE = Path("/usr/bin/git")
 TRUSTED_HELPER_PATH = "/usr/bin:/bin"
 GIT_REDIRECT_ENV_VARS = (
@@ -875,7 +876,11 @@ def _decode_bounded_json(raw: bytes, label: str) -> object:
         raise ValueError(f"{label} is not valid JSON") from exc
 
 
-def _metadata_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+def _metadata_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    """Bind filesystem identity, including mutation timestamps."""
+
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -883,6 +888,8 @@ def _metadata_identity(metadata: os.stat_result) -> tuple[int, int, int, int, in
         stat.S_IMODE(metadata.st_mode),
         metadata.st_size,
         metadata.st_nlink,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
     )
 
 
@@ -1017,25 +1024,69 @@ def _read_bounded_fd(
     *,
     deadline: float | None = None,
 ) -> bytes:
-    """Read at most limit+1 bytes from a stable descriptor."""
+    """Read at most limit+1 bytes from a stable descriptor.
+
+    A deadline check follows every ``os.read`` call, including the EOF read, so
+    a slow kernel/filesystem operation cannot return accepted data after the
+    caller's end-to-end budget has expired.
+    """
 
     if type(limit) is not int or limit < 0:
         raise ValueError(f"{label} has an invalid bounded input size")
     chunks = bytearray()
     while len(chunks) <= limit:
-        if deadline is not None and time.monotonic() > deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             raise ValueError(f"{label} read deadline exceeded")
         remaining = limit + 1 - len(chunks)
         try:
             chunk = os.read(descriptor, min(64 * 1024, remaining))
         except (OSError, RuntimeError, TypeError) as exc:
             raise ValueError(f"{label} could not be read") from exc
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ValueError(f"{label} read deadline exceeded")
         if not chunk:
             break
         chunks.extend(chunk)
         if len(chunks) > limit:
             raise ValueError(f"{label} exceeds the bounded input size")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise ValueError(f"{label} read deadline exceeded")
     return bytes(chunks)
+
+
+def _verify_fd_content_identity(
+    descriptor: int,
+    expected: bytes,
+    label: str,
+    *,
+    deadline: float,
+) -> None:
+    """Compare a second bounded descriptor view with the bytes being hashed.
+
+    Timestamps catch ordinary in-place replacement races. The second
+    descriptor-relative pass also binds the content itself, so a filesystem
+    that preserves or restores timestamps cannot silently change same-sized
+    bytes between the first read and the acceptance checks.
+    """
+
+    pread = getattr(os, "pread", None)
+    if not callable(pread):
+        raise ValueError(f"{label} content identity cannot be verified")
+    offset = 0
+    while offset < len(expected):
+        if time.monotonic() >= deadline:
+            raise ValueError(f"{label} read deadline exceeded")
+        try:
+            chunk = pread(descriptor, min(64 * 1024, len(expected) - offset), offset)
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ValueError(f"{label} content identity could not be read") from exc
+        if time.monotonic() >= deadline:
+            raise ValueError(f"{label} read deadline exceeded")
+        if not chunk or chunk != expected[offset : offset + len(chunk)]:
+            raise ValueError(f"{label} content changed during read")
+        offset += len(chunk)
+    if time.monotonic() >= deadline:
+        raise ValueError(f"{label} read deadline exceeded")
 
 
 def _read_verified_file_path(path: Path, limit: int, label: str) -> bytes:
@@ -1324,6 +1375,80 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(roots))
 
 
+def _git_config_has_lazy_metadata(text: str) -> bool:
+    """Parse Git config keys without trusting regex escape interpretation.
+
+    Git writes sectioned config files, while ``git config --list`` exposes
+    dotted keys. Accept both representations and normalize key spelling before
+    checking the forbidden partial-clone and promisor selectors.
+    """
+
+    section = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("["):
+            if not line.endswith("]"):
+                raise ValueError("Git config is malformed")
+            section = line[1:-1].strip().lower()
+            continue
+        key, separator, _value = line.partition("=")
+        if not separator:
+            continue
+        key = key.strip().lower()
+        if key in {"extensions.partialclone", "partialclone", "promisor"}:
+            return True
+        if key.startswith("remote.") and key.endswith(".promisor"):
+            return True
+        if key == "partialclone" and section == "extensions":
+            return True
+        if key == "promisor" and section.startswith("remote "):
+            return True
+    return False
+
+
+def _reject_packed_replacement_refs(metadata_root: Path) -> None:
+    """Reject replacement refs retained in bounded ``packed-refs`` output."""
+
+    packed_refs = metadata_root / "packed-refs"
+    if not packed_refs.exists() and not packed_refs.is_symlink():
+        return
+    raw = _read_verified_file_path(packed_refs, GIT_CONFIG_MAX_BYTES, "Git packed-refs")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Git packed-refs is malformed") from exc
+    for raw_line in text.splitlines():
+        fields = raw_line.strip().split()
+        if len(fields) >= 2 and fields[1].startswith("refs/replace/"):
+            raise ValueError("Git metadata uses replacement refs")
+
+
+def _reject_promisor_pack_sidecars(metadata_root: Path) -> None:
+    """Reject bounded ``objects/pack/*.promisor`` sidecars independently."""
+
+    pack_directory = metadata_root / "objects" / "pack"
+    if not pack_directory.exists() and not pack_directory.is_symlink():
+        return
+    try:
+        metadata = os.lstat(pack_directory)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("Git pack metadata directory is unsafe")
+        with os.scandir(pack_directory) as entries:
+            count = 0
+            for entry in entries:
+                count += 1
+                if count > GIT_PACK_ENTRY_MAX:
+                    raise ValueError("Git pack metadata exceeds the bounded entry count")
+                if isinstance(entry.name, str) and entry.name.endswith(".promisor"):
+                    raise ValueError("Git metadata uses a promisor pack sidecar")
+    except ValueError:
+        raise
+    except (OSError, RuntimeError, TypeError) as exc:
+        raise ValueError("Git pack metadata could not be inspected") from exc
+
+
 def _validate_git_metadata(root: Path) -> None:
     for metadata_root in _git_metadata_roots(root):
         for relative in GIT_FORBIDDEN_METADATA:
@@ -1333,6 +1458,8 @@ def _validate_git_metadata(root: Path) -> None:
         replace_refs = metadata_root / "refs" / "replace"
         if replace_refs.exists() or replace_refs.is_symlink():
             raise ValueError("Git metadata uses replacement refs")
+        _reject_packed_replacement_refs(metadata_root)
+        _reject_promisor_pack_sidecars(metadata_root)
         config = metadata_root / "config"
         if config.exists() or config.is_symlink():
             raw = _read_verified_file_path(config, GIT_CONFIG_MAX_BYTES, "Git config")
@@ -1340,10 +1467,7 @@ def _validate_git_metadata(root: Path) -> None:
                 text = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise ValueError("Git config is malformed") from exc
-            if re.search(
-                r"(?im)^\\s*(?:extensions\\.partialclone|remote\\.[^\\s=]+\\.promisor|promisor|partialclone)\\s*=",
-                text,
-            ):
+            if _git_config_has_lazy_metadata(text):
                 raise ValueError("Git repository uses lazy or promisor metadata")
 
 
@@ -1999,7 +2123,7 @@ def _build_static_digest(site_root: Path) -> str:
     hasher = hashlib.sha256()
 
     def check_deadline() -> None:
-        if time.monotonic() > deadline:
+        if time.monotonic() >= deadline:
             raise ValueError("static build digest deadline exceeded")
 
     try:
@@ -2017,6 +2141,9 @@ def _build_static_digest(site_root: Path) -> str:
                 if isinstance(exc, ValueError):
                     raise
                 raise ValueError("static build directory could not be scanned") from exc
+            # Scandir can block even when it yields no entries. The deadline
+            # therefore applies after the iterator closes, not only before it.
+            check_deadline()
 
             entries.sort(key=lambda item: item.name)
             for entry in reversed(entries):
@@ -2037,6 +2164,7 @@ def _build_static_digest(site_root: Path) -> str:
                     )
                 except (OSError, RuntimeError, TypeError, ValueError) as exc:
                     raise ValueError("static build entry could not be inspected") from exc
+                check_deadline()
                 if stat.S_ISLNK(displayed.st_mode):
                     raise ValueError("static build must not contain symlinks")
                 if not (
@@ -2055,6 +2183,7 @@ def _build_static_digest(site_root: Path) -> str:
                         label="static build directory",
                     )
                     child_metadata = os.fstat(child_fd)
+                    check_deadline()
                     if (child_metadata.st_dev, child_metadata.st_ino) != (
                         relative_metadata.st_dev,
                         relative_metadata.st_ino,
@@ -2076,6 +2205,7 @@ def _build_static_digest(site_root: Path) -> str:
                     label="static build file",
                 )
                 try:
+                    check_deadline()
                     if _metadata_identity(metadata) != _metadata_identity(relative_metadata):
                         raise ValueError("static build file changed during open")
                     content = _read_bounded_fd(
@@ -2084,7 +2214,16 @@ def _build_static_digest(site_root: Path) -> str:
                         "static build file",
                         deadline=deadline,
                     )
+                    check_deadline()
+                    _verify_fd_content_identity(
+                        descriptor,
+                        content,
+                        "static build file",
+                        deadline=deadline,
+                    )
+                    check_deadline()
                     after_read = os.fstat(descriptor)
+                    check_deadline()
                     if _metadata_identity(metadata) != _metadata_identity(after_read):
                         raise ValueError("static build file changed during read")
                     after_entry = os.stat(
@@ -2092,6 +2231,7 @@ def _build_static_digest(site_root: Path) -> str:
                         dir_fd=directory_fd,
                         follow_symlinks=False,
                     )
+                    check_deadline()
                     _verify_regular_metadata(
                         after_entry,
                         limit=per_file_limit,
@@ -2099,8 +2239,10 @@ def _build_static_digest(site_root: Path) -> str:
                     )
                     if _metadata_identity(metadata) != _metadata_identity(after_entry):
                         raise ValueError("static build file changed after read")
+                    check_deadline()
                 finally:
                     os.close(descriptor)
+                check_deadline()
                 if total_bytes + len(content) > total_limit:
                     raise ValueError("static build exceeds aggregate byte budget")
                 total_bytes += len(content)
@@ -2110,6 +2252,8 @@ def _build_static_digest(site_root: Path) -> str:
                 hasher.update(str(len(content)).encode("ascii"))
                 hasher.update(b"\0")
                 hasher.update(content)
+                check_deadline()
+        check_deadline()
         return hasher.hexdigest()
     finally:
         for descriptor in reversed(open_directories):
