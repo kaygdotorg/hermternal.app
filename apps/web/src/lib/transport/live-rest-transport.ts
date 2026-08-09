@@ -15,6 +15,51 @@ import {
   type SessionMessages
 } from './live-rest-types';
 
+// Capture the reflection and clone primordials before any caller-controlled
+// prototype or global mutation can reach the session projection boundary. The
+// helper below deliberately uses these references rather than ambient methods;
+// a polluted Object.prototype must not turn inherited descriptor fields into
+// data, and replacing a global helper must not make a wrapper look plain.
+const primordialArrayIsArray = Array.isArray;
+const primordialObjectPrototype = Object.prototype;
+const primordialObjectGetPrototypeOf = Object.getPrototypeOf;
+const primordialObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const primordialObjectFreeze = Object.freeze;
+const primordialReflectApply = Reflect.apply;
+const primordialReflectOwnKeys = Reflect.ownKeys;
+const primordialMap = Map;
+const primordialMapGet = Map.prototype.get;
+const primordialMapHas = Map.prototype.has;
+const primordialMapSet = Map.prototype.set;
+
+const primordialNumberValueOf = Number.prototype.valueOf;
+const primordialBooleanValueOf = Boolean.prototype.valueOf;
+const primordialStringValueOf = String.prototype.valueOf;
+const primordialBigIntValueOf = typeof BigInt === 'function' ? BigInt.prototype.valueOf : undefined;
+const primordialSymbolValueOf = Symbol.prototype.valueOf;
+const primordialDateGetTime = Date.prototype.getTime;
+const primordialRegExpSourceGetter = primordialObjectGetOwnPropertyDescriptor(RegExp.prototype, 'source')?.get;
+const primordialSetHasBrand = Set.prototype.has;
+const primordialWeakMapHasBrand = WeakMap.prototype.has;
+const primordialWeakSetHasBrand = WeakSet.prototype.has;
+const primordialPromiseThen = Promise.prototype.then;
+const primordialArrayBufferByteLengthGetter = primordialObjectGetOwnPropertyDescriptor(
+  ArrayBuffer.prototype,
+  'byteLength'
+)?.get;
+const primordialSharedArrayBufferByteLengthGetter =
+  typeof SharedArrayBuffer === 'function'
+    ? primordialObjectGetOwnPropertyDescriptor(SharedArrayBuffer.prototype, 'byteLength')?.get
+    : undefined;
+const primordialDataViewByteLengthGetter = primordialObjectGetOwnPropertyDescriptor(
+  DataView.prototype,
+  'byteLength'
+)?.get;
+const primordialTypedArrayByteLengthGetter = primordialObjectGetOwnPropertyDescriptor(
+  primordialObjectGetPrototypeOf(Uint8Array.prototype),
+  'byteLength'
+)?.get;
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BODY_BYTES = 128 * 1024;
@@ -94,7 +139,7 @@ export interface LiveRestTransport {
   ): Promise<SessionMessages>;
 }
 
-type CapturedLiveSession = Readonly<LiveSession>;
+export type CapturedLiveSession = Readonly<LiveSession>;
 
 interface CanonicalAliasRecord {
   readonly requestedSessionId: string;
@@ -154,7 +199,7 @@ export async function getLiveRestSessionForWorkspace(
   const session = authority
     ? await authority.fetchSession(requested, signal)
     : await rest.getSession(requested, signal);
-  const captured = captureLiveSessionDetail(session);
+  const captured = captureLiveSessionProjection(session);
   if (!captured) {
     throw new LiveRestError('invalid-response');
   }
@@ -472,52 +517,49 @@ const SESSION_DETAIL_REQUIRED_KEYS = [
  * Captures one immutable detail projection for structural adapters. Reflection
  * never reads through the source object: every accepted field comes from one
  * own enumerable data descriptor, and all own keys must be plain data
- * properties. Descriptor records inherit from Object.prototype, so the check
- * uses primordial own-descriptor reflection instead of `in` or ambient
- * Object.hasOwn. Any own `get` or `set` descriptor is rejected before
- * structuredClone, and descriptor values are not read until that proof passes.
- * structuredClone is a fail-closed proxy check; its result is not used because
- * the descriptor values above are the single captured snapshot.
+ * properties. A source is first proven to be an ordinary object using captured
+ * primordials and built-in brand checks, before any structured clone is paid
+ * for. Descriptor records inherit from Object.prototype, so the check uses
+ * primordial own-descriptor reflection instead of `in` or ambient helpers.
+ * Any own `get` or `set` descriptor is rejected before structuredClone, and
+ * descriptor values are not read until that proof passes. Native
+ * structuredClone remains a fail-closed proxy and residual-exotic check; its
+ * result is not used as the normalized snapshot.
  */
-function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+export function captureLiveSessionProjection(value: unknown): CapturedLiveSession | undefined {
+  if (!isOrdinaryPlainDataObject(value)) return undefined;
 
-  const descriptors = new Map<string, PropertyDescriptor>();
+  const descriptors = new primordialMap<string, PropertyDescriptor>();
   try {
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const prototype = primordialObjectGetPrototypeOf(value);
+    if (prototype !== primordialObjectPrototype && prototype !== null) return undefined;
 
-    for (const key of Reflect.ownKeys(value)) {
+    for (const key of primordialReflectOwnKeys(value)) {
       if (typeof key !== 'string') return undefined;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const descriptor = primordialObjectGetOwnPropertyDescriptor(value, key);
       if (!descriptor) return undefined;
 
       // PropertyDescriptor records inherit from Object.prototype. Prove the
       // record has an own data `value`, own enumerable flag, and no own getter
       // or setter before any later descriptor.value read. This keeps a polluted
       // Object.prototype.value from turning an accessor into trusted data.
-      const ownValue = Reflect.getOwnPropertyDescriptor(descriptor, 'value');
-      const ownEnumerable = Reflect.getOwnPropertyDescriptor(descriptor, 'enumerable');
-      const ownGet = Reflect.getOwnPropertyDescriptor(descriptor, 'get');
-      const ownSet = Reflect.getOwnPropertyDescriptor(descriptor, 'set');
+      const ownValue = primordialObjectGetOwnPropertyDescriptor(descriptor, 'value');
+      const ownEnumerable = primordialObjectGetOwnPropertyDescriptor(descriptor, 'enumerable');
+      const ownGet = primordialObjectGetOwnPropertyDescriptor(descriptor, 'get');
+      const ownSet = primordialObjectGetOwnPropertyDescriptor(descriptor, 'set');
       if (!ownValue || ownGet || ownSet || ownEnumerable?.value !== true) {
         return undefined;
       }
-      descriptors.set(key, descriptor);
+      primordialReflectApply(primordialMapSet, descriptors, [key, descriptor]);
     }
-
-    const clone = globalThis.structuredClone;
-    if (typeof clone !== 'function') return undefined;
-    // Native structured cloning rejects Proxy objects without invoking their
-    // get traps. Accessors were rejected above before this check can run.
-    clone(value);
   } catch {
     return undefined;
   }
 
-  const read = (key: string): unknown => descriptors.get(key)?.value;
+  const read = (key: string): unknown =>
+    (primordialReflectApply(primordialMapGet, descriptors, [key]) as PropertyDescriptor | undefined)?.value;
   for (const key of SESSION_DETAIL_REQUIRED_KEYS) {
-    if (!descriptors.has(key)) return undefined;
+    if (!primordialReflectApply(primordialMapHas, descriptors, [key])) return undefined;
   }
 
   const id = read('id');
@@ -572,7 +614,24 @@ function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefin
   if (profile !== undefined && !isBoundedText(profile, MAX_SHORT_TEXT_LENGTH)) return undefined;
   if (isDefaultProfile !== undefined && typeof isDefaultProfile !== 'boolean') return undefined;
 
-  return Object.freeze({
+  // Delay the clone until the bounded projection has passed all cheap checks.
+  // This keeps malformed details, wrappers, and missing-key objects from
+  // paying clone traversal cost. The result proves transparent Proxy and
+  // residual-exotic rejection; the values below remain the single snapshot.
+  try {
+    const structuredClone = globalThis.structuredClone;
+    if (typeof structuredClone !== 'function') return undefined;
+    const clone = primordialReflectApply(structuredClone, undefined, [value]);
+    if (clone === null || typeof clone !== 'object' || primordialArrayIsArray(clone)) {
+      return undefined;
+    }
+    const clonePrototype = primordialObjectGetPrototypeOf(clone);
+    if (clonePrototype !== primordialObjectPrototype && clonePrototype !== null) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  return primordialObjectFreeze({
     id,
     source,
     model,
@@ -592,6 +651,51 @@ function captureLiveSessionDetail(value: unknown): CapturedLiveSession | undefin
     ...(profile !== undefined && { profile }),
     ...(isDefaultProfile !== undefined && { isDefaultProfile })
   });
+}
+
+function isOrdinaryPlainDataObject(value: unknown): value is object {
+  if (typeof value !== 'object' || value === null) return false;
+
+  try {
+    if (primordialArrayIsArray(value)) return false;
+    const prototype = primordialObjectGetPrototypeOf(value);
+    if (prototype !== primordialObjectPrototype && prototype !== null) return false;
+    return !hasKnownBuiltinBrand(value);
+  } catch {
+    return false;
+  }
+}
+
+function hasKnownBuiltinBrand(value: object): boolean {
+  const brandProbe = {};
+  return (
+    invokesPrimordial(primordialNumberValueOf, value) ||
+    invokesPrimordial(primordialBooleanValueOf, value) ||
+    invokesPrimordial(primordialStringValueOf, value) ||
+    invokesPrimordial(primordialBigIntValueOf, value) ||
+    invokesPrimordial(primordialSymbolValueOf, value) ||
+    invokesPrimordial(primordialDateGetTime, value) ||
+    invokesPrimordial(primordialRegExpSourceGetter, value) ||
+    invokesPrimordial(primordialMapHas, value, [brandProbe]) ||
+    invokesPrimordial(primordialSetHasBrand, value, [brandProbe]) ||
+    invokesPrimordial(primordialWeakMapHasBrand, value, [brandProbe]) ||
+    invokesPrimordial(primordialWeakSetHasBrand, value, [brandProbe]) ||
+    invokesPrimordial(primordialPromiseThen, value) ||
+    invokesPrimordial(primordialArrayBufferByteLengthGetter, value) ||
+    invokesPrimordial(primordialSharedArrayBufferByteLengthGetter, value) ||
+    invokesPrimordial(primordialDataViewByteLengthGetter, value) ||
+    invokesPrimordial(primordialTypedArrayByteLengthGetter, value)
+  );
+}
+
+function invokesPrimordial(method: unknown, value: object, args: unknown[] = []): boolean {
+  if (typeof method !== 'function') return false;
+  try {
+    primordialReflectApply(method, value, args);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeApiBaseUrl(value = API_ROOT): string {

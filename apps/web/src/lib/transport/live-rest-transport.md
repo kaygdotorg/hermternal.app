@@ -123,15 +123,23 @@ budgets:
 - A returned session ID is validated independently. It may differ from the
   requested path because Hermes resolves aliases and continuation sessions to a
   canonical ID before returning session details or messages. Detail responses
-  are accepted only when a plain object exposes own enumerable data
-  descriptors. Each reflected descriptor record is separately proven to have an
-  own `value` and enumerable data flag with no own `get` or `set`; inherited
-  descriptor keys such as a polluted `Object.prototype.value` are never trusted.
-  Accessors, inherited fields, symbols, non-enumerable descriptor variants,
-  revoked objects, and Proxy wrappers fail closed before cloning or value reads.
-  The transport then captures one immutable normalized projection and the
-  workspace never reads the adapter's raw object again. The exact transport
-  instance created here is
+  are accepted only when the captured source is an actual ordinary plain data
+  object whose prototype is the captured primordial `Object.prototype` or
+  `null`. Captured built-in brand checks reject Number, Boolean, Date, Map, Set,
+  boxed strings, custom-prototype wrappers, and other exotics before
+  `structuredClone`; this remains true when `Object.prototype` is polluted or
+  a wrapper has been reset to the ordinary prototype. Each reflected descriptor
+  record is separately proven to have an own `value` and enumerable data flag
+  with no own `get` or `set`; inherited descriptor keys such as a polluted
+  `Object.prototype.value` are never trusted. Accessors, inherited fields,
+  symbols, non-enumerable descriptor variants, revoked objects, and Proxy
+  wrappers fail closed before cloning or value reads. The transport then
+  captures one immutable normalized projection and the workspace never reads
+  the adapter's raw object again. `captureLiveSessionProjection(value)` is
+  exported as the reusable `Readonly<LiveSession> | undefined` projection
+  seam for a later `initialize()` list-normalization change; this transport
+  does not normalize session lists yet. The exact transport instance created
+  here is
   registered in a module-private `WeakMap`; when that instance resolves an
   alias, the exact workspace instance, requested alias, canonical ID, and exact
   frozen projection are recorded in workspace-scoped private state. The helper
