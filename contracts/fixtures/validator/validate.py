@@ -473,16 +473,26 @@ SYNTHETIC_FULL_VALUE_ALLOWANCES = {
 # turn structural test vocabulary into a live-host bypass.
 # Two historical domain fixtures intentionally preserve one NUL-bearing parser
 # input. They cannot be rewritten in this source-only commit because their bytes
-# are part of the indexed negative-test corpus. Keep the exception structural:
-# canonical artifact path, exact JSON pointer, and exact expected value. The
-# generic redaction scanner remains strict everywhere else.
+# are part of the indexed negative-test corpus. Keep each exception bound to the
+# canonical artifact path, exact JSON pointer/value, and reviewed ancestry:
+# root dict -> ``cases`` list -> case dict -> ``request`` dict -> field. The
+# ancestry check prevents a numeric object key from reproducing a list pointer.
 _NUL_CHARACTER = chr(0)
-NUL_FIELD_ALLOWANCES: dict[str, dict[str, str]] = {
+NUL_FIELD_ALLOWANCES: dict[
+    str,
+    dict[str, tuple[str, tuple[tuple[str, str | int], ...]]],
+] = {
     "attachment-policy/cases.json": {
-        "/cases/10/request/filename": "../unsafe name" + _NUL_CHARACTER + ".png",
+        "/cases/10/request/filename": (
+            "../unsafe name" + _NUL_CHARACTER + ".png",
+            (("dict", "cases"), ("list", 10), ("dict", "request"), ("dict", "filename")),
+        ),
     },
     "session-search/cases.json": {
-        "/cases/28/request/query": "atlas" + _NUL_CHARACTER,
+        "/cases/28/request/query": (
+            "atlas" + _NUL_CHARACTER,
+            (("dict", "cases"), ("list", 28), ("dict", "request"), ("dict", "query")),
+        ),
     },
 }
 # The aggregate scanner must preserve reviewed parser, signature, delimiter, and
@@ -3463,8 +3473,9 @@ def _validate_redaction_tree(
     allowed_assignment_values: frozenset[str] = frozenset(),
     allowed_structural_urls: frozenset[str] = frozenset(),
     allowed_empty_assignment_values: frozenset[str] = frozenset(),
-    allowed_nul_fields: dict[str, str] | None = None,
+    allowed_nul_fields: dict[str, tuple[str, tuple[tuple[str, str | int], ...]]] | None = None,
     json_pointer: str = "",
+    json_ancestry: tuple[tuple[str, str | int], ...] = (),
 ) -> None:
     if allowed_nul_fields is None:
         allowed_nul_fields = {}
@@ -3493,6 +3504,7 @@ def _validate_redaction_tree(
                     allowed_empty_assignment_values=allowed_empty_assignment_values,
                     allowed_nul_fields=allowed_nul_fields,
                     json_pointer=child_pointer,
+                    json_ancestry=json_ancestry + (("dict", key),),
                 )
         return
     if type(value) is list:
@@ -3504,16 +3516,18 @@ def _validate_redaction_tree(
                 allowed_empty_assignment_values=allowed_empty_assignment_values,
                 allowed_nul_fields=allowed_nul_fields,
                 json_pointer=_json_pointer_child(json_pointer, index),
+                json_ancestry=json_ancestry + (("list", index),),
             )
         return
     if type(value) is str:
-        allowed_nul_value = allowed_nul_fields.get(json_pointer)
-        if allowed_nul_value is not None:
-            # The pointer and value must both match the reviewed parser input;
-            # a changed prefix, suffix, duplicate NUL, or moved copy is not an
-            # allowance. Scan a NUL-free projection so surrounding credential,
-            # assignment, and URL policy still applies to the retained bytes.
+        allowance = allowed_nul_fields.get(json_pointer)
+        if allowance is not None:
+            allowed_nul_value, allowed_ancestry = allowance
+            # Pointer text alone is not authority: a numeric object key can
+            # reproduce a list index. Require the exact reviewed container
+            # ancestry as well as the canonical value before projecting NUL.
             require(value == allowed_nul_value, "NUL field value is not reviewed")
+            require(json_ancestry == allowed_ancestry, "NUL field ancestry is not reviewed")
             _validate_text_value(
                 value.replace("\x00", ""),
                 allowed_assignment_values=allowed_assignment_values,
