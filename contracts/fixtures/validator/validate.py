@@ -24,6 +24,7 @@ import re
 import stat
 import statistics
 import string
+import struct
 import tokenize
 import unicodedata
 from dataclasses import dataclass
@@ -490,6 +491,9 @@ NUL_FIELD_ALLOWANCES: dict[str, dict[str, str]] = {
 # controls to the validator source that it governs. The structural role includes
 # the enclosing scope, callee or binding path, and an occurrence ordinal for
 # repeated identical helper calls; line numbers are intentionally not authority.
+# Dynamic rows use ``unknown`` only for reviewed opaque operands whose exact
+# bytes cannot be recovered statically; a resolver/API name is never a blanket
+# allowance, and every decoded construction receives an exact kind and hex row.
 _PYTHON_CONTROL_LITERAL_ROWS: tuple[tuple[str, str, str, str, int], ...] = (
     ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_filename_control_byte_is_escaped_and_omitted_or_null_defaults|call:self.assertNotIn|arg:0|path:direct', 0),
     ('attachment-policy/test_attachment_policy.py', 'bytes', '00', 'fn:AttachmentPolicyTests.test_gif_and_jpeg_metadata_terminators_are_opaque|assign:gif_comment|path:value/left/left/left/left/right/left', 0),
@@ -5164,8 +5168,11 @@ def _control_free_projection(value: str | bytes) -> str | None:
 
 def _control_projection_from_hex(kind: str, value_hex: str) -> str | None:
     try:
-        value = binascii.unhexlify(value_hex)
-    except (binascii.Error, ValueError) as exc:
+        value = struct.pack(
+            f"{len(value_hex) // 2}B",
+            *(int(value_hex[index:index + 2], 16) for index in range(0, len(value_hex), 2)),
+        )
+    except (struct.error, ValueError) as exc:
         raise ValidationError() from exc
     if kind not in {"str", "bytes"}:
         return None
@@ -5192,25 +5199,333 @@ def _control_static_bytes_hex(node: ast.AST) -> str | None:
     return None
 
 
+_CONTROL_MODULE_PREFIX = "module:"
+_CONTROL_INVALID = object()
+_CONTROL_DIRECT_APIS = frozenset({"chr", "bytes", "bytearray"})
+_CONTROL_MODULES = frozenset({"builtins", "binascii", "codecs"})
+_CONTROL_CANONICAL_APIS = frozenset({
+    "chr",
+    "bytes",
+    "bytearray",
+    "bytes.fromhex",
+    "bytearray.fromhex",
+    "binascii.unhexlify",
+    "binascii.a2b_hex",
+    "codecs.decode",
+})
+_CONTROL_SOURCE_APIS = {
+    "chr": "chr",
+    "bytes": "bytes",
+    "bytearray": "bytearray",
+    "builtins.chr": "chr",
+    "builtins.bytes": "bytes",
+    "builtins.bytearray": "bytearray",
+    "bytes.fromhex": "bytes.fromhex",
+    "bytearray.fromhex": "bytearray.fromhex",
+    "builtins.bytes.fromhex": "bytes.fromhex",
+    "builtins.bytearray.fromhex": "bytearray.fromhex",
+    "binascii.unhexlify": "binascii.unhexlify",
+    "binascii.a2b_hex": "binascii.a2b_hex",
+    "codecs.decode": "codecs.decode",
+}
+
+
+def _control_scope_chain(scope: str) -> tuple[str, ...]:
+    if scope == "module":
+        return ("module",)
+    parts = scope.split(".")
+    return tuple(
+        [".".join(parts[:index]) for index in range(len(parts), 0, -1)]
+        + ["module"]
+    )
+
+
+def _control_lookup_binding(
+    bindings: dict[tuple[str, str], object],
+    scope: str,
+    name: str,
+) -> tuple[bool, object | None]:
+    for candidate in _control_scope_chain(scope):
+        key = (candidate, name)
+        if key in bindings:
+            value = bindings[key]
+            return True, value
+    if name in _CONTROL_DIRECT_APIS:
+        return True, name
+    if name in _CONTROL_MODULES:
+        return True, f"{_CONTROL_MODULE_PREFIX}{name}"
+    return False, None
+
+
+def _control_resolve_expression(
+    node: ast.AST,
+    scope: str,
+    bindings: dict[tuple[str, str], object],
+) -> object | None:
+    if isinstance(node, ast.Name):
+        _found, value = _control_lookup_binding(bindings, scope, node.id)
+        return value
+    if not isinstance(node, ast.Attribute):
+        return None
+    base = _control_resolve_expression(node.value, scope, bindings)
+    if base is _CONTROL_INVALID:
+        return _CONTROL_INVALID
+    if base == f"{_CONTROL_MODULE_PREFIX}builtins" and node.attr in _CONTROL_DIRECT_APIS:
+        return node.attr
+    if base == f"{_CONTROL_MODULE_PREFIX}binascii" and node.attr in {"unhexlify", "a2b_hex"}:
+        return f"binascii.{node.attr}"
+    if base == f"{_CONTROL_MODULE_PREFIX}codecs" and node.attr == "decode":
+        return "codecs.decode"
+    if base in {"bytes", "bytearray"} and node.attr == "fromhex":
+        return f"{base}.fromhex"
+    return None
+
+
+def _control_bind_name(
+    bindings: dict[tuple[str, str], object],
+    scope: str,
+    name: str,
+    value: object,
+    *,
+    force: bool = False,
+) -> None:
+    key = (scope, name)
+    if force:
+        bindings[key] = value
+    elif key in bindings:
+        bindings[key] = _CONTROL_INVALID
+    else:
+        bindings[key] = value
+
+
+def _control_target_names_for_binding(node: ast.AST) -> tuple[str, ...]:
+    if isinstance(node, ast.Name):
+        return (node.id,)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for child in node.elts:
+            names.extend(_control_target_names_for_binding(child))
+        return tuple(names)
+    return ()
+
+
+def _control_alias_bindings(
+    tree: ast.AST,
+    parents: dict[int, tuple[ast.AST, str, int | None]],
+) -> dict[tuple[str, str], object]:
+    """Resolve only bounded import/simple-alias chains for control APIs.
+
+    This is deliberately not a general constant-propagation engine. A second
+    binding, shadowing parameter, dynamic assignment, or unknown imported API
+    invalidates a known alias; the caller then fails closed before generic AST
+    text handling can hide a constructed control value.
+    """
+    bindings: dict[tuple[str, str], object] = {}
+    nodes = sorted(ast.walk(tree), key=lambda item: (getattr(item, "lineno", -1), getattr(item, "col_offset", -1)))
+
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            parent_scope = _control_scope(parents, node)
+            if node.name in _CONTROL_DIRECT_APIS or node.name in _CONTROL_MODULES or (parent_scope, node.name) in bindings:
+                _control_bind_name(bindings, parent_scope, node.name, _CONTROL_INVALID)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                local_scope = node.name if parent_scope == "module" else f"{parent_scope}.{node.name}"
+                # Ordinary parameters such as ``data`` and ``self`` must not
+                # make unrelated method calls look like shadowed constructors;
+                # invalidate only names that could hide a known control alias.
+                outer_scopes = _control_scope_chain(parent_scope)
+                for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+                    if (
+                        argument.arg in _CONTROL_DIRECT_APIS
+                        or argument.arg in _CONTROL_MODULES
+                        or any((candidate, argument.arg) in bindings for candidate in outer_scopes)
+                    ):
+                        _control_bind_name(bindings, local_scope, argument.arg, _CONTROL_INVALID, force=True)
+                if node.args.vararg is not None and (
+                    node.args.vararg.arg in _CONTROL_DIRECT_APIS
+                    or node.args.vararg.arg in _CONTROL_MODULES
+                    or any((candidate, node.args.vararg.arg) in bindings for candidate in outer_scopes)
+                ):
+                    _control_bind_name(bindings, local_scope, node.args.vararg.arg, _CONTROL_INVALID, force=True)
+                if node.args.kwarg is not None and (
+                    node.args.kwarg.arg in _CONTROL_DIRECT_APIS
+                    or node.args.kwarg.arg in _CONTROL_MODULES
+                    or any((candidate, node.args.kwarg.arg) in bindings for candidate in outer_scopes)
+                ):
+                    _control_bind_name(bindings, local_scope, node.args.kwarg.arg, _CONTROL_INVALID, force=True)
+        elif isinstance(node, ast.Import):
+            scope = _control_scope(parents, node)
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                if alias.name in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, f"{_CONTROL_MODULE_PREFIX}{alias.name}")
+                elif bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, _CONTROL_INVALID)
+        elif isinstance(node, ast.ImportFrom):
+            scope = _control_scope(parents, node)
+            module = node.module or ""
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                canonical: object = _CONTROL_INVALID
+                if module == "builtins" and alias.name in _CONTROL_DIRECT_APIS:
+                    canonical = alias.name
+                elif module == "binascii" and alias.name in {"unhexlify", "a2b_hex"}:
+                    canonical = f"binascii.{alias.name}"
+                elif module == "codecs" and alias.name == "decode":
+                    canonical = "codecs.decode"
+                elif alias.name in _CONTROL_DIRECT_APIS or alias.name in _CONTROL_MODULES:
+                    canonical = _CONTROL_INVALID
+                if canonical is not _CONTROL_INVALID or bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                    _control_bind_name(bindings, scope, bound, canonical)
+        elif isinstance(node, ast.Assign):
+            scope = _control_scope(parents, node)
+            resolved = _control_resolve_expression(node.value, scope, bindings)
+            for target in node.targets:
+                for name in _control_target_names_for_binding(target):
+                    if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                        _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+                    elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                        _control_bind_name(bindings, scope, name, resolved)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            scope = _control_scope(parents, node)
+            target = node.target if isinstance(node, ast.AnnAssign) else node.target
+            resolved = _control_resolve_expression(node.value, scope, bindings) if node.value is not None else None
+            for name in _control_target_names_for_binding(target):
+                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                    _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+                elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                    _control_bind_name(bindings, scope, name, resolved)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+            scope = _control_scope(parents, node)
+            target = node.target
+            for name in _control_target_names_for_binding(target):
+                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                    _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
+    return bindings
+
+
+def _control_static_scalar(node: ast.AST) -> str | bytes | None:
+    if isinstance(node, ast.Constant) and type(node.value) in {str, bytes}:
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _control_static_scalar(node.left)
+        right = _control_static_scalar(node.right)
+        if type(left) is type(right) and left is not None and len(left) + len(right) <= MAX_ARTIFACT_BYTES:
+            return left + right
+    return None
+
+
+def _control_static_hex_payload(node: ast.AST) -> str | None:
+    value = _control_static_scalar(node)
+    if value is None:
+        return None
+    if type(value) is bytes:
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValidationError() from exc
+    payload = "".join(value.split())
+    if any(character not in "0123456789abcdefABCDEF" for character in payload) or len(payload) % 2:
+        raise ValidationError()
+    try:
+        return "".join(
+            f"{int(payload[index:index + 2], 16):02x}"
+            for index in range(0, len(payload), 2)
+        )
+    except ValueError as exc:
+        raise ValidationError() from exc
+
+
+def _control_has_static_controls(node: ast.Call, canonical: str) -> bool:
+    """Detect control evidence before rejecting an otherwise ordinary call shape.
+
+    Fixture code also uses ``bytes(text, encoding)`` and ``bytearray()`` for
+    ordinary serialization. Only reject a wrong-arity form when its static
+    operands prove that it is attempting to construct a control-bearing value;
+    fully valid control forms still fail closed below when their operands are
+    dynamic or malformed.
+    """
+    operands = [argument for argument in node.args]
+    operands.extend(keyword.value for keyword in node.keywords)
+    if canonical == "chr":
+        return any(
+            (code := _control_static_int(operand)) is not None
+            and (code < 32 or code == 127)
+            for operand in operands
+        )
+    if canonical in {"bytes", "bytearray"}:
+        for operand in operands:
+            value_hex = _control_static_bytes_hex(operand)
+            if value_hex is None:
+                continue
+            if any(
+                int(value_hex[index:index + 2], 16) < 32
+                or int(value_hex[index:index + 2], 16) == 127
+                for index in range(0, len(value_hex), 2)
+            ):
+                return True
+        return False
+    if canonical in {
+        "bytes.fromhex",
+        "bytearray.fromhex",
+        "binascii.unhexlify",
+        "binascii.a2b_hex",
+        "codecs.decode",
+    }:
+        for operand in operands[:1]:
+            value_hex = _control_static_hex_payload(operand)
+            if value_hex is None:
+                continue
+            if any(
+                int(value_hex[index:index + 2], 16) < 32
+                or int(value_hex[index:index + 2], 16) == 127
+                for index in range(0, len(value_hex), 2)
+            ):
+                return True
+    return False
+
+
 def _control_dynamic_constructor(
     node: ast.AST,
     parents: dict[int, tuple[ast.AST, str, int | None]],
+    bindings: dict[tuple[str, str], object],
 ) -> tuple[str, str, str, str] | None:
     if not isinstance(node, ast.Call):
         return None
     name = _control_dotted_name(node.func)
+    scope = _control_scope(parents, node)
+    resolved = _control_resolve_expression(node.func, scope, bindings)
+    if isinstance(node.func, ast.Call) and _control_dotted_name(node.func.func) == "getattr":
+        raise ValidationError()
+    canonical = resolved if isinstance(resolved, str) else _CONTROL_SOURCE_APIS.get(name)
+    if resolved is _CONTROL_INVALID:
+        raise ValidationError()
+    if canonical not in _CONTROL_CANONICAL_APIS:
+        return None
     role = _control_role(parents, node)
-    if name == "chr" and len(node.args) == 1 and not node.keywords:
+    if canonical == "chr":
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
         code = _control_static_int(node.args[0])
         if code is None:
-            return ("unknown", "", name, role)
-        if 0 <= code < 32 or code == 127:
-            return ("str", format(code, "02x"), name, _control_role(parents, node))
+            return ("unknown", "", canonical, role)
+        if not 0 <= code <= 0x10FFFF:
+            raise ValidationError()
+        if code < 32 or code == 127:
+            if code == 10:
+                return None
+            return ("str", format(code, "02x"), canonical, role)
         return None
-    if name in {"bytes", "bytearray"} and len(node.args) == 1 and not node.keywords:
+    if canonical in {"bytes", "bytearray"}:
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
         value_hex = _control_static_bytes_hex(node.args[0])
         if value_hex is None:
-            return ("unknown", "", name, role)
+            return ("unknown", "", canonical, role)
         controls = {
             int(value_hex[index:index + 2], 16)
             for index in range(0, len(value_hex), 2)
@@ -5218,10 +5533,47 @@ def _control_dynamic_constructor(
             or int(value_hex[index:index + 2], 16) == 127
         }
         if controls and controls != {10}:
-            return ("bytes", value_hex, name, _control_role(parents, node))
+            return ("bytes", value_hex, canonical, role)
         return None
-    if name in {"bytes.fromhex", "bytearray.fromhex"} and len(node.args) == 1 and not node.keywords:
-        return ("unknown", "", name, role)
+    if canonical in {"bytes.fromhex", "bytearray.fromhex", "binascii.unhexlify", "binascii.a2b_hex"}:
+        if len(node.args) != 1 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
+        value_hex = _control_static_hex_payload(node.args[0])
+        if value_hex is None:
+            return ("unknown", "", canonical, role)
+        controls = {
+            int(value_hex[index:index + 2], 16)
+            for index in range(0, len(value_hex), 2)
+            if int(value_hex[index:index + 2], 16) < 32
+            or int(value_hex[index:index + 2], 16) == 127
+        }
+        if controls and controls != {10}:
+            return ("bytes", value_hex, canonical, role)
+        return None
+    if canonical == "codecs.decode":
+        if len(node.args) != 2 or node.keywords:
+            if _control_has_static_controls(node, canonical):
+                raise ValidationError()
+            return None
+        encoding = node.args[1]
+        if not isinstance(encoding, ast.Constant) or type(encoding.value) is not str:
+            raise ValidationError()
+        if encoding.value.casefold() not in {"hex", "hex_codec"}:
+            raise ValidationError()
+        value_hex = _control_static_hex_payload(node.args[0])
+        if value_hex is None:
+            return ("unknown", "", canonical, role)
+        controls = {
+            int(value_hex[index:index + 2], 16)
+            for index in range(0, len(value_hex), 2)
+            if int(value_hex[index:index + 2], 16) < 32
+            or int(value_hex[index:index + 2], 16) == 127
+        }
+        if controls and controls != {10}:
+            return ("bytes", value_hex, canonical, role)
+        return None
     return None
 
 
@@ -5313,6 +5665,7 @@ def _validate_python_file(
         else frozenset()
     )
     bindings = _collect_static_bindings(tree)
+    control_bindings = _control_alias_bindings(tree, _control_parent_map(tree))
     policy_root = FIXTURES_ROOT if control_policy_root is None else control_policy_root
     policy_path = _control_policy_path(path, control_policy_path, fixtures_root=policy_root)
     parents = _control_parent_map(tree)
@@ -5335,7 +5688,7 @@ def _validate_python_file(
     dynamic_control_records: list[tuple[ast.Call, str, str]] = []
     dynamic_control_ids: set[int] = set()
     for node in ast.walk(tree):
-        construction = _control_dynamic_constructor(node, parents)
+        construction = _control_dynamic_constructor(node, parents, control_bindings)
         if construction is None:
             continue
         kind, value_hex, constructor, role = construction
