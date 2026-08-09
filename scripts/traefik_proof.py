@@ -16,6 +16,7 @@ exception, not the production private-network topology.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import http.server
 import ipaddress
@@ -32,7 +33,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 
@@ -481,6 +482,7 @@ PARSER_GIT_COMMAND_TIMEOUT_SECONDS = 5.0
 PARSER_HISTORY_MAX_BYTES = 64 << 20
 PARSER_GIT_OUTPUT_MAX_BYTES = 1 << 20
 PARSER_GIT_INPUT_MAX_BYTES = 8 << 20
+PARSER_GIT_METADATA_MAX_ENTRIES = 4096
 PARSER_GIT_EXECUTABLE = Path("/usr/bin/git")
 PARSER_GIT_HELPER_PATH = "/usr/bin:/bin"
 PARSER_OBJECT_HASHES = MappingProxyType(
@@ -804,8 +806,41 @@ def _lstat_exists(path: Path) -> bool:
     return True
 
 
-def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> None:
-    """Authenticate the local topology before any commit can become evidence."""
+class _ParserGitMetadataSnapshot(NamedTuple):
+    """Bounded topology state that must remain stable for one calculation."""
+
+    git_dir: str
+    common_dir: str
+    objects_dir: str
+    marker_bytes: bytes
+    commondir_bytes: bytes
+    linked_bytes: bytes
+    replacements: bytes
+    config: bytes
+    pack_entries: tuple[str, ...]
+
+
+def _resolve_git_metadata_reference(base: Path, value: str, label: str) -> Path:
+    """Resolve Git's relative metadata references against their containing file."""
+
+    if not value or "\x00" in value:
+        raise ValueError(f"parser provenance {label} is malformed")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        return candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"parser provenance {label} cannot be resolved") from exc
+
+
+def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> _ParserGitMetadataSnapshot:
+    """Authenticate and snapshot local topology before or after Git traversal.
+
+    The caller must compare an initial snapshot with a final snapshot. This
+    catches forbidden metadata created after the first preflight and also binds
+    safe directory/config identities across the full provenance calculation.
+    """
 
     raw = _git_output(
         project_root,
@@ -853,6 +888,9 @@ def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> No
         raise ValueError("parser provenance Git metadata points outside the repository")
 
     marker = project_root / ".git"
+    marker_bytes = b"<directory>"
+    commondir_bytes = b""
+    linked_bytes = b""
     try:
         marker_stat = os.lstat(marker)
     except OSError as exc:
@@ -870,22 +908,47 @@ def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> No
             raise ValueError("parser provenance Git worktree gitfile is malformed") from exc
         if len(line) != 1 or not line[0].startswith("gitdir:"):
             raise ValueError("parser provenance Git worktree gitfile is malformed")
-        declared_git_dir = Path(line[0][7:].strip()).resolve()
+        declared_git_dir = _resolve_git_metadata_reference(marker.parent, line[0][7:].strip(), "Git worktree gitfile")
         if declared_git_dir != git_dir or git_dir.parent != common_dir / "worktrees":
             raise ValueError("parser provenance Git worktree metadata is outside the repository")
         commondir_file = git_dir / "commondir"
         linked_file = git_dir / "gitdir"
         if not _lstat_exists(commondir_file) or not _lstat_exists(linked_file):
             raise ValueError("parser provenance Git worktree metadata is incomplete")
-        commondir = _read_bounded_regular_file(commondir_file, 4096, "Git commondir").decode("ascii").strip()
-        linked = Path(_read_bounded_regular_file(linked_file, 4096, "Git worktree link").decode("ascii").strip()).resolve()
-        if (git_dir / commondir).resolve() != common_dir or linked != marker.resolve():
+        commondir_bytes = _read_bounded_regular_file(commondir_file, 4096, "Git commondir")
+        linked_bytes = _read_bounded_regular_file(linked_file, 4096, "Git worktree link")
+        try:
+            commondir_text = commondir_bytes.decode("ascii").strip()
+            linked_text = linked_bytes.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("parser provenance Git worktree metadata is malformed") from exc
+        commondir = _resolve_git_metadata_reference(git_dir, commondir_text, "Git commondir")
+        linked = _resolve_git_metadata_reference(git_dir, linked_text, "Git worktree link")
+        if commondir != common_dir or linked != marker.resolve():
             raise ValueError("parser provenance Git worktree metadata is malformed")
     else:
         raise ValueError("parser provenance Git metadata has an invalid gitfile")
 
-    reported_metadata = tuple(Path(value) for value in (shallow_text, grafts_text, alternates_text, http_alternates_text, replace_text))
-    for path in {git_dir / "shallow", common_dir / "shallow", git_dir / "info/grafts", common_dir / "info/grafts", git_dir / "objects/info/alternates", common_dir / "objects/info/alternates", git_dir / "objects/info/http-alternates", common_dir / "objects/info/http-alternates", git_dir / "refs/replace", common_dir / "refs/replace", *reported_metadata}:
+    reported_metadata: list[Path] = []
+    for value in (shallow_text, grafts_text, alternates_text, http_alternates_text, replace_text):
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError("parser provenance Git metadata paths are malformed")
+        reported_metadata.append(path)
+    metadata_paths = {
+        git_dir / "shallow",
+        common_dir / "shallow",
+        git_dir / "info/grafts",
+        common_dir / "info/grafts",
+        git_dir / "objects/info/alternates",
+        common_dir / "objects/info/alternates",
+        git_dir / "objects/info/http-alternates",
+        common_dir / "objects/info/http-alternates",
+        git_dir / "refs/replace",
+        common_dir / "refs/replace",
+        *reported_metadata,
+    }
+    for path in metadata_paths:
         budget.check()
         if _lstat_exists(path):
             raise ValueError("parser provenance rejects shallow, alternate, graft, or replacement metadata")
@@ -914,14 +977,42 @@ def _parser_git_preflight(project_root: Path, *, budget: _ParserGitBudget) -> No
             or lowered.startswith("include")
         ):
             raise ValueError("parser provenance rejects partial, alternate, or included Git config")
+
     pack_dir = objects_dir / "pack"
+    pack_entries: list[str] = []
     if _lstat_exists(pack_dir):
         try:
-            entries = list(pack_dir.iterdir())
-        except (OSError, RuntimeError, ValueError) as exc:
+            pack_stat = os.lstat(pack_dir)
+        except OSError as exc:
             raise ValueError("parser provenance Git pack metadata cannot be inspected") from exc
-        if any(entry.name.endswith(".promisor") for entry in entries):
+        if stat.S_ISLNK(pack_stat.st_mode) or not stat.S_ISDIR(pack_stat.st_mode):
+            raise ValueError("parser provenance Git pack metadata is not a regular directory")
+        try:
+            with os.scandir(pack_dir) as iterator:
+                for entry in iterator:
+                    budget.check()
+                    if len(pack_entries) >= PARSER_GIT_METADATA_MAX_ENTRIES:
+                        raise ValueError("parser provenance Git pack metadata exceeds its bounded entry limit")
+                    pack_entries.append(entry.name)
+        except (OSError, RuntimeError, ValueError) as exc:
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError("parser provenance Git pack metadata cannot be inspected") from exc
+        pack_entries.sort()
+        if any(entry.endswith(".promisor") for entry in pack_entries):
             raise ValueError("parser provenance rejects promisor objects")
+
+    return _ParserGitMetadataSnapshot(
+        str(git_dir),
+        str(common_dir),
+        str(objects_dir),
+        marker_bytes,
+        commondir_bytes,
+        linked_bytes,
+        replacements,
+        config,
+        tuple(pack_entries),
+    )
 
 
 def _parser_tree_pair(
@@ -1283,27 +1374,169 @@ def _parser_source_predecessor(
     return candidate, committed_implementation, committed_tests
 
 
-def _parser_source_snapshot(path: Path, label: str, budget: _ParserGitBudget) -> tuple[bytes, tuple[int, int, int, int, bool]]:
-    """Read one parser source under the shared deadline and retain its identity."""
+def _parser_source_node_identity(metadata: os.stat_result) -> tuple[int, int, int, int, bool]:
+    """Keep stable identity fields for one descriptor-anchored source node."""
 
-    budget.check()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        stat.S_IFMT(metadata.st_mode),
+        bool(metadata.st_mode & 0o111),
+    )
+
+
+def _parser_source_components(relative_path: str, label: str) -> tuple[str, ...]:
+    """Validate the fixed relative source path before descriptor traversal."""
+
+    if type(relative_path) is not str or not relative_path or relative_path.startswith("/") or "\x00" in relative_path:
+        raise ValueError(f"{label} path is malformed")
+    components = tuple(relative_path.split("/"))
+    if not components or any(not part or part in {".", ".."} for part in components):
+        raise ValueError(f"{label} path is malformed")
+    return components
+
+
+def _parser_close_fds(descriptors: Sequence[int]) -> None:
+    for descriptor in reversed(descriptors):
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _parser_open_source_chain(
+    project_root: Path,
+    relative_path: str,
+    label: str,
+) -> tuple[int, list[int], int, str, tuple[tuple[int, int, int, int, bool], ...]]:
+    """Open every source-path component beneath a no-follow directory fd."""
+
+    components = _parser_source_components(relative_path, label)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise ValueError("parser provenance requires O_NOFOLLOW source traversal")
+    directory_flags = os.O_RDONLY | nofollow | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
     try:
-        before = os.lstat(path)
-    except OSError as exc:
-        raise ValueError(f"{label} cannot be inspected") from exc
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise ValueError(f"{label} must be a regular non-symlink file")
-    content = _read_bounded_regular_file(path, PARSER_SOURCE_MAX_BYTES, label)
+        try:
+            current = os.open(str(project_root), directory_flags)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError(f"{label} contains a symlinked path component") from exc
+            raise ValueError(f"{label} root cannot be opened safely") from exc
+        descriptors.append(current)
+        root_metadata = os.fstat(current)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise ValueError(f"{label} root must be a directory")
+        chain = [_parser_source_node_identity(root_metadata)]
+        for component in components[:-1]:
+            try:
+                entry_metadata = os.stat(component, dir_fd=current, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(f"{label} ancestor cannot be inspected safely") from exc
+            if stat.S_ISLNK(entry_metadata.st_mode):
+                raise ValueError(f"{label} contains a symlinked path component")
+            if not stat.S_ISDIR(entry_metadata.st_mode):
+                raise ValueError(f"{label} ancestor is not a directory")
+            try:
+                child = os.open(component, directory_flags, dir_fd=current)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise ValueError(f"{label} contains a symlinked path component") from exc
+                raise ValueError(f"{label} ancestor cannot be opened safely") from exc
+            descriptors.append(child)
+            metadata = os.fstat(child)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(f"{label} ancestor is not a directory")
+            chain.append(_parser_source_node_identity(metadata))
+            current = child
+        leaf_name = components[-1]
+        try:
+            entry_metadata = os.stat(leaf_name, dir_fd=current, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(f"{label} cannot be inspected safely") from exc
+        if stat.S_ISLNK(entry_metadata.st_mode):
+            raise ValueError(f"{label} contains a symlinked path component")
+        try:
+            leaf = os.open(leaf_name, os.O_RDONLY | nofollow, dir_fd=current)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError(f"{label} contains a symlinked path component") from exc
+            raise ValueError(f"{label} cannot be opened safely") from exc
+        descriptors.append(leaf)
+        metadata = os.fstat(leaf)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{label} must be a regular non-symlink file")
+        chain.append(_parser_source_node_identity(metadata))
+        return leaf, descriptors, current, leaf_name, tuple(chain)
+    except Exception:
+        _parser_close_fds(descriptors)
+        raise
+
+
+def _parser_source_chain_identity(project_root: Path, relative_path: str, label: str) -> tuple[tuple[int, int, int, int, bool], ...]:
+    """Reopen the source path to detect ancestor replacement after reading."""
+
+    _leaf, descriptors, _parent, _name, chain = _parser_open_source_chain(project_root, relative_path, label)
+    _parser_close_fds(descriptors)
+    return chain
+
+
+def _parser_read_source_file(
+    project_root: Path,
+    relative_path: str,
+    limit: int,
+    label: str,
+    budget: _ParserGitBudget,
+) -> tuple[bytes, tuple[int, int, int, int, bool]]:
+    """Read a source file through component-wise O_NOFOLLOW descriptors."""
+
+    if type(limit) is not int or limit < 0:
+        raise ValueError("parser source limit must be non-negative")
     budget.check()
+    leaf, descriptors, parent, leaf_name, chain = _parser_open_source_chain(project_root, relative_path, label)
     try:
-        after = os.lstat(path)
-    except OSError as exc:
-        raise ValueError(f"{label} disappeared after reading") from exc
-    identity = (after.st_dev, after.st_ino, after.st_size, stat.S_IFMT(after.st_mode), bool(after.st_mode & 0o111))
-    before_identity = (before.st_dev, before.st_ino, before.st_size, stat.S_IFMT(before.st_mode), bool(before.st_mode & 0o111))
-    if identity != before_identity or len(content) != before.st_size:
-        raise ValueError(f"{label} changed while reading")
-    return content, identity
+        before = os.fstat(leaf)
+        content = bytearray()
+        while True:
+            budget.check()
+            chunk = os.read(leaf, min(MAX_DIGEST_CHUNK_BYTES, limit - len(content) + 1))
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > limit:
+                raise ValueError(f"{label} exceeds the bounded input size")
+        after = os.fstat(leaf)
+        try:
+            current = os.stat(leaf_name, dir_fd=parent, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(f"{label} disappeared after reading") from exc
+        before_identity = _parser_source_node_identity(before)
+        if (
+            _parser_source_node_identity(after) != before_identity
+            or _parser_source_node_identity(current) != before_identity
+            or len(content) != before.st_size
+        ):
+            raise ValueError(f"{label} changed while reading")
+        identity = before_identity
+    finally:
+        _parser_close_fds(descriptors)
+    budget.check()
+    if _parser_source_chain_identity(project_root, relative_path, label) != chain:
+        raise ValueError(f"{label} ancestor changed while reading")
+    return bytes(content), identity
+
+
+def _parser_source_snapshot(
+    project_root: Path,
+    relative_path: str,
+    label: str,
+    budget: _ParserGitBudget,
+) -> tuple[bytes, tuple[int, int, int, int, bool]]:
+    """Read one parser source under a shared deadline and retain its identity."""
+
+    return _parser_read_source_file(project_root, relative_path, PARSER_SOURCE_MAX_BYTES, label, budget)
 
 
 def _current_parser_provenance(project_root: Path | None = None) -> dict[str, str]:
@@ -1317,16 +1550,18 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
     project_root = Path(__file__).resolve().parents[1] if project_root is None else project_root.resolve()
     budget = _ParserGitBudget()
     implementation, implementation_identity = _parser_source_snapshot(
-        project_root / PARSER_IMPLEMENTATION_PATH,
+        project_root,
+        PARSER_IMPLEMENTATION_PATH,
         "parser implementation source",
         budget,
     )
     test_source, test_identity = _parser_source_snapshot(
-        project_root / PARSER_TEST_PATH,
+        project_root,
+        PARSER_TEST_PATH,
         "parser test source",
         budget,
     )
-    _parser_git_preflight(project_root, budget=budget)
+    initial_metadata = _parser_git_preflight(project_root, budget=budget)
     object_format = _git_object_format(project_root, budget=budget)
     implementation_commit = _git_output(
         project_root,
@@ -1345,12 +1580,14 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         budget=budget,
     )
     final_implementation, final_implementation_identity = _parser_source_snapshot(
-        project_root / PARSER_IMPLEMENTATION_PATH,
+        project_root,
+        PARSER_IMPLEMENTATION_PATH,
         "parser implementation source",
         budget,
     )
     final_test_source, final_test_identity = _parser_source_snapshot(
-        project_root / PARSER_TEST_PATH,
+        project_root,
+        PARSER_TEST_PATH,
         "parser test source",
         budget,
     )
@@ -1363,6 +1600,9 @@ def _current_parser_provenance(project_root: Path | None = None) -> dict[str, st
         or committed_tests != final_test_source
     ):
         raise ValueError("parser provenance source predecessor does not match final parser sources")
+    final_metadata = _parser_git_preflight(project_root, budget=budget)
+    if final_metadata != initial_metadata:
+        raise ValueError("parser provenance Git topology changed during calculation")
     budget.check()
     return {
         "implementation_path": PARSER_IMPLEMENTATION_PATH,
