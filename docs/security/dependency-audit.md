@@ -102,17 +102,22 @@ unsatisfied transitive and peer specifications fail closed. Its bounded npm
 subset requires canonical numeric components, rejects leading-zero and repeated
 `v` forms, validates every union arm, and excludes prerelease candidates from
 caret, tilde, comparator, and wildcard ranges unless the range arm contains a
-prerelease comparator with the candidate's exact major, minor, and patch tuple;
-that admission is evaluated within each AND comparator arm before OR aggregation.
-The npm universal stable floor `>=0.0.0` is redundant inside a constrained AND
-arm but makes an OR range universal for stable versions and does not admit
-prereleases. Comparator operands with omitted or wildcard components
-use npm partial expansion: `>1` becomes `>=2.0.0`, `>1.2.x` becomes
-`>=1.3.0`, and `<=1.2.x` becomes `<1.3.0`; comparator operands that are only a
-wildcard are rejected. Tilde wildcard forms `~*`, `~x`, and `~X` are treated
-as the npm wildcard range. Partial caret bounds follow npm's zero-major rules:
-`^0` and `^0.x` include `0.2.0` below `<1.0.0`, while `^0.0` and `^0.0.x`
-include `0.0.1` below `<0.1.0`. The same rules apply to required peer ranges.
+prerelease comparator with the candidate's exact major, minor, and patch tuple.
+That tuple admission is evaluated separately within each AND comparator arm;
+OR aggregation cannot borrow a prerelease tuple from another arm. A one-term
+universal stable arm such as `*`, `~*`, `~x`, `~X`, or `>=0` matches stable
+versions universally but never admits a prerelease. The npm universal stable
+floor is redundant inside a constrained AND arm and is removed only there.
+Before matching, omitted and wildcard comparator operands are expanded to npm's
+full comparator set, so `1` becomes `>=1.0.0 <2.0.0-0`, `>=1` becomes
+`>=1.0.0`, `>1` becomes `>=2.0.0`, `>=1.0.x` becomes `>=1.0.0`, and
+`<=1.2.x` becomes `<1.3.0-0`. The generated stable lower bound is matched as a
+full semantic version, not by core alone, so a same-core prerelease cannot pass
+that floor. Comparator operands that are only a wildcard are rejected. Tilde
+wildcard forms `~*`, `~x`, and `~X` are treated as the npm wildcard range.
+Partial caret bounds follow npm's zero-major rules: `^0` and `^0.x` include
+`0.2.0` below `<1.0.0`, while `^0.0` and `^0.0.x` include `0.0.1` below
+`<0.1.0`. The same rules apply to required peer ranges.
 An `npm:` alias must match both the dependency-name lock key and the descriptor's
 target package name, then match its exact target version. Unsupported or ambiguous
 shapes fail closed rather than inventing a network resolution.

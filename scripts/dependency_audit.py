@@ -676,11 +676,56 @@ def _tilde_upper(version: SemVer, wildcards: tuple[bool, bool, bool]) -> tuple[i
     return (version.major, version.minor + 1, 0)
 
 
+def _expand_partial_term(term: RangeTerm) -> list[RangeTerm]:
+    """Expand npm partial comparators before matching prerelease candidates.
+
+    Npm represents partial comparator operands as full comparator sets. A bare
+    ``1`` is therefore ``>=1.0.0 <2.0.0-0`` rather than a core-only wildcard,
+    and ``<=1.2.x`` is ``<1.3.0-0``. The synthetic ``-0`` upper bound keeps the
+    stable-only prerelease floor visible to the per-AND-arm admission rule.
+    """
+
+    if not any(term.wildcards):
+        return [term]
+    if term.operator == "=":
+        if all(term.wildcards):
+            return [term]
+        return [
+            RangeTerm(">=", SemVer(*term.version.core)),
+            RangeTerm("<", SemVer(*_partial_upper(term.version, term.wildcards), prerelease=("0",))),
+        ]
+    if term.operator == ">":
+        return [RangeTerm(">=", SemVer(*_partial_upper(term.version, term.wildcards)))]
+    if term.operator == ">=":
+        return [RangeTerm(">=", SemVer(*term.version.core))]
+    if term.operator == "<":
+        return [RangeTerm("<", SemVer(*term.version.core, prerelease=("0",)))]
+    if term.operator == "<=":
+        return [RangeTerm("<", SemVer(*_partial_upper(term.version, term.wildcards), prerelease=("0",)))]
+    return [term]
+
+
+def _is_universal_stable_term(term: RangeTerm) -> bool:
+    """Identify one-term npm ranges that match stable versions universally."""
+
+    if term.operator in {"=", "^", "~"} and all(term.wildcards):
+        return True
+    return (
+        term.operator == ">="
+        and term.version.core == (0, 0, 0)
+        and not term.version.prerelease
+        and not any(term.wildcards)
+    )
+
+
 def _matches_wildcards(actual: SemVer, version: SemVer, wildcards: tuple[bool, bool, bool]) -> bool:
     return all(wildcards[index] or actual.core[index] == version.core[index] for index in range(3))
 
 
 def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
+    expanded = _expand_partial_term(term)
+    if len(expanded) != 1 or expanded[0] != term:
+        return all(_matches_term(actual, item) for item in expanded)
     if term.operator == "*":
         return _matches_wildcards(actual, term.version, term.wildcards)
     if term.operator == "=":
@@ -688,14 +733,6 @@ def _matches_term(actual: SemVer, term: RangeTerm) -> bool:
             return _matches_wildcards(actual, term.version, term.wildcards)
         return _compare_semver(actual, term.version) == 0
     if term.operator in {">=", ">", "<", "<="}:
-        if any(term.wildcards):
-            if term.operator == ">":
-                return actual.core >= _partial_upper(term.version, term.wildcards)
-            if term.operator == ">=":
-                return actual.core >= term.version.core
-            if term.operator == "<":
-                return actual.core < term.version.core
-            return actual.core < _partial_upper(term.version, term.wildcards)
         comparison = _compare_semver(actual, term.version)
         return {
             ">=": comparison >= 0,
@@ -739,14 +776,17 @@ def _range_matches(version: str, specification: str) -> bool:
             # accept a valid arm while silently ignoring unsupported syntax.
             return False
 
-    # npm treats a standalone ``>=0.0.0`` comparator as the universal stable
-    # range. When it is combined with another AND comparator it is redundant;
-    # remove it before tuple admission so a same-core prerelease comparator can
-    # admit the candidate. If it appears in any OR arm by itself, the universal
-    # arm wins for stable versions and suppresses prerelease admission globally.
+    # Expand partial comparator operands before applying tuple admission. This
+    # preserves npm's generated stable lower and ``-0`` upper bounds instead of
+    # deciding whether a prerelease matches from core numbers alone.
     universal_stable_arm = False
     normalized_alternatives: list[list[RangeTerm]] = []
-    for terms in parsed_alternatives:
+    for raw_terms in parsed_alternatives:
+        terms = [
+            expanded
+            for term in raw_terms
+            for expanded in _expand_partial_term(term)
+        ]
         zero_floor = [
             term
             for term in terms
@@ -755,10 +795,13 @@ def _range_matches(version: str, specification: str) -> bool:
             and not term.version.prerelease
             and not any(term.wildcards)
         ]
-        if zero_floor and len(terms) == 1:
+        if len(terms) == 1 and _is_universal_stable_term(terms[0]):
             universal_stable_arm = True
             continue
         if zero_floor:
+            # The npm universal stable floor is redundant inside a constrained
+            # AND arm, but a standalone arm suppresses prerelease admission
+            # across the whole OR range.
             terms = [term for term in terms if term not in zero_floor]
         normalized_alternatives.append(terms)
     if universal_stable_arm:

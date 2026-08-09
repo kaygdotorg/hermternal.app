@@ -568,6 +568,74 @@ class DependencyAuditTests(unittest.TestCase):
             result,
         )
 
+    def test_universal_stable_or_arms_do_not_admit_other_arm_prerelease_tuples(self) -> None:
+        universal_specs = ("~*", "*", "~x", "~X", ">=0", ">=0.0.0")
+        cases = tuple(
+            ("0.0.0-alpha.1", f"{universal} || <0.0.0-beta.1", False)
+            for universal in universal_specs
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+    def test_universal_stable_or_arms_reject_required_peer_prerelease_tuples(self) -> None:
+        peer_specs = {
+            "required-peer-tilde-star": "~* || <0.0.0-beta.1",
+            "required-peer-star": "* || <0.0.0-beta.1",
+            "required-peer-tilde-x": "~x || <0.0.0-beta.1",
+            "required-peer-tilde-X": "~X || <0.0.0-beta.1",
+            "required-peer-gte-zero": ">=0 || <0.0.0-beta.1",
+            "required-peer-gte-zero-exact": ">=0.0.0 || <0.0.0-beta.1",
+        }
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {"peerDependencies": peer_specs}
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                **{
+                    name: package_record(name, "0.0.0-alpha.1")
+                    for name in peer_specs
+                },
+            },
+        )
+        result = audit.audit_bytes(
+            manifest,
+            lockfile,
+            manifest_label="fixture/package.json",
+            lockfile_label="fixture/bun.lock",
+        )
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(blocking, set(peer_specs), result)
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": name,
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+                for name in sorted(peer_specs)
+            ],
+            result,
+        )
+
     def test_prerelease_tuple_admission_is_per_and_arm_before_or_aggregation(self) -> None:
         cases = (
             ("0.0.0-alpha.1", ">=0.0.0 <0.0.0-beta.1", True),
@@ -745,6 +813,77 @@ class DependencyAuditTests(unittest.TestCase):
                     "optional": False,
                     "status": "package-resolution-missing",
                 }
+            ],
+            result,
+        )
+
+    def test_partial_comparator_bounds_use_expanded_prerelease_semantics(self) -> None:
+        cases = (
+            ("1.0.0-alpha.1", "1 <1.0.0-beta.1", False),
+            ("1.0.0-alpha.1", ">=1 <1.0.0-beta.1", False),
+            ("2.0.0-alpha.1", ">1 <2.0.0-beta.1", False),
+            ("1.0.0-alpha.1", ">=1.0.x <1.0.0-beta.1", False),
+        )
+        oracle = [npm_semver_satisfies(version, specification) for version, specification, _ in cases]
+        if all(value is not None for value in oracle):
+            self.assertEqual(oracle, [expected for _, _, expected in cases])
+        self.assertEqual(
+            [audit._range_matches(version, specification) for version, specification, _ in cases],
+            [expected for _, _, expected in cases],
+        )
+
+    def test_partial_comparator_bounds_reject_required_peer_prereleases(self) -> None:
+        peer_cases = {
+            "required-peer-bare-major": ("1 <1.0.0-beta.1", "1.0.0-alpha.1"),
+            "required-peer-gte-major": (">=1 <1.0.0-beta.1", "1.0.0-alpha.1"),
+            "required-peer-gt-major": (">1 <2.0.0-beta.1", "2.0.0-alpha.1"),
+            "required-peer-gte-minor-wildcard": (">=1.0.x <1.0.0-beta.1", "1.0.0-alpha.1"),
+        }
+        manifest = json.dumps(
+            {
+                "name": "@fixture/web",
+                "dependencies": {"alpha": "1.0.0"},
+                "devDependencies": {},
+            }
+        ).encode("utf-8")
+        metadata = {
+            "peerDependencies": {
+                name: specification for name, (specification, _version) in peer_cases.items()
+            }
+        }
+        lockfile = synthetic_lock(
+            {"alpha": "1.0.0"},
+            {},
+            {
+                "alpha": package_record("alpha", "1.0.0", metadata),
+                **{
+                    name: package_record(name, version)
+                    for name, (_specification, version) in peer_cases.items()
+                },
+            },
+        )
+        result = audit.audit_bytes(
+            manifest,
+            lockfile,
+            manifest_label="fixture/package.json",
+            lockfile_label="fixture/bun.lock",
+        )
+        blocking = {
+            item.get("package")
+            for item in result["findings"]
+            if item["severity"] == "blocking" and item["code"] == "package-resolution-missing"
+        }
+        self.assertEqual(blocking, set(peer_cases), result)
+        self.assertEqual(
+            result["lockfile"]["peer_dependency_gaps"],
+            [
+                {
+                    "package": "alpha",
+                    "dependency": name,
+                    "optional": False,
+                    "status": "package-resolution-missing",
+                }
+                for name in sorted(peer_cases)
             ],
             result,
         )
