@@ -393,23 +393,22 @@ export function assertBenchmarkTrace(value: unknown, checkout: BenchmarkCheckout
   if (String(revision.source_commit).toLowerCase() !== checkout.head.toLowerCase()) {
     throw new Error('checked-in benchmark evidence source commit did not match the reviewed checkout HEAD');
   }
-  if (checkout.evidence_head !== undefined || checkout.evidence_changed_paths !== undefined) {
-    const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
-    if (
-      typeof checkout.evidence_head !== 'string' ||
-      !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
-      checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
-      checkout.evidence_source_is_strict_ancestor !== true ||
-      checkout.evidence_blob_matches !== true ||
-      checkout.evidence_anchor_count !== 1 ||
-      !Array.isArray(checkout.evidence_changed_paths) ||
-      checkout.evidence_changed_paths.length !== 1 ||
-      checkout.evidence_changed_paths[0] !== evidencePath
-    ) {
-      // An empty range would let one commit attest itself; any other path would
-      // make an old source appear authorized by unrelated later changes.
-      throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
-    }
+  const evidencePath = 'apps/web/tests/bench/terminal-renderer.evidence.json';
+  if (
+    typeof checkout.evidence_head !== 'string' ||
+    !FULL_COMMIT_SHA.test(checkout.evidence_head) ||
+    checkout.evidence_head.toLowerCase() === checkout.head.toLowerCase() ||
+    checkout.evidence_source_is_strict_ancestor !== true ||
+    checkout.evidence_blob_matches !== true ||
+    checkout.evidence_anchor_count !== 1 ||
+    !Array.isArray(checkout.evidence_changed_paths) ||
+    checkout.evidence_changed_paths.length !== 1 ||
+    checkout.evidence_changed_paths[0] !== evidencePath
+  ) {
+    // An empty range would let one commit attest itself; any other path would
+    // make an old source appear authorized by unrelated later changes. Git
+    // topology validation supplies the immediate-parent and per-commit proof.
+    throw new Error('checked-in benchmark evidence source relationship was not evidence-only');
   }
   if (
     checkout.execution_inputs.length !== BENCHMARK_EXECUTION_INPUT_PATHS.length ||
