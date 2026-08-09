@@ -10,6 +10,7 @@ import {
 import type { TerminalBinding } from "$lib/session/coordinator";
 import {
   CurrentSessionTerminalBridge,
+  getCurrentSessionTerminalLifecycleIdentity,
   createBrowserPtyTransport,
   type CurrentSessionTerminalEvent,
   type BrowserPtyWebSocketFactory,
@@ -169,6 +170,40 @@ describe("CurrentSessionTerminalBridge", () => {
       binding: undefined,
       nativeTransportGeneration: 1,
     });
+  });
+
+  it("stamps state callbacks with the active bridge lease before a 4401 retires it", async () => {
+    const fake = createFakePty();
+    const bridge = new CurrentSessionTerminalBridge({ createTransport: () => fake.pty });
+    const states: Extract<CurrentSessionTerminalEvent, { type: "state" }>[] = [];
+    bridge.subscribe((event) => {
+      if (event.type === "state") states.push(event);
+    });
+    const binding = await bridge.attach("session-one", new AbortController().signal);
+    states.length = 0;
+
+    fake.emit({
+      type: "state",
+      state: {
+        status: "failed",
+        generation: 2,
+        mode: "legacy",
+        sessionId: "session-one",
+        closeCode: 4401,
+        closeClassification: "authentication-rejected",
+        outputMayBeTruncated: false,
+      },
+    });
+
+    const stamp = states.at(-1)?.lifecycle;
+    expect(stamp).toBeDefined();
+    expect(getCurrentSessionTerminalLifecycleIdentity(stamp!)).toEqual({
+      binding,
+      nativeTransportGeneration: 1,
+    });
+    // A structural lookalike has no producer record and cannot cross the root fence.
+    expect(getCurrentSessionTerminalLifecycleIdentity({})).toBeUndefined();
+    expect(bridge.lifecycleIdentity.binding).toBeUndefined();
   });
 
   it.each([

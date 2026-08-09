@@ -11,9 +11,14 @@
   let liveContext: LiveRootContext | undefined;
 
   function returnLiveWorkspaceToSignIn(): void {
-    // Chat or PTY may report the same semantic authentication boundary. Auth owns
-    // expiry and workspace invalidation; incompatible-origin failures stay local.
+    // Chat has no PTY lease and retains the established auth path.
     liveContext?.auth.expire();
+  }
+
+  function returnTerminalToSignIn(lease: import('$lib/root-route').RootTerminalLifecycleLease | undefined): void {
+    // A terminal 4401 without the active opaque lease is stale and must not
+    // become a generic auth expiry after a later reauthentication.
+    liveContext?.expireTerminalAuthentication(lease);
   }
 
   // Route selection waits for browser mount. The server and first client render
@@ -42,7 +47,12 @@
   <PrototypeShell transport={fixtureTransport} />
 {:else if routeMode === 'live' && liveContext}
   <BrowserAuthView session={liveContext.auth}>
-    <LiveWorkspaceView session={liveContext.workspace} onReturnToSignIn={returnLiveWorkspaceToSignIn} />
+    <LiveWorkspaceView
+      session={liveContext.workspace}
+      registerTerminalLifecycle={liveContext.registerTerminalLifecycle}
+      onReturnToSignIn={returnLiveWorkspaceToSignIn}
+      onTerminalAuthenticationFailure={returnTerminalToSignIn}
+    />
   </BrowserAuthView>
 {:else}
   <main aria-busy="true" aria-label="Starting Hermternal"></main>
