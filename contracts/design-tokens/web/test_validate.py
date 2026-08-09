@@ -18,6 +18,78 @@ import validate
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR_PATH = Path(__file__).resolve().with_name("validate.py")
 
+# These seven families are the focused Authentication registration contract.
+# Their approved board IDs are all on Paper page C-0; this direct parser keeps
+# the source-page correction independent from the validator's full page gate.
+AUTHENTICATION_RECORDS = (
+    ("auth.password-sign-in", "auth", ("3JK-0", "HJO-0", "3OH-0", "HKK-0")),
+    ("auth.oauth-callback", "auth", ("3JL-0", "HLG-0", "3P1-0", "HLT-0")),
+    ("auth.authentication-failure", "auth-gate", ("3JM-0", "HM6-0", "3PE-0", "HMM-0")),
+    ("auth.session-expired", "auth-gate", ("HN2-0", "3JO-0", "HNR-0", "3QO-0")),
+    ("auth.interaction-states", "auth", ("69V-0", "HOG-0", "69W-0", "HRD-0")),
+    ("auth.provider-selection-200-percent-zoom", "auth", ("HUA-0", "6G3-0", "HUX-0", "6HR-0")),
+    ("auth.provider-localization-growth", "auth", ("HVK-0", "6GX-0", "HW7-0", "6IL-0")),
+)
+EXPECTED_POPULATED_PAGES = (
+    ("A-0", "Chat workspace", 34),
+    ("C-0", "Authentication", 48),
+    ("D-0", "Runtime and recovery", 40),
+    ("B-0", "Shared Chat–Terminal workspace", 25),
+    ("E-0", "Terminal desktop lifecycle", 22),
+    ("F-0", "Terminal narrow and mobile", 28),
+    ("G-0", "Accessibility", 3),
+)
+OBSOLETE_EMPTY_PAGES = (
+    ("3-0", "Web states — Authentication", 48),
+    ("4-0", "Web states — Runtime", 68),
+)
+
+
+def read_manifest_direct() -> dict:
+    return json.loads(Path(__file__).with_name("artboards.json").read_text(encoding="utf-8"))
+
+
+class AuthenticationPaperSourceTests(unittest.TestCase):
+    def test_authentication_families_use_c0_not_obsolete_web_pages(self) -> None:
+        manifest = read_manifest_direct()
+        pages = tuple(
+            tuple(page[field] for field in ("id", "name", "artboard_count"))
+            for page in manifest["paper"]["pages"]
+        )
+        self.assertEqual(pages, EXPECTED_POPULATED_PAGES)
+        for obsolete_page in OBSOLETE_EMPTY_PAGES:
+            self.assertNotIn(obsolete_page, pages)
+
+        states = {state["id"]: state for state in manifest["states"]}
+        for state_id, _, expected_artboards in AUTHENTICATION_RECORDS:
+            with self.subTest(state_id=state_id):
+                self.assertEqual(states[state_id]["family"], "authentication")
+                self.assertEqual(
+                    [variant["artboard_id"] for variant in states[state_id]["variants"]],
+                    list(expected_artboards),
+                )
+
+
+class AuthenticationRegistrationRegressionTests(unittest.TestCase):
+    def test_seven_authentication_families_are_registered_ready(self) -> None:
+        manifest = read_manifest_direct()
+        states = {state["id"]: state for state in manifest["states"]}
+        for state_id, token_set, expected_artboards in AUTHENTICATION_RECORDS:
+            with self.subTest(state_id=state_id):
+                state = states.get(state_id)
+                self.assertIsNotNone(state, f"missing Authentication record: {state_id}")
+                if state is None:
+                    continue
+                self.assertEqual(state["status"], "ready", f"Authentication record remains blocked: {state_id}")
+                self.assertEqual(state["family"], "authentication")
+                self.assertEqual(state["release"], "v0.0.1")
+                self.assertEqual(state["token_set"], token_set)
+                self.assertEqual(state["missing_variants"], [])
+                self.assertEqual(
+                    [variant["artboard_id"] for variant in state["variants"]],
+                    list(expected_artboards),
+                )
+
 
 class StrictJsonTests(unittest.TestCase):
     def _write_bytes(self, payload: bytes) -> Path:
@@ -103,6 +175,19 @@ class ManifestMutationTests(unittest.TestCase):
         mutated = copy.deepcopy(self.manifest)
         mutated["paper"]["pages"] = [page for page in mutated["paper"]["pages"] if page["id"] != "F-0"]
         self._assert_cli_failure(mutated)
+
+    def test_authentication_source_page_negatives_fail_closed(self) -> None:
+        mutations = (
+            ("missing C-0", lambda doc: doc["paper"]["pages"].pop(1)),
+            ("duplicate C-0", lambda doc: doc["paper"]["pages"].insert(1, copy.deepcopy(doc["paper"]["pages"][1]))),
+            ("renamed C-0", lambda doc: doc["paper"]["pages"][1].update(name="Web states — Authentication")),
+            ("wrong C-0 count", lambda doc: doc["paper"]["pages"][1].update(artboard_count=0)),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                mutated = copy.deepcopy(self.manifest)
+                mutate(mutated)
+                self._assert_cli_failure(mutated)
 
     def test_missing_terminal_state_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.manifest)
