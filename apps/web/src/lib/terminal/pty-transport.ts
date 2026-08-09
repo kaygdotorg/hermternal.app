@@ -304,6 +304,8 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
 
   const now = options.now ?? Date.now;
   const listeners = new Set<(event: PtyTransportEvent) => void>();
+  const pendingEvents: PtyTransportEvent[] = [];
+  let dispatchingEvents = false;
   let currentGeneration = 0;
   let currentState: PtyConnectionState = {
     status: "closed",
@@ -350,8 +352,26 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   };
 
   const emit = (event: PtyTransportEvent): void => {
-    observe(options.onEvent ? () => options.onEvent?.(event) : undefined);
-    for (const listener of listeners) observe(() => listener(event));
+    pendingEvents.push(event);
+    if (dispatchingEvents) return;
+
+    dispatchingEvents = true;
+    try {
+      for (let index = 0; index < pendingEvents.length; index += 1) {
+        const nextEvent = pendingEvents[index]!;
+        // Capture one listener snapshot before any observer can synchronously
+        // subscribe, unsubscribe, or publish a newer state. Reentrant events
+        // stay queued until every subscriber has seen this older event, so a
+        // listener cannot receive `closing`/`detached` before the `attached`
+        // event that caused a sibling listener to close the transport.
+        const snapshot = [...listeners];
+        observe(options.onEvent ? () => options.onEvent?.(nextEvent) : undefined);
+        for (const listener of snapshot) observe(() => listener(nextEvent));
+      }
+    } finally {
+      pendingEvents.length = 0;
+      dispatchingEvents = false;
+    }
   };
 
   const setState = (
@@ -625,20 +645,29 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
   ): Promise<void> => {
     const normalized = validateInput(input);
     const staleAttempt = activeAttempt;
-    if (staleAttempt && currentInput && sameConnectionInput(currentInput, normalized)) {
+    const sameIdentity =
+      currentInput !== undefined && sameConnectionInput(currentInput, normalized);
+    const authRecovery =
+      reattaching &&
+      sameIdentity &&
+      reattachBlocked === "authentication-required" &&
+      detachedAtFor(normalized) !== undefined;
+    if (staleAttempt && sameIdentity) {
       return waitForAttempt(staleAttempt, signal);
     }
     if (signal?.aborted) {
       return Promise.reject(new PtyTransportError("aborted", currentGeneration));
     }
-    if (
-      detachedAttachment &&
-      !sameConnectionInput(detachedAttachment.input, normalized)
-    ) {
+    if (detachedAttachment && !sameIdentity) {
       // Retention belongs to one exact PTY identity. Do not let an old
       // session's expiry evidence reject a replacement current-session attach.
       detachedAttachment = undefined;
     }
+
+    // A deterministic retry fence is transport evidence, not generic cleanup
+    // state. A new identity or the documented explicit 4401 recovery action
+    // may clear it; ordinary same-identity reconnect and cleanup must not.
+    if (!sameIdentity || authRecovery) reattachBlocked = undefined;
 
     // Claim the replacement generation and its active-attempt slot before any
     // adapter-controlled close or abort callback. A nested connector can then
@@ -646,7 +675,6 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     const generation = ++currentGeneration;
     const controller = new AbortController();
     currentInput = normalized;
-    reattachBlocked = undefined;
     userClosed = false;
     explicitlyClosed = false;
 
@@ -830,7 +858,10 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     const hadActiveAttempt = activeAttempt !== undefined;
     userClosed = closing;
     explicitlyClosed = closing;
-    if (closing || hadActiveContext || hadActiveAttempt) reattachBlocked = undefined;
+    // Keep a server/authentication retry fence after cleanup has no active
+    // owner. Only a new identity or explicit recovery in start() may clear it;
+    // detach/Close must not turn failed authentication into an implicit retry.
+    if (hadActiveContext || hadActiveAttempt) reattachBlocked = undefined;
     const generation = ++currentGeneration;
     const input = currentInput;
     const attempt = activeAttempt;
@@ -867,16 +898,24 @@ export function createPtyTransport(options: PtyTransportOptions): PtyTransport {
     },
     connect(input, signal) {
       const normalized = validateInput(input);
+      const authRecovery =
+        reattachBlocked === "authentication-required" &&
+        currentInput !== undefined &&
+        sameConnectionInput(currentInput, normalized) &&
+        detachedAtFor(normalized) !== undefined;
       if (
         reattachBlocked &&
         currentInput &&
-        sameConnectionInput(currentInput, normalized)
+        sameConnectionInput(currentInput, normalized) &&
+        !authRecovery
       ) {
         return Promise.reject(
           new PtyTransportError(reattachBlocked, currentGeneration),
         );
       }
-      return start(normalized, false, signal);
+      // A same-identity connect after 4401 is the sole explicit recovery path;
+      // reconnect() remains fenced until this deliberate attempt succeeds.
+      return start(normalized, authRecovery, signal);
     },
     reconnect(signal) {
       if (explicitlyClosed && currentInput && modeFor(currentInput) === "attach") {
@@ -1142,6 +1181,7 @@ function statusForClose(
 
 function isPermanentReattachError(code: PtyErrorCode): boolean {
   return (
+    code === "authentication-required" ||
     code === "attachment-superseded" ||
     code === "expired-attachment" ||
     code === "invalid-attachment" ||
@@ -1152,6 +1192,12 @@ function isPermanentReattachError(code: PtyErrorCode): boolean {
 function retryBlockForClose(
   classification: PtyCloseClassification,
 ): PtyErrorCode | undefined {
+  if (classification === "authentication-rejected") {
+    // A server 4401 is recoverable only through an explicit same-identity
+    // connect after authentication. Do not let reconnect() mint a ticket while
+    // the transport is still behind the auth boundary.
+    return "authentication-required";
+  }
   if (classification === "attachment-superseded") {
     return "attachment-superseded";
   }
