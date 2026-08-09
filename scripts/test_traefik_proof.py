@@ -998,6 +998,70 @@ class TraefikRendererTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "symlinks"):
                     traefik_proof._build_static_digest(root)
 
+    def test_bounded_static_digest_rejects_collected_ancestor_symlink(self) -> None:
+        """A directory replaced after collection cannot redirect hashing outside the site."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            root = sandbox / "site"
+            nested = root / "nested"
+            outside = sandbox / "outside"
+            root.mkdir()
+            nested.mkdir()
+            outside.mkdir()
+            (nested / "app.js").write_bytes(b"inside-static-content")
+            (outside / "app.js").write_bytes(b"outside-attacker-content")
+            real_collect = traefik_proof._collect_static_files
+            swapped = False
+
+            def collect_then_swap(site_root: Path) -> object:
+                nonlocal swapped
+                result = real_collect(site_root)
+                nested.rename(root / "nested-original")
+                nested.symlink_to(outside, target_is_directory=True)
+                swapped = True
+                return result
+
+            try:
+                with mock.patch.object(traefik_proof, "_collect_static_files", side_effect=collect_then_swap):
+                    with self.assertRaisesRegex(ValueError, "symlinked path component|ancestor changed|site_root changed"):
+                        traefik_proof._build_static_digest(root)
+            finally:
+                if swapped:
+                    nested.unlink()
+                    (root / "nested-original").rename(nested)
+
+    def test_bounded_static_digest_rejects_collected_site_root_symlink(self) -> None:
+        """A site-root replacement after collection cannot redirect hashing outside the site."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            root = sandbox / "site"
+            outside = sandbox / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (root / "app.js").write_bytes(b"inside-static-content")
+            (outside / "app.js").write_bytes(b"outside-attacker-content")
+            real_collect = traefik_proof._collect_static_files
+            swapped = False
+
+            def collect_then_swap(site_root: Path) -> object:
+                nonlocal swapped
+                result = real_collect(site_root)
+                root.rename(sandbox / "site-original")
+                root.symlink_to(outside, target_is_directory=True)
+                swapped = True
+                return result
+
+            try:
+                with mock.patch.object(traefik_proof, "_collect_static_files", side_effect=collect_then_swap):
+                    with self.assertRaisesRegex(ValueError, "symlinked path component|site_root"):
+                        traefik_proof._build_static_digest(root)
+            finally:
+                if swapped:
+                    root.unlink()
+                    (sandbox / "site-original").rename(root)
+
     def test_bounded_static_digest_rejects_fifo_and_all_resource_limits(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1896,6 +1960,53 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             alias.symlink_to(root, target_is_directory=True)
             with self.assertRaisesRegex(ValueError, "symlink alias"):
                 traefik_proof._current_parser_provenance(alias)
+
+    def _assert_first_git_command_rejects_metadata_swap(self, root: Path, target: Path, pattern: str) -> None:
+        """Mutate pinned metadata after preparation but before the first Git call."""
+
+        real_snapshot = traefik_proof._parser_source_snapshot
+        replacement = _same_path_copy(target)
+        swapped = False
+
+        def mutate_after_sources(project: Path, relative: str, label: str, budget: object) -> object:
+            nonlocal swapped
+            result = real_snapshot(project, relative, label, budget)
+            if label == "parser test source" and not swapped:
+                replacement.__enter__()
+                swapped = True
+            return result
+
+        try:
+            with mock.patch.object(traefik_proof, "_parser_source_snapshot", side_effect=mutate_after_sources):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    traefik_proof._current_parser_provenance(root)
+        finally:
+            if swapped:
+                replacement.__exit__(None, None, None)
+
+    def test_first_git_command_is_fenced_by_common_config_pin(self) -> None:
+        """Common config replacement before rev-parse cannot evade the metadata fence."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            self._assert_first_git_command_rejects_metadata_swap(
+                root,
+                root / ".git" / "config",
+                "Git common config (identity|bytes) changed",
+            )
+
+    def test_first_git_command_is_fenced_by_objects_pin(self) -> None:
+        """Objects-directory replacement before rev-parse cannot evade the metadata fence."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            self._assert_first_git_command_rejects_metadata_swap(
+                root,
+                root / ".git" / "objects",
+                "Git objects directory identity changed",
+            )
 
     def test_pack_metadata_entry_bound_fails_closed(self) -> None:
         """A huge objects/pack directory cannot consume unbounded scan time."""

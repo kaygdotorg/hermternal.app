@@ -234,8 +234,14 @@ resolved against the containing `.git` file with component-wise `O_NOFOLLOW`
 traversal; direct `..` paths remain supported, while symlinked redirects and
 escapes fail closed. Standalone `--separate-git-dir` checkouts remain explicitly
 unsupported because they do not provide the required structural anchor. The
-preflight returns a bounded topology snapshot and repeats it after traversal so
-forbidden metadata or same-path swaps cannot authorize a result.
+initial pin is built directly from the no-follow marker and reciprocal
+`commondir`/`gitdir` metadata before the first topology-discovery `rev-parse`;
+common config, worktree config, objects, and forbidden indirection paths are
+already retained at that point. The first and every later Git command rechecks
+the pin before and after execution, so a config or objects replacement cannot
+slip through the initial discovery fence. The preflight returns a bounded
+topology snapshot and repeats it after traversal so forbidden metadata or
+same-path swaps cannot authorize a result.
 
 It treats the implementation/test blob pair as the source identity, ignores
 mode-only commits (`100644` versus `100755`) and descendants that do not change
@@ -248,7 +254,11 @@ are reread after traversal so a concurrent mutation cannot be reported as the
 historical source. Source files are opened through component-wise directory
 file descriptors with `O_NOFOLLOW`; ancestor and leaf identities are checked
 before, during, and after each bounded read, so a symlinked `scripts` ancestor
-cannot redirect provenance outside the repository.
+cannot redirect provenance outside the repository. Static-site digest entries
+retain the collection-time root-to-parent identity chain and are reopened
+relative to the site-root descriptor for both the pre-read and post-read checks;
+replacing `site_root` or a nested directory with a symlink therefore fails
+closed instead of hashing outside content.
 
 Topology is read once with bounded `git log` output. Unique source subtrees are
 resolved with one `cat-file --batch-check` and one `cat-file --batch` operation,
