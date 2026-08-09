@@ -31,9 +31,12 @@ failure rather than evidence. The registry's `pending` rows become `blocked`
 results and can never be promoted to proof. Unknown fixture roots, case selectors, platform values,
 statuses, unsafe paths, and unregistered representative artifacts fail closed.
 Every read is rooted at a held repository descriptor. Directory and regular-file
-components use no-follow opens; regular-file metadata is checked before and
-after bounded reads, and the path is reopened from the held parent descriptor to
-detect replacement. Selected JSON artifacts must match the registry's exact
+components use no-follow, close-on-exec, non-blocking opens (with directory
+opens constrained by `O_DIRECTORY`); macOS `/tmp` and `/var` aliases are mapped
+to `/private` without realpath or pathname reads. Regular-file metadata is checked
+before and after bounded reads, and the leaf is reopened from the held parent
+file descriptor to detect replacement. FIFO and other non-regular inputs fail
+closed before any read. Selected JSON artifacts must match the registry's exact
 size and SHA-256 binding. There is no pathname or glob fallback. Strict JSON
 parsing rejects duplicate keys and bounds bytes, depth, nodes, keys, strings,
 integers, arrays, case counts, error text, and parser time. Coverage rows preserve

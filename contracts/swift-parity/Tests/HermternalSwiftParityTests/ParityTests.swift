@@ -1,5 +1,8 @@
 import Foundation
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#endif
 @testable import HermternalSwiftParity
 
 final class ParityTests: XCTestCase {
@@ -209,6 +212,105 @@ final class ParityTests: XCTestCase {
         }
     }
 
+    #if os(macOS)
+    func testHeldParentDescriptorSurvivesParentPathReplacement() throws {
+        let temporaryRoot = try makeTemporaryFixtureRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let registry = try loadRegistry(at: temporaryRoot)
+        let artifactURL = temporaryRoot
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("deployment-security", isDirectory: true)
+            .appendingPathComponent("browser-auth", isDirectory: true)
+            .appendingPathComponent("cases.json")
+        let parentURL = artifactURL.deletingLastPathComponent()
+        let renamedParentURL = parentURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("browser-auth-held-\(UUID().uuidString)", isDirectory: true)
+
+        let fixtureCase = try loadCaseForTests(
+            at: temporaryRoot,
+            registry: registry,
+            rootID: "deployment-security-browser-auth",
+            caseID: "login-success"
+        ) {
+            try FileManager.default.moveItem(at: parentURL, to: renamedParentURL)
+            try FileManager.default.createDirectory(at: parentURL, withIntermediateDirectories: true)
+            try Data("{\"cases\":[]}".utf8).write(
+                to: parentURL.appendingPathComponent("cases.json"),
+                options: .atomic
+            )
+        }
+        XCTAssertEqual(fixtureCase.id, "login-success")
+    }
+
+    func testHeldParentDescriptorRejectsLeafReplacement() throws {
+        let temporaryRoot = try makeTemporaryFixtureRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        let registry = try loadRegistry(at: temporaryRoot)
+        let artifactURL = temporaryRoot
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("deployment-security", isDirectory: true)
+            .appendingPathComponent("browser-auth", isDirectory: true)
+            .appendingPathComponent("cases.json")
+        let displacedURL = artifactURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("cases-original-\(UUID().uuidString).json")
+
+        assertInputCode(.artifactIntegrity) {
+            _ = try loadCaseForTests(
+                at: temporaryRoot,
+                registry: registry,
+                rootID: "deployment-security-browser-auth",
+                caseID: "login-success"
+            ) {
+                try FileManager.default.moveItem(at: artifactURL, to: displacedURL)
+                try FileManager.default.copyItem(at: displacedURL, to: artifactURL)
+            }
+        }
+    }
+
+    func testRegistryFIFOSubprocessFailsClosedWithoutHanging() throws {
+        let temporaryRoot = try makeTemporaryCLIRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try installPassingValidator(at: temporaryRoot)
+        let indexURL = temporaryRoot
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("index.json")
+        try FileManager.default.removeItem(at: indexURL)
+        try makeFIFO(at: indexURL)
+
+        let result = try runCLI(at: temporaryRoot, timeout: 2)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.status, 1)
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertTrue(result.stderr.contains("artifact_integrity"))
+    }
+
+    func testArtifactFIFOSubprocessFailsClosedWithoutHanging() throws {
+        let temporaryRoot = try makeTemporaryCLIRepository()
+        defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+        try installPassingValidator(at: temporaryRoot)
+        let artifactURL = temporaryRoot
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("deployment-security", isDirectory: true)
+            .appendingPathComponent("browser-auth", isDirectory: true)
+            .appendingPathComponent("cases.json")
+        try FileManager.default.removeItem(at: artifactURL)
+        try makeFIFO(at: artifactURL)
+
+        let result = try runCLI(at: temporaryRoot, timeout: 2)
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.status, 1)
+        XCTAssertTrue(result.stdout.isEmpty)
+        XCTAssertTrue(result.stderr.contains("artifact_integrity"))
+    }
+
+    #endif
+
     func testStrictJSONRejectsDuplicateKeysAndBoundsErrors() throws {
         try withTemporaryIndex(Data("{\"schema\":\"hermternal.fixture-index.v1\",\"schema\":\"hermternal.fixture-index.v1\"}".utf8)) { temporaryRoot in
             assertInputCode(.malformedJSON) {
@@ -331,8 +433,10 @@ final class ParityTests: XCTestCase {
 
 #if os(macOS)
     func testCLIBlockedStatusIsNonzeroAndOutputIsStable() throws {
-        let first = try runCLI()
-        let second = try runCLI()
+        let first = try runCLI(at: repoRoot)
+        let second = try runCLI(at: repoRoot)
+        XCTAssertFalse(first.timedOut)
+        XCTAssertFalse(second.timedOut)
         XCTAssertEqual(first.status, 1)
         XCTAssertEqual(second.status, 1)
         XCTAssertEqual(first.stdout, second.stdout)
@@ -346,7 +450,10 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(value["liveClaim"] as? Bool, false)
     }
 
-    private func runCLI() throws -> (status: Int32, stdout: String, stderr: String) {
+    private func runCLI(
+        at root: URL,
+        timeout: TimeInterval = 5
+    ) throws -> (status: Int32, stdout: String, stderr: String, timedOut: Bool) {
         let candidates = [
             packageRoot.appendingPathComponent(".build/debug/hermternal-swift-parity"),
             packageRoot.appendingPathComponent(".build/release/hermternal-swift-parity")
@@ -356,20 +463,103 @@ final class ParityTests: XCTestCase {
         }
         let process = Process()
         process.executableURL = executable
-        process.arguments = ["--repo-root", repoRoot.path]
+        process.arguments = ["--repo-root", root.path]
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
-        process.waitUntilExit()
+
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            process.waitUntilExit()
+            finished.signal()
+        }
+        let timedOut = finished.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut {
+            process.terminate()
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            process.waitUntilExit()
+        }
         return (
             process.terminationStatus,
             String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-            String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
+            timedOut
         )
     }
 #endif
+
+    #if os(macOS)
+    private func makeTemporaryRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermternal-swift-c21-descriptor-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func makeFixturesDirectory(at root: URL) throws -> URL {
+        let fixturesURL = root
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixturesURL, withIntermediateDirectories: true)
+        return fixturesURL
+    }
+
+    private func makeTemporaryFixtureRepository(copyArtifact: Bool = true) throws -> URL {
+        let root = try makeTemporaryRoot()
+        let fixturesURL = try makeFixturesDirectory(at: root)
+        try FileManager.default.copyItem(
+            at: repoRoot.appendingPathComponent("contracts/fixtures/index.json"),
+            to: fixturesURL.appendingPathComponent("index.json")
+        )
+
+        let artifactURL = fixturesURL
+            .appendingPathComponent("deployment-security", isDirectory: true)
+            .appendingPathComponent("browser-auth", isDirectory: true)
+        try FileManager.default.createDirectory(at: artifactURL, withIntermediateDirectories: true)
+        if copyArtifact {
+            try FileManager.default.copyItem(
+                at: repoRoot.appendingPathComponent("contracts/fixtures/deployment-security/browser-auth/cases.json"),
+                to: artifactURL.appendingPathComponent("cases.json")
+            )
+        }
+        return root
+    }
+
+    private func makeTemporaryCLIRepository() throws -> URL {
+        let root = try makeTemporaryRoot()
+        let contractsURL = root.appendingPathComponent("contracts", isDirectory: true)
+        try FileManager.default.createDirectory(at: contractsURL, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: repoRoot.appendingPathComponent("contracts/fixtures", isDirectory: true),
+            to: contractsURL.appendingPathComponent("fixtures", isDirectory: true)
+        )
+        return root
+    }
+
+    private func installPassingValidator(at root: URL) throws {
+        let validatorURL = root
+            .appendingPathComponent("contracts", isDirectory: true)
+            .appendingPathComponent("fixtures", isDirectory: true)
+            .appendingPathComponent("validator", isDirectory: true)
+            .appendingPathComponent("validate.py")
+        let source = """
+        import json
+        print(json.dumps({"ok": True, "evidence_status": "ready", "live_claim": False}))
+        """
+        try Data(source.utf8).write(to: validatorURL, options: .atomic)
+    }
+
+    private func makeFIFO(at url: URL) throws {
+        guard Darwin.mkfifo(url.path, mode_t(S_IRUSR | S_IWUSR)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    #endif
 
     private func assertInputCode(
         _ expected: ContractInputCode,

@@ -529,7 +529,10 @@ private func openRootDescriptor(at url: URL) throws -> Int32 {
         rootPath = absolute.path
     }
 
-    let root = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+    let root = Darwin.open(
+        "/",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    )
     guard root >= 0 else {
         throw descriptorError(.missingArtifact, "repository root is not readable")
     }
@@ -537,7 +540,11 @@ private func openRootDescriptor(at url: URL) throws -> Int32 {
     do {
         for component in rootPath.split(separator: "/") {
             let next = component.withCString {
-                Darwin.openat(current, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+                Darwin.openat(
+                    current,
+                    $0,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+                )
             }
             guard next >= 0 else {
                 throw descriptorError(.missingArtifact, "repository root is not readable")
@@ -566,7 +573,11 @@ private func openRelativeRegularFile(
     do {
         for component in components.dropLast() {
             let next = component.withCString {
-                Darwin.openat(parent, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+                Darwin.openat(
+                    parent,
+                    $0,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+                )
             }
             guard next >= 0 else {
                 throw descriptorError(.missingArtifact, "artifact directory is not readable")
@@ -575,7 +586,7 @@ private func openRelativeRegularFile(
             parent = next
         }
         let file = leaf.withCString {
-            Darwin.openat(parent, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            Darwin.openat(parent, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
         }
         guard file >= 0 else {
             throw descriptorError(.missingArtifact, "artifact is not checked in")
@@ -603,7 +614,8 @@ private func readRegularFile(
     relativePath: String,
     label: String,
     maxBytes: Int,
-    expected: RegistryFile? = nil
+    expected: RegistryFile? = nil,
+    beforeFinalReopen: (() throws -> Void)? = nil
 ) throws -> Data {
     let opened = try openRelativeRegularFile(repoRoot: repoRoot, relativePath: relativePath)
     defer {
@@ -625,6 +637,9 @@ private func readRegularFile(
     var bytes = Data()
     bytes.reserveCapacity(Int(before.size))
     var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    // Regular files should not report EAGAIN, but bounded retries keep the
+    // non-blocking descriptor contract fail-closed under transient host errors.
+    var transientReadFailures = 0
     while true {
         guard DispatchTime.now().uptimeNanoseconds <= deadline else {
             throw reject(.malformedInput, "\(label) read exceeded the time limit")
@@ -634,8 +649,21 @@ private func readRegularFile(
             return Darwin.read(opened.file, baseAddress, storage.count)
         }
         if count < 0 {
-            throw reject(.missingArtifact, "\(label) could not be read")
+            let readError = errno
+            guard readError == EINTR || readError == EAGAIN else {
+                throw reject(.missingArtifact, "\(label) could not be read")
+            }
+            transientReadFailures += 1
+            guard transientReadFailures <= 128,
+                  DispatchTime.now().uptimeNanoseconds <= deadline else {
+                throw reject(.malformedInput, "\(label) read exceeded the time limit")
+            }
+            if readError == EAGAIN {
+                usleep(1_000)
+            }
+            continue
         }
+        transientReadFailures = 0
         if count == 0 { break }
         bytes.append(contentsOf: buffer.prefix(count))
         guard bytes.count <= maxBytes else {
@@ -647,8 +675,9 @@ private func readRegularFile(
         throw reject(.artifactIntegrity, "\(label) changed while it was read")
     }
 
+    try beforeFinalReopen?()
     let reopened = opened.leaf.withCString {
-        Darwin.openat(opened.parent, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        Darwin.openat(opened.parent, $0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
     }
     guard reopened >= 0 else {
         throw reject(.artifactIntegrity, "\(label) was replaced while it was read")
@@ -675,12 +704,14 @@ private func readRegularFile(
     relativePath: String,
     label: String,
     maxBytes: Int,
-    expected: RegistryFile? = nil
+    expected: RegistryFile? = nil,
+    beforeFinalReopen: (() throws -> Void)? = nil
 ) throws -> Data {
     _ = repoRoot
     _ = relativePath
     _ = maxBytes
     _ = expected
+    _ = beforeFinalReopen
     throw reject(.missingArtifact, "\(label) requires a host descriptor reader")
 }
 #endif
@@ -903,14 +934,16 @@ private func readJSON(
     repoRoot: URL,
     relativePath: String,
     _ label: String,
-    expected: RegistryFile? = nil
+    expected: RegistryFile? = nil,
+    beforeFinalReopen: (() throws -> Void)? = nil
 ) throws -> JSONValue {
     let bytes = try readRegularFile(
         repoRoot: repoRoot,
         relativePath: relativePath,
         label: label,
         maxBytes: ParityBounds.maxJSONBytes,
-        expected: expected
+        expected: expected,
+        beforeFinalReopen: beforeFinalReopen
     )
     return try decodeJSON(bytes, label)
 }
@@ -1005,7 +1038,10 @@ private func parseParity(_ value: JSONValue?) throws -> RegistryParity {
     )
 }
 
-public func loadRegistry(at repoRoot: URL) throws -> FixtureRegistry {
+private func loadRegistryImpl(
+    at repoRoot: URL,
+    beforeFinalReopen: (() throws -> Void)? = nil
+) throws -> FixtureRegistry {
     // The registry is the compatibility allowlist. Missing or additive parity
     // metadata is not permission to discover another fixture or platform.
     let root = repoRoot.standardizedFileURL
@@ -1013,7 +1049,8 @@ public func loadRegistry(at repoRoot: URL) throws -> FixtureRegistry {
         try readJSON(
             repoRoot: root,
             relativePath: "contracts/fixtures/index.json",
-            "fixture index"
+            "fixture index",
+            beforeFinalReopen: beforeFinalReopen
         ),
         "fixture index"
     )
@@ -1074,6 +1111,10 @@ public func loadRegistry(at repoRoot: URL) throws -> FixtureRegistry {
     return FixtureRegistry(fixtureRoots: fixtureRoots, coverage: coverage, parity: parity)
 }
 
+public func loadRegistry(at repoRoot: URL) throws -> FixtureRegistry {
+    try loadRegistryImpl(at: repoRoot)
+}
+
 private func rootByID(_ registry: FixtureRegistry, _ rootID: String) throws -> FixtureRoot {
     guard let root = registry.fixtureRoots.first(where: { $0.id == rootID }) else {
         throw reject(.unknownFixture, "representative fixture root is not registered")
@@ -1104,23 +1145,29 @@ private func artifactRecord(root: FixtureRoot) throws -> RegistryFile {
     return record
 }
 
-private func loadArtifact(repoRoot: URL, root: FixtureRoot) throws -> [String: JSONValue] {
+private func loadArtifact(
+    repoRoot: URL,
+    root: FixtureRoot,
+    beforeFinalReopen: (() throws -> Void)? = nil
+) throws -> [String: JSONValue] {
     let record = try artifactRecord(root: root)
     let bytes = try readRegularFile(
         repoRoot: repoRoot,
         relativePath: "contracts/fixtures/\(record.path)",
         label: "fixture \(root.id)",
         maxBytes: ParityBounds.maxArtifactBytes,
-        expected: record
+        expected: record,
+        beforeFinalReopen: beforeFinalReopen
     )
     return try object(try decodeJSON(bytes, "fixture \(root.id)"), "fixture \(root.id)")
 }
 
-public func loadCase(
+private func loadCaseImpl(
     at repoRoot: URL,
     registry: FixtureRegistry,
     rootID: String,
-    caseID: String
+    caseID: String,
+    beforeFinalReopen: (() throws -> Void)? = nil
 ) throws -> FixtureCase {
     let caseIDCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")
     guard !caseID.isEmpty,
@@ -1134,7 +1181,11 @@ public func loadCase(
     guard root.status == .ready else {
         throw reject(.coveragePending, "pending fixture roots cannot provide parity evidence")
     }
-    let artifact = try loadArtifact(repoRoot: repoRoot, root: root)
+    let artifact = try loadArtifact(
+        repoRoot: repoRoot,
+        root: root,
+        beforeFinalReopen: beforeFinalReopen
+    )
     let cases = try array(artifact["cases"], "fixture \(rootID).cases")
     guard cases.count <= ParityBounds.maxCaseCount else {
         throw reject(.malformedInput, "fixture \(rootID).cases exceeds the case limit")
@@ -1153,6 +1204,36 @@ public func loadCase(
         id: try string(match["id"], "fixture \(rootID).\(caseID).id"),
         expected: try object(match["expected"], "fixture \(rootID).\(caseID).expected"),
         raw: match
+    )
+}
+
+public func loadCase(
+    at repoRoot: URL,
+    registry: FixtureRegistry,
+    rootID: String,
+    caseID: String
+) throws -> FixtureCase {
+    try loadCaseImpl(
+        at: repoRoot,
+        registry: registry,
+        rootID: rootID,
+        caseID: caseID
+    )
+}
+
+func loadCaseForTests(
+    at repoRoot: URL,
+    registry: FixtureRegistry,
+    rootID: String,
+    caseID: String,
+    beforeFinalReopen: @escaping () throws -> Void
+) throws -> FixtureCase {
+    try loadCaseImpl(
+        at: repoRoot,
+        registry: registry,
+        rootID: rootID,
+        caseID: caseID,
+        beforeFinalReopen: beforeFinalReopen
     )
 }
 
