@@ -130,6 +130,65 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
         verify.assert_called_once()
 
+    def test_parent_swap_during_descriptor_relative_credential_read_fails_closed(self) -> None:
+        moved = self.root / "runs-credential-original"
+        swapped = False
+        original_verify = helper.live_run_marker.verify_credential_identity
+
+        def swap_after_identity(binding, *, parent_fd=None):
+            nonlocal swapped
+            result = original_verify(binding, parent_fd=parent_fd)
+            if not swapped:
+                swapped = True
+                self.runs.rename(moved)
+                self.runs.mkdir(mode=marker.RUNS_DIR_MODE)
+                self.runs.chmod(marker.RUNS_DIR_MODE)
+            return result
+
+        with mock.patch.object(
+            helper.live_run_marker,
+            "verify_credential_identity",
+            side_effect=swap_after_identity,
+        ):
+            with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue((moved / "fixture.json").exists())
+        self.assertEqual((moved / "fixture.credential").read_bytes(), self.value + b"\n")
+        self.assertFalse(any(self.runs.iterdir()))
+
+    def test_marker_replacement_during_credential_use_fails_closed(self) -> None:
+        original = marker.load_marker(self.marker_path)
+        replacement = marker.new_marker(
+            self.marker_path,
+            run_id="f" * 64,
+            instance=original.instance,
+            container_id=original.container_id,
+            container_name=original.container_name,
+            image=original.image,
+            endpoint=original.endpoint,
+            credential_identity=original.credential_identity,
+        )
+        original_read = helper._read_pinned_credential
+        replaced = False
+
+        def replace_after_read(binding, *, marker_identity=None, parent_fd=None):
+            nonlocal replaced
+            raw = original_read(binding, marker_identity=marker_identity, parent_fd=parent_fd)
+            if not replaced:
+                replaced = True
+                marker.replace_marker(replacement, parent_fd=parent_fd)
+            return raw
+
+        with mock.patch.object(helper, "_read_pinned_credential", side_effect=replace_after_read):
+            with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                helper.read_credential_file(self.marker_path)
+        self.assertEqual(raised.exception.code, "marker_identity_mismatch")
+        self.assertTrue(replaced)
+        self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
+        self.assertEqual(self.credential_path.read_bytes(), self.value + b"\n")
+
     def test_non_line_ending_whitespace_and_interior_line_endings_fail_closed(self) -> None:
         rejected = (
             ("space", self.value + b" "),

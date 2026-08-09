@@ -94,6 +94,135 @@ class LiveRunMarkerTests(unittest.TestCase):
             marker.load_marker(self.marker_path, selectable=True)
         self.assertEqual(raised.exception.code, "marker_not_selectable")
 
+    def test_marker_size_limit_fails_before_publication(self) -> None:
+        value = self.make_marker()
+        with mock.patch.object(marker, "MAX_MARKER_BYTES", 1):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.create_marker(value)
+        self.assertEqual(raised.exception.code, "marker_too_large")
+        self.assertFalse(self.marker_path.exists())
+
+    def test_fixed_quarantine_quota_preserves_foreign_slots_and_stops_growth(self) -> None:
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        try:
+            foreign = b"foreign"
+            for name in marker.quarantine_slot_names("cleanup"):
+                path = self.runs / name
+                path.write_bytes(foreign)
+                path.chmod(marker.MARKER_MODES)
+            count, total = marker.quarantine_usage(parent_fd)
+            self.assertEqual(count, marker.QUARANTINE_SLOT_COUNT)
+            self.assertEqual(total, marker.QUARANTINE_SLOT_COUNT * len(foreign))
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.reserve_quarantine_slot(parent_fd, "cleanup", 1)
+            self.assertEqual(raised.exception.code, "quarantine_quota_exceeded")
+            self.assertEqual((self.runs / ".cleanup-00").read_bytes(), foreign)
+
+            for name in marker.quarantine_slot_names("cleanup"):
+                (self.runs / name).unlink()
+            saturated = self.runs / ".cleanup-00"
+            saturated.write_bytes(b"x" * marker.QUARANTINE_MAX_BYTES)
+            saturated.chmod(marker.MARKER_MODES)
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.reserve_quarantine_slot(parent_fd, "cleanup", 1)
+            self.assertEqual(raised.exception.code, "quarantine_quota_exceeded")
+            self.assertEqual(saturated.stat().st_size, marker.QUARANTINE_MAX_BYTES)
+        finally:
+            os.close(parent_fd)
+
+    def test_parent_lease_rejects_replaced_marker_directory(self) -> None:
+        value = self.make_marker()
+        marker.create_marker(value)
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        expected = marker.parent_identity(parent_fd)
+        moved = self.root / "runs-original"
+        try:
+            self.runs.rename(moved)
+            self.runs.mkdir(mode=marker.RUNS_DIR_MODE)
+            self.runs.chmod(marker.RUNS_DIR_MODE)
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.revalidate_runs_parent_path(self.marker_path, parent_fd, expected=expected)
+            self.assertEqual(raised.exception.code, "runs_dir_replaced")
+            self.assertTrue((moved / "fixture.json").exists())
+            self.assertFalse((self.runs / "fixture.json").exists())
+        finally:
+            os.close(parent_fd)
+
+    def test_replace_marker_preserves_a_concurrent_same_name_replacement(self) -> None:
+        value = self.make_marker()
+        marker.create_marker(value)
+        replacement = marker.new_marker(
+            self.marker_path,
+            run_id="f" * 64,
+            instance=value.instance,
+            container_id=value.container_id,
+            container_name=value.container_name,
+            image=value.image,
+            endpoint=value.endpoint,
+            credential_identity=value.credential_identity,
+        )
+        original_rename = marker._rename_noreplace
+        replaced = False
+
+        def race(parent_fd: int, source_name: str, target_name: str) -> None:
+            nonlocal replaced
+            if source_name == self.marker_path.name and not replaced:
+                replaced = True
+                self.marker_path.unlink()
+                marker.create_marker(replacement)
+            original_rename(parent_fd, source_name, target_name)
+
+        with mock.patch.object(marker, "_rename_noreplace", side_effect=race):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertTrue(replaced)
+        self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
+
+    def test_replace_marker_rejects_a_replacement_after_final_publish(self) -> None:
+        value = self.make_marker()
+        marker.create_marker(value)
+        replacement = marker.new_marker(
+            self.marker_path,
+            run_id="f" * 64,
+            instance=value.instance,
+            container_id=value.container_id,
+            container_name=value.container_name,
+            image=value.image,
+            endpoint=value.endpoint,
+            credential_identity=value.credential_identity,
+        )
+        original_rename = marker._rename_noreplace
+        replaced = False
+
+        def race(parent_fd: int, source_name: str, target_name: str) -> None:
+            nonlocal replaced
+            original_rename(parent_fd, source_name, target_name)
+            if target_name == self.marker_path.name and source_name.startswith(".replace-tmp-") and not replaced:
+                replaced = True
+                self.marker_path.unlink()
+                marker.create_marker(replacement)
+
+        with mock.patch.object(marker, "_rename_noreplace", side_effect=race):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.replace_marker(value.with_status(marker.STATUS_CLEANUP_FAILED))
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertTrue(replaced)
+        self.assertEqual(marker.load_marker(self.marker_path).run_id, "f" * 64)
+
+    def test_replace_marker_rejects_a_replacement_present_before_first_open(self) -> None:
+        original = self.make_marker()
+        marker.create_marker(original)
+        _, original_identity = marker.load_marker_with_identity(self.marker_path)
+        replacement = original.with_status(marker.STATUS_CLEANUP_FAILED)
+        self.marker_path.unlink()
+        marker.create_marker(original.with_status(marker.STATUS_CLEANUP_FAILED))
+
+        with self.assertRaises(marker.MarkerError) as raised:
+            marker.replace_marker(replacement, expected=original_identity)
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertEqual(marker.load_marker(self.marker_path).status, marker.STATUS_CLEANUP_FAILED)
+
     def test_unknown_duplicate_and_malformed_keys_fail_closed(self) -> None:
         value = self.make_marker()
         marker.create_marker(value)

@@ -93,6 +93,10 @@ class FakePodman:
             host_ip, host_port, container_port = args[args.index("--publish") + 1].split(":")
             container_id = f"{self._next_id:012x}" + ("a" * 52)
             self._next_id += 1
+            if "--cidfile" in args:
+                cidfile = Path(args[args.index("--cidfile") + 1])
+                cidfile.write_text(container_id + "\n", encoding="ascii")
+                cidfile.chmod(0o600)
             self.containers[name] = {
                 "Id": container_id,
                 "Name": f"/{name}",
@@ -170,10 +174,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
     def start(self, spec=None, *, marker_path: Path | None = None, readiness=None, **overrides):
         current_spec = spec or self.make_spec()
+        runner = overrides.pop("runner", self.fake)
         return launcher.start_instance(
             current_spec,
             marker_path=marker_path or self.marker_path(),
-            runner=self.fake,
+            runner=runner,
             readiness=readiness or self.ready,
             port_checker=lambda port: True,
             executable="/usr/bin/podman",
@@ -282,6 +287,391 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(environment["HERMES_DASHBOARD_BASIC_AUTH_PASSWORD"], password)
         self.assertNotIn(password, run_command)
         self.assertIn(f"io.hermternal.run-id={bound.run_id}", run_command)
+
+    def test_credential_replacement_before_marker_publication_is_not_adopted(self) -> None:
+        spec = self.make_spec()
+        original_revalidate = launcher._revalidate_private_identity
+        replaced = False
+
+        def race_credential(path, expected, *, code, replacement_code=None, parent_fd=None):
+            nonlocal replaced
+            if path.name == "fixture.credential" and not replaced:
+                replaced = True
+                replacement = self.runs / "credential-prepublish-replacement"
+                replacement.write_bytes(b"replacement-credential")
+                replacement.chmod(0o600)
+                path.unlink()
+                replacement.rename(path)
+            return original_revalidate(
+                path,
+                expected,
+                code=code,
+                replacement_code=replacement_code,
+                parent_fd=parent_fd,
+            )
+
+        with mock.patch.object(launcher, "_revalidate_private_identity", side_effect=race_credential):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec)
+        self.assertEqual(raised.exception.code, "credential_identity_mismatch")
+        self.assertTrue(replaced)
+        self.assertEqual((self.runs / "fixture.credential").read_bytes(), b"replacement-credential")
+        self.assertEqual(len(self.fake.containers), 1)
+        self.assertEqual(self.load().marker.status, "cleanup_failed")
+
+    def test_marker_constructor_failure_still_cleans_exact_started_container(self) -> None:
+        spec = self.make_spec()
+        with mock.patch.object(
+            launcher.live_run_marker,
+            "new_marker",
+            side_effect=launcher.live_run_marker.MarkerError("marker_schema_invalid"),
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec)
+        self.assertEqual(raised.exception.code, "marker_schema_invalid")
+        self.assertEqual(self.fake.containers, {})
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+
+    def test_state_sync_failure_cleans_created_state_inode_without_orphan(self) -> None:
+        original_sync = launcher._sync_parent
+
+        def fail_state_sync(path: Path, code: str, *, parent_fd: int | None = None) -> None:
+            if path.name == "fixture.state.json":
+                self.assertIsNotNone(parent_fd)
+                raise launcher.LauncherError("state_sync_failed")
+            original_sync(path, code, parent_fd=parent_fd)
+
+        with mock.patch.object(launcher, "_sync_parent", side_effect=fail_state_sync):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(self.make_spec())
+        self.assertEqual(raised.exception.code, "state_sync_failed")
+        self.assertEqual(self.fake.containers, {})
+        for path in (
+            self.marker_path(),
+            self.runs / "fixture.state.json",
+            self.runs / "fixture.credential",
+            self.runs / "fixture.cidfile",
+        ):
+            self.assertFalse(path.exists(), path)
+
+    def test_runs_directory_replacement_fails_closed_without_publishing_into_new_directory(self) -> None:
+        spec = self.make_spec()
+        moved = self.root / "runs-original"
+
+        def replace_runs_directory(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                self.runs.rename(moved)
+                self.runs.mkdir(mode=launcher.live_run_marker.RUNS_DIR_MODE)
+                self.runs.chmod(launcher.live_run_marker.RUNS_DIR_MODE)
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=replace_runs_directory)
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertFalse(any(self.runs.iterdir()))
+        self.assertTrue((moved / "fixture.json").exists())
+        self.assertEqual(len(self.fake.containers), 1)
+
+    def test_status_rejects_runs_directory_swap_after_runner(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        moved = self.root / "runs-status-original"
+
+        def swap_after_preflight(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "info":
+                self.runs.rename(moved)
+                self.runs.mkdir(mode=launcher.live_run_marker.RUNS_DIR_MODE)
+                self.runs.chmod(launcher.live_run_marker.RUNS_DIR_MODE)
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.status_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=swap_after_preflight,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertFalse((self.runs / "fixture.json").exists())
+        self.assertTrue((moved / "fixture.json").exists())
+        self.assertEqual(len(self.fake.containers), 1)
+
+    def test_stop_rejects_runs_directory_swap_after_runner_and_tombstones_held_dir(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        moved = self.root / "runs-stop-original"
+
+        def swap_after_preflight(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "info":
+                self.runs.rename(moved)
+                self.runs.mkdir(mode=launcher.live_run_marker.RUNS_DIR_MODE)
+                self.runs.chmod(launcher.live_run_marker.RUNS_DIR_MODE)
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=swap_after_preflight,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertFalse((self.runs / "fixture.json").exists())
+        moved_document = json.loads((moved / "fixture.json").read_text(encoding="utf-8"))
+        self.assertEqual(moved_document["status"], "cleanup_failed")
+        self.assertEqual(len(self.fake.containers), 1)
+
+    def test_execute_endpoint_rejects_runs_directory_swap_after_runner(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        moved = self.root / "runs-execute-original"
+        args = type(
+            "Args",
+            (),
+            {
+                "operation": "endpoint",
+                "marker": str(self.marker_path()),
+                "state_root": str(self.roots.state),
+                "data_root": str(self.roots.data),
+                "credential_root": str(self.roots.credentials),
+            },
+        )()
+
+        def fake_endpoint(state):
+            launcher.invoke_runner(
+                self.fake,
+                ("/usr/bin/podman", "info", "--format", "{{.Host.Security.Rootless}}"),
+                {"PATH": "/usr/bin"},
+                15,
+                failure_code="podman_preflight_failed",
+            )
+            self.runs.rename(moved)
+            self.runs.mkdir(mode=launcher.live_run_marker.RUNS_DIR_MODE)
+            self.runs.chmod(launcher.live_run_marker.RUNS_DIR_MODE)
+            return {"status": "running", "endpoint": state.marker.endpoint}
+
+        with mock.patch.object(launcher, "verify_handoff_endpoint", side_effect=fake_endpoint):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.execute(args)
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertFalse((self.runs / "fixture.json").exists())
+        self.assertTrue((moved / "fixture.json").exists())
+
+    def test_quarantine_count_and_bytes_quota_never_delete_foreign_slots(self) -> None:
+        for index in range(launcher.live_run_marker.QUARANTINE_SLOT_COUNT):
+            occupied = self.runs / f".cleanup-{index:02x}"
+            occupied.write_bytes(b"foreign")
+            occupied.chmod(0o600)
+        target = self.runs / "quota-target"
+        target.write_bytes(b"owned")
+        target.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher._remove_exact_file(target, code="quota_remove_failed")
+        self.assertEqual(raised.exception.code, "quarantine_quota_exceeded")
+        self.assertTrue(target.exists())
+        self.assertEqual((self.runs / ".cleanup-00").read_bytes(), b"foreign")
+
+        for name in launcher.live_run_marker.quarantine_slot_names("cleanup"):
+            path = self.runs / name
+            if path.exists():
+                path.unlink()
+        oversized = self.runs / ".cleanup-00"
+        oversized.write_bytes(b"x" * launcher.live_run_marker.QUARANTINE_MAX_BYTES)
+        oversized.chmod(0o600)
+        target.write_bytes(b"owned")
+        target.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher._remove_exact_file(target, code="quota_remove_failed")
+        self.assertEqual(raised.exception.code, "quarantine_quota_exceeded")
+        self.assertTrue(target.exists())
+        self.assertEqual(oversized.stat().st_size, launcher.live_run_marker.QUARANTINE_MAX_BYTES)
+
+    def test_quota_exhaustion_retains_cleanup_failed_tombstone_without_growth(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        for name in launcher.live_run_marker.quarantine_slot_names("cleanup"):
+            occupied = self.runs / name
+            occupied.write_bytes(b"foreign")
+            occupied.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "quarantine_quota_exceeded")
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(json.loads(tombstone.marker.state_path.read_text(encoding="utf-8"))["status"], "cleanup_failed")
+        self.assertEqual(len(self.fake.containers), 0)
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            count, _ = launcher.live_run_marker.quarantine_usage(parent_fd)
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(count, launcher.live_run_marker.QUARANTINE_SLOT_COUNT)
+
+    def test_marker_and_state_serialization_limits_apply_before_write(self) -> None:
+        value = launcher.live_run_marker.new_marker(
+            self.marker_path(),
+            run_id="a" * 64,
+            instance="fixture-one",
+            container_id="b" * 64,
+            container_name="hermternal-hermes-fixture-one",
+            image=launcher.DEFAULT_IMAGE,
+            endpoint="http://127.0.0.1:19119",
+            credential_identity=launcher.live_run_marker.CredentialIdentity(1, 2, 0o600, 49, 1),
+        )
+        with mock.patch.object(launcher.live_run_marker, "MAX_MARKER_BYTES", 1):
+            with self.assertRaises(launcher.live_run_marker.MarkerError) as raised:
+                launcher.live_run_marker.create_marker(value)
+        self.assertEqual(raised.exception.code, "marker_too_large")
+
+        self.start(self.make_spec())
+        state = self.load()
+        with mock.patch.object(launcher, "MAX_STATE_BYTES", 1):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.write_state(self.make_spec(), state.marker, replace=True, expected=state.state_identity)
+        self.assertEqual(raised.exception.code, "instance_state_too_large")
+
+    def test_runner_raise_after_creation_uses_cidfile_and_never_name_adopts(self) -> None:
+        def raise_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                raise RuntimeError("synthetic runner boundary secret")
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(self.make_spec(), runner=raise_after_run)
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        self.assertEqual(self.fake.containers, {})
+        run_id = next(command for command, _ in self.fake.calls if command[1] == "run")
+        removed = [command for command, _ in self.fake.calls if command[1:3] == ("rm", "--force")]
+        self.assertEqual(len(removed), 1)
+        self.assertRegex(removed[0][3], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(removed[0][3], launcher.CONTAINER_PREFIX + self.make_spec().instance)
+        self.assertIn("--cidfile", run_id)
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertFalse((self.runs / "fixture.cidfile").exists())
+
+    def test_runner_raise_without_cidfile_keeps_unknown_container_and_private_tombstone(self) -> None:
+        def raise_without_cidfile(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.unlink()
+                raise RuntimeError("synthetic unknown-run secret")
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(self.make_spec(), runner=raise_without_cidfile)
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        self.assertEqual(len(self.fake.containers), 1)
+        tombstone = launcher.load_launcher_state(self.marker_path(), self.roots)
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertFalse(tombstone.marker.credential_path.exists())
+
+        result = launcher.stop_instance(
+            self.marker_path(),
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(result["status"], "removed")
+        self.assertEqual(len(self.fake.containers), 1)
+
+    def test_success_without_cidfile_never_falls_back_to_stdout(self) -> None:
+        def return_without_cidfile(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                Path(command[command.index("--cidfile") + 1]).unlink()
+            return result
+
+        with mock.patch.object(launcher, "container_id_from_run_result", side_effect=AssertionError("stdout fallback")):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(self.make_spec(), runner=return_without_cidfile)
+        self.assertEqual(raised.exception.code, "cidfile_missing")
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertEqual(len(self.fake.containers), 1)
+        self.assertFalse(tombstone.marker.credential_path.exists())
+
+    def test_foreign_cidfile_is_not_adopted_and_retains_cleanup_tombstone(self) -> None:
+        spec = self.make_spec()
+        foreign_id = "e" * 64
+        self.fake.containers["foreign-container"] = {
+            "Id": foreign_id,
+            "Name": "/foreign-container",
+            "ImageName": spec.image,
+            "Config": {"Labels": {}},
+            "Mounts": [],
+            "NetworkSettings": {"Ports": {}},
+            "State": {"Status": "running"},
+        }
+
+        def raise_with_foreign_cidfile(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.write_text(f"{foreign_id}\n", encoding="ascii")
+                cidfile.chmod(0o600)
+                raise RuntimeError("synthetic foreign cidfile")
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=raise_with_foreign_cidfile)
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertIn(spec.container, self.fake.containers)
+        self.assertIn("foreign-container", self.fake.containers)
+
+    def test_runner_inspect_and_remove_exceptions_are_normalized_and_tombstoned(self) -> None:
+        def raise_on_inspect(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:3] == ("container", "inspect"):
+                raise RuntimeError("synthetic inspect secret")
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(self.make_spec(), runner=raise_on_inspect)
+        self.assertEqual(raised.exception.code, "container_inspect_failed")
+        self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
+        self.assertTrue((self.runs / "fixture.state.json").exists())
+        self.assertTrue((self.runs / "fixture.credential").exists())
+        self.assertEqual(len(self.fake.containers), 1)
+
+        def raise_on_remove(command, environment, timeout):
+            if command[1:3] == ("rm", "--force"):
+                raise RuntimeError("synthetic remove secret")
+            return self.fake(command, environment, timeout)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=raise_on_remove,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "container_remove_failed")
+        self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
+        self.assertEqual(len(self.fake.containers), 1)
 
     def test_new_run_never_adopts_same_name_replacement_after_run(self) -> None:
         spec = self.make_spec()
@@ -571,20 +961,17 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def test_cleanup_marker_unlink_failure_recreates_tombstone_for_exact_retry(self) -> None:
         spec = self.make_spec()
         self.start(spec)
-        original_unlink = Path.unlink
-        unlink_targets = [
-            self.runs / "fixture.credential",
-            self.runs / "fixture.state.json",
-            self.marker_path(),
-        ]
 
-        def fail_marker_unlink(*args: object, **kwargs: object) -> None:
-            path = unlink_targets.pop(0)
-            if path == self.marker_path():
-                raise OSError("synthetic marker unlink failure")
-            original_unlink(path, *args, **kwargs)
+        def fail_marker_unlink(
+            current: launcher.LauncherState,
+            expected: launcher.FileIdentity,
+            *,
+            parent_fd: int | None = None,
+        ) -> None:
+            del current, expected, parent_fd
+            raise launcher.LauncherError("marker_remove_failed")
 
-        with mock.patch.object(Path, "unlink", side_effect=fail_marker_unlink):
+        with mock.patch.object(launcher, "_remove_marker_last", side_effect=fail_marker_unlink):
             with self.assertRaises(launcher.LauncherError) as raised:
                 launcher.stop_instance(
                     self.marker_path(),
@@ -629,9 +1016,14 @@ class HermesAgentLauncherTests(unittest.TestCase):
             credential_identity=state.marker.credential_identity,
         )
 
-        def replace_marker_then_fail(current: launcher.LauncherState, expected: tuple[int, int, int, int, int]) -> None:
-            del expected
-            launcher.live_run_marker.replace_marker(raced)
+        def replace_marker_then_fail(
+            current: launcher.LauncherState,
+            expected: tuple[int, int, int, int, int],
+            *,
+            parent_fd: int | None = None,
+        ) -> None:
+            del current, expected
+            launcher.live_run_marker.replace_marker(raced, parent_fd=parent_fd)
             raise launcher.LauncherError("marker_replaced")
 
         with mock.patch.object(launcher, "_remove_marker_last", side_effect=replace_marker_then_fail):
@@ -645,7 +1037,178 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 )
         self.assertEqual(raised.exception.code, "marker_replaced")
         self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).run_id, "f" * 64)
-        self.assertFalse(self.runs.joinpath("fixture.state.json").exists())
+        self.assertTrue(self.runs.joinpath("fixture.state.json").exists())
+        self.assertEqual(json.loads(self.runs.joinpath("fixture.state.json").read_text())["status"], "cleanup_failed")
+
+    def test_same_name_replacement_container_survives_pinned_id_cleanup(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        original_id = state.container_id
+        swapped = False
+        original_key = f"original-{original_id}"
+
+        def swap_name_on_inspect(command, environment, timeout):
+            nonlocal swapped
+            if command[1:3] == ("container", "inspect") and command[3] == original_id and not swapped:
+                swapped = True
+                original = self.fake.containers.pop(spec.container)
+                replacement = json.loads(json.dumps(original))
+                replacement["Id"] = "d" * 64
+                self.fake.containers[spec.container] = replacement
+                self.fake.containers[original_key] = original
+            return self.fake(command, environment, timeout)
+
+        result = launcher.stop_instance(
+            self.marker_path(),
+            roots=self.roots,
+            runner=swap_name_on_inspect,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(result["status"], "removed")
+        self.assertTrue(swapped)
+        self.assertEqual(self.fake.containers[spec.container]["Id"], "d" * 64)
+        self.assertFalse(self.marker_path().exists())
+        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+        lifecycle = [command for command, _ in self.fake.calls if command[1:3] == ("rm", "--force")]
+        self.assertEqual(lifecycle, [("/usr/bin/podman", "rm", "--force", original_id)])
+
+    def test_concurrent_credential_replacement_is_preserved_and_original_erased(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        original_fd = os.open(state.marker.credential_path, os.O_RDONLY)
+        replaced = False
+        original_rename = launcher._rename_noreplace
+        replacement_bytes = b"replacement-credential"
+
+        def race_credential(parent_fd, source_name, target_name):
+            nonlocal replaced
+            if source_name == state.marker.credential_path.name and not replaced:
+                replaced = True
+                replacement = self.runs / "credential-replacement"
+                replacement.write_bytes(replacement_bytes)
+                replacement.chmod(0o600)
+                state.marker.credential_path.unlink()
+                replacement.rename(state.marker.credential_path)
+            return original_rename(parent_fd, source_name, target_name)
+
+        try:
+            with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_credential):
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.stop_instance(
+                        self.marker_path(),
+                        roots=self.roots,
+                        runner=self.fake,
+                        executable="/usr/bin/podman",
+                        source_environment={"PATH": "/usr/bin"},
+                    )
+            os.lseek(original_fd, 0, os.SEEK_SET)
+            self.assertEqual(os.read(original_fd, 256), b"")
+        finally:
+            os.close(original_fd)
+        self.assertTrue(replaced)
+        self.assertIn("credential_remove_failed_replaced", raised.exception.code)
+        self.assertEqual(state.marker.credential_path.read_bytes(), replacement_bytes)
+        self.assertEqual(self.fake.containers, {})
+
+    def test_credential_erasure_overwrites_held_descriptor_before_truncate(self) -> None:
+        path = self.runs / "erase.credential"
+        path.write_bytes(b"synthetic-secret")
+        path.chmod(0o600)
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        observed: list[bytes] = []
+        real_ftruncate = os.ftruncate
+
+        def observe_before_truncate(current: int, size: int) -> None:
+            observed.append(os.pread(current, launcher.live_run_marker.MAX_CREDENTIAL_BYTES, 0))
+            real_ftruncate(current, size)
+
+        try:
+            with mock.patch.object(launcher.os, "ftruncate", side_effect=observe_before_truncate):
+                launcher._erase_credential_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+        self.assertEqual(observed, [b"\x00" * launcher.live_run_marker.MAX_CREDENTIAL_BYTES])
+        self.assertEqual(path.read_bytes(), b"")
+
+    def test_concurrent_state_replacement_is_preserved_without_marker_adoption(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        replacement_bytes = b"replacement-state"
+        replaced = False
+        original_rename = launcher._rename_noreplace
+
+        def race_state(parent_fd, source_name, target_name):
+            nonlocal replaced
+            if source_name == state.marker.state_path.name and not replaced:
+                replaced = True
+                replacement = self.runs / "state-replacement"
+                replacement.write_bytes(replacement_bytes)
+                replacement.chmod(0o600)
+                state.marker.state_path.unlink()
+                replacement.rename(state.marker.state_path)
+            return original_rename(parent_fd, source_name, target_name)
+
+        with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_state):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.stop_instance(
+                    self.marker_path(),
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertIn("state_remove_failed_replaced", raised.exception.code)
+        self.assertTrue(replaced)
+        self.assertEqual(state.marker.state_path.read_bytes(), replacement_bytes)
+        self.assertEqual(self.fake.containers, {})
+        self.assertTrue(self.marker_path().exists())
+
+    def test_concurrent_marker_replacement_is_preserved_without_marker_adoption(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        replacement = launcher.live_run_marker.RunMarker(
+            marker_path=state.marker.marker_path,
+            status=launcher.live_run_marker.STATUS_RUNNING,
+            run_id="f" * 64,
+            instance=state.marker.instance,
+            container_id=state.marker.container_id,
+            container_name=state.marker.container_name,
+            image=state.marker.image,
+            endpoint=state.marker.endpoint,
+            state_path=state.marker.state_path,
+            credential_path=state.marker.credential_path,
+            credential_identity=state.marker.credential_identity,
+        )
+        replaced = False
+        original_rename = launcher._rename_noreplace
+
+        def race_marker(parent_fd, source_name, target_name):
+            nonlocal replaced
+            if source_name == state.marker.marker_path.name and not replaced:
+                replaced = True
+                state.marker.marker_path.unlink()
+                launcher.live_run_marker.create_marker(replacement)
+            return original_rename(parent_fd, source_name, target_name)
+
+        with mock.patch.object(launcher, "_rename_noreplace", side_effect=race_marker):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.stop_instance(
+                    self.marker_path(),
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertTrue(replaced)
+        self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).run_id, "f" * 64)
+        self.assertEqual(self.fake.containers, {})
 
     def test_cleanup_rejects_replaced_credential_before_container_removal(self) -> None:
         spec = self.make_spec()

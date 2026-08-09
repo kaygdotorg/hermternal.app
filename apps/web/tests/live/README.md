@@ -10,8 +10,21 @@ The host is test-only. It is not a deployment server and does not add authentica
 
 Run the lane only against the authorized disposable VM. From the repository root,
 create one existing private `0700` runs directory and provide one exact
-absolute marker path inside it. Parse that caller-selected marker result before
-starting Playwright; never enumerate runs, infer recency, or reuse a port:
+absolute marker path inside it. The launcher derives the live credential, state,
+and private engine cidfile as siblings of that marker; `--credential-root` is a
+legacy compatibility option and does not control live credential placement.
+The launcher accepts container identity only from the private engine-emitted
+cidfile read through the same held runs-directory descriptor; missing, malformed,
+replaced, or foreign cidfiles fail closed and never fall back to detached stdout.
+Each launcher operation captures the private runs-directory device, inode, and
+`0700` mode at entry and revalidates that the exact marker pathname still names
+that held directory around engine boundaries. Marker/state serialization is
+capped before publication, and fixed cleanup/replacement quarantine slots are
+bounded to 48 entries and 131,072 aggregate bytes; occupied or raced slots are
+retained rather than deleted or replaced; quota exhaustion retains
+`cleanup_failed` evidence through the already-owned marker/state descriptors.
+Parse that caller-selected marker result before starting Playwright; never
+enumerate runs, infer recency, or reuse a port:
 
 ```sh
 RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"

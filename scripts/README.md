@@ -228,11 +228,14 @@ Every result is one JSON object. Start, status, and stop output contain only
 bounded instance/status/marker metadata. A verified endpoint result contains
 only `status`, the exact loopback endpoint, the exact marker path, and the exact
 credential path. It never contains the generated run ID or password. Credentials
-use mode `0600` and live outside Git under
-`~/.config/hermternal-tests/hermes-agent/` by default. Data defaults to
-`~/.local/share/hermternal-tests/hermes-agent/` and non-secret launcher state
-defaults to `~/.local/state/hermternal/hermes-agent/`. Tests may override all
-three roots.
+use mode `0600`. The live credential, state file, and cidfile paths are derived
+as siblings beside the exact caller-selected marker, under that marker's
+existing private `0700` runs directory. For example, a marker named
+`run.json` derives `run.credential`, `run.state.json`, and `run.cidfile` in the
+same directory. `--credential-root` does not control live credential placement.
+The container data directory defaults to
+`~/.local/share/hermternal-tests/hermes-agent/`; that data root is separate from
+the marker-bound live files.
 
 A successful `start` result is `ready`, not a handoff permit. The following
 `endpoint` command is the source of truth for the caller-selected marker: it
@@ -271,17 +274,36 @@ Readiness requires HTTP 200 and a `basic` provider with
 invocation-owned container, fresh credential, state, and marker after the
 immutable run binding is published. Data remains for diagnosis or retry; if
 exact cleanup fails, the private marker and state are retained as a bounded
-`cleanup_failed` tombstone. This strict marker path does not expose a broad
-purge operation. Active rebind of an already-running container is intentionally
-unsupported; ordinary running-container reuse is non-destructive. Cleanup
-never runs a broad prune or glob and never removes data implicitly.
+`cleanup_failed` tombstone. If the synchronous engine runner raises before a
+private cidfile yields an immutable container ID, the launcher never searches
+or adopts by name: it erases the known credential and retains a bounded private
+`cleanup_failed` tombstone with an unproven sentinel ID that stop removes only
+as metadata. This strict marker path does not expose a broad purge operation.
+Active rebind of an already-running container is intentionally unsupported;
+ordinary running-container reuse is non-destructive. Cleanup never runs a
+broad prune or glob and never removes data implicitly.
 
 An existing container is reused only after its launcher labels prove the exact
 instance, loopback port, and immutable image identity. A stopped owned
 container is started only after the requested port is available, then readiness
-is checked. A new run accepts only the one validated immutable container ID
-emitted by that detached invocation; every first inspect, endpoint check, and
-cleanup targets that ID, never a replacement rediscovered by mutable name.
+is checked. A new run accepts only the one validated immutable container ID emitted by the
+private engine cidfile for that detached invocation; detached stdout is never an
+identity fallback. The cidfile is read through the same held private runs-directory
+fd used by credential, state, and marker publication. Every first inspect, endpoint
+check, and cleanup targets that ID, never a replacement rediscovered by mutable
+name. A malformed, missing, replaced, or foreign cidfile fails closed and retains
+bounded private cleanup evidence rather than publishing `ready`. Each start,
+status, endpoint, stop, and credential-read operation captures the runs-directory
+device, inode, and `0700` mode at entry, keeps that descriptor through all marker,
+state, credential, cidfile, cleanup, and tombstone work, and rechecks that the
+caller-selected pathname still names the held directory around every fake-engine
+boundary. Marker and state records are capped at 16 KiB before publication.
+Quarantine evidence uses 16 fixed slots per kind (`cleanup`, `replace`, and
+`replace-tmp`), with at most 48 occupied entries and 131,072 aggregate bytes;
+occupied, foreign, inaccessible, or raced slots are retained rather than removed.
+When no safe slot remains, cleanup fails closed and rewrites only the already
+owned marker/state descriptors into `cleanup_failed` evidence; it never creates
+an unbounded name or deletes a raced foreign inode.
 Lifecycle actions use the freshly inspected immutable container ID, not the
 mutable container name, and rollback re-inspects that same ID before stopping
 it. If start, readiness, or state persistence fails, the recovery transaction
@@ -313,16 +335,20 @@ python3 -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scrip
 python3 -O -m unittest scripts.test_live_run_marker scripts.test_hermes_agent scripts.test_with_live_credential scripts.test_read_launcher_result
 ```
 
-The 9-test marker and 26-test launcher suites use local synthetic files and a
-fake Podman boundary. The 9-test credential handoff and 6-test launcher-result
-suites use only synthetic bytes and mocked local process boundaries. None of
-these suites starts Hermes, contacts an endpoint, or reads a real credential.
-The suites cover strict closed schemas, private atomic files, exact marker
-selection, run-ID/container binding, credential identity replacement, FIFO and
-symlink rejection, bounded handoff output, rootless checks, environment
-cleanup, stopped-container recovery, and exact-once cleanup. This command-line
-artifact has no UI, focus, screen-reader, browser-zoom, contrast, motion, or
-touch-target surface; accessibility checks are N/A.
+The 15-test marker and 46-test launcher suites use local synthetic files and a
+fake Podman boundary. The 11-test credential handoff and 6-test launcher-result
+suites use only synthetic bytes and mocked local process boundaries (78 tests in
+this focused command). None of these suites starts Hermes, contacts an endpoint,
+or reads a real credential. The suites cover strict closed schemas, private
+atomic files, exact marker selection, run-ID/container binding, private cidfile
+provenance, runs-directory replacement around status/stop/endpoint windows,
+credential and state identity replacement, held-descriptor erasure, fixed-slot
+count/byte saturation, foreign quarantine preservation, oversized marker/state
+publication rejection, no-name-unlink quarantine retention, FIFO and symlink
+rejection, bounded handoff output, rootless checks, environment cleanup,
+stopped-container recovery, and exact-once cleanup. This command-line artifact
+has no UI, focus, screen-reader, browser-zoom, contrast, motion, or touch-target
+surface; accessibility checks are N/A.
 
 ## Disposable Caddy proof renderer
 

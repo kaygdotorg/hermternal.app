@@ -10,11 +10,15 @@ credential file. The credential value is intentionally never read here.
 
 from __future__ import annotations
 
+import contextvars
+import ctypes
+import errno
 import json
 import os
 import re
 import secrets
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -57,11 +61,40 @@ MARKER_KEYS = frozenset(
 CREDENTIAL_IDENTITY_KEYS = frozenset({"device", "inode", "mode", "size", "nlink"})
 
 
+MarkerFileIdentity = tuple[int, int, int, int, int]
+ParentIdentity = tuple[int, int, int]
+_MARKER_RENAME_EXPECTED: contextvars.ContextVar[tuple[int, str, str, MarkerFileIdentity] | None] = contextvars.ContextVar(
+    "marker_rename_expected",
+    default=None,
+)
+_EXPECTED_PARENT_IDENTITY: contextvars.ContextVar[ParentIdentity | None] = contextvars.ContextVar(
+    "marker_expected_parent_identity",
+    default=None,
+)
+
+# Quarantines are deliberately fixed-name slots rather than randomly named
+# entries. This bounds retained evidence without enumerating a runs directory;
+# an occupied slot is never removed or overwritten, even when it is foreign.
+QUARANTINE_SLOT_COUNT = 16
+QUARANTINE_MAX_ENTRIES = QUARANTINE_SLOT_COUNT * 3
+QUARANTINE_MAX_BYTES = 128 * 1024
+_QUARANTINE_KINDS = ("cleanup", "replace", "replace-tmp")
+
+
 class MarkerError(Exception):
     """Stable fail-closed marker error without path or run-ID echoing."""
 
     def __init__(self, code: str = "marker_invalid") -> None:
         self.code = code
+        super().__init__(code)
+
+
+class OwnedMarkerError(MarkerError):
+    """A marker write failed after this process created one exact inode."""
+
+    def __init__(self, code: str, *, path: Path, identity: MarkerFileIdentity) -> None:
+        self.path = path
+        self.identity = identity
         super().__init__(code)
 
 
@@ -168,6 +201,21 @@ class RunMarker:
             credential_identity=self.credential_identity,
         )
 
+    def with_container_id(self, container_id: str) -> "RunMarker":
+        return RunMarker(
+            marker_path=self.marker_path,
+            status=self.status,
+            run_id=self.run_id,
+            instance=self.instance,
+            container_id=container_id,
+            container_name=self.container_name,
+            image=self.image,
+            endpoint=self.endpoint,
+            state_path=self.state_path,
+            credential_path=self.credential_path,
+            credential_identity=self.credential_identity,
+        )
+
 
 @dataclass(frozen=True)
 class MarkerPaths:
@@ -176,6 +224,7 @@ class MarkerPaths:
     marker: Path
     state: Path
     credential: Path
+    cidfile: Path
 
 
 def _fail(code: str) -> None:
@@ -240,11 +289,13 @@ def marker_paths(marker_path: str | Path) -> MarkerPaths:
         _fail("marker_path_invalid")
     state = canonical_path(marker.with_name(f"{marker.stem}.state.json"), code="state_path_invalid")
     credential = canonical_path(marker.with_name(f"{marker.stem}.credential"), code="credential_path_invalid")
-    if state.parent != marker.parent or credential.parent != marker.parent:
+    cidfile = canonical_path(marker.with_name(f"{marker.stem}.cidfile"), code="cidfile_path_invalid")
+    siblings = (state, credential, cidfile)
+    if any(path.parent != marker.parent for path in siblings):
         _fail("marker_path_invalid")
-    if state == marker or credential in {marker, state}:
+    if len(set((marker, *siblings))) != 4:
         _fail("marker_path_invalid")
-    return MarkerPaths(marker, state, credential)
+    return MarkerPaths(marker, state, credential, cidfile)
 
 
 def new_run_id() -> str:
@@ -374,20 +425,180 @@ def _write_all(descriptor: int, content: bytes) -> None:
         view = view[written:]
 
 
-def _sync_directory(directory: Path) -> None:
+def _parent_identity(info: os.stat_result, *, code: str = "marker_invalid") -> ParentIdentity:
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != RUNS_DIR_MODE:
+        _fail(code)
+    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+
+
+def parent_identity(parent_fd: int, *, code: str = "marker_invalid") -> ParentIdentity:
+    """Capture the exact private parent identity held by one operation."""
+
     try:
-        descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        return _parent_identity(os.fstat(parent_fd), code=code)
     except OSError:
-        _fail("marker_sync_failed")
+        _fail(code)
+    raise AssertionError("unreachable")
+
+
+def _set_expected_parent_identity(identity: ParentIdentity):
+    return _EXPECTED_PARENT_IDENTITY.set(identity)
+
+
+def _reset_expected_parent_identity(token: contextvars.Token[ParentIdentity | None]) -> None:
+    _EXPECTED_PARENT_IDENTITY.reset(token)
+
+
+def revalidate_runs_parent_path(
+    marker_path: str | Path,
+    parent_fd: int,
+    *,
+    expected: ParentIdentity | None = None,
+    code: str = "marker_invalid",
+) -> None:
+    """Require the marker pathname to still name the original held directory."""
+
+    marker = canonical_path(marker_path, code="marker_path_invalid")
+    try:
+        current = _parent_identity(marker.parent.lstat(), code=code)
+        held = parent_identity(parent_fd, code=code)
+    except OSError:
+        _fail("runs_dir_replaced")
+    if held != current or (expected is not None and held != expected):
+        _fail("runs_dir_replaced")
+
+
+def _validate_runs_parent_fd(parent_fd: int, *, code: str = "marker_invalid") -> None:
+    """Validate a caller-held private runs directory without reopening its path."""
+
+    current = parent_identity(parent_fd, code=code)
+    expected = _EXPECTED_PARENT_IDENTITY.get()
+    if expected is not None and current != expected:
+        _fail("runs_dir_replaced")
+
+
+def _open_runs_parent(directory: Path, *, code: str = "marker_invalid") -> int:
+    """Hold one validated private runs directory across marker operations."""
+
+    try:
+        descriptor = os.open(
+            directory,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            _validate_runs_parent_fd(descriptor, code=code)
+        except MarkerError:
+            os.close(descriptor)
+            raise
+        return descriptor
+    except MarkerError:
+        raise
+    except OSError:
+        _fail(code)
+    raise AssertionError("unreachable")
+
+
+def open_runs_parent(marker_path: str | Path, *, code: str = "marker_invalid") -> int:
+    """Open the caller-selected marker's private parent without following links."""
+
+    marker = canonical_path(marker_path, code="marker_path_invalid")
+    ensure_private_runs_dir(marker.parent)
+    return _open_runs_parent(marker.parent, code=code)
 
 
 def _marker_bytes(marker: RunMarker) -> bytes:
     # ``sort_keys`` and compact separators keep the bounded record deterministic.
-    return (json.dumps(marker.document(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    content = (json.dumps(marker.document(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(content) > MAX_MARKER_BYTES:
+        _fail("marker_too_large")
+    return content
+
+
+def quarantine_slot_names(kind: str) -> tuple[str, ...]:
+    if kind not in _QUARANTINE_KINDS:
+        _fail("quarantine_kind_invalid")
+    return tuple(f".{kind}-{index:02x}" for index in range(QUARANTINE_SLOT_COUNT))
+
+
+def _quarantine_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def quarantine_usage(parent_fd: int) -> tuple[int, int]:
+    """Measure only the fixed quarantine slots, without directory enumeration."""
+
+    _validate_runs_parent_fd(parent_fd)
+    count = 0
+    total = 0
+    for kind in _QUARANTINE_KINDS:
+        for name in quarantine_slot_names(kind):
+            descriptor = -1
+            try:
+                descriptor = os.open(name, _quarantine_open_flags(), dir_fd=parent_fd)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # An unopenable occupied slot is conservatively counted. It can
+                # never be reclaimed by this process, so it consumes capacity.
+                count += 1
+                continue
+            try:
+                info = os.fstat(descriptor)
+                count += 1
+                total += max(0, info.st_size)
+            except OSError:
+                count += 1
+            finally:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    if count > QUARANTINE_MAX_ENTRIES or total > QUARANTINE_MAX_BYTES:
+        _fail("quarantine_quota_exceeded")
+    return count, total
+
+
+def reserve_quarantine_slot(
+    parent_fd: int,
+    kind: str,
+    size: int,
+    *,
+    exclude: set[str] | None = None,
+) -> str:
+    """Reserve a bounded fixed slot; races only make a slot unavailable."""
+
+    if type(size) is not int or size < 0:
+        _fail("quarantine_quota_exceeded")
+    count, total = quarantine_usage(parent_fd)
+    if count >= QUARANTINE_MAX_ENTRIES or total + size > QUARANTINE_MAX_BYTES:
+        _fail("quarantine_quota_exceeded")
+    excluded = exclude or set()
+    for name in quarantine_slot_names(kind):
+        if name in excluded:
+            continue
+        descriptor = -1
+        try:
+            descriptor = os.open(name, _quarantine_open_flags(), dir_fd=parent_fd)
+        except FileNotFoundError:
+            return name
+        except OSError:
+            continue
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+    _fail("quarantine_quota_exceeded")
+    raise AssertionError("unreachable")
 
 
 def validate_marker(marker: RunMarker) -> RunMarker:
@@ -400,87 +611,417 @@ def validate_marker(marker: RunMarker) -> RunMarker:
     return marker
 
 
-def create_marker(marker: RunMarker) -> None:
-    """Create one marker with O_EXCL, fsync, and a private parent directory."""
+def create_marker(marker: RunMarker, *, parent_fd: int | None = None) -> MarkerFileIdentity:
+    """Create one marker with O_EXCL, fsync, and a held private parent fd."""
 
     validate_marker(marker)
     path = marker.marker_path
     content = _marker_bytes(marker)
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_runs_parent(path.parent)
+    else:
+        _validate_runs_parent_fd(parent_fd)
+    descriptor = -1
+    identity: MarkerFileIdentity | None = None
     try:
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            MARKER_MODES,
-        )
-    except FileExistsError:
-        _fail("marker_already_exists")
-    except OSError:
-        _fail("marker_create_failed")
-    try:
-        _write_all(descriptor, content)
-        os.fchmod(descriptor, MARKER_MODES)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    _sync_directory(path.parent)
-
-
-def replace_marker(marker: RunMarker) -> None:
-    """Atomically replace an existing marker after validating its exact path."""
-
-    validate_marker(marker)
-    path = marker.marker_path
-    try:
-        info = path.lstat()
-    except OSError:
-        _fail("marker_missing")
-    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != MARKER_MODES or info.st_nlink != 1:
-        _fail("marker_invalid")
-    temporary = path.with_name(f".{path.name}.tmp-{secrets.token_hex(8)}")
-    content = _marker_bytes(marker)
-    try:
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            MARKER_MODES,
-        )
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                MARKER_MODES,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            _fail("marker_already_exists")
+        except OSError:
+            _fail("marker_create_failed")
         try:
             _write_all(descriptor, content)
             os.fchmod(descriptor, MARKER_MODES)
             os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        os.replace(temporary, path)
-        _sync_directory(path.parent)
-    except MarkerError:
+            identity = _marker_file_identity(os.fstat(descriptor))
+        except (MarkerError, OSError) as error:
+            if identity is None:
+                try:
+                    identity = _marker_file_identity(os.fstat(descriptor))
+                except MarkerError:
+                    pass
+                except OSError:
+                    pass
+            if identity is not None:
+                code = error.code if isinstance(error, MarkerError) else "marker_create_failed"
+                raise OwnedMarkerError(code, path=path, identity=identity) from None
+            if isinstance(error, MarkerError):
+                raise
+            _fail("marker_create_failed")
         try:
-            temporary.unlink()
+            os.close(descriptor)
         except OSError:
-            pass
+            descriptor = -1
+            assert identity is not None
+            raise OwnedMarkerError("marker_close_failed", path=path, identity=identity) from None
+        descriptor = -1
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            assert identity is not None
+            raise OwnedMarkerError("marker_sync_failed", path=path, identity=identity) from None
+        assert identity is not None
+        return identity
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _marker_file_identity(info: os.stat_result) -> MarkerFileIdentity:
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != MARKER_MODES or info.st_nlink != 1:
+        _fail("marker_invalid")
+    return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_size, info.st_nlink)
+
+
+def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> None:
+    """Claim one same-directory entry without overwriting a replacement."""
+
+    source = os.fsencode(source_name)
+    target = os.fsencode(target_name)
+    expected_claim = _MARKER_RENAME_EXPECTED.get()
+    if expected_claim is not None:
+        expected_parent, expected_source, expected_target, expected_identity = expected_claim
+        if (expected_parent, expected_source, expected_target) == (parent_fd, source_name, target_name):
+            descriptor = -1
+            try:
+                descriptor = os.open(
+                    source_name,
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=parent_fd,
+                )
+                current = _marker_file_identity(os.fstat(descriptor))
+                if current != expected_identity:
+                    _fail("marker_replaced")
+            except FileNotFoundError:
+                pass
+            finally:
+                if descriptor >= 0:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        operation = libc.renameatx_np
+        operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source, parent_fd, target, 0x00000004)
+    elif hasattr(libc, "renameat2"):
+        operation = libc.renameat2
+        operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        operation.restype = ctypes.c_int
+        result = operation(parent_fd, source, parent_fd, target, 0x00000001)
+    else:
+        _fail("atomic_quarantine_unavailable")
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        _fail("quarantine_exists")
+    if error_number == errno.ENOENT:
+        _fail("marker_missing")
+    _fail("atomic_quarantine_failed")
+
+
+def _rename_exact_noreplace(
+    parent_fd: int,
+    source_name: str,
+    target_name: str,
+    expected: MarkerFileIdentity,
+) -> None:
+    """Validate the source again inside the no-replace syscall boundary."""
+
+    token = _MARKER_RENAME_EXPECTED.set((parent_fd, source_name, target_name, expected))
+    try:
+        _rename_noreplace(parent_fd, source_name, target_name)
+    finally:
+        _MARKER_RENAME_EXPECTED.reset(token)
+
+
+def replace_marker(
+    marker: RunMarker,
+    *,
+    expected: MarkerFileIdentity | None = None,
+    parent_fd: int | None = None,
+) -> MarkerFileIdentity:
+    """Replace one exact marker without overwriting a concurrent replacement."""
+
+    validate_marker(marker)
+    path = marker.marker_path
+    content = _marker_bytes(marker)
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_runs_parent(path.parent)
+    else:
+        _validate_runs_parent_fd(parent_fd)
+    source_identity: MarkerFileIdentity | None = None
+    source_fd = -1
+    moved_fd = -1
+    final_fd = -1
+    temporary_fd = -1
+    temporary_name: str | None = None
+    quarantine_name: str | None = None
+    temporary_identity: MarkerFileIdentity | None = None
+
+    def remove_temporary() -> None:
+        # Fixed private slots are bounded evidence. Do not unlink one by name
+        # after validating an inode: a same-name replacement could be deleted
+        # by that final pathname operation.
+        return
+
+    try:
+        try:
+            source_fd = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            _fail("marker_missing")
+        except OSError:
+            _fail("marker_invalid")
+        source_identity = _marker_file_identity(os.fstat(source_fd))
+        if expected is not None and source_identity != expected:
+            _fail("marker_replaced")
+        for _ in range(QUARANTINE_SLOT_COUNT):
+            candidate = reserve_quarantine_slot(parent_fd, "replace-tmp", len(content))
+            try:
+                temporary_fd = os.open(
+                    candidate,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    MARKER_MODES,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        if temporary_fd < 0 or temporary_name is None:
+            _fail("quarantine_quota_exceeded")
+        _write_all(temporary_fd, content)
+        os.fchmod(temporary_fd, MARKER_MODES)
+        os.fsync(temporary_fd)
+        temporary_identity = _marker_file_identity(os.fstat(temporary_fd))
+        os.close(temporary_fd)
+        temporary_fd = -1
+
+        assert source_identity is not None
+        for _ in range(QUARANTINE_SLOT_COUNT):
+            candidate = reserve_quarantine_slot(
+                parent_fd,
+                "replace",
+                source_identity[3],
+                exclude={temporary_name},
+            )
+            try:
+                _rename_exact_noreplace(parent_fd, path.name, candidate, source_identity)
+            except MarkerError as error:
+                if error.code == "quarantine_exists":
+                    continue
+                raise
+            quarantine_name = candidate
+            break
+        if quarantine_name is None:
+            _fail("quarantine_quota_exceeded")
+        moved_fd = os.open(
+            quarantine_name,
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+        moved_identity = _marker_file_identity(os.fstat(moved_fd))
+        if moved_identity != source_identity:
+            # Never move a raced quarantine entry back by pathname: after the
+            # descriptor check that name may already belong to a replacement.
+            _fail("marker_replaced")
+
+        assert temporary_name is not None
+        _rename_noreplace(parent_fd, temporary_name, path.name)
+        try:
+            final_fd = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError:
+            _fail("marker_replaced")
+        try:
+            final_identity = _marker_file_identity(os.fstat(final_fd))
+            moved_current = _marker_file_identity(os.fstat(moved_fd))
+        except MarkerError:
+            _fail("marker_replaced")
+        if final_identity != temporary_identity or moved_current != moved_identity:
+            _fail("marker_replaced")
+        # The old marker remains in one of the finite private quarantine slots.
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            _fail("marker_sync_failed")
+        assert temporary_identity is not None
+        return temporary_identity
+    except MarkerError:
         raise
     except OSError:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
         _fail("marker_replace_failed")
+    finally:
+        if temporary_fd >= 0:
+            try:
+                os.close(temporary_fd)
+            except OSError:
+                pass
+        if final_fd >= 0:
+            try:
+                os.close(final_fd)
+            except OSError:
+                pass
+        # Never restore a quarantine by pathname after its descriptor has been
+        # checked. A replacement at that name must remain untouched.
+        remove_temporary()
+        for descriptor in (moved_fd, source_fd):
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        if owns_parent and parent_fd >= 0:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
 
 
-def _read_marker_bytes(path: Path) -> bytes:
+def rewrite_marker_exact(
+    marker: RunMarker,
+    expected: MarkerFileIdentity,
+    *,
+    parent_fd: int | None = None,
+) -> MarkerFileIdentity:
+    """Rewrite one exact marker inode when quarantine capacity is exhausted.
+
+    This is the bounded fallback for cleanup evidence. It never follows or
+    replaces the marker pathname: the held descriptor must still identify the
+    expected private inode before bytes are changed. The operation is used only
+    to turn an already-owned record into a cleanup tombstone when allocating a
+    second quarantine inode would exceed the finite retention budget.
+    """
+
+    validate_marker(marker)
+    content = _marker_bytes(marker)
+    path = marker.marker_path
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_runs_parent(path.parent)
+    else:
+        _validate_runs_parent_fd(parent_fd)
+    descriptor = -1
     try:
-        descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-        )
-    except FileNotFoundError:
-        _fail("marker_missing")
-    except OSError:
-        _fail("marker_invalid")
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDWR
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            _fail("marker_missing")
+        except OSError:
+            _fail("marker_rewrite_failed")
+        before = _marker_file_identity(os.fstat(descriptor))
+        if before != expected:
+            _fail("marker_replaced")
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            _write_all(descriptor, content)
+            os.fchmod(descriptor, MARKER_MODES)
+            os.fsync(descriptor)
+        except MarkerError:
+            raise
+        except OSError:
+            _fail("marker_rewrite_failed")
+        after = _marker_file_identity(os.fstat(descriptor))
+        if after[:3] != before[:3] or after[4] != before[4] or after[3] != len(content):
+            _fail("marker_replaced")
+        try:
+            os.fsync(parent_fd)
+        except OSError:
+            _fail("marker_sync_failed")
+        return after
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def _read_marker_record(path: Path, *, parent_fd: int | None = None) -> tuple[object, MarkerFileIdentity]:
+    """Read, parse, and pin one marker through a held parent directory fd."""
+
+    owns_parent = parent_fd is None
+    if parent_fd is None:
+        parent_fd = _open_runs_parent(path.parent)
+    else:
+        _validate_runs_parent_fd(parent_fd)
+    descriptor = -1
     try:
+        try:
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            _fail("marker_missing")
+        except OSError:
+            _fail("marker_invalid")
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or stat.S_ISLNK(before.st_mode)
             or stat.S_IMODE(before.st_mode) != MARKER_MODES
             or before.st_nlink != 1
             or before.st_size > MAX_MARKER_BYTES
@@ -492,56 +1033,116 @@ def _read_marker_bytes(path: Path) -> bytes:
             if not chunk:
                 break
             raw.extend(chunk)
-        after = os.fstat(descriptor)
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_size,
-            before.st_nlink,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_size,
-            after.st_nlink,
-        ):
-            _fail("marker_replaced")
         if len(raw) > MAX_MARKER_BYTES:
             _fail("marker_too_large")
-        return bytes(raw)
+        # Parse before the final fstat while the same descriptor is still held;
+        # pathname replacement cannot make an unowned document look adopted.
+        document = _json_load(bytes(raw))
+        after = os.fstat(descriptor)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            stat.S_IMODE(before.st_mode),
+            before.st_size,
+            before.st_nlink,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            stat.S_IMODE(after.st_mode),
+            after.st_size,
+            after.st_nlink,
+        )
+        if before_identity != after_identity:
+            _fail("marker_replaced")
+        return document, after_identity
     except OSError:
         _fail("marker_read_failed")
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
 
 
-def load_marker(marker_path: str | Path, *, selectable: bool = False) -> RunMarker:
-    """Load exactly the caller's marker path; never enumerate or infer a run."""
+def _read_marker_bytes(path: Path) -> bytes:
+    document, _ = _read_marker_record(path)
+    return (json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def load_marker_with_identity(
+    marker_path: str | Path,
+    *,
+    selectable: bool = False,
+    parent_fd: int | None = None,
+) -> tuple[RunMarker, MarkerFileIdentity]:
+    """Load one marker and its descriptor identity without a second pathname read."""
 
     paths = marker_paths(marker_path)
-    raw = _read_marker_bytes(paths.marker)
-    marker = _validate_marker_document(_json_load(raw), paths.marker)
+    document, identity = _read_marker_record(paths.marker, parent_fd=parent_fd)
+    marker = _validate_marker_document(document, paths.marker)
     if selectable and marker.status != STATUS_RUNNING:
         _fail("marker_not_selectable")
+    return marker, identity
+
+
+def load_marker(
+    marker_path: str | Path,
+    *,
+    selectable: bool = False,
+    parent_fd: int | None = None,
+) -> RunMarker:
+    """Load exactly the caller's marker path; never enumerate or infer a run."""
+
+    marker, _ = load_marker_with_identity(marker_path, selectable=selectable, parent_fd=parent_fd)
     return marker
 
 
-def credential_lstat(path: str | Path) -> CredentialIdentity:
+def credential_lstat(path: str | Path, *, parent_fd: int | None = None) -> CredentialIdentity:
     """Inspect one exact credential path without opening or reading its value."""
 
     credential = canonical_path(path, code="credential_path_invalid")
+    if parent_fd is None:
+        try:
+            info = credential.lstat()
+        except OSError:
+            _fail("credential_identity_invalid")
+        return CredentialIdentity.from_stat(info)
+
+    _validate_runs_parent_fd(code="credential_identity_invalid", parent_fd=parent_fd)
+    descriptor = -1
     try:
-        info = credential.lstat()
-    except OSError:
-        _fail("credential_identity_invalid")
-    return CredentialIdentity.from_stat(info)
+        try:
+            descriptor = os.open(credential.name, _quarantine_open_flags(), dir_fd=parent_fd)
+        except OSError:
+            _fail("credential_identity_invalid")
+        try:
+            info = os.fstat(descriptor)
+        except OSError:
+            _fail("credential_identity_invalid")
+        return CredentialIdentity.from_stat(info)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
-def verify_credential_identity(marker: RunMarker) -> CredentialIdentity:
+def verify_credential_identity(
+    marker: RunMarker,
+    *,
+    parent_fd: int | None = None,
+) -> CredentialIdentity:
     """Recheck the exact pinned credential identity without reading its value."""
 
-    current = credential_lstat(marker.credential_path)
+    current = credential_lstat(marker.credential_path, parent_fd=parent_fd)
     if current != marker.credential_identity:
         _fail("credential_identity_mismatch")
     return current
@@ -590,6 +1191,8 @@ __all__ = [
     "MARKER_KEYS",
     "MARKER_MODES",
     "MarkerError",
+    "MarkerFileIdentity",
+    "OwnedMarkerError",
     "MarkerPaths",
     "RunMarker",
     "RUNS_DIR_MODE",
@@ -602,10 +1205,12 @@ __all__ = [
     "credential_lstat",
     "ensure_private_runs_dir",
     "load_marker",
+    "load_marker_with_identity",
     "marker_paths",
     "new_marker",
     "new_run_id",
     "replace_marker",
+    "rewrite_marker_exact",
     "validate_marker",
     "verify_credential_identity",
 ]
