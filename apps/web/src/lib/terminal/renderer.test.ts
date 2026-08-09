@@ -332,13 +332,17 @@ async function recomputeBenchmarkBuild(
     bunExecutable?: string;
     cacheDirectory?: string;
     timeoutMs?: number;
+    isProcessGroupAlive?: (groupId: number) => boolean;
   }> = {}
 ): Promise<BenchmarkBuild> {
   const webRoot = resolve(repoRoot, 'apps/web');
   const outputDirectory = resolve(repoRoot, '.terminal-renderer-test-build');
   const bunExecutable = options.bunExecutable ?? 'bun';
+  // `timeoutMs` is the complete recomputation lifecycle budget. Reserve the
+  // shared cleanup grace inside that budget before starting the owned process.
   const timeoutMs = options.timeoutMs ?? BENCHMARK_HARNESS_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+  const buildTimeoutMs = timeoutMs - DEPENDENCY_KILL_GRACE_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || buildTimeoutMs < 1) {
     throw new Error('benchmark recomputation timeout was invalid');
   }
   const homeDirectory = environment.HOME;
@@ -390,11 +394,12 @@ async function recomputeBenchmarkBuild(
       argumentsList: ['--no-install', '-e', buildScript],
       cwd: webRoot,
       environment: buildEnvironment,
-      timeoutMs,
+      timeoutMs: buildTimeoutMs,
       failureMessage: 'benchmark recomputation build failed',
       timeoutMessage: 'benchmark recomputation build timed out',
       outputLimitBytes: BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES,
-      outputLimitMessage: 'benchmark recomputation output exceeded its bounded capture limit'
+      outputLimitMessage: 'benchmark recomputation output exceeded its bounded capture limit',
+      isProcessGroupAlive: options.isProcessGroupAlive
     });
     const files = benchmarkFiles(outputDirectory).map((path) => {
       const bytes = readFileSync(join(outputDirectory, path));
@@ -421,6 +426,8 @@ const DEPENDENCY_CACHE_CLONE_TIMEOUT_MS = 90_000;
 // cleanup deadline that allows macOS to reap sandbox descendants under load.
 const DEPENDENCY_ESCALATION_DELAY_MS = 250;
 const DEPENDENCY_KILL_GRACE_MS = 5_000;
+const BENCHMARK_SHORT_TOTAL_TIMEOUT_MS = DEPENDENCY_KILL_GRACE_MS + 2_000;
+const EXACT_PARENT_DEADLINE_REGRESSION_SHA = '5559e9ad4cf78debc98e8935c47cdc956535f96c';
 const BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES = 64 * 1024;
 const BUN_REGISTRY_BLACKHOLE = 'http://127.0.0.1:1';
 const OWNED_PROCESS_SUPERVISOR_SCRIPT = String.raw`
@@ -573,13 +580,17 @@ function signalOwnedProcessGroup(
   }
 }
 
-async function waitForProcessGroupGone(groupId: number, deadline: number): Promise<boolean> {
-  while (isProcessGroupAlive(groupId)) {
+async function waitForProcessGroupGone(
+  groupId: number,
+  deadline: number,
+  groupAlive: (groupId: number) => boolean = isProcessGroupAlive
+): Promise<boolean> {
+  while (groupAlive(groupId)) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       // Recheck at the deadline boundary so a group that exited between the
       // poll and the clock read is not reported as an uncleared owned group.
-      return !isProcessGroupAlive(groupId);
+      return !groupAlive(groupId);
     }
     await new Promise((resolve) => setTimeout(resolve, Math.min(10, remaining)));
   }
@@ -596,6 +607,7 @@ type OwnedProcessOptions = Readonly<{
   timeoutMessage: string;
   outputLimitBytes: number;
   outputLimitMessage: string;
+  isProcessGroupAlive?: (groupId: number) => boolean;
 }>;
 
 function byteLengthOfChunk(chunk: unknown): number {
@@ -615,6 +627,7 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
     let groupId: number | undefined;
     let statusBuffer = '';
     let outputBytes = 0;
+    const groupAlive = options.isProcessGroupAlive ?? isProcessGroupAlive;
 
     const finish = (error?: Error): void => {
       if (settled) return;
@@ -694,7 +707,7 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
         return;
       }
       if (!isOwnedProcessLeaderAlive(child, ownedGroupId)) {
-        finish(isProcessGroupAlive(ownedGroupId)
+        finish(groupAlive(ownedGroupId)
           ? new Error('benchmark subprocess process-group ownership was lost')
           : error);
         return;
@@ -707,7 +720,7 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
       escalationHandle = setTimeout(() => {
         escalationHandle = undefined;
         if (!isOwnedProcessLeaderAlive(child, ownedGroupId)) {
-          finish(isProcessGroupAlive(ownedGroupId)
+          finish(groupAlive(ownedGroupId)
             ? new Error('benchmark subprocess process-group ownership was lost')
             : error);
           return;
@@ -716,7 +729,7 @@ function runOwnedProcess(options: OwnedProcessOptions): Promise<void> {
           finish(new Error('benchmark subprocess process-group ownership was lost'));
           return;
         }
-        void waitForProcessGroupGone(ownedGroupId, totalDeadline).then((cleaned) => {
+        void waitForProcessGroupGone(ownedGroupId, totalDeadline, groupAlive).then((cleaned) => {
           finish(cleaned ? error : new Error('benchmark subprocess process-group cleanup timed out'));
         });
       }, Math.min(DEPENDENCY_ESCALATION_DELAY_MS, remaining));
@@ -2593,6 +2606,106 @@ setInterval(() => undefined, 1_000);
     }
   }, 30_000);
 
+  it('keeps recomputation cleanup inside the advertised total unlike exact parent 5559e9a', async () => {
+    const parentSource = execFileSync(
+      'git',
+      ['-C', resolve(process.cwd(), '../..'), 'show', `${EXACT_PARENT_DEADLINE_REGRESSION_SHA}:apps/web/src/lib/terminal/renderer.test.ts`],
+      { encoding: 'utf8' }
+    );
+    expect(parentSource).toContain(
+      'const totalDeadline = Date.now() + options.timeoutMs + DEPENDENCY_KILL_GRACE_MS;'
+    );
+
+    const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-deadline-'));
+    const bin = join(root, 'bin');
+    const descendantPidPath = join(root, 'descendant-pid');
+    const fakeBunPath = join(bin, 'bun');
+    let parentDescendantPid: number | undefined;
+    let childDescendantPid: number | undefined;
+    const environment = { PATH: `${bin}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: root, TMPDIR: root };
+    const writeHostileBun = (): void => {
+      writeFileSync(
+        fakeBunPath,
+        `#!/opt/homebrew/bin/bun
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const descendant = spawn(
+  process.execPath,
+  ['-e', 'process.on("SIGTERM", () => undefined); setInterval(() => undefined, 1_000);'],
+  { stdio: 'ignore' }
+);
+writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
+setInterval(() => undefined, 1_000);
+`
+      );
+      chmodSync(fakeBunPath, 0o755);
+    };
+    try {
+      mkdirSync(bin, { recursive: true });
+      writeHostileBun();
+
+      // This direct invocation mirrors the exact parent's recomputation call:
+      // it treats the advertised total as work time, then adds cleanup grace.
+      const parentStartedAt = Date.now();
+      const parentDeadline = parentStartedAt + BENCHMARK_SHORT_TOTAL_TIMEOUT_MS;
+      const parentLifecycle = runOwnedProcess({
+        command: fakeBunPath,
+        argumentsList: [],
+        cwd: root,
+        environment,
+        timeoutMs: BENCHMARK_SHORT_TOTAL_TIMEOUT_MS,
+        failureMessage: 'benchmark recomputation build failed',
+        timeoutMessage: 'benchmark recomputation build timed out',
+        outputLimitBytes: BENCHMARK_BUILD_OUTPUT_LIMIT_BYTES,
+        outputLimitMessage: 'benchmark recomputation output exceeded its bounded capture limit',
+        isProcessGroupAlive: (groupId) =>
+          Date.now() < parentDeadline + DEPENDENCY_KILL_GRACE_MS || isProcessGroupAlive(groupId)
+      });
+      await vi.waitFor(() => expect(existsSync(descendantPidPath)).toBe(true), { timeout: 3_000 });
+      parentDescendantPid = Number.parseInt(readFileSync(descendantPidPath, 'utf8').trim(), 10);
+      expect(Number.isSafeInteger(parentDescendantPid)).toBe(true);
+      const parentError = await parentLifecycle.then(() => undefined, (failure: unknown) => failure);
+      const parentElapsedMs = Date.now() - parentStartedAt;
+      expect(parentError).toBeInstanceOf(Error);
+      expect(parentElapsedMs).toBeGreaterThan(BENCHMARK_SHORT_TOTAL_TIMEOUT_MS + DEPENDENCY_KILL_GRACE_MS - 500);
+      expect(isProcessAlive(parentDescendantPid)).toBe(false);
+
+      rmSync(descendantPidPath, { force: true });
+      writeHostileBun();
+      const childStartedAt = Date.now();
+      const childDeadline = childStartedAt + BENCHMARK_SHORT_TOTAL_TIMEOUT_MS;
+      const childLifecycle = recomputeBenchmarkBuild(
+        resolve(process.cwd(), '../..'),
+        environment,
+        {
+          bunExecutable: fakeBunPath,
+          timeoutMs: BENCHMARK_SHORT_TOTAL_TIMEOUT_MS,
+          isProcessGroupAlive: (groupId) =>
+            Date.now() < childDeadline || isProcessGroupAlive(groupId)
+        }
+      );
+      await vi.waitFor(() => expect(existsSync(descendantPidPath)).toBe(true), { timeout: 3_000 });
+      childDescendantPid = Number.parseInt(readFileSync(descendantPidPath, 'utf8').trim(), 10);
+      expect(Number.isSafeInteger(childDescendantPid)).toBe(true);
+      const childError = await childLifecycle.then(() => undefined, (failure: unknown) => failure);
+      const childElapsedMs = Date.now() - childStartedAt;
+      expect(childError).toBeInstanceOf(Error);
+      expect(childElapsedMs).toBeLessThanOrEqual(BENCHMARK_SHORT_TOTAL_TIMEOUT_MS + 500);
+      expect(isProcessAlive(childDescendantPid)).toBe(false);
+    } finally {
+      for (const descendantPid of [parentDescendantPid, childDescendantPid]) {
+        if (descendantPid !== undefined && isProcessAlive(descendantPid)) {
+          try {
+            process.kill(descendantPid, 'SIGKILL');
+          } catch {
+            // The regression cleanup is best effort after the assertion.
+          }
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('bounds hostile benchmark recomputation and cleans its detached descendants', async () => {
     const root = mkdtempSync(join(tmpdir(), 'hermternal-renderer-build-descendant-'));
     const bin = join(root, 'bin');
@@ -2625,7 +2738,7 @@ setInterval(() => undefined, 1_000);
           npm_config_offline: 'true',
           NPM_CONFIG_OFFLINE: 'true'
         },
-        { bunExecutable: fakeBunPath, timeoutMs: 2_000 }
+        { bunExecutable: fakeBunPath, timeoutMs: DEPENDENCY_KILL_GRACE_MS + 2_000 }
       );
       await vi.waitFor(() => expect(existsSync(descendantPidPath)).toBe(true), { timeout: 3_000 });
       descendantPid = Number.parseInt(readFileSync(descendantPidPath, 'utf8').trim(), 10);
