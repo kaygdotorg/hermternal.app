@@ -498,23 +498,89 @@ def is_port_available(port: int) -> bool:
 
 
 def _validate_private_directory_path(path: Path) -> None:
-    """Reject existing symlink/non-directory ancestors without creating paths."""
+    """Reject symlink/non-directory ancestors before any directory creation.
 
-    current = path
-    while True:
-        try:
-            info = current.lstat()
-        except FileNotFoundError:
-            parent = current.parent
-            if parent == current:
+    Existing components are opened one at a time with ``O_NOFOLLOW`` and a
+    directory descriptor. A missing component ends the walk because no later
+    descendant can already exist, while every existing ancestor remains pinned
+    to the descriptor-relative path that was checked. The lexical fallback keeps
+    the same fail-closed behavior on platforms without descriptor-relative
+    ``open`` support.
+    """
+
+    try:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError):
+        raise LauncherError("owned_path_invalid") from None
+
+    def validate_lexically() -> None:
+        current = absolute
+        while True:
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                parent = current.parent
+                if parent == current:
+                    return
+                current = parent
+                continue
+            except OSError:
+                raise LauncherError("owned_path_invalid") from None
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise LauncherError("owned_path_invalid")
+            if current == Path(current.anchor):
                 return
-            current = parent
-            continue
-        except OSError:
-            raise LauncherError("owned_path_invalid") from None
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise LauncherError("owned_path_invalid")
+            current = current.parent
+
+    if not getattr(os, "O_NOFOLLOW", 0) or os.open not in getattr(os, "supports_dir_fd", ()):
+        validate_lexically()
         return
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(absolute.anchor, flags)
+        for component in absolute.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                return
+            except (OSError, ValueError, TypeError):
+                raise LauncherError("owned_path_invalid") from None
+            try:
+                info = os.fstat(child)
+            except OSError:
+                try:
+                    os.close(child)
+                except OSError:
+                    pass
+                raise LauncherError("owned_path_invalid") from None
+            if not stat.S_ISDIR(info.st_mode):
+                try:
+                    os.close(child)
+                except OSError:
+                    pass
+                raise LauncherError("owned_path_invalid")
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            descriptor = child
+    except LauncherError:
+        raise
+    except (OSError, ValueError, TypeError):
+        raise LauncherError("owned_path_invalid") from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _ensure_private_directory(path: Path) -> None:
@@ -3450,6 +3516,12 @@ def start_many(
         raise
     if len(set(canonical_marker_paths)) != len(canonical_marker_paths):
         raise LauncherError("marker_not_unique")
+    canonical_marker_parents = {path.parent for path in canonical_marker_paths}
+    if len(canonical_marker_parents) != 1:
+        # A batch is one caller-selected private runs directory transaction;
+        # reject split parents before opening either directory or dispatching a
+        # lifecycle operation.
+        raise LauncherError("marker_parent_mismatch")
 
     # Validate every marker, existing record, private data path, and new-run
     # port before dispatching the first lifecycle transaction. Each start still

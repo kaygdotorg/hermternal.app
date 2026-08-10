@@ -342,6 +342,45 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
         self.assertEqual(list(target.iterdir()), [])
 
+    def test_nested_symlink_ancestor_rejects_before_engine_or_outside_mkdir(self) -> None:
+        target = self.root / "target"
+        outside_nested = target / "outside" / "nested"
+        outside_nested.mkdir(mode=0o700, parents=True)
+        outside_nested.chmod(0o700)
+        link = self.root / "link"
+        link.symlink_to(target, target_is_directory=True)
+        # The existing target/outside/nested directory makes both
+        # link/outside/nested and its missing instance child look like valid
+        # directories to a leaf-only lstat walk. Neither may become a bind
+        # mount source through the symlink.
+        roots = launcher.Roots(
+            self.roots.state,
+            link / "outside" / "nested",
+            self.roots.credentials,
+        )
+        spec = launcher.make_spec("nested-symlink", 19122, roots=roots)
+        before_target = sorted(path.relative_to(target).as_posix() for path in target.rglob("*"))
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("nested-symlink.json"),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "owned_path_invalid")
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(
+            sorted(path.relative_to(target).as_posix() for path in target.rglob("*")),
+            before_target,
+        )
+        self.assertFalse((outside_nested / spec.instance).exists())
+        self.assertFalse(self.marker_path("nested-symlink.json").exists())
+
     def test_start_rejects_unsupported_spec_image_before_podman_or_publication(self) -> None:
         image = "docker.io/nousresearch/hermes-agent:v999@sha256:" + ("a" * 64)
         spec = launcher.InstanceSpec("unsupported-image", 19121, image, launcher.DEFAULT_USERNAME, self.roots)
@@ -431,6 +470,40 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         self.assertFalse(first.exists())
         self.assertTrue(second.exists())
+
+    def test_start_many_rejects_split_private_marker_parents_before_dispatch(self) -> None:
+        other_runs = self.root / "other-runs"
+        other_runs.mkdir(mode=launcher.live_run_marker.RUNS_DIR_MODE)
+        other_runs.chmod(launcher.live_run_marker.RUNS_DIR_MODE)
+        specs = launcher.specs_for_batch(
+            "split-parent", 2, 19138, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
+        )
+        first = self.marker_path("split-parent-1.json")
+        second = other_runs / "split-parent-2.json"
+        with mock.patch.object(
+            launcher,
+            "start_instance",
+            side_effect=AssertionError("split-parent batch dispatched a start"),
+        ) as start_instance:
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.start_many(
+                    specs,
+                    [first, second],
+                    runner=self.fake,
+                    readiness=self.ready,
+                    port_checker=lambda port: True,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                    attempts=1,
+                    interval=0,
+                )
+        self.assertEqual(raised.exception.code, "marker_parent_mismatch")
+        self.assertEqual(self.fake.calls, [])
+        start_instance.assert_not_called()
+        self.assertFalse(first.exists())
+        self.assertFalse(second.exists())
+        self.assertEqual(list(self.runs.iterdir()), [])
+        self.assertEqual(list(other_runs.iterdir()), [])
 
     def test_start_many_inspects_existing_stopped_records_before_first_start(self) -> None:
         existing = self.make_spec("batch-existing", 19140)

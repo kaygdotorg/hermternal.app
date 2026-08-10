@@ -231,7 +231,9 @@ else
   return "$start_many_status" 2>/dev/null || exit "$start_many_status"
 fi
 # This example requests exactly two instances; changing `--count` requires
-# the same number of distinct `--marker` options.
+# the same number of distinct `--marker` options. All markers must remain under
+# this one canonical private runs directory; split-parent batches are rejected
+# before either marker is opened or any lifecycle operation is dispatched.
 ```
 
 Before Podman preflight, image pull, or data-root creation, the launcher rejects
