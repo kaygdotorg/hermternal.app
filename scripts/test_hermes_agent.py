@@ -381,6 +381,214 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse((outside_nested / spec.instance).exists())
         self.assertFalse(self.marker_path("nested-symlink.json").exists())
 
+    def test_noncanonical_symlink_dotdot_alias_rejects_before_engine_or_outside_mkdir(self) -> None:
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        outside_parent = target / "outside"
+        outside_parent.mkdir(mode=0o700)
+        outside_parent.chmod(0o700)
+        link = self.root / "link"
+        link.symlink_to(outside_parent, target_is_directory=True)
+        raw_data_root = link / ".." / "unique-data"
+        roots = launcher.Roots(self.roots.state, raw_data_root, self.roots.credentials)
+        spec = launcher.InstanceSpec("dotdot-alias", 19123, launcher.DEFAULT_IMAGE, launcher.DEFAULT_USERNAME, roots)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("dotdot-alias.json"),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "owned_path_invalid")
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse((outside_parent / "unique-data").exists())
+        self.assertFalse(self.marker_path("dotdot-alias.json").exists())
+
+    def test_descriptor_mkdir_does_not_follow_parent_swap(self) -> None:
+        race_parent = self.root / "race-parent"
+        race_parent.mkdir(mode=0o700)
+        race_parent.chmod(0o700)
+        old_parent = self.root / "race-parent-old"
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o700)
+        outside.chmod(0o700)
+        link = self.root / "race-link"
+        roots = launcher.Roots(
+            self.roots.state,
+            race_parent / "new-root",
+            self.roots.credentials,
+        )
+        spec = launcher.make_spec("mkdir-race", 19124, roots=roots)
+        real_mkdir = launcher.os.mkdir
+        swapped = False
+
+        def swap_before_mkdir(name, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if not swapped and name == "new-root" and dir_fd is not None:
+                race_parent.rename(old_parent)
+                link.symlink_to(outside, target_is_directory=True)
+                race_parent.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return real_mkdir(name, mode=mode, dir_fd=dir_fd)
+
+        patched_mkdir = mock.Mock(side_effect=swap_before_mkdir)
+        supports = set(launcher.os.supports_dir_fd)
+        supports.add(patched_mkdir)
+        marker = self.marker_path("mkdir-race.json")
+        with (
+            mock.patch.object(launcher.os, "supports_dir_fd", supports),
+            mock.patch.object(launcher.os, "mkdir", patched_mkdir),
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.start_instance(
+                    spec,
+                    marker_path=marker,
+                    runner=self.fake,
+                    readiness=self.ready,
+                    port_checker=lambda port: True,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                    attempts=1,
+                    interval=0,
+                )
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse((outside / "new-root").exists())
+        self.assertFalse((outside / "new-root" / spec.instance).exists())
+        self.assertFalse(marker.exists())
+
+    def test_broad_and_noncanonical_roots_reject_before_mkdir_fchmod_or_engine(self) -> None:
+        candidates = (
+            Path("."),
+            Path(".."),
+            Path("relative") / ".." / "unique",
+            self.root / "noncanonical" / ".." / "unique",
+            Path("/"),
+            Path("/tmp"),
+            Path("/var"),
+        )
+        real_mkdir = launcher.os.mkdir
+        real_fchmod = launcher.os.fchmod
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                roots = launcher.Roots(self.roots.state, candidate, self.roots.credentials)
+                spec = launcher.InstanceSpec("unsafe-root", 19125, launcher.DEFAULT_IMAGE, launcher.DEFAULT_USERNAME, roots)
+                self.fake.calls.clear()
+                with (
+                    mock.patch.object(launcher.os, "mkdir", side_effect=AssertionError("mkdir boundary")),
+                    mock.patch.object(launcher.os, "fchmod", side_effect=AssertionError("fchmod boundary")),
+                ):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.start_instance(
+                            spec,
+                            marker_path=self.marker_path("unsafe-root.json"),
+                            runner=self.fake,
+                            readiness=self.ready,
+                            port_checker=lambda port: True,
+                            executable="/usr/bin/podman",
+                            source_environment={"PATH": "/usr/bin"},
+                            attempts=1,
+                            interval=0,
+                        )
+                self.assertEqual(raised.exception.code, "owned_path_invalid")
+                self.assertEqual(self.fake.calls, [])
+                self.assertEqual(launcher.os.mkdir, real_mkdir)
+                self.assertEqual(launcher.os.fchmod, real_fchmod)
+
+    def test_descriptor_fchmod_and_creation_do_not_call_pathname_mutators(self) -> None:
+        outside = self.root / "chmod-outside"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        spec = self.make_spec("descriptor-mutate", 19126)
+        marker = self.marker_path("descriptor-mutate.json")
+        real_chmod = Path.chmod
+
+        def reject_data_path_chmod(path: Path, mode: int) -> None:
+            if path in {outside, spec.data_dir}:
+                raise AssertionError("pathname chmod")
+            real_chmod(path, mode)
+
+        with (
+            mock.patch.object(Path, "mkdir", side_effect=AssertionError("pathname mkdir")),
+            mock.patch.object(Path, "chmod", autospec=True, side_effect=reject_data_path_chmod),
+        ):
+            self.start(spec, marker_path=marker)
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o755)
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertEqual(stat.S_IMODE(spec.data_dir.stat().st_mode), 0o700)
+
+    def test_bind_path_replacement_after_engine_dispatch_fails_before_publication(self) -> None:
+        data_root = self.root / "bind-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        outside = self.root / "bind-outside"
+        outside.mkdir(mode=0o700)
+        outside.chmod(0o700)
+        backup = self.root / "bind-root-old"
+        link_path = data_root
+        spec = launcher.make_spec(
+            "bind-replacement",
+            19128,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        swapped = False
+
+        def runner(command, environment, timeout):
+            nonlocal swapped
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run" and not swapped:
+                link_path.rename(backup)
+                link_path.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("bind-replacement.json"),
+                runner=runner,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertFalse((outside / spec.instance).exists())
+        self.assertTrue((backup / spec.instance).is_dir())
+        self.assertEqual(stat.S_IMODE((backup / spec.instance).stat().st_mode), 0o700)
+        self.assertFalse(self.marker_path("bind-replacement.json").exists())
+        self.assertTrue(any(command[1] == "run" for command, _ in self.fake.calls))
+
+    def test_canonical_private_tmp_child_is_accepted_without_chmodding_parent(self) -> None:
+        canonical_tmp = Path("/private/tmp")
+        if not canonical_tmp.is_dir():
+            self.skipTest("Darwin canonical temporary directory is unavailable")
+        unique_root = canonical_tmp / f"hermternal-task457-{os.getpid()}"
+        spec = launcher.make_spec(
+            "canonical-tmp",
+            19127,
+            roots=launcher.Roots(self.roots.state, unique_root, self.roots.credentials),
+        )
+        try:
+            self.start(spec, marker_path=self.marker_path("canonical-tmp.json"))
+            self.assertTrue(spec.data_dir.is_dir())
+            self.assertEqual(stat.S_IMODE(spec.data_dir.stat().st_mode), 0o700)
+        finally:
+            if spec.data_dir.exists():
+                spec.data_dir.rmdir()
+            if unique_root.exists():
+                unique_root.rmdir()
+
     def test_start_rejects_unsupported_spec_image_before_podman_or_publication(self) -> None:
         image = "docker.io/nousresearch/hermes-agent:v999@sha256:" + ("a" * 64)
         spec = launcher.InstanceSpec("unsupported-image", 19121, image, launcher.DEFAULT_USERNAME, self.roots)
@@ -484,7 +692,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
             launcher,
             "start_instance",
             side_effect=AssertionError("split-parent batch dispatched a start"),
-        ) as start_instance:
+        ) as start_instance, mock.patch.object(
+            launcher,
+            "_open_private_parent",
+            side_effect=AssertionError("split-parent opened a parent"),
+        ) as open_parent:
             with self.assertRaises(launcher.LauncherError) as raised:
                 launcher.start_many(
                     specs,
@@ -500,10 +712,54 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "marker_parent_mismatch")
         self.assertEqual(self.fake.calls, [])
         start_instance.assert_not_called()
+        open_parent.assert_not_called()
         self.assertFalse(first.exists())
         self.assertFalse(second.exists())
         self.assertEqual(list(self.runs.iterdir()), [])
         self.assertEqual(list(other_runs.iterdir()), [])
+
+    def test_start_many_stops_before_second_marker_when_shared_parent_is_replaced(self) -> None:
+        specs = launcher.specs_for_batch(
+            "parent-race", 2, 19139, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
+        )
+        first = self.marker_path("parent-race-1.json")
+        second = self.marker_path("parent-race-2.json")
+        old_runs = self.root / "runs-old"
+        outside = self.root / "parent-race-outside"
+        outside.mkdir(mode=0o700)
+        outside.chmod(0o700)
+        swapped = False
+        real_start = launcher.start_instance
+
+        def start_and_replace(spec, **kwargs):
+            nonlocal swapped
+            result = real_start(spec, **kwargs)
+            if not swapped:
+                self.runs.rename(old_runs)
+                self.runs.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return result
+
+        with mock.patch.object(launcher, "start_instance", side_effect=start_and_replace) as start_instance:
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.start_many(
+                    specs,
+                    [first, second],
+                    runner=self.fake,
+                    readiness=self.ready,
+                    port_checker=lambda port: True,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                    attempts=1,
+                    interval=0,
+                )
+        self.assertEqual(raised.exception.code, "runs_dir_replaced")
+        self.assertTrue(swapped)
+        self.assertEqual(start_instance.call_count, 1)
+        self.assertTrue((old_runs / first.name).exists())
+        self.assertFalse((old_runs / second.name).exists())
+        self.assertFalse((outside / second.name).exists())
+        self.assertEqual(sum(command[1] == "run" for command, _ in self.fake.calls), 1)
 
     def test_start_many_inspects_existing_stopped_records_before_first_start(self) -> None:
         existing = self.make_spec("batch-existing", 19140)

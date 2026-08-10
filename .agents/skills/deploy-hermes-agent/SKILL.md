@@ -129,9 +129,24 @@ fi
 ```
 
 Before dispatching the first instance, `start-many` validates every marker's
-private records, data-root path, readiness controls, and new-run port. Each
-individual transaction repeats those checks under its own descriptor-bound
-lease; the batch preflight is advisory rather than an atomic lock.
+private records, canonical absolute data-root path, readiness controls, and
+new-run port. The batch holds one descriptor-bound parent lease while each
+per-marker transaction repeats those checks; the preflight is advisory and the
+batch remains non-atomic. If a marker parent or data path is replaced between
+iterations, that marker fails closed before its next lifecycle boundary; the
+earlier marker is not rediscovered, adopted, or rolled back by a broad batch
+cleanup.
+
+Data roots must use canonical absolute spellings with no `.` or `..` segments
+and must not traverse symlink aliases. On Darwin, use `/private/tmp` or
+`/private/var` spellings rather than `/tmp` or `/var`; the launcher rejects
+filesystem anchors and broad system roots before any `mkdir`, `fchmod`, or
+Podman call. New instance leaves are created and mode-checked through
+`openat`-style directory descriptors. Podman receives the canonical pathname,
+so the launcher revalidates its descriptor identity immediately before and
+after each bind/start or mount-inspection boundary; a same-user replacement
+racing the final pathname syscall is outside this pathname-based adapter's
+proof boundary and fails closed when observed.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation

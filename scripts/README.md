@@ -238,10 +238,26 @@ fi
 
 Before Podman preflight, image pull, or data-root creation, the launcher rejects
 non-finite readiness controls, unsupported image pins, malformed existing marker
-records, private-root symlinks, stale sibling records, and occupied new-run
-ports. `start-many` repeats that record/root/port preflight for every marker
-before dispatching the first instance; each individual start repeats it under
-its own descriptor-bound lifecycle lease because the batch pass is advisory.
+records, noncanonical or broad private roots, private-root symlinks, stale
+sibling records, and occupied new-run ports. Data roots must be absolute,
+lexically canonical, and free of `.` or `..` segments. Darwin `/tmp` and `/var`
+symlink aliases are rejected; use canonical `/private/tmp` and `/private/var`
+spellings instead. Filesystem anchors and broad system roots are rejected before
+any `mkdir`, descriptor-bound `fchmod`, or engine call. The launcher creates
+only the instance leaf through descriptor-relative `openat` operations and
+never pathname-`mkdir`/`chmod`s the caller-supplied root.
+
+`start-many` repeats that record/root/port preflight for every marker before
+dispatching the first instance; the batch holds one descriptor-bound parent
+lease while each individual start repeats its checks. The preflight is advisory
+and the batch remains non-atomic. If a marker parent or data path is replaced
+between iterations, the affected marker fails before its next lifecycle
+boundary; earlier marker evidence is not rediscovered, adopted, or broadly
+rolled back. Podman accepts a pathname rather than a held host fd, so the
+launcher revalidates the canonical data-directory identity immediately before
+and after bind/start and mount inspection. A same-user replacement racing the
+final pathname syscall is outside this pathname-based adapter's proof boundary
+and fails closed when observed.
 
 Other operations receive the same exact marker path; they never select by
 instance name, port, recency, or directory contents. Run them only after the
