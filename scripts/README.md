@@ -178,12 +178,19 @@ RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
 MARKER_PATH="${HERMES_MARKER_PATH:?set the exact absolute marker path under that directory}"
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 PORT="${HERMES_PORT:?set a free loopback port for this instance}"
-launcher_output="$(
+if launcher_output="$(
   python3 scripts/hermes_agent.py start \
     --instance "$INSTANCE" \
     --port "$PORT" \
     --marker "$MARKER_PATH"
-)"
+)"; then
+  :
+else
+  start_status=$?
+  # Do not let a failed mutation fall through to an older valid marker proof.
+  printf '%s\n' 'Hermes start failed; endpoint handoff skipped.' >&2
+  return "$start_status" 2>/dev/null || exit "$start_status"
+fi
 # `endpoint` is the fail-closed handoff gate. It re-inspects the exact
 # persisted container ID and accepts only a running, launcher-owned container
 # with one 127.0.0.1:<requested-port>:9119 mapping.
@@ -210,17 +217,33 @@ one caller-supplied marker per instance. Every marker path must be a distinct
 canonical path in the same private `0700` runs directory:
 
 ```sh
-python3 scripts/hermes_agent.py start-many \
+if python3 scripts/hermes_agent.py start-many \
   --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
-  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --count 2 \
   --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
   --marker "${HERMES_MARKER_1:?set marker 1}" \
-  --marker "${HERMES_MARKER_2:?set marker 2}"
-# Repeat --marker once for every requested instance.
+  --marker "${HERMES_MARKER_2:?set marker 2}"; then
+  :
+else
+  start_many_status=$?
+  # Stop the batch before any per-marker endpoint can select stale proof.
+  printf '%s\n' 'Hermes start-many failed; endpoint handoff skipped.' >&2
+  return "$start_many_status" 2>/dev/null || exit "$start_many_status"
+fi
+# This example requests exactly two instances; changing `--count` requires
+# the same number of distinct `--marker` options.
 ```
 
+Before Podman preflight, image pull, or data-root creation, the launcher rejects
+non-finite readiness controls, unsupported image pins, malformed existing marker
+records, private-root symlinks, stale sibling records, and occupied new-run
+ports. `start-many` repeats that record/root/port preflight for every marker
+before dispatching the first instance; each individual start repeats it under
+its own descriptor-bound lifecycle lease because the batch pass is advisory.
+
 Other operations receive the same exact marker path; they never select by
-instance name, port, recency, or directory contents:
+instance name, port, recency, or directory contents. Run them only after the
+guarded mutation succeeds:
 
 ```sh
 # This verifies the immutable container ID, running state, and exact loopback mapping.
@@ -234,14 +257,29 @@ credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_l
 python3 scripts/hermes_agent.py stop --marker "$MARKER_PATH"
 ```
 
-Cleanup removes only the marker-pinned container, credential, and state, then
-removes the marker last. `--purge-data` is intentionally unsupported by this
-strict ownership path; data is never removed by a broad prune or glob.
+To stop more than one owned instance, run independently verified exact-marker
+stops in sequence:
 
-Every result is one JSON object. Start, status, and stop output contain only
-bounded instance/status/marker metadata. A verified endpoint result contains
-exactly `status`, `endpoint`, `marker_path`, `run_id`, `credential_file`, and
-`credential_identity`; it never contains the password. `run_id` is 64 lowercase
+```sh
+python3 scripts/hermes_agent.py stop \
+  --marker "${HERMES_MARKER_1:?set marker 1}"
+python3 scripts/hermes_agent.py stop \
+  --marker "${HERMES_MARKER_2:?set marker 2}"
+```
+
+This sequence is intentionally not atomic: a failure may stop between commands,
+so inspect and retry each remaining marker explicitly. Cleanup removes only the
+marker-pinned container, credential, and state, then
+removes the marker last. `--purge-data` is intentionally unsupported by this
+strict ownership path; data is never removed by a broad prune or glob. The CLI
+rejects that flag before opening the marker lease, so invalid input does not
+create `.lifecycle.lock` state.
+
+A successfully parsed operation emits one JSON object. Start, status, stop, and
+batch results contain only bounded instance/status/marker metadata. A verified
+endpoint result contains exactly six fields: `status`, `endpoint`,
+`marker_path`, `run_id`, `credential_file`, and `credential_identity`; it never
+contains the password. `run_id` is 64 lowercase
 hexadecimal characters. `credential_identity` contains `device`, `inode`,
 `mode`, `size`, `nlink`, and a 64-character lowercase hexadecimal `generation`.
 The generation is a one-way SHA-256 of the bounded credential bytes, not the

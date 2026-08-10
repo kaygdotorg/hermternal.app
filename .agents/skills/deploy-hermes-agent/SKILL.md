@@ -44,12 +44,19 @@ RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
 MARKER_PATH="${HERMES_MARKER_PATH:?set the exact absolute marker path under that directory}"
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 PORT="${HERMES_PORT:?set a free loopback port for this instance}"
-launcher_output="$(
+if launcher_output="$(
   python3 scripts/hermes_agent.py start \
     --instance "$INSTANCE" \
     --port "$PORT" \
     --marker "$MARKER_PATH"
-)"
+)"; then
+  :
+else
+  start_status=$?
+  # Do not let a failed mutation fall through to an older valid marker proof.
+  printf '%s\n' 'Hermes start failed; endpoint handoff skipped.' >&2
+  return "$start_status" 2>/dev/null || exit "$start_status"
+fi
 # `endpoint` is the fail-closed selection gate immediately before credential
 # handoff. It pins the immutable launcher container ID to running state and the
 # sole explicit 127.0.0.1:<requested-port>:9119 mapping.
@@ -102,21 +109,34 @@ Each instance gets a unique deterministic name, data directory, credential
 file, loopback port, and caller-selected marker:
 
 ```sh
-python3 scripts/hermes_agent.py start-many \
+if python3 scripts/hermes_agent.py start-many \
   --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
-  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
+  --count 2 \
   --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
   --marker "${HERMES_MARKER_1:?set marker 1}" \
-  --marker "${HERMES_MARKER_2:?set marker 2}"
-# Repeat --marker once for every requested instance.
+  --marker "${HERMES_MARKER_2:?set marker 2}"; then
+  :
+else
+  start_many_status=$?
+  # Stop the batch before any per-marker endpoint can select stale proof.
+  printf '%s\n' 'Hermes start-many failed; endpoint handoff skipped.' >&2
+  return "$start_many_status" 2>/dev/null || exit "$start_many_status"
+fi
+# This example requests exactly two instances; changing `--count` requires
+# the same number of distinct `--marker` options.
 ```
 
+Before dispatching the first instance, `start-many` validates every marker's
+private records, data-root path, readiness controls, and new-run port. Each
+individual transaction repeats those checks under its own descriptor-bound
+lease; the batch preflight is advisory rather than an atomic lock.
+
 The `start-many` result contains bounded batch status and marker metadata, not
-handoff endpoint or credential metadata. For each marker, run the exact
-`endpoint --marker` operation, extract all five fields with
-`read_launcher_result.py`, and use the four proof fields for any credential
-handoff. Keep those per-marker results together; do not reconstruct a port from
-a prefix, count, or remembered deployment.
+handoff endpoint or credential metadata. Only after the guarded mutation
+succeeds, for each marker run the exact `endpoint --marker` operation, extract
+all five fields with `read_launcher_result.py`, and use the four proof fields for
+any credential handoff. Keep those per-marker results together; do not
+reconstruct a port from a prefix, count, or remembered deployment.
 
 ## Inspect an instance
 
@@ -154,16 +174,19 @@ The marker-bound stop removes only the exact container, credential, state, and
 marker records. It retains the container data for diagnosis or retry; the strict
 path does not support `--purge-data` or broad cleanup.
 
-Stop an exact marker-bound batch:
+To stop more than one owned instance, run independent exact-marker commands in
+sequence:
 
 ```sh
-python3 scripts/hermes_agent.py stop-many \
-  --marker "${HERMES_MARKER_1:?set marker 1}" \
+python3 scripts/hermes_agent.py stop \
+  --marker "${HERMES_MARKER_1:?set marker 1}"
+python3 scripts/hermes_agent.py stop \
   --marker "${HERMES_MARKER_2:?set marker 2}"
 ```
 
-Repeat stop commands to verify idempotent cleanup. Never use broad Podman prune
-commands.
+This sequence is intentionally not atomic: a failure may stop between commands,
+so inspect and retry each remaining marker explicitly. Repeat individual stop
+commands to verify idempotent cleanup. Never use broad Podman prune commands.
 
 ## Completion boundary
 

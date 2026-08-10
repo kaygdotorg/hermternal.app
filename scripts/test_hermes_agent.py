@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import io
 import json
+import math
 import os
 import stat
 import subprocess
@@ -230,6 +232,279 @@ class HermesAgentLauncherTests(unittest.TestCase):
             with self.subTest(image=image), self.assertRaises(launcher.LauncherError) as raised:
                 launcher.validate_image(image)
             self.assertEqual(raised.exception.code, "image_not_immutable_official")
+
+    def test_start_validation_rejects_readiness_controls_before_engine_or_files(self) -> None:
+        spec = self.make_spec()
+        before = sorted(path.name for path in self.runs.iterdir())
+
+        for attempts in (-1, 0, 601, True, 1.0):
+            with self.subTest(attempts=attempts):
+                self.fake.calls.clear()
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.start_instance(
+                        spec,
+                        marker_path=self.marker_path(),
+                        runner=self.fake,
+                        readiness=self.ready,
+                        port_checker=lambda port: True,
+                        executable="/usr/bin/podman",
+                        source_environment={"PATH": "/usr/bin"},
+                        attempts=attempts,
+                        interval=0,
+                    )
+                self.assertEqual(raised.exception.code, "readiness_attempts_invalid")
+                self.assertEqual(self.fake.calls, [])
+                self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
+
+        for interval in (math.nan, math.inf, -math.inf, -1, 31, True):
+            with self.subTest(interval=interval):
+                self.fake.calls.clear()
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.start_instance(
+                        spec,
+                        marker_path=self.marker_path(),
+                        runner=self.fake,
+                        readiness=self.ready,
+                        port_checker=lambda port: True,
+                        executable="/usr/bin/podman",
+                        source_environment={"PATH": "/usr/bin"},
+                        attempts=1,
+                        interval=interval,
+                    )
+                self.assertEqual(raised.exception.code, "readiness_interval_invalid")
+                self.assertEqual(self.fake.calls, [])
+                self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
+
+    def test_start_rejects_occupied_port_before_podman_or_publication(self) -> None:
+        before = sorted(path.name for path in self.runs.iterdir())
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                self.make_spec(),
+                marker_path=self.marker_path(),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: False,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "port_unavailable")
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
+
+    def test_stopped_owned_record_checks_port_before_image_work(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path(),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: False,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "port_unavailable")
+        self.assertTrue(any(command[1:] == ("info", "--format", "{{.Host.Security.Rootless}}") for command, _ in self.fake.calls))
+        self.assertTrue(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1:] == ("pull", spec.image) for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1:3] == ("image", "inspect") for command, _ in self.fake.calls))
+
+    def test_start_rejects_symlink_data_root_before_podman_or_mkdir(self) -> None:
+        target = self.root / "real-data"
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        link = self.root / "data-link"
+        link.symlink_to(target, target_is_directory=True)
+        roots = launcher.Roots(self.roots.state, link, self.roots.credentials)
+        spec = launcher.make_spec("symlink-data", 19120, roots=roots)
+        before = sorted(path.name for path in self.runs.iterdir())
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("symlink-data.json"),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "owned_path_invalid")
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_start_rejects_unsupported_spec_image_before_podman_or_publication(self) -> None:
+        image = "docker.io/nousresearch/hermes-agent:v999@sha256:" + ("a" * 64)
+        spec = launcher.InstanceSpec("unsupported-image", 19121, image, launcher.DEFAULT_USERNAME, self.roots)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("unsupported-image.json"),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "image_not_immutable_official")
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(self.marker_path("unsupported-image.json").exists())
+
+    def test_existing_marker_and_state_validation_precedes_podman(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.calls.clear()
+        state.marker.state_path.write_bytes(b"not-json\n")
+        state.marker.state_path.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path(),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "instance_state_invalid")
+        self.assertEqual(self.fake.calls, [])
+        restored = launcher.state_document(spec, state.marker)
+        state.marker.state_path.write_text(
+            json.dumps(restored, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        state.marker.state_path.chmod(0o600)
+
+        self.start(spec)
+        self.fake.calls.clear()
+        mismatch = self.make_spec(instance="other-instance", port=19120)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                mismatch,
+                marker_path=self.marker_path(),
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "marker_spec_mismatch")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_start_many_prevalidates_later_marker_before_first_start(self) -> None:
+        specs = launcher.specs_for_batch(
+            "batch", 2, 19130, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
+        )
+        first = self.marker_path("batch-1.json")
+        second = self.marker_path("batch-2.json")
+        second.write_bytes(b"not-json\n")
+        second.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_many(
+                specs,
+                [first, second],
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "marker_json_invalid")
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+
+    def test_start_many_inspects_existing_stopped_records_before_first_start(self) -> None:
+        existing = self.make_spec("batch-existing", 19140)
+        new = self.make_spec("batch-new", 19141)
+        existing_marker = self.marker_path("batch-existing.json")
+        new_marker = self.marker_path("batch-new.json")
+        self.start(existing, marker_path=existing_marker)
+        self.fake.containers[existing.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_many(
+                [existing, new],
+                [existing_marker, new_marker],
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: port != existing.port,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "port_unavailable")
+        self.assertFalse(any(command[1] == "run" for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1:] == ("pull", new.image) for command, _ in self.fake.calls))
+        self.assertTrue(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        self.assertFalse(new_marker.exists())
+        self.assertEqual(self.fake.containers[existing.container]["State"]["Status"], "exited")
+
+    def test_duplicate_single_marker_fails_before_any_engine_boundary(self) -> None:
+        operations = (
+            ["start", "--instance", "fixture", "--port", "19119"],
+            ["endpoint"],
+            ["status"],
+            ["stop"],
+        )
+        for prefix in operations:
+            with self.subTest(operation=prefix[0]):
+                output = io.StringIO()
+                with mock.patch.object(launcher, "execute") as execute, contextlib.redirect_stdout(output):
+                    status = launcher.main([*prefix, "--marker", "M1", "--marker", "M2"])
+                self.assertEqual(status, 2)
+                self.assertEqual(output.getvalue(), '{"error":{"code":"marker_not_unique"},"ok":false}\n')
+                execute.assert_not_called()
+        self.assertEqual(self.fake.calls, [])
+
+    def test_removed_stop_many_rejects_before_dispatch(self) -> None:
+        parser = launcher.build_parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["stop-many", "--marker", "M1", "--marker", "M2"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_execute_stop_rejects_purge_before_lifecycle_lock(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "operation": "stop",
+                "marker": str(self.marker_path()),
+                "purge_data": True,
+                "state_root": str(self.roots.state),
+                "data_root": str(self.roots.data),
+                "credential_root": str(self.roots.credentials),
+            },
+        )()
+        with mock.patch.object(
+            launcher,
+            "_operation_lease",
+            side_effect=AssertionError("invalid purge input acquired a lease"),
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.execute(args)
+        self.assertEqual(raised.exception.code, "purge_not_supported")
+        self.assertFalse((self.runs / launcher.live_run_marker.LIFECYCLE_LOCK_NAME).exists())
 
     def test_marker_is_required_and_run_arguments_bind_the_run_id_label(self) -> None:
         spec = self.make_spec()

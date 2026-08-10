@@ -73,8 +73,94 @@ EXPECTED_SKILL_OPERATIONS = [
     "start-many",
     "endpoint",
     "stop",
-    "stop-many",
+    "stop",
+    "stop",
 ]
+START_GUARD_DOCS = (
+    ROOT / "scripts" / "README.md",
+    SKILL_DOC,
+)
+SYNTHETIC_ENDPOINT = "http://127.0.0.1:19119"
+SYNTHETIC_MARKER = "/tmp/stale-marker.json"
+def documented_shell_blocks(path: Path) -> list[str]:
+    """Return shell fences as data without executing documentation commands."""
+
+    blocks: list[str] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "```sh":
+            continue
+        end = next((candidate for candidate in range(index + 1, len(lines)) if lines[candidate].strip() == "```"), None)
+        if end is not None:
+            blocks.append("\n".join(lines[index + 1 : end]))
+    return blocks
+
+
+def documented_mutation_block(path: Path, operation: str) -> str:
+    """Extract one documented positive mutation block for synthetic execution."""
+
+    pattern = re.compile(
+        rf"(?m)^(?:if )?\s*python3 scripts/hermes_agent\.py {re.escape(operation)}(?:\s|\\)"
+    )
+    for block in documented_shell_blocks(path):
+        if pattern.search(block):
+            return block
+    raise AssertionError(f"No {operation} block found in {path}")
+
+
+def synthetic_handoff() -> str:
+    """Append a fake-only proof handoff; no repository helper or credential runs."""
+
+    return """
+HERMES_LIVE_TARGET="$endpoint" \\
+  python3 scripts/with_live_credential.py \\
+    --marker "$marker_path" \\
+    --run-id "$run_id" \\
+    --credential-file "$credential_file" \\
+    --credential-identity "$credential_identity" \\
+    -- \\
+    node synthetic-child
+""".strip()
+
+
+def synthetic_batch_handoff() -> str:
+    """Model each documented per-marker endpoint loop with fake commands only."""
+
+    return """
+for MARKER_PATH in "$HERMES_MARKER_1" "$HERMES_MARKER_2"; do
+  launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
+  endpoint="$(printf '%s\\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+  marker_path="$(printf '%s\\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+  run_id="$(printf '%s\\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+  credential_file="$(printf '%s\\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+  credential_identity="$(printf '%s\\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
+  HERMES_LIVE_TARGET="$endpoint" \\
+    python3 scripts/with_live_credential.py \\
+      --marker "$marker_path" \\
+      --run-id "$run_id" \\
+      --credential-file "$credential_file" \\
+      --credential-identity "$credential_identity" \\
+      -- \\
+      node synthetic-child
+ done
+""".strip()
+
+
+def legacy_unchecked_mutation(block: str, operation: str) -> str:
+    """Recreate the pre-fix unguarded command for the regression baseline."""
+
+    if operation == "start":
+        start = block.index('if launcher_output="$(')
+        end = block.index("\nfi", start) + len("\nfi")
+        command_start = block.index("\n", start) + 1
+        command_end = block.index('\n)"; then', command_start)
+        command = block[command_start:command_end]
+        return block[:start] + 'launcher_output="$(\n' + command + '\n)"' + block[end:]
+    start = block.index("if python3 scripts/hermes_agent.py start-many")
+    end = block.index("\nfi", start) + len("\nfi")
+    command = block[start:end]
+    command_line = command[command.index("python3 scripts/hermes_agent.py") : command.index("; then")]
+    return block[:start] + command_line + block[end:]
 
 
 def canonical_parser_line(variable: str, field: str) -> str:
@@ -108,6 +194,8 @@ def documented_launcher_commands(path: Path) -> list[list[str]]:
         if prefix not in line:
             continue
         fragment = line[line.index(prefix) :].strip()
+        if fragment.endswith("; then"):
+            fragment = fragment[: -len("; then")].rstrip()
         for suffix in (')"', ")"):
             if fragment.endswith(suffix):
                 fragment = fragment[: -len(suffix)].rstrip()
@@ -221,6 +309,110 @@ class LiveProofCredentialTests(unittest.TestCase):
             "--",
             *command,
         ]
+
+    def run_synthetic_document(self, script: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        """Run a parsed doc block against fake start, proof, credential, and child boundaries."""
+
+        bin_directory = self.root / "synthetic-bin"
+        bin_directory.mkdir(exist_ok=True)
+        log_path = self.root / "boundaries.log"
+        log_path.unlink(missing_ok=True)
+        stale_credential = self.root / "stale.credential"
+        stale_credential.write_bytes(self.value + b"\n")
+        stale_credential.chmod(marker.CREDENTIAL_MODE)
+        fake_python = bin_directory / "python3"
+        fake_python.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "log = Path(os.environ['BOUNDARY_LOG'])\n"
+            "def record(value):\n"
+            "    with log.open('a', encoding='ascii') as stream:\n"
+            "        stream.write(value + '\\n')\n"
+            "args = sys.argv[1:]\n"
+            "if args[:2] == ['scripts/hermes_agent.py', 'start']:\n"
+            "    record('start')\n"
+            "    raise SystemExit(37)\n"
+            "if args[:2] == ['scripts/hermes_agent.py', 'start-many']:\n"
+            "    record('start-many')\n"
+            "    raise SystemExit(37)\n"
+            "if args[:2] == ['scripts/hermes_agent.py', 'endpoint']:\n"
+            "    record('endpoint')\n"
+            "    print(json.dumps({'ok': True, 'operation': 'endpoint', 'result': {\n"
+            "        'status': 'running', 'endpoint': os.environ['STALE_ENDPOINT'],\n"
+            "        'marker_path': os.environ['STALE_MARKER'], 'run_id': 'a' * 64,\n"
+            "        'credential_file': os.environ['STALE_CREDENTIAL'],\n"
+            "        'credential_identity': {'device': 1, 'generation': 'b' * 64,\n"
+            "            'inode': 2, 'mode': 384, 'nlink': 1, 'size': 49}}},\n"
+            "        sort_keys=True, separators=(',', ':')))\n"
+            "    raise SystemExit(0)\n"
+            "if args[:1] == ['scripts/read_launcher_result.py']:\n"
+            "    field = args[-1]\n"
+            "    record('parse:' + field)\n"
+            "    values = {\n"
+            "        'endpoint': os.environ['STALE_ENDPOINT'],\n"
+            "        'marker-path': os.environ['STALE_MARKER'],\n"
+            "        'run-id': 'a' * 64,\n"
+            "        'credential-file': os.environ['STALE_CREDENTIAL'],\n"
+            "        'credential-identity': json.dumps({'device': 1, 'generation': 'b' * 64,\n"
+            "            'inode': 2, 'mode': 384, 'nlink': 1, 'size': 49},\n"
+            "            sort_keys=True, separators=(',', ':')),\n"
+            "    }\n"
+            "    print(values[field])\n"
+            "    raise SystemExit(0)\n"
+            "if args[:1] == ['scripts/with_live_credential.py']:\n"
+            "    record('credential-read')\n"
+            "    credential = args[args.index('--credential-file') + 1]\n"
+            "    Path(credential).read_bytes()\n"
+            "    child = args[args.index('--') + 1:]\n"
+            "    environment = os.environ.copy()\n"
+            "    environment['HERMES_TEST_PASSWORD'] = 'a' * 48\n"
+            "    os.execvpe(child[0], child, environment)\n"
+            "raise SystemExit(99)\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(stat.S_IRWXU)
+        fake_node = bin_directory / "node"
+        fake_node.write_text(
+            f"#!{sys.executable}\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "if os.environ.get('HERMES_TEST_PASSWORD') != 'a' * 48:\n"
+            "    raise SystemExit(98)\n"
+            "with Path(os.environ['BOUNDARY_LOG']).open('a', encoding='ascii') as stream:\n"
+            "    stream.write('child\\n')\n",
+            encoding="utf-8",
+        )
+        fake_node.chmod(stat.S_IRWXU)
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{bin_directory}{os.pathsep}{environment['PATH']}",
+                "BOUNDARY_LOG": str(log_path),
+                "STALE_ENDPOINT": SYNTHETIC_ENDPOINT,
+                "STALE_MARKER": str(self.root / SYNTHETIC_MARKER.lstrip('/')),
+                "STALE_CREDENTIAL": str(stale_credential),
+                "HERMES_RUNS_DIR": str(self.runs),
+                "HERMES_MARKER_PATH": str(self.marker_path),
+                "HERMES_INSTANCE": "synthetic-one",
+                "HERMES_PORT": "19119",
+                "HERMES_INSTANCE_PREFIX": "synthetic",
+                "HERMES_INSTANCE_COUNT": "2",
+                "HERMES_BASE_PORT": "19119",
+                "HERMES_MARKER_1": str(self.marker_path),
+                "HERMES_MARKER_2": str(self.runs / "fixture-two.json"),
+            }
+        )
+        result = subprocess.run(
+            ["/bin/sh", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=environment,
+        )
+        lines = log_path.read_text(encoding="ascii").splitlines() if log_path.exists() else []
+        return result, lines
 
     def test_read_accepts_one_terminal_line_ending_and_preserves_file(self) -> None:
         for label, suffix in (
@@ -504,6 +696,30 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertFalse(execvpe.called)
         self.assertNotIn(str(self.credential_path), stderr.getvalue())
 
+    def test_start_mutations_guard_stale_marker_handoff_and_preserve_failure(self) -> None:
+        for operation in ("start", "start-many"):
+            for document in START_GUARD_DOCS:
+                with self.subTest(operation=operation, document=document):
+                    block = documented_mutation_block(document, operation)
+                    handoff = synthetic_handoff() if operation == "start" else synthetic_batch_handoff()
+                    legacy = legacy_unchecked_mutation(block, operation) + "\n" + handoff
+                    old_result, old_boundaries = self.run_synthetic_document(legacy)
+                    self.assertEqual(old_result.returncode, 0)
+                    self.assertIn(operation, old_boundaries)
+                    self.assertIn("endpoint", old_boundaries)
+                    self.assertIn("credential-read", old_boundaries)
+                    self.assertIn("child", old_boundaries)
+
+                    guarded_result, guarded_boundaries = self.run_synthetic_document(block + "\n" + handoff)
+                    self.assertEqual(guarded_result.returncode, 37)
+                    self.assertEqual(
+                        guarded_result.stderr,
+                        f"Hermes {operation} failed; endpoint handoff skipped.\n",
+                    )
+                    self.assertEqual(guarded_result.stdout, "")
+                    self.assertEqual(guarded_boundaries, [operation])
+                    self.assertNotIn(self.value.decode("ascii"), guarded_result.stdout + guarded_result.stderr)
+
     def test_skill_launcher_commands_use_current_marker_cli_without_podman(self) -> None:
         commands = documented_launcher_commands(SKILL_DOC)
         parsed = []
@@ -536,10 +752,20 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertEqual(parsed[2].count, 2)
         self.assertEqual(parsed[2].base_port, 19119)
         self.assertEqual(parsed[2].marker, ["${HERMES_MARKER_1:?set marker 1}", "${HERMES_MARKER_2:?set marker 2}"])
+        for document in START_GUARD_DOCS:
+            batch_commands = [
+                command for command in documented_launcher_commands(document) if command[2] == "start-many"
+            ]
+            self.assertEqual(len(batch_commands), 1)
+            self.assertEqual(batch_commands[0][batch_commands[0].index("--count") + 1], "2")
+            self.assertEqual(batch_commands[0].count("--marker"), 2)
         self.assertEqual(parsed[3].marker, "$MARKER_PATH")
         self.assertEqual(parsed[4].marker, "${HERMES_MARKER_PATH:?set the exact absolute marker path}")
+        self.assertFalse(parsed[4].purge_data)
+        self.assertEqual(parsed[5].marker, "${HERMES_MARKER_1:?set marker 1}")
         self.assertFalse(parsed[5].purge_data)
-        self.assertEqual(parsed[5].marker, ["${HERMES_MARKER_1:?set marker 1}", "${HERMES_MARKER_2:?set marker 2}"])
+        self.assertEqual(parsed[6].marker, "${HERMES_MARKER_2:?set marker 2}")
+        self.assertFalse(parsed[6].purge_data)
 
         old_forms = (
             ["start", "--instance", "$INSTANCE", "--port", "$PORT"],
@@ -547,6 +773,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             ["status", "--instance", "$INSTANCE"],
             ["start-many", "--prefix", "$PREFIX", "--count", "2", "--base-port", "19119"],
             ["stop", "--instance", "$INSTANCE"],
+            ["credential-file", "--marker", "$MARKER_PATH"],
             [
                 "stop-many",
                 "--prefix",

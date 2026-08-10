@@ -16,6 +16,7 @@ import contextvars
 import ctypes
 import errno
 import json
+import math
 import os
 import re
 import secrets
@@ -42,6 +43,12 @@ DEFAULT_IMAGE = (
     "docker.io/nousresearch/hermes-agent:v2026.8.3@"
     "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e"
 )
+# Keep the execution image allowlist source-bound. A caller-provided digest is
+# not evidence of trust; every accepted image must be this reviewed tag+digest.
+TRUSTED_IMAGE_REPO_DIGESTS = {
+    DEFAULT_IMAGE: "docker.io/nousresearch/hermes-agent@"
+    "sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e",
+}
 IMAGE_PATTERN = re.compile(
     r"^docker\.io/nousresearch/hermes-agent:"
     r"(?P<tag>[a-z0-9][a-z0-9._-]{0,127})@sha256:(?P<digest>[0-9a-f]{64})$"
@@ -221,6 +228,8 @@ def default_roots() -> Roots:
 
 
 def validate_image(image: str) -> tuple[str, str]:
+    if type(image) is not str or image not in TRUSTED_IMAGE_REPO_DIGESTS:
+        raise LauncherError("image_not_immutable_official")
     match = IMAGE_PATTERN.fullmatch(image)
     if match is None or match.group("tag") == "latest":
         raise LauncherError("image_not_immutable_official")
@@ -228,7 +237,7 @@ def validate_image(image: str) -> tuple[str, str]:
 
 
 def validate_instance(instance: str) -> str:
-    if INSTANCE_PATTERN.fullmatch(instance) is None:
+    if type(instance) is not str or INSTANCE_PATTERN.fullmatch(instance) is None:
         raise LauncherError("instance_invalid")
     return instance
 
@@ -257,6 +266,28 @@ def make_spec(
     if not username or username_bytes > 128 or any(ord(char) < 0x20 for char in username):
         raise LauncherError("username_invalid")
     return InstanceSpec(instance, port, image, username, roots or default_roots())
+
+
+def _validate_start_spec(spec: InstanceSpec) -> None:
+    """Validate caller-provided spec scalars before acquiring a lifecycle lease."""
+
+    if type(spec) is not InstanceSpec:
+        raise LauncherError("instance_spec_invalid")
+    if type(spec.roots) is not Roots or any(
+        not isinstance(path, Path)
+        for path in (spec.roots.state, spec.roots.data, spec.roots.credentials)
+    ):
+        raise LauncherError("instance_spec_invalid")
+    # Reuse the constructor's strict scalar checks without touching the
+    # filesystem. This keeps direct callers from bypassing the CLI validation
+    # before marker, Podman, or data-root work begins.
+    make_spec(
+        spec.instance,
+        spec.port,
+        image=spec.image,
+        username=spec.username,
+        roots=spec.roots,
+    )
 
 
 def clean_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -413,8 +444,8 @@ def podman_preflight(runner: Runner, environment: Mapping[str, str], executable:
 
 
 def expected_repo_digest(image: str) -> str:
-    _, digest = validate_image(image)
-    return f"docker.io/nousresearch/hermes-agent@{digest}"
+    validate_image(image)
+    return TRUSTED_IMAGE_REPO_DIGESTS[image]
 
 
 def verify_image(
@@ -423,6 +454,8 @@ def verify_image(
     environment: Mapping[str, str],
     executable: str,
 ) -> None:
+    # Keep direct callers fail-closed too; no pull is evidence of trust.
+    validate_image(image)
     pulled = invoke_runner(
         runner,
         (executable, "pull", image),
@@ -464,12 +497,38 @@ def is_port_available(port: int) -> bool:
     return True
 
 
+def _validate_private_directory_path(path: Path) -> None:
+    """Reject existing symlink/non-directory ancestors without creating paths."""
+
+    current = path
+    while True:
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            parent = current.parent
+            if parent == current:
+                return
+            current = parent
+            continue
+        except OSError:
+            raise LauncherError("owned_path_invalid") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise LauncherError("owned_path_invalid")
+        return
+
+
 def _ensure_private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        raise LauncherError("owned_path_invalid")
-    path.chmod(0o700)
+    _validate_private_directory_path(path)
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise LauncherError("owned_path_invalid")
+        path.chmod(0o700)
+    except LauncherError:
+        raise
+    except OSError:
+        raise LauncherError("owned_path_invalid") from None
 
 
 STATE_SCHEMA = "hermternal.live-run-state.v1"
@@ -1578,11 +1637,23 @@ def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> tuple[str
                 pass
 
 
-def check_provider_readiness(endpoint: str, attempts: int, interval: float) -> None:
+def _validate_readiness_options(attempts: int, interval: float) -> None:
+    """Reject non-finite or out-of-range readiness controls before side effects."""
+
     if type(attempts) is not int or attempts < 1 or attempts > 600:
         raise LauncherError("readiness_attempts_invalid")
-    if not isinstance(interval, (int, float)) or isinstance(interval, bool) or interval < 0 or interval > 30:
+    if (
+        not isinstance(interval, (int, float))
+        or isinstance(interval, bool)
+        or not math.isfinite(interval)
+        or interval < 0
+        or interval > 30
+    ):
         raise LauncherError("readiness_interval_invalid")
+
+
+def check_provider_readiness(endpoint: str, attempts: int, interval: float) -> None:
+    _validate_readiness_options(attempts, interval)
     url = f"{endpoint}/api/auth/providers"
     for attempt in range(attempts):
         try:
@@ -2395,6 +2466,106 @@ def _require_absent_entry(parent_fd: int, name: str, *, code: str) -> None:
             pass
 
 
+def _validate_existing_start_state(
+    state: LauncherState,
+    spec: InstanceSpec,
+    *,
+    parent_fd: int,
+) -> None:
+    """Validate an existing marker transaction before any engine boundary."""
+
+    _revalidate_state_records(state, parent_fd=parent_fd)
+    if (
+        state.spec.instance != spec.instance
+        or state.spec.port != spec.port
+        or state.spec.image != spec.image
+        or state.spec.username != spec.username
+    ):
+        raise LauncherError("marker_spec_mismatch")
+    if state.marker.status != live_run_marker.STATUS_RUNNING:
+        raise LauncherError("cleanup_incomplete")
+    _revalidate_credential_identity(state.marker, parent_fd=parent_fd)
+
+
+def _prevalidate_start_marker(
+    spec: InstanceSpec,
+    marker_path: str | Path,
+    *,
+    port_checker: PortChecker = is_port_available,
+) -> live_run_marker.MarkerPaths:
+    """Preflight one marker's private records without Podman or publication."""
+
+    paths = _marker_paths(marker_path)
+    _validate_private_directory_path(spec.roots.data)
+    _validate_private_directory_path(spec.data_dir)
+    parent_fd = _open_private_parent(paths.marker, code="marker_path_invalid")
+    try:
+        try:
+            state = _load_bound_state(paths.marker, spec.roots, parent_fd=parent_fd)
+        except LauncherError as error:
+            if error.code != "marker_missing":
+                raise
+            # A markerless sibling set is not a fresh transaction. Reject it
+            # before the first batch start rather than creating credentials and
+            # relying on cleanup to discover stale private records later.
+            _require_absent_entry(parent_fd, paths.state.name, code="state_path_invalid")
+            _require_absent_entry(parent_fd, paths.credential.name, code="credential_path_invalid")
+            _require_absent_entry(parent_fd, paths.cidfile.name, code="cidfile_path_invalid")
+            if not port_checker(spec.port):
+                raise LauncherError("port_unavailable")
+            return paths
+        _validate_existing_start_state(state, spec, parent_fd=parent_fd)
+        return paths
+    finally:
+        try:
+            os.close(parent_fd)
+        except OSError:
+            pass
+
+
+def _prevalidate_existing_start_containers(
+    specs: Sequence[InstanceSpec],
+    marker_paths: Sequence[Path],
+    *,
+    runner: Runner,
+    executable: str | None,
+    source_environment: Mapping[str, str] | None,
+    port_checker: PortChecker,
+) -> None:
+    """Inspect all existing exact IDs before a batch can mutate one run."""
+
+    existing: list[LauncherState] = []
+    for spec, marker_path in zip(specs, marker_paths):
+        paths = _marker_paths(marker_path)
+        parent_fd = _open_private_parent(paths.marker, code="marker_path_invalid")
+        try:
+            try:
+                state = _load_bound_state(paths.marker, spec.roots, parent_fd=parent_fd)
+            except LauncherError as error:
+                if error.code == "marker_missing":
+                    continue
+                raise
+            _validate_existing_start_state(state, spec, parent_fd=parent_fd)
+            existing.append(state)
+        finally:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+    if not existing:
+        return
+    environment = clean_environment(source_environment)
+    podman = executable or podman_path()
+    podman_preflight(runner, environment, podman)
+    for state in existing:
+        _, snapshot = _inspect_bound_container(state, runner, environment, podman)
+        if snapshot.status not in {"running", "configured", "created", "stopped", "exited", "dead"}:
+            raise LauncherError("container_state_unrecoverable")
+        if snapshot.status != "running" and not port_checker(state.spec.port):
+            raise LauncherError("port_unavailable")
+
+
 def _retain_cleanup_failed_in_place(
     state: LauncherState,
     tombstone: live_run_marker.RunMarker,
@@ -2721,13 +2892,12 @@ def _start_instance_with_parent(
     executable: str | None = None,
     source_environment: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, object], bool]:
+    _validate_start_spec(spec)
+    _validate_readiness_options(attempts, interval)
     environment = clean_environment(source_environment)
     _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
-    podman = executable or podman_path()
-    podman_preflight(runner, environment, podman)
-    verify_image(spec.image, runner, environment, podman)
-    _ensure_private_directory(spec.roots.data)
-    _ensure_private_directory(spec.data_dir)
+    _validate_private_directory_path(spec.roots.data)
+    _validate_private_directory_path(spec.data_dir)
 
     try:
         state = _load_bound_state(paths.marker, spec.roots, parent_fd=runs_parent_fd)
@@ -2737,22 +2907,33 @@ def _start_instance_with_parent(
         state = None
 
     if state is not None:
-        _revalidate_state_records(state, parent_fd=runs_parent_fd)
-        if (
-            state.spec.instance != spec.instance
-            or state.spec.port != spec.port
-            or state.spec.image != spec.image
-            or state.spec.username != spec.username
-        ):
-            raise LauncherError("marker_spec_mismatch")
-        if state.marker.status != live_run_marker.STATUS_RUNNING:
-            raise LauncherError("cleanup_incomplete")
-        try:
-            _revalidate_credential_identity(state.marker, parent_fd=runs_parent_fd)
-        except LauncherError as error:
-            raise LauncherError(error.code) from None
+        _validate_existing_start_state(state, spec, parent_fd=runs_parent_fd)
+    else:
+        # The selected port is a pure preflight for a new run. Do it before
+        # rootless Podman checks, image pull/inspect, or any data-root mkdir.
+        if not port_checker(spec.port):
+            raise LauncherError("port_unavailable")
+        _require_absent_entry(runs_parent_fd, paths.state.name, code="state_path_invalid")
+        _require_absent_entry(runs_parent_fd, paths.credential.name, code="credential_path_invalid")
+        _require_absent_entry(runs_parent_fd, paths.cidfile.name, code="cidfile_path_invalid")
+
+    podman = executable or podman_path()
+    podman_preflight(runner, environment, podman)
+    if state is not None:
+        # Classify the exact retained container before image work. A stopped
+        # owned record gets its port check before pull/inspect; a running record
+        # is exempt because its own container necessarily owns that port.
         document, current = _inspect_bound_container(state, runner, environment, podman)
         original_status = current.status
+        if original_status not in {"running", "configured", "created", "stopped", "exited", "dead"}:
+            raise LauncherError("container_state_unrecoverable")
+        if original_status != "running" and not port_checker(spec.port):
+            raise LauncherError("port_unavailable")
+    verify_image(spec.image, runner, environment, podman)
+    _ensure_private_directory(spec.roots.data)
+    _ensure_private_directory(spec.data_dir)
+
+    if state is not None:
         if original_status == "running":
             readiness(state.marker.endpoint, attempts, interval)
             _require_running_container(state, runner, environment, podman)
@@ -2887,6 +3068,9 @@ def _start_instance_with_parent(
     # removed merely because its name resembles this instance.
     if container_exists(spec, runner, environment, podman):
         raise LauncherError("marker_missing")
+    # Repeat immediately before publication to narrow the port TOCTOU window.
+    # This path is only for a new marker; valid running records skip port checks
+    # because their own retained container already owns the selected port.
     if not port_checker(spec.port):
         raise LauncherError("port_unavailable")
 
@@ -3219,9 +3403,15 @@ def start_instance(
 ) -> tuple[dict[str, object], bool]:
     """Run one lifecycle transaction under one pinned runs-directory fd."""
 
+    _validate_start_spec(spec)
+    _validate_readiness_options(attempts, interval)
     if marker_path is None:
         raise LauncherError("marker_required")
     paths = _marker_paths(marker_path)
+    # Perform the advisory pure-record/data-root/port pass before creating the
+    # lifecycle lock. The descriptor-bound transaction below repeats every
+    # check after acquiring its lease and remains the authoritative gate.
+    _prevalidate_start_marker(spec, paths.marker, port_checker=port_checker)
     with _operation_lease(paths.marker, code="marker_path_invalid") as lease:
         return _start_instance_with_parent(
             spec,
@@ -3245,16 +3435,52 @@ def start_many(
 ) -> list[dict[str, object]]:
     if not specs:
         raise LauncherError("instance_count_invalid")
+    attempts = kwargs.get("attempts", 60)
+    interval = kwargs.get("interval", 1)
+    _validate_readiness_options(attempts, interval)  # type: ignore[arg-type]
+    for spec in specs:
+        _validate_start_spec(spec)
     if marker_paths is None or len(marker_paths) != len(specs):
         raise LauncherError("marker_count_invalid")
     if len({spec.instance for spec in specs}) != len(specs) or len({spec.port for spec in specs}) != len(specs):
         raise LauncherError("batch_not_unique")
     try:
-        exact_marker_paths = tuple(_marker_paths(path).marker for path in marker_paths)
+        canonical_marker_paths = tuple(_marker_paths(path).marker for path in marker_paths)
     except LauncherError:
         raise
-    if len(set(exact_marker_paths)) != len(exact_marker_paths):
+    if len(set(canonical_marker_paths)) != len(canonical_marker_paths):
         raise LauncherError("marker_not_unique")
+
+    # Validate every marker, existing record, private data path, and new-run
+    # port before dispatching the first lifecycle transaction. Each start still
+    # repeats these checks while holding its descriptor-bound lease because this
+    # batch pass is advisory and cannot close the inter-marker race window.
+    port_checker = kwargs.get("port_checker", is_port_available)
+    if not callable(port_checker):
+        raise LauncherError("port_checker_invalid")
+    exact_marker_paths = tuple(
+        _prevalidate_start_marker(spec, marker_path, port_checker=port_checker)
+        .marker
+        for spec, marker_path in zip(specs, canonical_marker_paths)
+    )
+    runner = kwargs.get("runner", run_command)
+    if not callable(runner):
+        raise LauncherError("runner_invalid")
+    executable = kwargs.get("executable")
+    if executable is not None and type(executable) is not str:
+        raise LauncherError("executable_invalid")
+    source_environment = kwargs.get("source_environment")
+    if source_environment is not None and not isinstance(source_environment, Mapping):
+        raise LauncherError("environment_invalid")
+    _prevalidate_existing_start_containers(
+        specs,
+        exact_marker_paths,
+        runner=runner,  # type: ignore[arg-type]
+        executable=executable,  # type: ignore[arg-type]
+        source_environment=source_environment,  # type: ignore[arg-type]
+        port_checker=port_checker,
+    )
+
     results: list[dict[str, object]] = []
     created: list[tuple[InstanceSpec, str | Path]] = []
     try:
@@ -3493,8 +3719,32 @@ def add_start_options(parser: argparse.ArgumentParser) -> None:
     add_roots(parser)
 
 
+class RejectDuplicateMarkerAction(argparse.Action):
+    """Reject duplicate single-operation markers before any boundary access."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str,
+        option_string: str | None = None,
+    ) -> None:
+        del parser, option_string
+        if getattr(namespace, self.dest, None) is not None:
+            # A repeated single-marker option used to silently select the last
+            # value, which could redirect an exact-marker operation before its
+            # filesystem or engine boundary. Batch commands keep append
+            # semantics and validate their complete marker set separately.
+            raise LauncherError("marker_not_unique")
+        setattr(namespace, self.dest, values)
+
+
 def add_marker(parser: argparse.ArgumentParser, *, many: bool = False) -> None:
-    parser.add_argument("--marker", action="append" if many else None, required=True)
+    parser.add_argument(
+        "--marker",
+        action="append" if many else RejectDuplicateMarkerAction,
+        required=True,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3514,32 +3764,29 @@ def build_parser() -> argparse.ArgumentParser:
     add_marker(start_many_parser, many=True)
     add_start_options(start_many_parser)
 
-    for operation in ("status", "endpoint", "credential-file", "stop"):
+    for operation in ("status", "endpoint", "stop"):
         command = subparsers.add_parser(operation)
         add_marker(command)
         if operation == "stop":
             command.add_argument("--purge-data", action="store_true")
         add_roots(command)
 
-    stop_many_parser = subparsers.add_parser("stop-many")
-    add_marker(stop_many_parser, many=True)
-    stop_many_parser.add_argument("--purge-data", action="store_true")
-    add_roots(stop_many_parser)
     return parser
 
 
 def execute(args: argparse.Namespace) -> dict[str, object]:
     roots = roots_from_args(args)
     if args.operation == "start":
-        with _operation_lease(args.marker, code="marker_path_invalid"):
-            spec = make_spec(args.instance, args.port, image=args.image, username=args.username, roots=roots)
-            result, _ = start_instance(
-                spec,
-                marker_path=args.marker,
-                attempts=args.readiness_attempts,
-                interval=args.readiness_interval,
-            )
-            return {"ok": True, "operation": "start", "result": result}
+        # Build and validate pure scalar inputs before start_instance acquires
+        # the marker lease; rejected CLI input must not create lock state.
+        spec = make_spec(args.instance, args.port, image=args.image, username=args.username, roots=roots)
+        result, _ = start_instance(
+            spec,
+            marker_path=args.marker,
+            attempts=args.readiness_attempts,
+            interval=args.readiness_interval,
+        )
+        return {"ok": True, "operation": "start", "result": result}
     if args.operation == "start-many":
         if len(args.marker) != args.count:
             raise LauncherError("marker_count_invalid")
@@ -3558,28 +3805,27 @@ def execute(args: argparse.Namespace) -> dict[str, object]:
             interval=args.readiness_interval,
         )
         return {"ok": True, "operation": "start-many", "results": results}
-    if args.operation in {"endpoint", "credential-file"}:
+    if args.operation == "endpoint":
         with _operation_lease(args.marker, code="marker_path_invalid") as lease:
             state = _load_bound_state(args.marker, roots, parent_fd=lease.parent_fd)
             result = verify_handoff_endpoint(state)
             return {"ok": True, "operation": args.operation, "result": result}
     if args.operation == "status":
-        with _operation_lease(args.marker, code="marker_path_invalid"):
-            return {
-                "ok": True,
-                "operation": "status",
-                "result": status_instance(args.marker, roots=roots),
-            }
+        # status_instance owns the lease; avoid nesting a redundant lock around
+        # its pure marker-path validation and exact-record inspection.
+        return {
+            "ok": True,
+            "operation": "status",
+            "result": status_instance(args.marker, roots=roots),
+        }
     if args.operation == "stop":
-        with _operation_lease(args.marker, code="marker_path_invalid"):
-            return {
-                "ok": True,
-                "operation": "stop",
-                "result": stop_instance(args.marker, roots=roots, purge_data=args.purge_data),
-            }
-    if args.operation == "stop-many":
-        results = [stop_instance(path, roots=roots, purge_data=args.purge_data) for path in args.marker]
-        return {"ok": True, "operation": "stop-many", "results": results}
+        # stop_instance rejects unsupported purge input before acquiring its
+        # lease, so invalid CLI input cannot leave lifecycle-lock state behind.
+        return {
+            "ok": True,
+            "operation": "stop",
+            "result": stop_instance(args.marker, roots=roots, purge_data=args.purge_data),
+        }
     raise LauncherError("operation_unknown")
 
 
