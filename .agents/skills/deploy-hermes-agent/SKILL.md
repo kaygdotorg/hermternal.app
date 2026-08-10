@@ -35,24 +35,31 @@ Never:
 
 ## Start one instance
 
-From the repository root on the VM, provide the exact instance name and the
-free loopback port owned by that instance. Do not copy a port from an old proof:
+From the repository root on the VM, provide the exact instance name, free
+loopback port, and caller-selected marker under an existing private `0700` runs
+directory. Do not copy a port or marker from an old proof:
 
 ```sh
+RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
+MARKER_PATH="${HERMES_MARKER_PATH:?set the exact absolute marker path under that directory}"
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 PORT="${HERMES_PORT:?set a free loopback port for this instance}"
 launcher_output="$(
   python3 scripts/hermes_agent.py start \
     --instance "$INSTANCE" \
-    --port "$PORT"
+    --port "$PORT" \
+    --marker "$MARKER_PATH"
 )"
 # `endpoint` is the fail-closed selection gate immediately before credential
 # handoff. It pins the immutable launcher container ID to running state and the
 # sole explicit 127.0.0.1:<requested-port>:9119 mapping.
-launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
-# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
+# Command substitution strips all trailing LF bytes; append exactly one LF for canonical parsing.
 endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
 credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 ```
 
 The launcher emits public metadata under `.result`. A successful `start` result
@@ -63,20 +70,26 @@ requires the launcher-owned container to be `running` with exactly one
 missing/stale IDs, replacements, ownership mismatches, rebound or extra ports,
 and non-loopback mappings before any credential-file read.
 `read_launcher_result.py` accepts only the closed successful `endpoint` result
-with `status` `running`, its canonical launcher loopback endpoint, and matching
-credential-file metadata; it rejects `start`, `status`, and retained metadata.
-It never prints the password or infers a port.
+with `status` `running`, its canonical launcher loopback endpoint, matching
+marker and credential metadata. It never prints the password or infers a port.
 
-Do not print the credential file. A local test process may read it through the
-repository helper. `with_live_credential.py` removes only terminal CR/LF bytes,
-requires exactly 48 lowercase hexadecimal characters, and replaces itself with
-the proof command. The password is never printed or written by the helper; it is
-present only in the child process environment:
+Do not print the credential file or the `credential_identity` value. A local test
+process may read the credential through the repository helper. The helper
+requires the exact marker, run ID, credential path, and generation-bearing
+identity before it reads the file. It removes only terminal CR/LF bytes, requires
+exactly 48 lowercase hexadecimal characters, and replaces itself with the proof
+command. The password is never printed or written by the helper; it is present
+only in the child process environment:
 
 ```sh
 HERMES_LIVE_TARGET="$endpoint" \
-  python3 scripts/with_live_credential.py "$credential_file" -- \
-  node /path/to/browser-smoke.mjs
+  python3 scripts/with_live_credential.py \
+    --marker "$marker_path" \
+    --run-id "$run_id" \
+    --credential-file "$credential_file" \
+    --credential-identity "$credential_identity" \
+    -- \
+    node /path/to/browser-smoke.mjs
 ```
 
 Invalid, empty, overlong, uppercase, or whitespace-padded files fail locally
@@ -86,28 +99,38 @@ repository file, fixture, report, terminal output, or retained log.
 ## Start N independent instances
 
 Each instance gets a unique deterministic name, data directory, credential
-file, and loopback port:
+file, loopback port, and caller-selected marker:
 
 ```sh
 python3 scripts/hermes_agent.py start-many \
   --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
   --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
-  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}"
+  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
+  --marker "${HERMES_MARKER_1:?set marker 1}" \
+  --marker "${HERMES_MARKER_2:?set marker 2}"
+# Repeat --marker once for every requested instance.
 ```
 
-The launcher reports each instance's endpoint and credential-file path in its
-JSON results. Keep those results together; do not reconstruct a port from a
-prefix, count, or remembered deployment.
+The `start-many` result contains bounded batch status and marker metadata, not
+handoff endpoint or credential metadata. For each marker, run the exact
+`endpoint --marker` operation, extract all five fields with
+`read_launcher_result.py`, and use the four proof fields for any credential
+handoff. Keep those per-marker results together; do not reconstruct a port from
+a prefix, count, or remembered deployment.
 
 ## Inspect an instance
 
 ```sh
-INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
+RUNS_DIR="${HERMES_RUNS_DIR:?set an existing private 0700 runs directory}"
+MARKER_PATH="${HERMES_MARKER_PATH:?set the exact absolute marker path under that directory}"
 # This freshly verifies the immutable container ID, running state, and loopback mapping.
-launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
-# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
+# Command substitution strips all trailing LF bytes; append exactly one LF for canonical parsing.
 endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
 credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 ```
 
 A successful `start` result is `ready`, not a handoff permit. The `endpoint`
@@ -120,30 +143,23 @@ live endpoint permit.
 
 ## Stop and clean up
 
-Stop only the exact instance you own:
+Stop only the exact marker-bound instance you own:
 
 ```sh
 python3 scripts/hermes_agent.py stop \
-  --instance "${HERMES_INSTANCE:?set the exact launcher instance name}"
+  --marker "${HERMES_MARKER_PATH:?set the exact absolute marker path}"
 ```
 
-Keep data and the synthetic credential when a retry needs the same instance.
-Remove both only when the disposable lane is finished:
+The marker-bound stop removes only the exact container, credential, state, and
+marker records. It retains the container data for diagnosis or retry; the strict
+path does not support `--purge-data` or broad cleanup.
 
-```sh
-python3 scripts/hermes_agent.py stop \
-  --instance "${HERMES_INSTANCE:?set the exact launcher instance name}" \
-  --purge-data
-```
-
-Stop an exact batch:
+Stop an exact marker-bound batch:
 
 ```sh
 python3 scripts/hermes_agent.py stop-many \
-  --prefix "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}" \
-  --count "${HERMES_INSTANCE_COUNT:?set the fleet count}" \
-  --base-port "${HERMES_BASE_PORT:?set the first free loopback port}" \
-  --purge-data
+  --marker "${HERMES_MARKER_1:?set marker 1}" \
+  --marker "${HERMES_MARKER_2:?set marker 2}"
 ```
 
 Repeat stop commands to verify idempotent cleanup. Never use broad Podman prune

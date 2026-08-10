@@ -12,6 +12,7 @@ import importlib.util
 import json
 import io
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -39,6 +40,14 @@ helper = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = helper
 spec.loader.exec_module(helper)
 
+LAUNCHER_SCRIPT = ROOT / "scripts" / "hermes_agent.py"
+launcher_spec = importlib.util.spec_from_file_location("hermes_agent", LAUNCHER_SCRIPT)
+if launcher_spec is None or launcher_spec.loader is None:
+    raise RuntimeError(f"Could not load {LAUNCHER_SCRIPT}")
+launcher = importlib.util.module_from_spec(launcher_spec)
+sys.modules[launcher_spec.name] = launcher
+launcher_spec.loader.exec_module(launcher)
+
 DOCUMENTED_HANDOFF_DOCS = (
     ROOT / "scripts" / "README.md",
     ROOT / "apps" / "web" / "tests" / "live" / "README.md",
@@ -50,15 +59,22 @@ README_PARSER_FIELDS = (
     ("credential_file", "credential-file"),
     ("credential_identity", "credential-identity"),
 )
+SKILL_DOC = ROOT / ".agents" / "skills" / "deploy-hermes-agent" / "SKILL.md"
 DOCUMENTED_PARSER_FIELDS = {
     ROOT / "scripts" / "README.md": README_PARSER_FIELDS,
     ROOT / "apps" / "web" / "tests" / "live" / "README.md": README_PARSER_FIELDS,
-    ROOT / ".agents" / "skills" / "deploy-hermes-agent" / "SKILL.md": (
-        ("endpoint", "endpoint"),
-        ("credential_file", "credential-file"),
-    ),
+    SKILL_DOC: README_PARSER_FIELDS,
 }
 EXPECTED_BUN_COMMAND = ["bun", "run", "--cwd", "apps/web", "test:e2e:live"]
+EXPECTED_SKILL_COMMAND = ["node", "/path/to/browser-smoke.mjs"]
+EXPECTED_SKILL_OPERATIONS = [
+    "start",
+    "endpoint",
+    "start-many",
+    "endpoint",
+    "stop",
+    "stop-many",
+]
 
 
 def canonical_parser_line(variable: str, field: str) -> str:
@@ -78,6 +94,49 @@ def assert_canonical_parser_handoff(path: Path, fields: tuple[tuple[str, str], .
     missing = sorted(expected - lines)
     if missing:
         raise AssertionError(f"Missing canonical parser handoff in {path}: {missing}")
+
+
+def documented_launcher_commands(path: Path) -> list[list[str]]:
+    """Extract every documented launcher argv without executing the launcher."""
+
+    # Join only shell continuation lines. This keeps command substitutions and
+    # quoted variable expansions intact for shlex, including marker identities.
+    source = re.sub(r"\\\n[ \\t]*", " ", path.read_text(encoding="utf-8"))
+    commands: list[list[str]] = []
+    prefix = "python3 scripts/hermes_agent.py "
+    for line in source.splitlines():
+        if prefix not in line:
+            continue
+        fragment = line[line.index(prefix) :].strip()
+        for suffix in (')"', ")"):
+            if fragment.endswith(suffix):
+                fragment = fragment[: -len(suffix)].rstrip()
+                break
+        commands.append(shlex.split(fragment))
+    return commands
+
+
+def documented_skill_handoff_script(path: Path) -> str:
+    """Extract the complete skill credential handoff for a shell test."""
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    handoff_line = 'HERMES_LIVE_TARGET="$endpoint" \\'
+    expected_lines = [
+        'python3 scripts/with_live_credential.py \\',
+        '--marker "$marker_path" \\',
+        '--run-id "$run_id" \\',
+        '--credential-file "$credential_file" \\',
+        '--credential-identity "$credential_identity" \\',
+        '-- \\',
+        'node /path/to/browser-smoke.mjs',
+    ]
+    for index, line in enumerate(lines[:-len(expected_lines)]):
+        if line.strip() != handoff_line:
+            continue
+        block = lines[index + 1 : index + 1 + len(expected_lines)]
+        if [candidate.strip() for candidate in block] == expected_lines:
+            return "\n".join([line.strip(), *expected_lines])
+    raise AssertionError(f"No complete skill handoff found in {path}")
 
 
 def documented_bun_command(path: Path) -> list[str]:
@@ -431,6 +490,149 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "proof_invalid\n")
         self.assertFalse(read_credential_file.called)
         self.assertFalse(execvpe.called)
+
+    def test_legacy_positional_credential_form_is_rejected(self) -> None:
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(helper.os, "execvpe") as execvpe,
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = helper.main([str(self.credential_path), "--", "synthetic-proof"])
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "proof_required\n")
+        self.assertFalse(execvpe.called)
+        self.assertNotIn(str(self.credential_path), stderr.getvalue())
+
+    def test_skill_launcher_commands_use_current_marker_cli_without_podman(self) -> None:
+        commands = documented_launcher_commands(SKILL_DOC)
+        parsed = []
+        parser = launcher.build_parser()
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(command[:2], ["python3", "scripts/hermes_agent.py"])
+                parser_argv = [
+                    "19119"
+                    if value == "$PORT" or value.startswith("${HERMES_BASE_PORT:")
+                    else "2"
+                    if value.startswith("${HERMES_INSTANCE_COUNT:")
+                    else value
+                    for value in command[2:]
+                ]
+                try:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        parsed.append(parser.parse_args(parser_argv))
+                except SystemExit as error:
+                    self.fail(f"skill command is not current parser form: {command!r} ({error})")
+
+        self.assertEqual(len(commands), len(EXPECTED_SKILL_OPERATIONS))
+        self.assertEqual([command[2] for command in commands], EXPECTED_SKILL_OPERATIONS)
+        self.assertEqual([args.operation for args in parsed], EXPECTED_SKILL_OPERATIONS)
+        self.assertEqual(parsed[0].instance, "$INSTANCE")
+        self.assertEqual(parsed[0].port, 19119)
+        self.assertEqual(parsed[0].marker, "$MARKER_PATH")
+        self.assertEqual(parsed[1].marker, "$MARKER_PATH")
+        self.assertEqual(parsed[2].prefix, "${HERMES_INSTANCE_PREFIX:?set the fleet prefix}")
+        self.assertEqual(parsed[2].count, 2)
+        self.assertEqual(parsed[2].base_port, 19119)
+        self.assertEqual(parsed[2].marker, ["${HERMES_MARKER_1:?set marker 1}", "${HERMES_MARKER_2:?set marker 2}"])
+        self.assertEqual(parsed[3].marker, "$MARKER_PATH")
+        self.assertEqual(parsed[4].marker, "${HERMES_MARKER_PATH:?set the exact absolute marker path}")
+        self.assertFalse(parsed[5].purge_data)
+        self.assertEqual(parsed[5].marker, ["${HERMES_MARKER_1:?set marker 1}", "${HERMES_MARKER_2:?set marker 2}"])
+
+        old_forms = (
+            ["start", "--instance", "$INSTANCE", "--port", "$PORT"],
+            ["endpoint", "--instance", "$INSTANCE"],
+            ["status", "--instance", "$INSTANCE"],
+            ["start-many", "--prefix", "$PREFIX", "--count", "2", "--base-port", "19119"],
+            ["stop", "--instance", "$INSTANCE"],
+            [
+                "stop-many",
+                "--prefix",
+                "$PREFIX",
+                "--count",
+                "2",
+                "--base-port",
+                "19119",
+            ],
+        )
+        for old_form in old_forms:
+            with self.subTest(old_form=old_form), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parser.parse_args(old_form)
+
+    def test_skill_alias_is_relative_source_symlink(self) -> None:
+        alias = ROOT / ".claude"
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(os.readlink(alias), ".agents")
+        self.assertEqual(
+            (alias / "skills" / "deploy-hermes-agent" / "SKILL.md").resolve(),
+            SKILL_DOC.resolve(),
+        )
+
+    def test_documented_skill_handoff_preserves_identity_and_executes_child(self) -> None:
+        for document, fields in DOCUMENTED_PARSER_FIELDS.items():
+            with self.subTest(parser_document=document):
+                assert_canonical_parser_handoff(document, fields)
+        self.assertEqual(
+            documented_skill_handoff_script(SKILL_DOC).splitlines()[1:],
+            [
+                'python3 scripts/with_live_credential.py \\',
+                '--marker "$marker_path" \\',
+                '--run-id "$run_id" \\',
+                '--credential-file "$credential_file" \\',
+                '--credential-identity "$credential_identity" \\',
+                '-- \\',
+                'node /path/to/browser-smoke.mjs',
+            ],
+        )
+
+        bin_directory = Path(self.temporary.name) / "bin"
+        bin_directory.mkdir()
+        capture = Path(self.temporary.name) / "argv"
+        fake_node = bin_directory / "node"
+        fake_node.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os\n"
+            "from pathlib import Path\n"
+            "import sys\n"
+            "if os.environ.get('HERMES_TEST_PASSWORD') != 'a' * 48:\n"
+            "    raise SystemExit(97)\n"
+            "Path(os.environ['HANDOFF_CAPTURE']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8",
+        )
+        fake_node.chmod(stat.S_IRWXU)
+        proof = self.proof()
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{bin_directory}{os.pathsep}{environment['PATH']}",
+                "HANDOFF_CAPTURE": str(capture),
+                "endpoint": self.binding.endpoint,
+                "marker_path": str(self.marker_path),
+                "run_id": str(proof["run_id"]),
+                "credential_file": str(proof["credential_file"]),
+                "credential_identity": json.dumps(
+                    proof["credential_identity"], sort_keys=True, separators=(",", ":")
+                ),
+            }
+        )
+        result = subprocess.run(
+            ["/bin/sh", "-c", documented_skill_handoff_script(SKILL_DOC)],
+            check=False,
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(capture.read_text(encoding="utf-8").splitlines(), EXPECTED_SKILL_COMMAND[1:])
+        self.assertEqual(self.credential_path.read_bytes(), self.value + b"\n")
+        self.assertNotIn(self.value.decode("ascii"), result.stdout + result.stderr)
 
     def test_documented_handoff_invokes_valid_bun_command(self) -> None:
         for document, fields in DOCUMENTED_PARSER_FIELDS.items():

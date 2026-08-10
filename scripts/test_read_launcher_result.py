@@ -161,7 +161,7 @@ class LauncherResultTests(unittest.TestCase):
 
     def test_requires_canonical_producer_framing(self) -> None:
         raw = parser._serialize_result(self.document)
-        for noncanonical in (raw[:-1], b" " + raw, raw + b"\n"):
+        for noncanonical in (raw[:-1], raw[:-1] + b"\r\n", b" " + raw, raw + b"\n"):
             with self.subTest(raw_length=len(noncanonical)):
                 with self.assertRaises(parser.LauncherResultError):
                     parser.parse_launcher_result(noncanonical)

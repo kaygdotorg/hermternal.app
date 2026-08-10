@@ -41,7 +41,7 @@ INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 # This fail-closed selection gate freshly proves the immutable launcher
 # container ID is running and owns the one explicit loopback Dashboard port.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+# Command substitution strips all trailing LF bytes; append exactly one LF for canonical parsing.
 endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
 run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"

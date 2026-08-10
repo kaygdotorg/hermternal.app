@@ -188,7 +188,7 @@ launcher_output="$(
 # persisted container ID and accepts only a running, launcher-owned container
 # with one 127.0.0.1:<requested-port>:9119 mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-# Command substitution strips the producer LF; restore it for canonical parsing.
+# Command substitution strips all trailing LF bytes; append exactly one LF for canonical parsing.
 endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
 run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
@@ -225,7 +225,7 @@ instance name, port, recency, or directory contents:
 ```sh
 # This verifies the immutable container ID, running state, and exact loopback mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-# Command substitution strips the producer LF; restore it for canonical parsing.
+# Command substitution strips all trailing LF bytes; append exactly one LF for canonical parsing.
 endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
 marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
 run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
@@ -441,7 +441,11 @@ quarantine retention, FIFO and symlink rejection, bounded launcher-result and
 proof input, duplicate-free JSON, canonical endpoint spelling, exact one-line
 credential framing, Darwin clone-boundary mode gating, malformed runner
 normalization, rootless checks, environment cleanup, stopped-container recovery,
-and exact-once cleanup. This command-line artifact has no UI, focus,
+exact-once cleanup, and the marker-bound lifecycle commands documented by the
+Hermes deployment skill. The handoff tests exercise the real shell quoting for
+`credential_identity`, reject the obsolete positional helper form, validate the
+skill's `.claude` symlink alias, and parse corrected launcher argv without
+crossing the Podman boundary. This command-line artifact has no UI, focus,
 screen-reader, browser-zoom, contrast, motion, or touch-target surface;
 accessibility checks are N/A.
 
