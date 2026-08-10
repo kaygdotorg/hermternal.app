@@ -12,6 +12,8 @@ import {
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertLiveProofLedgerCaptureReady } from './live-proof-ledger.mjs';
+import { LIVE_SCREENSHOT_COMMAND } from './live-screenshot-contract.mjs';
+import { LIVE_PLAYWRIGHT_TIMEZONE_ID } from './live-playwright-config.mjs';
 
 /**
  * This module is the only explicit screenshot path in the live lane. It is
@@ -24,7 +26,10 @@ import { assertLiveProofLedgerCaptureReady } from './live-proof-ledger.mjs';
 export const LIVE_SCREENSHOT_MANIFEST_SCHEMA = 'hermternal.live-chat-screenshot.v2';
 export const LIVE_SCREENSHOT_ISSUE = 353;
 export const LIVE_SCREENSHOT_ROUTE = '/';
-export const LIVE_SCREENSHOT_TEST_COMMAND = 'bun run --cwd apps/web test:e2e:live';
+// Keep the retained manifest tied to the reviewed one-test command. The broad
+// live runner command is intentionally not sufficient evidence for issue #353.
+export const LIVE_SCREENSHOT_TEST_COMMAND = LIVE_SCREENSHOT_COMMAND;
+export const LIVE_SCREENSHOT_TIMEZONE_ID = LIVE_PLAYWRIGHT_TIMEZONE_ID;
 export const LIVE_SCREENSHOT_CAPTURE_ENV = 'HERMTERNAL_LIVE_SCREENSHOT_CAPTURE';
 export const LIVE_SCREENSHOT_PARITY_ENV = 'HERMTERNAL_PAPER_PARITY_APPROVED';
 export const LIVE_SCREENSHOT_CLIENT_SHA_ENV = 'HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA';
@@ -558,6 +563,7 @@ const MANIFEST_KEYS = [
   'theme',
   'reducedMotion',
   'locale',
+  'timezoneId',
   'uiState',
   'clientSha',
   'hermes',
@@ -702,6 +708,9 @@ export function validateLiveScreenshotManifest(value) {
   if (manifest.locale !== LIVE_SCREENSHOT_LOCALE) {
     throw new Error('live screenshot manifest locale is not pinned');
   }
+  if (manifest.timezoneId !== LIVE_SCREENSHOT_TIMEZONE_ID) {
+    throw new Error('live screenshot manifest timezone is not pinned');
+  }
   if (!LIVE_SCREENSHOT_UI_STATES.includes(manifest.uiState)) {
     throw new Error('live screenshot manifest UI state is not approved');
   }
@@ -745,6 +754,7 @@ export function validateLiveScreenshotManifest(value) {
     ['theme', manifest.theme],
     ['reducedMotion', manifest.reducedMotion],
     ['locale', manifest.locale],
+    ['timezoneId', manifest.timezoneId],
     ['uiState', manifest.uiState],
     ['clientSha', manifest.clientSha],
     ['hermes.imageDigest', manifest.hermes.imageDigest],
@@ -769,6 +779,7 @@ export function validateLiveScreenshotManifest(value) {
  *   devicePixelRatio: number,
  *   imageSha256: string,
  *   locale: string,
+ *   timezoneId: string,
  *   reducedMotion: 'reduce' | 'no-preference',
  *   theme: 'light' | 'dark',
  *   uiState: 'empty' | 'ready',
@@ -803,6 +814,7 @@ export function createLiveScreenshotManifest(input) {
     theme: input.theme,
     reducedMotion: input.reducedMotion,
     locale: input.locale,
+    timezoneId: input.timezoneId,
     uiState: input.uiState,
     clientSha: input.clientSha,
     hermes: {
@@ -996,7 +1008,11 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     return projection.outerHTML;
   };
 
-  const timeline = preview.querySelector('[data-live-content="conversation-timeline"]');
+  // These selectors are the current WorkspacePreview component contract. The
+  // old data-live-content markers were never emitted by Timeline, SessionList,
+  // ConversationHeader, or Composer and caused the f7 live-component proof to
+  // fail before it could sanitize the actual page.
+  const timeline = preview.querySelector('[data-testid="conversation-timeline"]');
   if (!(timeline instanceof HTMLElement)) {
     throw new Error('live screenshot capture transcript surface is unavailable');
   }
@@ -1007,7 +1023,7 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     element.querySelectorAll('[aria-label], [title]').forEach(rememberDynamicAttributes);
   });
 
-  preview.querySelectorAll('[data-live-content="session-list"] .session-row').forEach((row) => {
+  preview.querySelectorAll('nav[aria-label="Conversations"].session-list .session-row').forEach((row) => {
     remember(row.querySelector('.pill-label')?.textContent);
     remember(row.querySelector('.pill-description')?.textContent);
     const button = row.querySelector('button');
@@ -1019,13 +1035,11 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
   ];
   metadataElements.forEach(rememberMetadataElement);
 
-  preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
-    region.querySelectorAll('[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
-      remember(label.textContent);
-    });
-    region.querySelectorAll('input').forEach(rememberDynamicAttributes);
+  preview.querySelectorAll('button[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
+    remember(label.textContent);
   });
-  preview.querySelectorAll('[data-live-content="composer"] textarea, [data-live-content="composer"] input').forEach(
+  preview.querySelectorAll('.title-region input').forEach(rememberDynamicAttributes);
+  preview.querySelectorAll('form[aria-label="Message composer"].composer textarea, form[aria-label="Message composer"].composer input').forEach(
     rememberDynamicAttributes
   );
 
@@ -1038,7 +1052,7 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
   timeline.setAttribute('data-capture-sanitized', 'true');
   timeline.removeAttribute('data-live-content');
 
-  preview.querySelectorAll('[data-live-content="session-list"]').forEach((list) => {
+  preview.querySelectorAll('nav[aria-label="Conversations"].session-list').forEach((list) => {
     list.querySelectorAll('.session-row').forEach((row) => {
       const button = row.querySelector('button');
       if (!button) return;
@@ -1111,24 +1125,25 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     control.querySelector('select')?.setAttribute('aria-label', 'Model');
   });
 
-  preview.querySelectorAll('[data-live-content="conversation-title"]').forEach((region) => {
-    region.querySelectorAll('[aria-label="Edit conversation title"] .pill-label').forEach((label) => {
-      label.textContent = 'Chat session';
-    });
-    region.querySelectorAll('[aria-label="Edit conversation title"]').forEach((button) => {
-      button.setAttribute('aria-label', 'Edit conversation title');
-      button.setAttribute('title', 'Edit conversation title');
-    });
-    region.querySelectorAll('input').forEach((input) => {
-      input.value = '';
-      input.removeAttribute('value');
-      input.setAttribute('placeholder', 'Chat session');
-    });
+  preview.querySelectorAll('button[aria-label="Edit conversation title"]').forEach((button) => {
+    const label = button.querySelector('.pill-label');
+    if (label) label.textContent = 'Chat session';
+    button.setAttribute('aria-label', 'Edit conversation title');
+    button.setAttribute('title', 'Edit conversation title');
+    button.setAttribute('data-capture-sanitized', 'true');
+  });
+  preview.querySelectorAll('.title-region input').forEach((input) => {
+    const field = /** @type {HTMLInputElement} */ (input);
+    field.value = '';
+    field.removeAttribute('value');
+    field.setAttribute('placeholder', 'Chat session');
+  });
+  preview.querySelectorAll('.title-region').forEach((region) => {
     region.setAttribute('data-capture-sanitized', 'true');
     region.removeAttribute('data-live-content');
   });
 
-  preview.querySelectorAll('[data-live-content="composer"]').forEach((composer) => {
+  preview.querySelectorAll('form[aria-label="Message composer"].composer').forEach((composer) => {
     composer.querySelectorAll('textarea, input').forEach((input) => {
       const field = /** @type {HTMLInputElement | HTMLTextAreaElement} */ (input);
       field.value = '';
@@ -1629,6 +1644,7 @@ async function captureLiveChatScreenshot({
   const observed = await page.evaluate(() => ({
     devicePixelRatio: window.devicePixelRatio,
     locale: navigator.language,
+    timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
     reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches
       ? 'reduce'
       : 'no-preference',
@@ -1638,6 +1654,7 @@ async function captureLiveChatScreenshot({
   if (
     observed.devicePixelRatio !== LIVE_SCREENSHOT_DEVICE_PIXEL_RATIO ||
     observed.locale !== LIVE_SCREENSHOT_LOCALE ||
+    observed.timezoneId !== LIVE_SCREENSHOT_TIMEZONE_ID ||
     observed.reducedMotion !== reducedMotion ||
     observed.theme !== theme ||
     observed.zoom !== LIVE_SCREENSHOT_BROWSER_ZOOM
@@ -1694,6 +1711,7 @@ async function captureLiveChatScreenshot({
     devicePixelRatio: observed.devicePixelRatio,
     imageSha256: sha256Hex(bytes),
     locale: observed.locale,
+    timezoneId: observed.timezoneId,
     reducedMotion: observed.reducedMotion,
     theme: observed.theme,
     uiState,
@@ -2352,6 +2370,7 @@ export async function persistApprovedLiveScreenshot({
     devicePixelRatio: sourceManifest.devicePixelRatio,
     imageSha256: sourceManifest.imageSha256,
     locale: sourceManifest.locale,
+    timezoneId: sourceManifest.timezoneId,
     reducedMotion: sourceManifest.reducedMotion,
     theme: sourceManifest.theme,
     uiState: sourceManifest.uiState,

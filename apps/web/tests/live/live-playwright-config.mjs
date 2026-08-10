@@ -2,6 +2,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LIVE_RECONCILIATION_ENV } from './live-reconciliation.mjs';
 
+export const LIVE_PLAYWRIGHT_TIMEZONE_ID = 'UTC';
 export const LIVE_RECONCILIATION_TEST_MATCH = '**/reconcile-live-proof.spec.ts';
 export const LIVE_RECONCILIATION_TEST_IGNORE = Object.freeze([
   '**/official-hermes.spec.ts',
@@ -104,6 +105,7 @@ export function createLivePlaywrightConfig({
       viewport,
       deviceScaleFactor: 1,
       locale: 'en-US',
+      timezoneId: LIVE_PLAYWRIGHT_TIMEZONE_ID,
       contextOptions,
       trace: 'off',
       video: 'off',
@@ -126,6 +128,7 @@ export function createLivePlaywrightConfig({
           viewport,
           deviceScaleFactor: 1,
           locale: 'en-US',
+          timezoneId: LIVE_PLAYWRIGHT_TIMEZONE_ID,
           contextOptions,
           colorScheme: 'light',
           trace: 'off',

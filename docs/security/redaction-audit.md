@@ -108,7 +108,7 @@ A synthetic value is evidence of the synthetic path only. A live value is never 
 
 ### WebSocket and REST logging
 
-- `apps/web/tests/live/official-hermes.spec.ts` records only HTTP method/path pairs and JSON-RPC method or event names. Its tests are `browser UI reaches the official Hermes gateway through completion` and `browser auth logs out of the official Hermes session`; neither test is permission to retain request bodies, response bodies, cookies, provider text, or frame payloads.
+- `apps/web/tests/live/official-hermes.spec.ts` records only HTTP method/path pairs and JSON-RPC method or event names. Its single combined test is `browser UI reaches the official Hermes gateway through completion`; that test retains the reviewed reconciliation and logout proof in one causal journey and is not permission to retain request bodies, response bodies, cookies, provider text, or frame payloads.
 - The client-side REST and ticket boundaries use bounded parsing and fixed semantic errors. A non-success body, malformed body, redirect, cancellation, or timeout does not become a raw diagnostic.
 - The live host is explicitly test-only and adds no response logging, transcript storage, retries, or authentication layer. A live proof may report that a method or event was observed, but not what it carried.
 

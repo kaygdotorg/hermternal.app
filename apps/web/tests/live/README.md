@@ -158,10 +158,11 @@ path. The latter must write the closed
 must represent an independent human visual review. Hook output is suppressed;
 raw and rejected images remain in the disposable root and are removed. The
 published `capture-manifest.json` pins `/`, Chromium, CSS viewport, DPR 1,
-zoom 1, light appearance, reduced motion, `en-US`, UTC, the stable capture
-state, exact client commit, official Hermes image digest, command, issue, hook
-hashes, and image hashes. The narrow image is retained only if its independent
-review also approves it; otherwise the whole publication fails closed.
+zoom 1, light appearance, reduced motion, `en-US`, and the browser-resolved
+`timezoneId` `UTC`, the stable capture state, exact client commit, official Hermes
+image digest, the exact one-test command, issue, hook hashes, and image hashes.
+The narrow image is retained only if its independent review also approves it;
+otherwise the whole publication fails closed.
 
 The implementation supports provider discovery, password login, `/api/auth/me`, session and message reads, one fresh ticket, the native WebSocket upgrade, server-first `gateway.ready`, an existing `session.resume`, one `prompt.submit`, streaming, source-correlated completion, one pre-send and one post-completion canonical history read, and no automatic prompt replay. A fresh `session.create` is rejected before submission because the pinned source persists it lazily and cannot provide the pre-send REST fence. The historical issue-327 material in `tests/integration/hermes-chat` is synthetic-only fixture evidence and is not a live Hermes proof for this change. No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here, so no live completion, delta, or history result is claimed.
 

@@ -1,9 +1,10 @@
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { promises as fsPromises } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { readFileSync, promises as fsPromises } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WorkspacePreview from './workspace/WorkspacePreview.svelte';
@@ -15,7 +16,10 @@ import {
   LIVE_PROOF_ASSISTANT_MARKER,
   LIVE_PROOF_PROMPT
 } from '../../tests/live/live-proof-ledger.mjs';
+import { LIVE_SCREENSHOT_COMMAND } from '../../tests/live/live-screenshot-contract.mjs';
 import {
+  LIVE_SCREENSHOT_TEST_COMMAND,
+  LIVE_SCREENSHOT_TIMEZONE_ID,
   captureLiveChatScreenshotIfEnabled,
   createLiveScreenshotManifest,
   getLiveScreenshotAtomicRenameChildConfiguration,
@@ -198,6 +202,7 @@ function fakePage(options: FakePageOptions = {}) {
       return {
         devicePixelRatio: 1,
         locale: 'en-US',
+        timezoneId: 'UTC',
         reducedMotion: 'reduce',
         theme: 'light',
         zoom: 1
@@ -224,6 +229,7 @@ function manifestFixture() {
     devicePixelRatio: 1,
     imageSha256: sha256Hex(PNG_BYTES),
     locale: 'en-US',
+    timezoneId: LIVE_SCREENSHOT_TIMEZONE_ID,
     reducedMotion: 'reduce',
     theme: 'light',
     uiState: 'ready',
@@ -294,7 +300,7 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(page.locatorScreenshot).not.toHaveBeenCalled();
   });
 
-  it('sanitizes real live component DOM before the capture-only presentation', async () => {
+  it('sanitizes current WorkspacePreview selectors before the capture-only presentation', async () => {
     render(WorkspacePreview, {
       state: 'ready',
       dataSource: 'live-runtime',
@@ -331,7 +337,11 @@ describe('deterministic live Chat screenshot capture', () => {
     const preview = document.querySelector('[data-testid="runtime-preview"]');
     expect(preview).toBeTruthy();
     expect(preview?.textContent).toContain('private user prompt');
-    expect(preview?.querySelector('[data-live-content="conversation-timeline"]')).toBeTruthy();
+    expect(preview?.querySelector('[data-testid="conversation-timeline"]')).toBeTruthy();
+    expect(preview?.querySelector('[data-live-content]')).toBeNull();
+    expect(preview?.querySelector('nav[aria-label="Conversations"].session-list .session-row')).toBeTruthy();
+    expect(preview?.querySelector('.title-region')).toBeTruthy();
+    expect(preview?.querySelector('form[aria-label="Message composer"].composer textarea')).toBeTruthy();
     expect(preview?.querySelector('.header-model')).toHaveTextContent('PRIVATE PROVIDER MODEL');
     expect(preview?.querySelector('.model-control option')).toHaveTextContent('Atlas · balanced');
     expect([...preview!.querySelectorAll('.group-count')].map((node) => node.textContent)).toEqual([
@@ -371,6 +381,45 @@ describe('deterministic live Chat screenshot capture', () => {
     expect(preview?.querySelector<HTMLSelectElement>('.model-control select')?.value).toBe('Model');
   });
 
+  it('pins the manifest to the exact one-test screenshot command', () => {
+    expect(LIVE_SCREENSHOT_TEST_COMMAND).toBe(LIVE_SCREENSHOT_COMMAND);
+    expect(LIVE_SCREENSHOT_TEST_COMMAND).toBe(
+      'bun run --cwd apps/web test:e2e:live --grep "browser UI reaches the official Hermes gateway through completion"'
+    );
+    expect(manifestFixture().testCommand).toBe(LIVE_SCREENSHOT_COMMAND);
+  });
+
+  it('pins UTC in both Playwright contexts and manifest evidence', () => {
+    const paths = getLivePlaywrightPaths(
+      pathToFileURL(resolve(process.cwd(), 'playwright.live.config.ts')).href
+    );
+    const config = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory: join(tmpdir(), 'synthetic-live-output'),
+      launchOptions: { headless: true },
+      desktopChrome: {}
+    });
+    expect(config.use?.timezoneId).toBe(LIVE_SCREENSHOT_TIMEZONE_ID);
+    expect(config.projects[0]?.use?.timezoneId).toBe(LIVE_SCREENSHOT_TIMEZONE_ID);
+    expect(manifestFixture().timezoneId).toBe(LIVE_SCREENSHOT_TIMEZONE_ID);
+    expect(() => validateLiveScreenshotManifest({
+      ...manifestFixture(),
+      timezoneId: 'America/Los_Angeles'
+    })).toThrow('timezone');
+  });
+
+  it('keeps the redaction audit aligned to the single combined official test', () => {
+    const audit = readFileSync(
+      resolve(process.cwd(), '..', '..', 'docs/security/redaction-audit.md'),
+      'utf8'
+    );
+    expect(audit).toContain(
+      'Its single combined test is `browser UI reaches the official Hermes gateway through completion`'
+    );
+    expect(audit).not.toContain('browser auth logs out of the official Hermes session');
+  });
+
   it.skipIf(!browserPrerequisiteEnabled)('scrubs metadata in the real Chromium page realm', async () => {
     const browser = await chromiumForPrerequisite().launch({
       headless: true,
@@ -383,7 +432,7 @@ describe('deterministic live Chat screenshot capture', () => {
       await page.goto(origin.url);
       await page.setContent(`
         <section data-testid="runtime-preview">
-          <section data-live-content="conversation-timeline">
+          <section data-testid="conversation-timeline">
             <p class="assistant-copy">PRIVATE TRANSCRIPT</p>
           </section>
           <div class="header-model" aria-label="Current model PRIVATE PROVIDER MODEL">
@@ -429,7 +478,7 @@ describe('deterministic live Chat screenshot capture', () => {
       await page.setContent(`
         <div data-capture-wrapper>
           <section data-testid="runtime-preview">
-            <section data-live-content="conversation-timeline"><p class="assistant-copy">PRIVATE TRANSCRIPT</p></section>
+            <section data-testid="conversation-timeline"><p class="assistant-copy">PRIVATE TRANSCRIPT</p></section>
             <div class="header-model" data-model="Q" aria-label="Current model Q" title="Q"><span>Q</span></div>
             <div class="header-model" data-model="7" aria-label="Current model 7" title="7"><span>7</span></div>
             <span class="group-count" data-count="Q" aria-label="Q" title="Q" value="Q">Q</span>
@@ -507,7 +556,7 @@ describe('deterministic live Chat screenshot capture', () => {
       await page.setContent(`
         <main>
           <section data-testid="runtime-preview">
-            <section data-live-content="conversation-timeline"><p>Conversation preview</p></section>
+            <section data-testid="conversation-timeline"><p>Conversation preview</p></section>
             <div class="header-model" aria-label="Current model"><span>Model</span></div>
             <span class="group-count">—</span>
           </section>
@@ -593,7 +642,7 @@ describe('deterministic live Chat screenshot capture', () => {
     const markup = `
       <div style="width: 1440px; height: 960px">
         <section data-testid="runtime-preview">
-          <section data-live-content="conversation-timeline"><div data-capture-placeholder="conversation">Conversation preview</div></section>
+          <section data-testid="conversation-timeline"><div data-capture-placeholder="conversation">Conversation preview</div></section>
           <div class="header-model" aria-label="Current model"><span>Model</span></div>
           <span class="group-count">—</span>
         </section>
