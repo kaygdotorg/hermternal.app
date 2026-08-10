@@ -118,7 +118,15 @@ class FakePodman:
                 },
                 "State": {"Status": "running"},
             }
-            return launcher.CommandResult(0, container_id + "\n")
+            return launcher.CommandResult(
+                0,
+                container_id + "\n",
+                invocation_receipt=launcher._make_invocation_receipt(
+                    container_id,
+                    name,
+                    labels["io.hermternal.run-id"],
+                ),
+            )
         if args[:1] == ("start",):
             target = args[1]
             resolved = self._resolve(target)
@@ -1440,14 +1448,19 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
         self.assertFalse(tombstone.marker.credential_path.exists())
 
-        result = launcher.stop_instance(
-            self.marker_path(),
-            roots=self.roots,
-            runner=self.fake,
-            executable="/usr/bin/podman",
-            source_environment={"PATH": "/usr/bin"},
-        )
-        self.assertEqual(result["status"], "removed")
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as stop_error:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(stop_error.exception.code, "stop_evidence_unproven")
+        self.assertEqual(self.fake.calls, [])
+        self.assertTrue(self.marker_path().exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
         self.assertEqual(len(self.fake.containers), 1)
 
     def test_failed_run_without_cidfile_preserves_subprocess_failure(self) -> None:
@@ -1518,8 +1531,9 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 executable="/usr/bin/podman",
                 source_environment={"PATH": "/usr/bin"},
             )
-        self.assertEqual(stop_error.exception.code, "stop_evidence_replaced")
+        self.assertEqual(stop_error.exception.code, "stop_evidence_unproven")
         self.assertEqual(self.fake.calls, [])
+        self.assertTrue(self.marker_path().exists())
         self.assertEqual(len(self.fake.containers), 1)
 
     def test_normal_return_with_malformed_cidfile_reports_cidfile_invalid_after_stdout_witness(self) -> None:
@@ -1617,8 +1631,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
         self.assertFalse(any(command[1] in {"rm", "start", "stop"} for command, _ in self.fake.calls))
         inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
-        self.assertEqual([command[3] for command in inspect_calls], [spec.container])
-        self.assertNotIn(replacement_id, {command[3] for command in inspect_calls})
+        self.assertEqual(inspect_calls, [])
         tombstone = self.load()
         self.assertEqual(tombstone.marker.status, "cleanup_failed")
         self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
@@ -1646,12 +1659,12 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
         with self.assertRaises(launcher.LauncherError) as raised:
             self.start(spec, runner=forge_claims_after_run)
-        self.assertEqual(raised.exception.code, "container_id_mismatch")
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
         self.assertEqual(actual_id, [self.fake.containers[spec.container]["Id"]])
         self.assertNotEqual(actual_id[0], replacement_id)
         self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
         inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
-        self.assertEqual([command[3] for command in inspect_calls], [spec.container])
+        self.assertEqual(inspect_calls, [])
         self.assertNotIn(replacement_id, {command[3] for command in inspect_calls})
         self.assertFalse(any(command[1] in {"start", "stop", "rm"} for command, _ in self.fake.calls))
         tombstone = self.load()
@@ -1806,26 +1819,20 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "container_inspect_failed")
         self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
         self.assertTrue((self.runs / "fixture.state.json").exists())
-        self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertTrue((self.runs / "fixture.credential").exists())
         self.assertTrue((self.runs / "fixture.cidfile").exists())
         self.assertEqual(len(self.fake.containers), 1)
 
         self.fake.calls.clear()
-
-        def raise_on_remove(command, environment, timeout):
-            if command[1:3] == ("rm", "--force"):
-                raise RuntimeError("synthetic remove secret")
-            return self.fake(command, environment, timeout)
-
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.stop_instance(
                 self.marker_path(),
                 roots=self.roots,
-                runner=raise_on_remove,
+                runner=self.fake,
                 executable="/usr/bin/podman",
                 source_environment={"PATH": "/usr/bin"},
             )
-        self.assertEqual(raised.exception.code, "stop_evidence_replaced")
+        self.assertEqual(raised.exception.code, "stop_evidence_unproven")
         self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(len(self.fake.containers), 1)
@@ -1833,21 +1840,36 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def test_new_run_never_adopts_same_name_replacement_after_run(self) -> None:
         spec = self.make_spec()
         original_id: str | None = None
+        replacement_id = "d" * 64
 
-        def replace_after_run(command, environment, timeout):
+        def replace_name_and_claim_after_run(command, environment, timeout):
             nonlocal original_id
             result = self.fake(command, environment, timeout)
             if len(command) > 1 and command[1] == "run":
-                original = self.fake.containers[spec.container]
+                original = self.fake.containers.pop(spec.container)
                 original_id = str(original["Id"])
-                original["Id"] = "d" * 64
+                # Keep the actual A object as bounded synthetic engine evidence;
+                # replace only the deterministic name with B carrying copied
+                # labels, image, mount, and endpoint metadata.
+                self.fake.containers["actual-invocation-a"] = original
+                replacement = json.loads(json.dumps(original))
+                replacement["Id"] = replacement_id
+                self.fake.containers[spec.container] = replacement
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.write_text(replacement_id + "\n", encoding="ascii")
+                cidfile.chmod(0o600)
+                return launcher.CommandResult(
+                    0,
+                    replacement_id + "\n",
+                    invocation_receipt=result.invocation_receipt,
+                )
             return result
 
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.start_instance(
                 spec,
                 marker_path=self.marker_path(),
-                runner=replace_after_run,
+                runner=replace_name_and_claim_after_run,
                 readiness=self.ready,
                 port_checker=lambda port: True,
                 executable="/usr/bin/podman",
@@ -1857,18 +1879,17 @@ class HermesAgentLauncherTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "container_id_mismatch")
         self.assertIsNotNone(original_id)
-        self.assertIn(spec.container, self.fake.containers)
-        self.assertEqual(self.fake.containers[spec.container]["Id"], "d" * 64)
+        self.assertEqual(self.fake.containers["actual-invocation-a"]["Id"], original_id)
+        self.assertEqual(self.fake.containers[spec.container]["Id"], replacement_id)
         inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
-        self.assertTrue(inspect_calls)
-        self.assertEqual(inspect_calls[0][3], spec.container)
-        self.assertFalse(any(command[3] == original_id for command in inspect_calls))
+        self.assertEqual(inspect_calls, [])
+        self.assertFalse(any(command[3] == replacement_id for command in inspect_calls))
         self.assertTrue(self.marker_path().exists())
         tombstone = self.load()
         self.assertEqual(tombstone.marker.status, "cleanup_failed")
         self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
         self.assertFalse((self.runs / "fixture.credential").exists())
-        self.assertTrue((self.runs / "fixture.cidfile").exists())
+        self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
         self.assertFalse(any(command[1] == "rm" for command, _ in self.fake.calls))
         self.assertFalse(any(command[1] in {"start", "stop"} for command, _ in self.fake.calls))
 
@@ -2621,16 +2642,21 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse(tombstone.marker.credential_path.exists())
         self.assertEqual(self.fake.containers, {})
 
-        result = launcher.stop_instance(
-            self.marker_path(),
-            roots=self.roots,
-            runner=self.fake,
-            executable="/usr/bin/podman",
-            source_environment={"PATH": "/usr/bin"},
-        )
-        self.assertEqual(result["status"], "removed")
-        self.assertFalse(self.marker_path().exists())
-        self.assertFalse(tombstone.marker.state_path.exists())
+        self.fake.calls.clear()
+        with self.assertRaises(launcher.LauncherError) as retry_error:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=self.fake,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(retry_error.exception.code, "container_inspect_failed")
+        inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
+        self.assertEqual(len(inspect_calls), 1)
+        self.assertEqual(inspect_calls[0][3], tombstone.marker.container_id)
+        self.assertTrue(self.marker_path().exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
 
     def test_cleanup_does_not_overwrite_a_raced_marker_replacement(self) -> None:
         spec = self.make_spec()

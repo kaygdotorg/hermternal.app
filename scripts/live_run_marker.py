@@ -44,6 +44,9 @@ QUARANTINE_LOCK_NAME = ".quarantine.lock"
 RUN_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 INSTANCE_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 CONTAINER_ID_PATTERN = re.compile(r"[0-9a-f]{12,64}\Z")
+# This value is evidence that the launcher never proved an immutable engine ID;
+# it is valid only in a cleanup_failed tombstone, never in a running marker.
+UNPROVEN_CONTAINER_ID = "0" * 64
 CONTAINER_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 IMAGE_PATTERN = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 ENDPOINT_PATTERN = re.compile(r"http://127\.0\.0\.1:(?P<port>[0-9]{1,5})\Z")
@@ -539,7 +542,10 @@ def _validate_marker_document(document: object, requested_path: Path) -> RunMark
     if INSTANCE_PATTERN.fullmatch(instance) is None:
         _fail("marker_schema_invalid")
     container_id = _bounded_text(document.get("container_id"))
-    if CONTAINER_ID_PATTERN.fullmatch(container_id) is None:
+    if (
+        CONTAINER_ID_PATTERN.fullmatch(container_id) is None
+        or (container_id == UNPROVEN_CONTAINER_ID and status != STATUS_CLEANUP_FAILED)
+    ):
         _fail("marker_schema_invalid")
     container_name = _bounded_text(document.get("container_name"))
     if CONTAINER_NAME_PATTERN.fullmatch(container_name) is None:
@@ -1997,6 +2003,7 @@ __all__ = [
     "SCHEMA",
     "STATUS_CLEANUP_FAILED",
     "STATUS_RUNNING",
+    "UNPROVEN_CONTAINER_ID",
     "canonical_path",
     "cleanup_failed",
     "content_generation",

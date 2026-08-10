@@ -65,7 +65,7 @@ MAX_COMMAND_BYTES = 64 * 1024
 CONTAINER_ACTION_TIMEOUT = 60
 # A cleanup_failed tombstone may exist even when the engine raised before its
 # cidfile was readable. This valid-but-unproven ID is never sent to Podman.
-UNPROVEN_CONTAINER_ID = "0" * 64
+UNPROVEN_CONTAINER_ID = live_run_marker.UNPROVEN_CONTAINER_ID
 
 Runner = Callable[[Sequence[str], Mapping[str, str], float], "CommandResult"]
 ReadinessChecker = Callable[[str, int, float], None]
@@ -136,11 +136,46 @@ class OwnedFileError(LauncherError):
         super().__init__(code)
 
 
+_INVOCATION_RECEIPT_CAPABILITY = object()
+
+
+@dataclass(frozen=True)
+class InvocationReceipt:
+    """Trusted adapter proof captured by the detached-run operation.
+
+    Stdout, cidfiles, and mutable engine names are claims. Only the direct local
+    subprocess adapter or an explicitly approved synthetic adapter may create a
+    receipt with the private capability. A plain arbitrary runner result has no
+    proof and cannot authorize a new lifecycle binding.
+    """
+
+    container_id: str
+    container_name: str
+    run_id: str
+    _capability: object
+
+
 @dataclass(frozen=True)
 class CommandResult:
     returncode: int
     stdout: str = ""
     stderr: str = ""
+    invocation_receipt: InvocationReceipt | None = None
+
+
+def _make_invocation_receipt(
+    container_id: str,
+    container_name: str,
+    run_id: str,
+) -> InvocationReceipt:
+    """Create one adapter-only receipt; arbitrary result data cannot self-authorize."""
+
+    return InvocationReceipt(
+        container_id=container_id,
+        container_name=container_name,
+        run_id=run_id,
+        _capability=_INVOCATION_RECEIPT_CAPABILITY,
+    )
 
 
 @dataclass(frozen=True)
@@ -439,6 +474,28 @@ def _bounded_text(raw: bytes) -> str:
     return raw[:MAX_COMMAND_BYTES].decode("utf-8", errors="replace")
 
 
+def _direct_run_receipt(
+    command: Sequence[str],
+    result: CommandResult,
+) -> InvocationReceipt | None:
+    """Parse a receipt inside the trusted direct local run adapter only."""
+
+    if result.returncode != 0 or len(command) < 2 or command[1] != "run":
+        return None
+    try:
+        name = command[command.index("--name") + 1]
+        labels: dict[str, str] = {}
+        for index, value in enumerate(command):
+            if value == "--label":
+                key, label_value = command[index + 1].split("=", 1)
+                labels[key] = label_value
+        run_id = labels["io.hermternal.run-id"]
+        container_id = _strict_claimed_container_id(result.stdout)
+    except (LauncherError, KeyError, IndexError, ValueError):
+        return None
+    return _make_invocation_receipt(container_id, name, run_id)
+
+
 def run_command(command: Sequence[str], environment: Mapping[str, str], timeout: float) -> CommandResult:
     values = _validate_command_vector(command)
     try:
@@ -455,7 +512,13 @@ def run_command(command: Sequence[str], environment: Mapping[str, str], timeout:
         # including embedded NULs. Keep that adapter boundary bounded and
         # secret-free instead of leaking Python's raw exception text.
         return CommandResult(124, "")
-    return CommandResult(completed.returncode, _bounded_text(completed.stdout))
+    result = CommandResult(completed.returncode, _bounded_text(completed.stdout))
+    return CommandResult(
+        result.returncode,
+        result.stdout,
+        result.stderr,
+        _direct_run_receipt(values, result),
+    )
 
 
 def _attach_secondary_failure(primary: BaseException, secondary: BaseException) -> None:
@@ -500,16 +563,19 @@ def _validate_command_result(result: object, *, failure_code: str) -> CommandRes
         returncode = result.returncode
         stdout = result.stdout
         stderr = result.stderr
+        invocation_receipt = result.invocation_receipt
         if type(returncode) is not int or not -255 <= returncode <= 255:
             raise LauncherError(failure_code)
         for output in (stdout, stderr):
             if type(output) is not str or len(output.encode("utf-8")) > MAX_COMMAND_BYTES:
                 raise LauncherError(failure_code)
+        if invocation_receipt is not None and type(invocation_receipt) is not InvocationReceipt:
+            raise LauncherError(failure_code)
     except LauncherError:
         raise
     except (AttributeError, MemoryError, UnicodeEncodeError, ValueError):
         raise LauncherError(failure_code) from None
-    return CommandResult(returncode, stdout, stderr)
+    return CommandResult(returncode, stdout, stderr, invocation_receipt)
 
 
 def invoke_runner(
@@ -1444,11 +1510,64 @@ def read_or_create_password(spec: InstanceSpec, *, marker_path: str | Path | Non
 
 
 def validate_container_id(value: object) -> str:
-    """Accept only Podman's immutable hexadecimal container identity."""
+    """Accept one proven Podman identity, never the unknown-outcome sentinel."""
 
-    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{12,64}", value) is None:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{12,64}", value) is None
+        or value == UNPROVEN_CONTAINER_ID
+    ):
         raise LauncherError("instance_state_invalid")
     return value
+
+
+def _strict_claimed_container_id(raw: str) -> str:
+    """Parse one canonical full ID line for the trusted adapter boundary."""
+
+    if not isinstance(raw, str) or not raw.endswith("\n") or raw.count("\n") != 1:
+        raise LauncherError("container_id_unproven")
+    candidate = raw[:-1]
+    if len(candidate) != 64 or "\r" in candidate:
+        raise LauncherError("container_id_unproven")
+    try:
+        return validate_container_id(candidate)
+    except LauncherError:
+        raise LauncherError("container_id_unproven") from None
+
+
+def invocation_receipt_from_run_result(
+    result: CommandResult,
+    *,
+    spec: InstanceSpec,
+    run_id: str,
+) -> InvocationReceipt:
+    """Require an adapter-produced immutable receipt for one detached run.
+
+    A normal ``CommandResult`` is deliberately insufficient. An arbitrary
+    runner can copy labels, stdout, and cidfile bytes after replacing a name,
+    so a result without the private receipt capability fails closed before any
+    engine target is inspected.
+    """
+
+    receipt = result.invocation_receipt
+    if (
+        type(receipt) is not InvocationReceipt
+        or receipt._capability is not _INVOCATION_RECEIPT_CAPABILITY
+    ):
+        raise LauncherError("container_invocation_unproven")
+    if (
+        type(receipt.container_id) is not str
+        or type(receipt.container_name) is not str
+        or type(receipt.run_id) is not str
+        or receipt.container_name != spec.container
+        or receipt.run_id != run_id
+    ):
+        raise LauncherError("container_invocation_unproven")
+    try:
+        container_id = validate_container_id(receipt.container_id)
+    except LauncherError:
+        raise LauncherError("container_invocation_unproven") from None
+    return _make_invocation_receipt(container_id, receipt.container_name, receipt.run_id)
 
 
 def container_id_from_run_result(result: CommandResult) -> str:
@@ -1464,16 +1583,7 @@ def container_id_from_run_result(result: CommandResult) -> str:
 
     if result.returncode != 0:
         raise LauncherError("container_start_failed")
-    raw = result.stdout
-    if not raw.endswith("\n") or raw.count("\n") != 1:
-        raise LauncherError("container_id_unproven")
-    candidate = raw[:-1]
-    if len(candidate) != 64 or "\r" in candidate:
-        raise LauncherError("container_id_unproven")
-    try:
-        return validate_container_id(candidate)
-    except LauncherError:
-        raise LauncherError("container_id_unproven") from None
+    return _strict_claimed_container_id(result.stdout)
 
 
 def state_document(
@@ -1492,7 +1602,7 @@ def state_document(
     if data_identity is None:
         data_identity = _current_private_directory_identity(spec.data_dir)
     if binding.data_identity is not None and binding.data_identity != data_identity:
-        # The marker is an independently retained lifecycle witness. A state
+        # The marker is an independently retained lifecycle receipt. A state
         # record may not authorize a different data tree by rewriting its own
         # identity document.
         raise LauncherError("instance_state_binding_mismatch")
@@ -1502,7 +1612,14 @@ def state_document(
         "marker_path": str(binding.marker_path),
         "run_id": binding.run_id,
         "instance": spec.instance,
-        "container_id": validate_container_id(binding.container_id),
+        "container_id": (
+            binding.container_id
+            if (
+                binding.status == live_run_marker.STATUS_CLEANUP_FAILED
+                and binding.container_id == UNPROVEN_CONTAINER_ID
+            )
+            else validate_container_id(binding.container_id)
+        ),
         "container_name": binding.container_name,
         "image": binding.image,
         "endpoint": binding.endpoint,
@@ -1954,13 +2071,14 @@ def recovery_snapshot(
     """
 
     require_owned_container(spec, document, run_id=run_id)
-    container_id = document.get("Id")
+    try:
+        container_id = validate_container_id(document.get("Id"))
+    except LauncherError:
+        raise LauncherError("container_identity_unproven") from None
     name = document.get("Name")
     image = document.get("ImageName")
     if (
-        type(container_id) is not str
-        or not container_id
-        or type(name) is not str
+        type(name) is not str
         or name not in {spec.container, f"/{spec.container}"}
         or type(image) is not str
         or image not in {spec.image, expected_repo_digest(spec.image)}
@@ -2035,7 +2153,7 @@ def require_loopback_endpoint_mapping(spec: InstanceSpec, document: dict[str, ob
 
 def _inspect_invocation_container(
     spec: InstanceSpec,
-    run_id: str,
+    receipt: InvocationReceipt,
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
@@ -2043,14 +2161,13 @@ def _inspect_invocation_container(
     private_path: Path,
     private_identity: DirectoryIdentity,
 ) -> tuple[dict[str, object], RecoverySnapshot]:
-    """Obtain the engine-side ID for this exact detached invocation.
+    """Inspect only the immutable ID supplied by the approved run adapter.
 
-    The run command's deterministic name and opaque run-id label are the
-    invocation capability, not an ID-discovery fallback. Inspect that exact
-    engine object before any stdout or cidfile claim can become a target. A
-    missing, foreign, or replaced object fails closed without probing a claimed
-    ID, so a caller-controlled matching stdout/cidfile pair cannot orphan the
-    actual container under a substituted identity.
+    The deterministic name is checked as ordinary metadata after selecting the
+    adapter's immutable ID; it is never an inspect target or an ID-discovery
+    fallback. If the adapter cannot attach this receipt, callers fail closed
+    before this function is reached. A missing or replaced immutable object is
+    therefore uncertainty, not permission to inspect a same-name object.
     """
 
     document = inspect_container(
@@ -2058,13 +2175,15 @@ def _inspect_invocation_container(
         runner,
         environment,
         executable,
-        target=spec.container,
+        target=receipt.container_id,
         private_path=private_path,
         private_identity=private_identity,
     )
-    snapshot = recovery_snapshot(spec, document, run_id=run_id)
+    snapshot = recovery_snapshot(spec, document, run_id=receipt.run_id)
     if snapshot.status != "running":
         raise LauncherError("container_not_running")
+    if snapshot.container_id != receipt.container_id:
+        raise LauncherError("container_replaced")
     return document, snapshot
 
 
@@ -3192,38 +3311,23 @@ def _remove_bound_container(
     environment: Mapping[str, str],
     executable: str,
 ) -> None:
-    _revalidate_state_data_directory(state)
+    # The unknown-outcome sentinel is never an engine target. An exact inspect
+    # failure is also not evidence that the object is absent: the engine may be
+    # unavailable, contradictory, or have hidden the actual child. Preserve the
+    # marker and cidfile rather than treating ``exists=1`` as cleanup success.
     try:
-        _inspect_bound_container(
-            state,
-            runner,
-            environment,
-            executable,
-            private_path=state.spec.data_dir,
-            private_identity=state.data_identity,
-        )
-    except LauncherError as error:
-        if error.code != "container_inspect_failed":
-            raise
-        # A retry after a successful exact rm may find no container. Query only
-        # the pinned immutable ID so cleanup can finish without adopting a name
-        # or scanning the engine for a substitute.
-        _revalidate_state_data_directory(state)
-        exists = invoke_runner(
-            runner,
-            (executable, "container", "exists", state.container_id),
-            environment,
-            CONTAINER_ACTION_TIMEOUT,
-            failure_code="container_lookup_failed",
-            private_path=state.spec.data_dir,
-            private_identity=state.data_identity,
-        )
-        _revalidate_state_data_directory(state)
-        if exists.returncode == 1:
-            return
-        if exists.returncode != 0:
-            raise LauncherError("container_lookup_failed")
-        raise
+        validate_container_id(state.container_id)
+    except LauncherError:
+        raise LauncherError("container_identity_unproven") from None
+    _revalidate_state_data_directory(state)
+    _inspect_bound_container(
+        state,
+        runner,
+        environment,
+        executable,
+        private_path=state.spec.data_dir,
+        private_identity=state.data_identity,
+    )
     _revalidate_state_data_directory(state)
     result = invoke_runner(
         runner,
@@ -3674,6 +3778,7 @@ def _cleanup_started_run(
     )
     cleanup_error: LauncherError | None = None
     credential_proof_failed = False
+    container_cleanup_proven = False
     container_unproven = False
     data_path_unproven = False
     try:
@@ -3699,6 +3804,7 @@ def _cleanup_started_run(
         # instead of leaving a running child without a manageable tombstone.
         try:
             _remove_bound_container(state, runner, environment, executable)
+            container_cleanup_proven = True
             if marker_identity is not None or state_identity is not None:
                 if parent_fd is None:
                     raise LauncherError("ownership_snapshot_missing")
@@ -3728,6 +3834,9 @@ def _cleanup_started_run(
             if isinstance(error, LauncherError) and error.code in {
                 "container_not_launcher_owned",
                 "container_identity_unproven",
+                "container_invocation_unproven",
+                "container_inspect_failed",
+                "container_lookup_failed",
                 "container_replaced",
             }:
                 container_unproven = True
@@ -3738,7 +3847,13 @@ def _cleanup_started_run(
                 data_path_unproven = True
 
     if cidfile_identity is not None:
-        if cidfile_generation is None:
+        if not container_cleanup_proven:
+            # An engine inspect failure or contradictory exact-ID response does
+            # not prove that the child is absent. Keep the cidfile as the last
+            # private claim rather than erasing evidence for an unmanaged child.
+            if cleanup_error is None:
+                cleanup_error = LauncherError("container_identity_unproven")
+        elif cidfile_generation is None:
             # An inode snapshot without its exact bounded bytes cannot prove
             # that the cidfile still contains the invocation-bound ID. Preserve
             # it as evidence instead of quarantining a same-inode replacement.
@@ -4102,9 +4217,9 @@ def _start_instance_with_parent(
         raise LauncherError("port_unavailable")
 
     # Generate the opaque run identity before the first container-start command.
-    # A successful detached invocation must later provide an engine-side witness
-    # tied to this exact name/run-id pair. Stdout and cidfile are claims that must
-    # match that witness; neither can select an engine target by itself.
+    # A successful detached invocation must later provide an immutable witness
+    # from an approved engine adapter. The name/run-id label is only metadata;
+    # stdout and cidfile are claims and neither can select an engine target.
     run_id = live_run_marker.new_run_id()
     credential_identity: live_run_marker.CredentialIdentity | None = None
     cidfile_identity: FileIdentity | None = None
@@ -4150,11 +4265,11 @@ def _start_instance_with_parent(
         )
         if started.returncode != 0:
             # A nonzero subprocess result is still the primary mutation error,
-            # but it is not a successful identity witness. Never select or
+            # but it is not a successful identity receipt. Never select or
             # remove a cidfile ID from this failed invocation.
             raise LauncherError("container_start_failed")
         # Stdout is only a strict claimed-output check. It is not an identity
-        # source: the engine-side inspection below supplies the causal witness.
+        # source: the approved adapter witness below supplies the immutable ID.
         claimed_stdout_id = container_id_from_run_result(started)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         try:
@@ -4164,28 +4279,29 @@ def _start_instance_with_parent(
             raise
         cidfile_identity = cidfile_proof.identity
         cidfile_generation = cidfile_proof.generation
-
+        invocation_receipt = invocation_receipt_from_run_result(
+            started,
+            spec=spec,
+            run_id=run_id,
+        )
+        if (
+            claimed_stdout_id != invocation_receipt.container_id
+            or cidfile_proof.container_id != invocation_receipt.container_id
+        ):
+            # Claims are compared only with the adapter-produced immutable ID.
+            # Never inspect, bind, publish, or remove either claimed ID when it
+            # disagrees with that receipt.
+            raise LauncherError("container_id_mismatch")
+        run_container_id = invocation_receipt.container_id
         invocation_document, invocation_snapshot = _inspect_invocation_container(
             spec,
-            run_id,
+            invocation_receipt,
             runner,
             child_environment,
             podman,
             private_path=data_path,
             private_identity=data_identity,
         )
-        if (
-            claimed_stdout_id != invocation_snapshot.container_id
-            or cidfile_proof.container_id != invocation_snapshot.container_id
-        ):
-            # The exact run-name/run-id inspection is authoritative for this
-            # invocation. Never inspect, bind, publish, or remove either
-            # caller-controlled claimed ID when it disagrees with that witness.
-            raise LauncherError("container_id_mismatch")
-        run_container_id = invocation_snapshot.container_id
-        # Select the engine-witnessed ID before validating endpoint metadata so
-        # an endpoint failure can still clean up this exact container. No
-        # claimed stdout/cidfile ID is used as a target.
         require_loopback_endpoint_mapping(spec, invocation_document)
 
         try:
@@ -4734,9 +4850,14 @@ def stop_instance(
                 and state.marker.container_id == UNPROVEN_CONTAINER_ID
             )
             podman = executable or ""
-            if not unknown_container:
-                podman = executable or podman_path()
-                podman_preflight(runner, environment, podman)
+            if unknown_container:
+                # A sentinel records that the original engine identity was never
+                # proven. There is no safe target for stop and no proof that the
+                # child is absent, so retain marker/state/cidfile evidence and do
+                # not report removal.
+                raise LauncherError("stop_evidence_unproven")
+            podman = executable or podman_path()
+            podman_preflight(runner, environment, podman)
 
             credential_missing_after_failed_cleanup = False
             if state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED:
