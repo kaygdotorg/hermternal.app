@@ -455,12 +455,15 @@ cleanup fails, the private marker and state are retained as a bounded
 `cleanup_failed` tombstone. A data-path proof failure can block container
 removal, so the tombstone preserves the exact ID and stable data witness for a
 later retry after the original tree is restored; it never authorizes the
-replacement tree. The receipt is an adapter capability, not a field that an
-arbitrary runner may copy: the direct local subprocess adapter parses the
-canonical detached-run ID inside its own call, while the offline FakePodman
-adapter creates a receipt from the synthetic engine object at run time. The
-ordinary subprocess result, stdout, cidfile, mutable name, and copied labels do
-not prove causality by themselves. If no trusted receipt is present, the
+replacement tree. The receipt is authorized only as the exact object created
+inside the adapter and its private immutable field snapshot; it is not a field
+that an arbitrary runner may copy. Dataclass replacement, reconstruction,
+copy/deepcopy, subclassing, or field mutation therefore fails closed. The direct
+local subprocess adapter parses the canonical detached-run ID inside its own
+call, while the offline FakePodman adapter creates a receipt from the synthetic
+engine object at run time. The ordinary subprocess result, stdout, cidfile,
+mutable name, and copied labels do not prove causality by themselves. If no
+trusted receipt is present, the
 launcher fails with `container_invocation_unproven` before any post-run inspect,
 publication, start, stop, or rm target is selected. It retains the cidfile and a
 bounded `cleanup_failed` tombstone with `UNPROVEN_CONTAINER_ID`. If an exact-ID

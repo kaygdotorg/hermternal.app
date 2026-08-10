@@ -178,9 +178,12 @@ string. A new detached run must receive a trusted detached-run adapter receipt b
 it can select any immutable container ID. The direct local subprocess adapter
 parses the canonical full ID inside its own successful `run` call; the offline
 FakePodman adapter creates an equivalent receipt from the synthetic engine
-object. An arbitrary runner result has no receipt capability. The receipt ID
-must equal the strict stdout claim and private cidfile ID, after which the
-launcher inspects only that immutable receipt ID and validates its labels,
+object. An arbitrary runner result has no receipt capability. Authorization
+is bound to the exact adapter-created receipt object and private immutable field
+snapshot; dataclass replacement, reconstruction, copy/deepcopy, subclassing,
+or field mutation cannot retarget it. The receipt ID must equal the strict
+stdout claim and private cidfile ID, after which the launcher inspects only that
+immutable receipt ID and validates its labels,
 image, data mount, running state, and loopback mapping. It never inspects the
 mutable deterministic name to discover or adopt an ID. Stdout is never
 authoritative for inspect, publication, or cleanup. A name replacement carrying

@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -136,23 +137,41 @@ class OwnedFileError(LauncherError):
         super().__init__(code)
 
 
-_INVOCATION_RECEIPT_CAPABILITY = object()
-
-
 @dataclass(frozen=True)
 class InvocationReceipt:
     """Trusted adapter proof captured by the detached-run operation.
 
     Stdout, cidfiles, and mutable engine names are claims. Only the direct local
     subprocess adapter or an explicitly approved synthetic adapter may create a
-    receipt with the private capability. A plain arbitrary runner result has no
-    proof and cannot authorize a new lifecycle binding.
+    receipt through ``_make_invocation_receipt``. Authorization is bound to this
+    exact object and an immutable field snapshot kept in a private weak registry;
+    dataclass reconstruction, copying, subclassing, or field mutation cannot
+    manufacture a second receipt for a different container.
     """
 
     container_id: str
     container_name: str
     run_id: str
-    _capability: object
+
+    def __copy__(self) -> "InvocationReceipt":
+        """Return an unregistered copy that cannot authorize a lifecycle bind."""
+
+        return InvocationReceipt(self.container_id, self.container_name, self.run_id)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> "InvocationReceipt":
+        """Return an unregistered deep copy; receipt trust is never copied."""
+
+        del memo
+        return InvocationReceipt(self.container_id, self.container_name, self.run_id)
+
+
+# Keep only weak references so receipts do not accumulate for the process
+# lifetime. The snapshot is paired with object identity and checked on every
+# lifecycle bind, so a forged or mutated object cannot reuse adapter authority.
+_TRUSTED_INVOCATION_RECEIPTS: dict[
+    int,
+    tuple[weakref.ReferenceType[InvocationReceipt], tuple[str, str, str]],
+] = {}
 
 
 @dataclass(frozen=True)
@@ -168,14 +187,23 @@ def _make_invocation_receipt(
     container_name: str,
     run_id: str,
 ) -> InvocationReceipt:
-    """Create one adapter-only receipt; arbitrary result data cannot self-authorize."""
+    """Create one adapter-only receipt bound to its exact object identity."""
 
-    return InvocationReceipt(
-        container_id=container_id,
-        container_name=container_name,
-        run_id=run_id,
-        _capability=_INVOCATION_RECEIPT_CAPABILITY,
-    )
+    receipt = InvocationReceipt(container_id, container_name, run_id)
+    key = id(receipt)
+    snapshot = (container_id, container_name, run_id)
+
+    def remove_dead_receipt(
+        reference: weakref.ReferenceType[InvocationReceipt],
+        *,
+        key: int = key,
+    ) -> None:
+        current = _TRUSTED_INVOCATION_RECEIPTS.get(key)
+        if current is not None and current[0] is reference:
+            _TRUSTED_INVOCATION_RECEIPTS.pop(key, None)
+
+    _TRUSTED_INVOCATION_RECEIPTS[key] = (weakref.ref(receipt, remove_dead_receipt), snapshot)
+    return receipt
 
 
 @dataclass(frozen=True)
@@ -1541,19 +1569,31 @@ def invocation_receipt_from_run_result(
     spec: InstanceSpec,
     run_id: str,
 ) -> InvocationReceipt:
-    """Require an adapter-produced immutable receipt for one detached run.
+    """Require the exact adapter-produced receipt for one detached run.
 
     A normal ``CommandResult`` is deliberately insufficient. An arbitrary
     runner can copy labels, stdout, and cidfile bytes after replacing a name,
-    so a result without the private receipt capability fails closed before any
-    engine target is inspected.
+    while dataclass replacement, copying, reconstruction, subclassing, or
+    field mutation can otherwise imitate the receipt shape. The private weak
+    registry binds authorization to the original object and field snapshot, so
+    every such clone or forgery fails closed before any engine target is
+    inspected.
     """
 
     receipt = result.invocation_receipt
-    if (
-        type(receipt) is not InvocationReceipt
-        or receipt._capability is not _INVOCATION_RECEIPT_CAPABILITY
-    ):
+    if type(receipt) is not InvocationReceipt:
+        raise LauncherError("container_invocation_unproven")
+    registered = _TRUSTED_INVOCATION_RECEIPTS.get(id(receipt))
+    if registered is None or registered[0]() is not receipt:
+        raise LauncherError("container_invocation_unproven")
+    try:
+        fields = (receipt.container_id, receipt.container_name, receipt.run_id)
+    except (AttributeError, TypeError):
+        raise LauncherError("container_invocation_unproven") from None
+    if fields != registered[1]:
+        # Frozen dataclasses can still be altered with object-level reflection;
+        # compare the adapter snapshot so field forgery cannot retarget the
+        # exact object that originally carried the receipt.
         raise LauncherError("container_invocation_unproven")
     if (
         type(receipt.container_id) is not str
@@ -1564,10 +1604,10 @@ def invocation_receipt_from_run_result(
     ):
         raise LauncherError("container_invocation_unproven")
     try:
-        container_id = validate_container_id(receipt.container_id)
+        validate_container_id(receipt.container_id)
     except LauncherError:
         raise LauncherError("container_invocation_unproven") from None
-    return _make_invocation_receipt(container_id, receipt.container_name, receipt.run_id)
+    return receipt
 
 
 def container_id_from_run_result(result: CommandResult) -> str:
@@ -1576,9 +1616,9 @@ def container_id_from_run_result(result: CommandResult) -> str:
     Detached ``podman run`` stdout is caller-visible claim data, not an
     authoritative identity witness or fallback source. Require exactly one full
     lowercase ID line with one LF so missing, truncated, or extra output fails
-    closed. Lifecycle callers compare this claim with the engine-side invocation
-    inspection and the private cidfile, but never use it to choose an engine
-    target.
+    closed. Lifecycle callers compare this claim with the exact trusted adapter
+    receipt and private cidfile, then inspect only the receipt ID; stdout never
+    chooses an engine target.
     """
 
     if result.returncode != 0:

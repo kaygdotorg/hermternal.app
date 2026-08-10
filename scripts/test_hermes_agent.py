@@ -8,6 +8,8 @@ container, contacts Hermes, opens an endpoint, or reads a real credential value.
 from __future__ import annotations
 
 import contextlib
+import copy
+import dataclasses
 import importlib.util
 import io
 import json
@@ -298,6 +300,146 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.container_id_from_run_result(launcher.CommandResult(125, container_id + "\n"))
         self.assertEqual(raised.exception.code, "container_start_failed")
+
+    def test_direct_subprocess_run_attaches_receipt_for_canonical_output(self) -> None:
+        container_id = "a" * 64
+        run_id = "b" * 64
+        command = (
+            "/usr/bin/podman",
+            "run",
+            "--detach",
+            "--name",
+            "hermternal-test-one",
+            "--label",
+            f"io.hermternal.run-id={run_id}",
+        )
+        completed = subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=(container_id + "\n").encode("ascii"),
+            stderr=b"",
+        )
+        with mock.patch.object(launcher.subprocess, "run", return_value=completed) as subprocess_run:
+            result = launcher.run_command(command, {"PATH": "/usr/bin"}, 1)
+
+        subprocess_run.assert_called_once()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, container_id + "\n")
+        self.assertIs(type(result.invocation_receipt), launcher.InvocationReceipt)
+        assert result.invocation_receipt is not None
+        self.assertEqual(result.invocation_receipt.container_id, container_id)
+        self.assertEqual(result.invocation_receipt.container_name, "hermternal-test-one")
+        self.assertEqual(result.invocation_receipt.run_id, run_id)
+
+    def test_direct_subprocess_run_rejects_noncanonical_output_without_receipt(self) -> None:
+        spec = self.make_spec()
+        container_id = "c" * 64
+        run_id = "d" * 64
+        command = (
+            "/usr/bin/podman",
+            "run",
+            "--detach",
+            "--name",
+            spec.container,
+            "--label",
+            f"io.hermternal.run-id={run_id}",
+        )
+        outputs = (
+            b"",
+            container_id.encode("ascii"),
+            (container_id + "\n\n").encode("ascii"),
+            (container_id + "\nextra\n").encode("ascii"),
+            ("C" * 64 + "\n").encode("ascii"),
+            (container_id + "\r\n").encode("ascii"),
+            (launcher.UNPROVEN_CONTAINER_ID + "\n").encode("ascii"),
+        )
+        with mock.patch.object(launcher, "inspect_container") as inspect_container:
+            for stdout in outputs:
+                with self.subTest(stdout=repr(stdout)):
+                    completed = subprocess.CompletedProcess(command, 0, stdout=stdout, stderr=b"")
+                    with mock.patch.object(launcher.subprocess, "run", return_value=completed):
+                        result = launcher.run_command(command, {"PATH": "/usr/bin"}, 1)
+                    self.assertIsNone(result.invocation_receipt)
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.invocation_receipt_from_run_result(
+                            result,
+                            spec=spec,
+                            run_id=run_id,
+                        )
+                    self.assertEqual(raised.exception.code, "container_invocation_unproven")
+            inspect_container.assert_not_called()
+
+    def test_invocation_receipt_validation_rejects_clones_and_forged_fields_before_inspect(self) -> None:
+        spec = self.make_spec()
+        container_id = "e" * 64
+        run_id = "f" * 64
+        trusted = launcher._make_invocation_receipt(container_id, spec.container, run_id)
+        field_forged = launcher._make_invocation_receipt(container_id, spec.container, run_id)
+        object.__setattr__(field_forged, "container_id", "g" * 64)
+        legacy_capability_forged = launcher.InvocationReceipt(container_id, spec.container, run_id)
+        object.__setattr__(legacy_capability_forged, "_capability", object())
+
+        class ForgedReceipt(launcher.InvocationReceipt):
+            pass
+
+        invalid_receipts = (
+            (
+                "unregistered reconstruction",
+                launcher.InvocationReceipt(container_id, spec.container, run_id),
+            ),
+            ("forged legacy private capability", legacy_capability_forged),
+            (
+                "dataclass replacement",
+                dataclasses.replace(trusted, container_id="h" * 64),
+            ),
+            ("shallow copy", copy.copy(trusted)),
+            ("deep copy", copy.deepcopy(trusted)),
+            (
+                "subclass reconstruction",
+                ForgedReceipt(container_id, spec.container, run_id),
+            ),
+            ("field forgery", field_forged),
+            (
+                "wrong container name",
+                launcher._make_invocation_receipt(
+                    container_id,
+                    spec.container + "-replacement",
+                    run_id,
+                ),
+            ),
+            (
+                "wrong run id",
+                launcher._make_invocation_receipt(container_id, spec.container, "0" * 64),
+            ),
+            (
+                "invalid container id",
+                launcher._make_invocation_receipt("i" * 64, spec.container, run_id),
+            ),
+            (
+                "unknown sentinel container id",
+                launcher._make_invocation_receipt(
+                    launcher.UNPROVEN_CONTAINER_ID,
+                    spec.container,
+                    run_id,
+                ),
+            ),
+        )
+        with mock.patch.object(launcher, "inspect_container") as inspect_container:
+            for description, receipt in invalid_receipts:
+                with self.subTest(description=description):
+                    result = launcher.CommandResult(
+                        0,
+                        container_id + "\n",
+                        invocation_receipt=receipt,
+                    )
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.invocation_receipt_from_run_result(
+                            result,
+                            spec=spec,
+                            run_id=run_id,
+                        )
+                    self.assertEqual(raised.exception.code, "container_invocation_unproven")
+            inspect_container.assert_not_called()
 
     def test_start_validation_rejects_readiness_controls_before_engine_or_files(self) -> None:
         spec = self.make_spec()
@@ -1837,7 +1979,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(len(self.fake.containers), 1)
 
-    def test_new_run_never_adopts_same_name_replacement_after_run(self) -> None:
+    def test_new_run_never_adopts_same_name_replacement_after_cloned_receipt(self) -> None:
         spec = self.make_spec()
         original_id: str | None = None
         replacement_id = "d" * 64
@@ -1858,10 +2000,16 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 cidfile = Path(command[command.index("--cidfile") + 1])
                 cidfile.write_text(replacement_id + "\n", encoding="ascii")
                 cidfile.chmod(0o600)
+                self.assertIsNotNone(result.invocation_receipt)
+                # A dataclass clone retaining copied fields is not an adapter
+                # receipt. It must fail before the replacement name is inspected.
                 return launcher.CommandResult(
                     0,
                     replacement_id + "\n",
-                    invocation_receipt=result.invocation_receipt,
+                    invocation_receipt=dataclasses.replace(
+                        result.invocation_receipt,
+                        container_id=replacement_id,
+                    ),
                 )
             return result
 
@@ -1877,7 +2025,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 attempts=1,
                 interval=0,
             )
-        self.assertEqual(raised.exception.code, "container_id_mismatch")
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
         self.assertIsNotNone(original_id)
         self.assertEqual(self.fake.containers["actual-invocation-a"]["Id"], original_id)
         self.assertEqual(self.fake.containers[spec.container]["Id"], replacement_id)
