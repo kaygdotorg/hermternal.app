@@ -298,6 +298,34 @@ class HermesAgentLauncherTests(unittest.TestCase):
                     )
                 self.assertEqual(raised.exception.code, "runner_result_invalid")
 
+    def test_command_result_subclass_is_rejected_before_untrusted_accessor_runs(self) -> None:
+        class ExplodingResult(launcher.CommandResult):
+            @property
+            def returncode(self):
+                raise RuntimeError("untrusted returncode accessor")
+
+        result = object.__new__(ExplodingResult)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                lambda command, environment, timeout: result,
+                ("synthetic-runner",),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="runner_result_invalid",
+            )
+        self.assertEqual(raised.exception.code, "runner_result_invalid")
+
+    def test_command_result_surrogate_output_normalizes_to_stable_error(self) -> None:
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                lambda command, environment, timeout: launcher.CommandResult(0, chr(0xD800)),
+                ("synthetic-runner",),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="runner_result_invalid",
+            )
+        self.assertEqual(raised.exception.code, "runner_result_invalid")
+
     def test_new_run_creates_fresh_scoped_credential_state_and_marker_without_secret_or_run_id_output(self) -> None:
         spec = self.make_spec()
         result, created = self.start(spec)

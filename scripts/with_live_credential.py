@@ -27,6 +27,21 @@ import live_run_marker
 
 PASSWORD_PATTERN = re.compile(rb"[0-9a-f]{48}\Z")
 MAX_CREDENTIAL_BYTES = 256
+MAX_PROOF_BYTES = 4096
+MAX_NUMERIC_DIGITS = 64
+MAX_JSON_DEPTH = 32
+_PROOF_OPTION_KEYS = (
+    "--marker",
+    "--run-id",
+    "--credential-file",
+    "--credential-identity",
+)
+MAX_PROOF_OPTIONS_BYTES = (
+    2 * live_run_marker.MAX_PATH_BYTES
+    + 64
+    + MAX_PROOF_BYTES
+    + sum(len(key.encode("utf-8")) for key in _PROOF_OPTION_KEYS)
+)
 LIVE_RUNNER_DEBUG_ENV = "PW_RUNNER_DEBUG"
 
 
@@ -52,7 +67,25 @@ def _marker_with_identity(
 def _proof_identity(value: object) -> live_run_marker.CredentialIdentity:
     try:
         identity = live_run_marker.CredentialIdentity.from_document(value)
-    except live_run_marker.MarkerError:
+        serialized = json.dumps(
+            identity.document(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if len(serialized.encode("utf-8")) > MAX_PROOF_BYTES:
+            raise LiveProofCredentialError("proof_invalid")
+    except LiveProofCredentialError:
+        raise
+    except (
+        live_run_marker.MarkerError,
+        TypeError,
+        ValueError,
+        UnicodeEncodeError,
+        RecursionError,
+        MemoryError,
+        OverflowError,
+    ):
         raise LiveProofCredentialError("proof_invalid") from None
     if not identity.generation:
         raise LiveProofCredentialError("proof_invalid")
@@ -235,7 +268,16 @@ def read_credential_file(
             code="runs_dir_invalid",
         )
         _verify_marker_identity(marker, marker_identity, parent_fd=parent_fd)
-        normalized = raw.rstrip(b"\r\n")
+        if raw.endswith(b"\r\n"):
+            normalized = raw[:-2]
+        elif raw.endswith((b"\r", b"\n")):
+            normalized = raw[:-1]
+        else:
+            normalized = raw
+        # The framing contract is one password line: at most one terminal
+        # ending, with no interior or repeated CR/LF bytes after removal.
+        if b"\r" in normalized or b"\n" in normalized:
+            raise LiveProofCredentialError("credential_file_invalid")
         if PASSWORD_PATTERN.fullmatch(normalized) is None:
             raise LiveProofCredentialError("credential_file_invalid")
         return normalized.decode("ascii")
@@ -280,6 +322,77 @@ def run_with_credential(
     raise AssertionError("os.execvpe returned")
 
 
+def _proof_json(raw: str) -> object:
+    """Decode one bounded, duplicate-free proof document."""
+
+    if type(raw) is not str:
+        raise LiveProofCredentialError("proof_invalid")
+    try:
+        if len(raw.encode("utf-8")) > MAX_PROOF_BYTES:
+            raise LiveProofCredentialError("proof_invalid")
+    except UnicodeEncodeError:
+        raise LiveProofCredentialError("proof_invalid") from None
+
+    def reject_duplicate(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        document: dict[str, object] = {}
+        for key, value in pairs:
+            if key in document:
+                raise LiveProofCredentialError("proof_invalid")
+            document[key] = value
+        return document
+
+    def reject_constant(value: str) -> None:
+        del value
+        raise LiveProofCredentialError("proof_invalid")
+
+    def bounded_int(value: str) -> int:
+        if len(value.lstrip("-")) > MAX_NUMERIC_DIGITS:
+            raise LiveProofCredentialError("proof_invalid")
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            raise LiveProofCredentialError("proof_invalid") from None
+
+    def reject_float(value: str) -> None:
+        del value
+        raise LiveProofCredentialError("proof_invalid")
+
+    try:
+        depth = 0
+        in_string = False
+        escaped = False
+        for character in raw:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character in "[{":
+                depth += 1
+                if depth > MAX_JSON_DEPTH:
+                    raise LiveProofCredentialError("proof_invalid")
+            elif character in "]}":
+                depth -= 1
+                if depth < 0:
+                    raise LiveProofCredentialError("proof_invalid")
+        return json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate,
+            parse_constant=reject_constant,
+            parse_int=bounded_int,
+            parse_float=reject_float,
+        )
+    except LiveProofCredentialError:
+        raise
+    except (TypeError, json.JSONDecodeError, ValueError, RecursionError, MemoryError):
+        raise LiveProofCredentialError("proof_invalid") from None
+
+
 def _parse_arguments(arguments: Sequence[str]) -> tuple[Path, str, str, Mapping[str, object], list[str]]:
     """Parse only the explicit proof-bearing handoff form."""
 
@@ -292,21 +405,32 @@ def _parse_arguments(arguments: Sequence[str]) -> tuple[Path, str, str, Mapping[
     if not command or len(options) != 8:
         raise LiveProofCredentialError("proof_required")
     values: dict[str, str] = {}
+    total_bytes = 0
     for index in range(0, len(options), 2):
         key, value = options[index : index + 2]
-        if key not in {"--marker", "--run-id", "--credential-file", "--credential-identity"}:
+        if type(key) is not str or type(value) is not str:
+            raise LiveProofCredentialError("proof_invalid")
+        if key not in set(_PROOF_OPTION_KEYS):
             raise LiveProofCredentialError("proof_invalid")
         if key in values or not value:
+            raise LiveProofCredentialError("proof_invalid")
+        try:
+            key_bytes = len(key.encode("utf-8"))
+            value_bytes = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise LiveProofCredentialError("proof_invalid") from None
+        if value_bytes > MAX_PROOF_BYTES:
+            raise LiveProofCredentialError("proof_invalid")
+        total_bytes += key_bytes + value_bytes
+        if total_bytes > MAX_PROOF_OPTIONS_BYTES:
             raise LiveProofCredentialError("proof_invalid")
         values[key] = value
     if set(values) != {"--marker", "--run-id", "--credential-file", "--credential-identity"}:
         raise LiveProofCredentialError("proof_required")
-    try:
-        identity = json.loads(values["--credential-identity"])
-    except (TypeError, json.JSONDecodeError):
-        raise LiveProofCredentialError("proof_invalid") from None
+    identity = _proof_json(values["--credential-identity"])
     if not isinstance(identity, dict):
         raise LiveProofCredentialError("proof_invalid")
+    _proof_identity(identity)
     return (
         Path(values["--marker"]),
         values["--run-id"],

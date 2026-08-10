@@ -15,13 +15,16 @@ import os
 import re
 import sys
 from typing import Mapping, Sequence
-from urllib.parse import urlsplit
 
 
 FIELDS = frozenset(
     {"endpoint", "marker-path", "run-id", "credential-file", "credential-identity"}
 )
 MAX_RESULT_TEXT = 2048
+MAX_RESULT_BYTES = 4096
+MAX_NUMERIC_DIGITS = 64
+MAX_JSON_DEPTH = 32
+_ENDPOINT_PATTERN = re.compile(r"http://127\.0\.0\.1:(?P<port>[0-9]{1,5})\Z")
 RUN_ID_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 GENERATION_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 CREDENTIAL_IDENTITY_KEYS = frozenset(
@@ -40,12 +43,21 @@ class LauncherResultError(Exception):
         super().__init__(code)
 
 
-def _metadata(value: object) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_RESULT_TEXT:
+def _bounded_text(value: object, maximum: int) -> str:
+    if type(value) is not str or not value:
         raise LauncherResultError()
+    try:
+        if len(value.encode("utf-8")) > maximum:
+            raise LauncherResultError()
+    except UnicodeEncodeError:
+        raise LauncherResultError() from None
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise LauncherResultError()
     return value
+
+
+def _metadata(value: object) -> str:
+    return _bounded_text(value, MAX_RESULT_TEXT)
 
 
 def _path(value: object) -> str:
@@ -78,26 +90,16 @@ def _credential_identity(value: object) -> str:
 
 def _endpoint(value: object) -> str:
     endpoint = _metadata(value)
+    # Do not use a URL parser here: URL parsers intentionally normalize some
+    # spellings, while this handoff requires the producer's exact grammar.
+    match = _ENDPOINT_PATTERN.fullmatch(endpoint)
+    if match is None:
+        raise LauncherResultError()
     try:
-        parsed = urlsplit(endpoint)
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError:
+        port = int(match.group("port"))
+    except (TypeError, ValueError, OverflowError):
         raise LauncherResultError() from None
-    # This parser consumes launcher handoff output, not a general proxy target.
-    # Keep the selected endpoint on the exact IPv4 loopback form the launcher
-    # freshly proved; no alternate host can cross into credential handoff.
-    if (
-        parsed.scheme != "http"
-        or hostname != "127.0.0.1"
-        or port is None
-        or not 1 <= port <= 65535
-        or parsed.path not in ("", "/")
-        or parsed.query
-        or parsed.fragment
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
+    if not 1 <= port <= 65535:
         raise LauncherResultError()
     return endpoint
 
@@ -115,15 +117,68 @@ def _json_load(raw: bytes | str) -> object:
         del value
         raise LauncherResultError()
 
+    def bounded_int(value: str) -> int:
+        if len(value.lstrip("-")) > MAX_NUMERIC_DIGITS:
+            raise LauncherResultError()
+        try:
+            return int(value)
+        except (ValueError, OverflowError):
+            raise LauncherResultError() from None
+
+    def reject_float(value: str) -> None:
+        del value
+        raise LauncherResultError()
+
+    if isinstance(raw, bytes):
+        if len(raw) > MAX_RESULT_BYTES:
+            raise LauncherResultError()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise LauncherResultError() from None
+    elif isinstance(raw, str):
+        try:
+            if len(raw.encode("utf-8")) > MAX_RESULT_BYTES:
+                raise LauncherResultError()
+        except UnicodeEncodeError:
+            raise LauncherResultError() from None
+        text = raw
+    else:
+        raise LauncherResultError()
+
     try:
+        depth = 0
+        in_string = False
+        escaped = False
+        for character in text:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character in "[{":
+                depth += 1
+                if depth > MAX_JSON_DEPTH:
+                    raise LauncherResultError()
+            elif character in "]}":
+                depth -= 1
+                if depth < 0:
+                    raise LauncherResultError()
         return json.loads(
-            raw.decode("utf-8") if isinstance(raw, bytes) else raw,
+            text,
             object_pairs_hook=reject_duplicate,
             parse_constant=reject_constant,
+            parse_int=bounded_int,
+            parse_float=reject_float,
         )
     except LauncherResultError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError, MemoryError):
         raise LauncherResultError() from None
 
 
@@ -154,6 +209,17 @@ def parse_launcher_result(raw: bytes | str) -> Mapping[str, str]:
     }
 
 
+def _read_bounded_stdin() -> bytes:
+    try:
+        stream = sys.stdin.buffer
+        raw = stream.read(MAX_RESULT_BYTES + 1)
+    except (AttributeError, OSError, ValueError):
+        raise LauncherResultError() from None
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_RESULT_BYTES:
+        raise LauncherResultError()
+    return bytes(raw)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) != 1 or arguments[0] not in FIELDS:
@@ -161,7 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     try:
-        value = parse_launcher_result(sys.stdin.buffer.read())[arguments[0]]
+        value = parse_launcher_result(_read_bounded_stdin())[arguments[0]]
     except LauncherResultError as error:
         print(error.code, file=sys.stderr)
         return 1

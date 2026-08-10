@@ -78,12 +78,17 @@ class LauncherResultTests(unittest.TestCase):
     def test_endpoint_requires_explicit_canonical_loopback_port(self) -> None:
         for endpoint in (
             "http://127.0.0.1",
+            "HTTP://127.0.0.1:19124",
+            "http://127.0.0.1:019124",
             "http://localhost:19124",
             "http://[::1]:19124",
             "http://0.0.0.0:19124",
+            "http://127.0.0.1:19124/",
             "http://127.0.0.1:19124/path",
             "http://127.0.0.1:19124?query",
+            "http://127.0.0.1:19124?",
             "http://127.0.0.1:19124#fragment",
+            "http://127.0.0.1:19124#",
         ):
             with self.subTest(endpoint=endpoint):
                 self.document["result"]["endpoint"] = endpoint
@@ -121,6 +126,40 @@ class LauncherResultTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), "launcher_result_invalid\n")
             self.assertNotIn(raw.decode("utf-8", errors="ignore"), stderr.getvalue())
 
+    def test_cli_bounds_total_input_and_rejects_pathological_json_without_traceback(self) -> None:
+        valid = json.dumps(self.document).encode("utf-8")
+        huge_integer = (
+            b'{"ok":true,"operation":"endpoint","result":{"status":"running",'
+            b'"endpoint":"http://127.0.0.1:19124","marker_path":"/tmp/m.json",'
+            b'"run_id":"' + b"a" * 64 + b'","credential_file":"/tmp/m.credential",'
+            b'"credential_identity":{"device":' + b"9" * 5000 +
+            b',"inode":2,"mode":384,"size":49,"nlink":1,"generation":"' +
+            b"b" * 64 + b'"}}}'
+        )
+        deep = b"[" * (parser.MAX_JSON_DEPTH + 1) + b"0" + b"]" * (parser.MAX_JSON_DEPTH + 1)
+        surrogate = json.dumps(
+            {**self.document, "result": {**self.document["result"], "marker_path": "/tmp/\ud800"}},
+            ensure_ascii=True,
+        ).encode("ascii")
+        rejected = (
+            b" " * (parser.MAX_RESULT_BYTES - len(valid) + 1) + valid,
+            b" " * (4548 - len(valid)) + valid,
+            valid + b"\n" + valid,
+            huge_integer,
+            deep,
+            surrogate,
+        )
+        for raw in rejected:
+            with self.subTest(raw_length=len(raw)), mock_stdin(raw):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    status = parser.main(["endpoint"])
+                self.assertEqual(status, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "launcher_result_invalid\n")
+                self.assertNotIn("Traceback", stderr.getvalue())
+                self.assertNotIn("\\ud800", stderr.getvalue())
     def test_invalid_field_usage_fails_before_reading_input(self) -> None:
         with mock_stdin(b"unexpected"), contextlib.redirect_stderr(io.StringIO()) as stderr:
             status = parser.main(["password"])

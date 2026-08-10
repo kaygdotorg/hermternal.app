@@ -132,18 +132,32 @@ class LiveProofCredentialTests(unittest.TestCase):
             *command,
         ]
 
-    def test_read_strips_only_terminal_crlf_and_preserves_file(self) -> None:
+    def test_read_accepts_one_terminal_line_ending_and_preserves_file(self) -> None:
         for label, suffix in (
             ("bare", b""),
             ("lf", b"\n"),
             ("cr", b"\r"),
             ("crlf", b"\r\n"),
-            ("repeated-line-endings", b"\n\r"),
         ):
             with self.subTest(label=label):
                 raw = self.value + suffix
                 self._write_credential(raw)
                 self.assertEqual(helper.read_credential_file(self.marker_path, **self.proof()), self.value.decode("ascii"))
+                self.assertEqual(self.credential_path.read_bytes(), raw)
+
+    def test_read_rejects_repeated_or_mixed_terminal_line_endings(self) -> None:
+        for label, suffix in (
+            ("lf-cr", b"\n\r"),
+            ("crlf-lf", b"\r\n\n"),
+            ("lf-lf", b"\n\n"),
+            ("cr-cr", b"\r\r"),
+        ):
+            with self.subTest(label=label):
+                raw = self.value + suffix
+                self._write_credential(raw)
+                with self.assertRaises(helper.LiveProofCredentialError) as raised:
+                    helper.read_credential_file(self.marker_path, **self.proof())
+                self.assertEqual(raised.exception.code, "credential_file_invalid")
                 self.assertEqual(self.credential_path.read_bytes(), raw)
 
     def test_identity_is_revalidated_before_reading_credential_value(self) -> None:
@@ -332,6 +346,59 @@ class LiveProofCredentialTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
+        self.assertFalse(execvpe.called)
+
+    def test_proof_json_rejects_duplicates_oversize_and_pathological_numbers_before_child(self) -> None:
+        identity = json.dumps(
+            self.proof()["credential_identity"],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        duplicate = identity[:-1] + ',"device":1}'
+        oversized = "{" + '"padding":"' + ("p" * 100_000) + '"}'
+        pathological = (
+            '{"device":' + ("9" * 5000)
+            + ',"inode":2,"mode":384,"size":49,"nlink":1,"generation":"'
+            + ("b" * 64) + '"}'
+        )
+        for label, proof_json in (
+            ("duplicate", duplicate),
+            ("oversized", oversized),
+            ("pathological-number", pathological),
+        ):
+            with self.subTest(label=label):
+                arguments = self.cli_args("synthetic-proof")
+                proof_index = arguments.index("--credential-identity") + 1
+                arguments[proof_index] = proof_json
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(helper, "read_credential_file") as read_credential_file,
+                    mock.patch.object(helper.os, "execvpe") as execvpe,
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = helper.main(arguments)
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr.getvalue(), "proof_invalid\n")
+                self.assertFalse(read_credential_file.called)
+                self.assertFalse(execvpe.called)
+                self.assertNotIn("Traceback", stderr.getvalue())
+                self.assertNotIn("p" * 100, stderr.getvalue())
+                self.assertNotIn("9" * 100, stderr.getvalue())
+
+    def test_proof_json_rejects_lone_surrogate_without_raw_exception(self) -> None:
+        arguments = self.cli_args("synthetic-proof")
+        proof_index = arguments.index("--credential-identity") + 1
+        arguments[proof_index] = '{"generation":"\\ud800"}'
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(helper, "read_credential_file") as read_credential_file,
+            mock.patch.object(helper.os, "execvpe") as execvpe,
+            contextlib.redirect_stderr(stderr),
+        ):
+            status = helper.main(arguments)
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "proof_invalid\n")
+        self.assertFalse(read_credential_file.called)
         self.assertFalse(execvpe.called)
 
     def test_documented_handoff_invokes_valid_bun_command(self) -> None:

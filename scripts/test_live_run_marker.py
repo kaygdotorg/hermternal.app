@@ -98,10 +98,38 @@ class LiveRunMarkerTests(unittest.TestCase):
         self.assertRegex(value, r"^[0-9a-f]{64}$")
         self.assertEqual(len(value), 64)
 
+    def test_marker_endpoint_requires_exact_canonical_spelling_and_surrogate_safe_text(self) -> None:
+        identity = marker.credential_lstat(self.credential_path)
+        rejected = (
+            "HTTP://127.0.0.1:19119",
+            "http://127.0.0.1:019119",
+            "http://127.0.0.1:19119/",
+            "http://127.0.0.1:19119?",
+            "http://127.0.0.1:19119#",
+            "http://localhost:19119",
+            "http://127.0.0.1:\ud800",
+        )
+        for endpoint in rejected:
+            with self.subTest(endpoint=repr(endpoint)), self.assertRaises(marker.MarkerError) as raised:
+                marker.new_marker(
+                    self.marker_path,
+                    run_id="a" * 64,
+                    instance="fixture-one",
+                    container_id="b" * 64,
+                    container_name="hermternal-hermes-fixture-one",
+                    image="docker.io/nousresearch/hermes-agent:v1@sha256:" + "c" * 64,
+                    endpoint=endpoint,
+                    credential_identity=identity,
+                )
+            self.assertEqual(raised.exception.code, "marker_schema_invalid")
+
     def test_private_directory_and_exact_canonical_path_are_required(self) -> None:
         self.assertEqual(marker.ensure_private_runs_dir(self.runs), self.runs)
         with self.assertRaises(marker.MarkerError) as raised:
             marker.marker_paths(Path("runs/fixture.json"))
+        self.assertEqual(raised.exception.code, "marker_path_invalid")
+        with self.assertRaises(marker.MarkerError) as raised:
+            marker.marker_paths(self.runs / "\ud800.json")
         self.assertEqual(raised.exception.code, "marker_path_invalid")
 
         self.runs.chmod(0o755)
@@ -127,6 +155,85 @@ class LiveRunMarkerTests(unittest.TestCase):
         with self.assertRaises(marker.MarkerError) as raised:
             marker.load_marker(self.marker_path, selectable=True)
         self.assertEqual(raised.exception.code, "marker_not_selectable")
+
+    def test_darwin_clone_gates_staging_before_final_marker_path_exists(self) -> None:
+        value = self.make_marker()
+        content = marker._marker_bytes(value)
+        source_path = self.runs / "source.json"
+        source_path.write_bytes(content)
+        source_path.chmod(marker.MARKER_MODES)
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        source_fd = -1
+        clone_targets: list[str] = []
+        boundary_modes: list[int] = []
+        try:
+            source_fd = os.open(
+                source_path.name,
+                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+            source_identity = marker._marker_file_identity(os.fstat(source_fd))
+
+            def synthetic_clone(source_descriptor: int, destination_parent: int, target_name: str) -> None:
+                clone_targets.append(target_name)
+                destination = os.open(
+                    target_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    marker.MARKER_MODES,
+                    dir_fd=destination_parent,
+                )
+                try:
+                    os.lseek(source_descriptor, 0, os.SEEK_SET)
+                    raw = os.read(source_descriptor, len(content))
+                    self.assertEqual(raw, content)
+                    self.assertEqual(os.write(destination, raw), len(raw))
+                    os.fsync(destination)
+                finally:
+                    os.close(destination)
+                if target_name == self.marker_path.name:
+                    observed = os.open(
+                        target_name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=destination_parent,
+                    )
+                    try:
+                        boundary_modes.append(stat.S_IMODE(os.fstat(observed).st_mode))
+                    finally:
+                        os.close(observed)
+                    raise AssertionError("final marker was readable at clone boundary")
+                with self.assertRaises(FileNotFoundError):
+                    os.open(
+                        self.marker_path.name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=destination_parent,
+                    )
+
+            with (
+                mock.patch.object(marker.sys, "platform", "darwin"),
+                mock.patch.object(marker, "_fclonefileat", side_effect=synthetic_clone),
+            ):
+                published = marker._publish_marker_from_descriptor(
+                    parent_fd,
+                    self.marker_path.name,
+                    source_fd,
+                    source_identity,
+                    content,
+                )
+            self.assertEqual(len(clone_targets), 1)
+            self.assertIn(clone_targets[0], marker.quarantine_slot_names("replace-tmp"))
+            self.assertNotEqual(clone_targets[0], self.marker_path.name)
+            self.assertEqual(boundary_modes, [])
+            self.assertEqual(published, marker._marker_file_identity(os.stat(self.marker_path)))
+            self.assertEqual(self.marker_path.read_bytes(), content)
+            self.assertEqual(stat.S_IMODE(self.marker_path.stat().st_mode), marker.MARKER_MODES)
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
+            os.close(parent_fd)
 
     def test_normal_replace_publishes_new_inode_and_retains_old_evidence(self) -> None:
         original = self.make_marker()

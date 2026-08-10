@@ -25,7 +25,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Mapping
-from urllib.parse import urlsplit
 
 
 SCHEMA = "hermternal.live-run-marker.v1"
@@ -47,6 +46,7 @@ INSTANCE_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 CONTAINER_ID_PATTERN = re.compile(r"[0-9a-f]{12,64}\Z")
 CONTAINER_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 IMAGE_PATTERN = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+ENDPOINT_PATTERN = re.compile(r"http://127\.0\.0\.1:(?P<port>[0-9]{1,5})\Z")
 
 MARKER_KEYS = frozenset(
     {
@@ -341,7 +341,12 @@ def content_generation(
 
 
 def _bounded_text(value: object, code: str = "marker_schema_invalid") -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+    if type(value) is not str or not value:
+        _fail(code)
+    try:
+        if len(value.encode("utf-8")) > MAX_TEXT_BYTES:
+            _fail(code)
+    except UnicodeEncodeError:
         _fail(code)
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         _fail(code)
@@ -357,7 +362,12 @@ def canonical_path(value: str | Path, *, code: str = "marker_path_invalid") -> P
         raw = value
     else:
         _fail(code)
-    if not raw or len(raw.encode("utf-8")) > MAX_PATH_BYTES or not os.path.isabs(raw):
+    if not raw or not os.path.isabs(raw):
+        _fail(code)
+    try:
+        if len(raw.encode("utf-8")) > MAX_PATH_BYTES:
+            _fail(code)
+    except UnicodeEncodeError:
         _fail(code)
     if os.path.normpath(raw) != raw:
         _fail(code)
@@ -424,22 +434,16 @@ def new_run_id() -> str:
 
 def _validate_endpoint(value: object) -> str:
     endpoint = _bounded_text(value)
-    try:
-        parsed = urlsplit(endpoint)
-        port = parsed.port
-    except ValueError:
+    # Keep marker storage on the exact producer grammar. URL parsers normalize
+    # uppercase schemes, leading-zero ports, and empty delimiters.
+    match = ENDPOINT_PATTERN.fullmatch(endpoint)
+    if match is None:
         _fail("marker_schema_invalid")
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname != "127.0.0.1"
-        or port is None
-        or not 1 <= port <= 65535
-        or parsed.path not in ("", "/")
-        or parsed.query
-        or parsed.fragment
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
+    try:
+        port = int(match.group("port"))
+    except (TypeError, ValueError, OverflowError):
+        _fail("marker_schema_invalid")
+    if not 1 <= port <= 65535:
         _fail("marker_schema_invalid")
     return endpoint
 
@@ -1131,17 +1135,20 @@ def _publish_marker_from_descriptor(
     source_expected: MarkerFileIdentity,
     expected_content: bytes,
 ) -> MarkerFileIdentity:
-    """Publish exact staged bytes without renaming a source pathname.
+    """Publish exact staged bytes without exposing a complete final pathname.
 
-    Darwin uses ``fclonefileat`` so the kernel reads the held descriptor even if
-    its temporary name is unlinked and replaced. Other platforms use an
-    exclusive destination FD and copy from that same held descriptor. In both
-    paths a complete write is synced before the destination becomes a regular
-    ``0600`` marker; destination path reopens are detection-only snapshots.
+    Darwin clones into a bounded temporary slot, gates that complete clone at
+    mode ``000``, validates its descriptor and bytes, then moves it into the
+    final pathname with no-replace semantics. The final name therefore cannot
+    be opened as a complete readable marker before the mode gate and all
+    descriptor/content/identity checks have passed. Other platforms use an
+    exclusive destination FD and the same mode-gated validation sequence.
     """
 
     destination_fd = -1
     pathname_fd = -1
+    staging_fd = -1
+    staging_name: str | None = None
     try:
         held_identity = _held_marker_identity(source_fd)
         if held_identity[:4] != source_expected[:4] or held_identity[3] != len(expected_content):
@@ -1153,25 +1160,65 @@ def _publish_marker_from_descriptor(
         cloned = False
         if sys.platform == "darwin":
             try:
-                _fclonefileat(source_fd, parent_fd, target_name)
-            except MarkerError as error:
-                if error.code != "atomic_quarantine_unavailable":
-                    raise
-            else:
-                cloned = True
-                pathname_fd = os.open(
-                    target_name,
+                staging_name = reserve_quarantine_slot(
+                    parent_fd,
+                    "replace-tmp",
+                    len(expected_content),
+                )
+                _fclonefileat(source_fd, parent_fd, staging_name)
+                staging_fd = os.open(
+                    staging_name,
                     os.O_RDWR
                     | getattr(os, "O_NOFOLLOW", 0)
                     | getattr(os, "O_CLOEXEC", 0),
                     dir_fd=parent_fd,
                 )
-                # fclonefileat creates complete bytes. Close the small readable
-                # window immediately, then reopen after the mode-000 gate.
-                os.fchmod(pathname_fd, 0)
-                os.fsync(pathname_fd)
-                destination_fd = pathname_fd
-                pathname_fd = -1
+                staging_identity = _marker_file_identity(os.fstat(staging_fd))
+                if staging_identity[3] != len(expected_content):
+                    _fail("marker_replaced")
+                if _read_bounded_descriptor(staging_fd) != expected_content:
+                    _fail("marker_replaced")
+
+                # The complete clone is private staging evidence. Gate it
+                # before the final name can exist, then validate the gated fd
+                # and bytes again while the held descriptor remains authoritative.
+                os.fchmod(staging_fd, 0)
+                os.fsync(staging_fd)
+                gated = os.fstat(staging_fd)
+                if (
+                    not stat.S_ISREG(gated.st_mode)
+                    or stat.S_IMODE(gated.st_mode) != 0
+                    or gated.st_size != len(expected_content)
+                    or gated.st_nlink != 1
+                ):
+                    _fail("marker_replaced")
+                if _read_bounded_descriptor(staging_fd) != expected_content:
+                    _fail("marker_replaced")
+                os.fchmod(staging_fd, MARKER_MODES)
+                os.fsync(staging_fd)
+                staging_identity = _marker_file_identity(os.fstat(staging_fd))
+                _rename_exact_noreplace(
+                    parent_fd,
+                    staging_name,
+                    target_name,
+                    staging_identity,
+                    source_fd=staging_fd,
+                )
+                destination_fd = staging_fd
+                staging_fd = -1
+                staging_name = None
+                cloned = True
+            except MarkerError as error:
+                if error.code != "atomic_quarantine_unavailable":
+                    raise
+                if staging_fd >= 0:
+                    try:
+                        os.close(staging_fd)
+                    except OSError:
+                        pass
+                    staging_fd = -1
+                staging_name = None
+
         if not cloned:
             try:
                 destination_fd = os.open(
@@ -1215,6 +1262,11 @@ def _publish_marker_from_descriptor(
         if destination_fd >= 0:
             try:
                 os.close(destination_fd)
+            except OSError:
+                pass
+        if staging_fd >= 0:
+            try:
+                os.close(staging_fd)
             except OSError:
                 pass
 

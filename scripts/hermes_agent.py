@@ -250,7 +250,11 @@ def make_spec(
     validate_instance(instance)
     validate_port(port)
     validate_image(image)
-    if not username or len(username.encode("utf-8")) > 128 or any(ord(char) < 0x20 for char in username):
+    try:
+        username_bytes = len(username.encode("utf-8"))
+    except (AttributeError, UnicodeEncodeError):
+        raise LauncherError("username_invalid") from None
+    if not username or username_bytes > 128 or any(ord(char) < 0x20 for char in username):
         raise LauncherError("username_invalid")
     return InstanceSpec(instance, port, image, username, roots or default_roots())
 
@@ -340,14 +344,26 @@ def _revalidate_active_parent() -> None:
 def _validate_command_result(result: object, *, failure_code: str) -> CommandResult:
     """Normalize every untrusted runner result before any caller reads it."""
 
-    if not isinstance(result, CommandResult):
+    # Reject subclasses before touching fields: an injected adapter can expose
+    # properties that raise or change between reads, while the exact dataclass
+    # has only ordinary immutable fields. Return a base snapshot so callers do
+    # not retain an adapter-owned object after this boundary.
+    if type(result) is not CommandResult:
         raise LauncherError(failure_code)
-    if type(result.returncode) is not int or not -255 <= result.returncode <= 255:
-        raise LauncherError(failure_code)
-    for output in (result.stdout, result.stderr):
-        if type(output) is not str or len(output.encode("utf-8")) > MAX_COMMAND_BYTES:
+    try:
+        returncode = result.returncode
+        stdout = result.stdout
+        stderr = result.stderr
+        if type(returncode) is not int or not -255 <= returncode <= 255:
             raise LauncherError(failure_code)
-    return result
+        for output in (stdout, stderr):
+            if type(output) is not str or len(output.encode("utf-8")) > MAX_COMMAND_BYTES:
+                raise LauncherError(failure_code)
+    except LauncherError:
+        raise
+    except (AttributeError, MemoryError, UnicodeEncodeError, ValueError):
+        raise LauncherError(failure_code) from None
+    return CommandResult(returncode, stdout, stderr)
 
 
 def invoke_runner(
