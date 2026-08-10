@@ -47,7 +47,7 @@ class LauncherResultTests(unittest.TestCase):
         }
 
     def test_extracts_only_verified_endpoint_and_exact_ownership_paths(self) -> None:
-        raw = json.dumps(self.document).encode("utf-8")
+        raw = parser._serialize_result(self.document)
         self.assertEqual(
             parser.parse_launcher_result(raw),
             {
@@ -99,7 +99,7 @@ class LauncherResultTests(unittest.TestCase):
                     parser.parse_launcher_result(json.dumps(self.document))
 
     def test_cli_emits_only_requested_metadata(self) -> None:
-        raw = json.dumps(self.document).encode("utf-8")
+        raw = parser._serialize_result(self.document)
         for field, expected in (
             ("endpoint", "http://127.0.0.1:19124"),
             ("marker-path", "/private/tmp/hermes/runs/issue118.json"),
@@ -132,15 +132,44 @@ class LauncherResultTests(unittest.TestCase):
     def test_exact_maximum_valid_compound_result_is_accepted(self) -> None:
         document = parser._maximum_valid_result_document()
         raw = parser._serialize_result(document)
+        # Keep the parent-candidate failure at this assertion: its surrogate
+        # packing is a valid smaller fixture, not the parser-wide maximum.
+        self.assertEqual(parser.MAX_RESULT_BYTES, 25_068)
+        self.assertEqual(
+            len(json.dumps(document["result"]["marker_path"], ensure_ascii=True)),
+            12_287,
+        )
         self.assertEqual(len(raw), parser.MAX_RESULT_BYTES)
         parsed = parser.parse_launcher_result(raw)
         self.assertEqual(parsed["marker-path"], document["result"]["marker_path"])
         self.assertEqual(parsed["credential-file"], document["result"]["credential_file"])
 
+    def test_accepts_4497_byte_producer_shaped_lower_bound(self) -> None:
+        marker_path = "/" + ("a" * 1_993)
+        document = parser._maximum_valid_result_document()
+        document["result"]["marker_path"] = marker_path
+        document["result"]["credential_file"] = marker_path + ".credential"
+        raw = parser._serialize_result(document)
+        self.assertEqual(len(marker_path.encode("utf-8")), 1_994)
+        self.assertEqual(len((marker_path + ".state.json").encode("utf-8")), 2_005)
+        self.assertEqual(len(document["result"]["credential_file"].encode("utf-8")), 2_005)
+        self.assertEqual(len((marker_path + ".cidfile").encode("utf-8")), 2_002)
+        self.assertEqual(len(raw), 4_497)
+        parsed = parser.parse_launcher_result(raw)
+        self.assertEqual(parsed["marker-path"], marker_path)
+        self.assertEqual(parsed["credential-file"], marker_path + ".credential")
+
+    def test_requires_canonical_producer_framing(self) -> None:
+        raw = parser._serialize_result(self.document)
+        for noncanonical in (raw[:-1], b" " + raw, raw + b"\n"):
+            with self.subTest(raw_length=len(noncanonical)):
+                with self.assertRaises(parser.LauncherResultError):
+                    parser.parse_launcher_result(noncanonical)
+
     def test_one_byte_over_exact_maximum_result_is_rejected(self) -> None:
         raw = parser._serialize_result(parser._maximum_valid_result_document())
         self.assertEqual(len(raw), parser.MAX_RESULT_BYTES)
-        too_large = b" " + raw
+        too_large = raw + b" "
         self.assertEqual(len(too_large), parser.MAX_RESULT_BYTES + 1)
         with mock_stdin(too_large), contextlib.redirect_stderr(io.StringIO()) as stderr:
             status = parser.main(["endpoint"])

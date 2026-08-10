@@ -188,11 +188,12 @@ launcher_output="$(
 # persisted container ID and accepts only a running, launcher-owned container
 # with one 127.0.0.1:<requested-port>:9119 mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
-run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
-credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
+# Command substitution strips the producer LF; restore it for canonical parsing.
+endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 ```
 
 A successful `start` result has `.result.status` `ready`; it is not a handoff
@@ -224,11 +225,12 @@ instance name, port, recency, or directory contents:
 ```sh
 # This verifies the immutable container ID, running state, and exact loopback mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
-run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
-credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
+# Command substitution strips the producer LF; restore it for canonical parsing.
+endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 python3 scripts/hermes_agent.py stop --marker "$MARKER_PATH"
 ```
 
@@ -263,24 +265,36 @@ or changed credential identity before any credential-file read.
 `read_launcher_result.py` accepts only the closed successful `endpoint` result
 with `.result.status` `running` and exposes exactly five selectable fields:
 `endpoint`, `marker-path`, `run-id`, `credential-file`, and
-`credential-identity`. It reads at most the computed maximum serialized
-six-key endpoint result from stdin before JSON parsing. That bound is derived
-from the 4096-byte path contract, every closed-field maximum, producer
-`ensure_ascii` escaping, and the terminating newline; it is not an arbitrary
-transport cap. The parser rejects duplicate keys, non-finite constants, floats,
-integers longer than 64 digits, excessive nesting, malformed UTF-8, and
-lone-surrogate text, and emits only `launcher_result_invalid` for those
-failures. Endpoint handoff
-uses the exact canonical spelling `http://127.0.0.1:<port>` with no leading-zero
-port, path, query, fragment, alternate host, or case variation. The helper
-never selects a run, reads a marker, infers a port, or substitutes a remembered
+`credential-identity`. It requires the producer's canonical compact framing:
+`sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=True`, and exactly one
+trailing LF, with no leading whitespace, pretty-printing, alternate escapes, or
+concatenated JSON documents. It reads at most the exact `25,068`-byte maximum
+serialized six-key endpoint result from stdin before JSON parsing. This parser-
+wide bound is auditable: each of the two path fields independently permits an
+absolute 4,096-UTF-8-byte path, whose largest canonical JSON string field is
+12,287 bytes (`/` + 2,047 U+07FF scalars plus one escaped backslash, including
+quotes); the endpoint uses port `65535`, IDs use their fixed 64-character
+widths, and `device` and `inode` use the parser's full accepted 64 decimal
+digits rather than a producer or platform-width assumption. With both path
+slots set to `/`, the fixed compact document is 500 bytes including its LF; the
+exact bound is `500 + 2 * (12,287 - 3) = 25,068`. Fixed status, operation,
+identity fields, sorted-key framing, and the final LF account for the remainder. The two paths are independent parser values, so this bound does not
+assume producer sibling suffixes. The 4,497-byte producer-shaped sibling case
+remains a lower-bound compatibility regression, not the maximum. The parser
+rejects duplicate keys, non-finite constants, floats, integers longer than 64
+digits, excessive nesting, malformed UTF-8, and lone-surrogate text, and emits
+only `launcher_result_invalid` for those failures. Endpoint handoff uses the
+exact canonical spelling `http://127.0.0.1:<port>` with no leading-zero port,
+path, query, fragment, alternate host, or case variation. The helper never
+selects a run, reads a marker, infers a port, or substitutes a remembered
 listener. `credential-identity` is emitted as compact JSON and must be handed
 to the next command unchanged:
 
 ```sh
-run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
-credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
+# Preserve the producer LF that command substitution removed.
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 HERMES_LIVE_TARGET="$endpoint" \
   python3 scripts/with_live_credential.py \
     --marker "$marker_path" \

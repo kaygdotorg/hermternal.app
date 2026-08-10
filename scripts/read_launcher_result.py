@@ -5,7 +5,10 @@
 revalidated the caller-selected marker, pinned container, loopback mapping, and
 credential identity. This helper accepts that exact closed result and emits
 only the requested endpoint or ownership path for the transient local handoff.
-It never selects a run, reads a marker, or infers a port.
+It never selects a run, reads a marker, or infers a port. The producer framing
+is compact sorted-key ``ensure_ascii`` JSON followed by exactly one newline;
+requiring that framing makes the computed transport envelope exact rather than
+leaving room for arbitrary JSON whitespace or alternate escaping.
 """
 
 from __future__ import annotations
@@ -36,21 +39,36 @@ VERIFIED_ENDPOINT_RESULT_KEYS = frozenset(
 
 
 def _maximum_path_value() -> str:
-    """Return a valid absolute path that maximizes producer JSON escaping.
+    """Return the parser-valid path with the largest canonical JSON field.
 
-    The path contract is measured in UTF-8 bytes. A non-BMP scalar consumes four
-    source bytes and becomes a twelve-byte UTF-16 surrogate escape pair in the
-    producer's ``ensure_ascii`` JSON, which is the largest valid expansion.
+    The path contract is measured in UTF-8 bytes, not Python characters. The
+    absolute leading slash consumes one byte, leaving 4095 bytes. A permitted
+    U+07FF scalar consumes two source bytes and becomes six ASCII bytes as
+    ``\\u07ff`` under producer ``ensure_ascii=True``. Packing 2047 of those
+    scalars leaves one byte, which is filled with a backslash; its JSON escape
+    adds two bytes. This yields a 12,287-byte JSON string field including its
+    quotes (``2 + 1 + 2047 * 6 + 2``), and is larger than any 1-, 3-, or 4-byte
+    packing. The two result path fields are independent parser values, so this
+    construction intentionally makes no sibling-path assumption.
     """
 
-    wide = "\U0010ffff"
-    wide_bytes = len(wide.encode("utf-8"))
-    count, remainder = divmod(MAX_PATH_BYTES - 1, wide_bytes)
-    return "/" + (wide * count) + ("a" * remainder)
+    scalar = "߿"
+    scalar_bytes = len(scalar.encode("utf-8"))
+    count, remainder = divmod(MAX_PATH_BYTES - 1, scalar_bytes)
+    if remainder != 1:
+        raise RuntimeError("maximum path packing assumptions changed")
+    return "/" + (scalar * count) + "\\"
 
 
 def _maximum_valid_result_document() -> dict[str, object]:
-    """Build the exact maximum closed six-key endpoint result document."""
+    """Build the exact maximum closed six-key endpoint result document.
+
+    Every value is selected from the parser's acceptance grammar: the endpoint
+    uses port 65535, IDs use their fixed 64-character widths, and each accepted
+    nonnegative identity integer uses the full 64-digit parser allowance unless
+    its schema fixes a smaller value. Both path fields use their independent
+    canonical JSON maxima above.
+    """
 
     maximum_path = _maximum_path_value()
     maximum_number = int("9" * MAX_NUMERIC_DIGITS)
@@ -75,7 +93,9 @@ def _maximum_valid_result_document() -> dict[str, object]:
     }
 
 
-def _serialize_result(document: Mapping[str, object]) -> bytes:
+def _serialize_result(document: object) -> bytes:
+    """Serialize exactly as ``hermes_agent.py`` frames a result."""
+
     return (
         json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
     ).encode("ascii")
@@ -181,13 +201,15 @@ def _json_load(raw: bytes | str) -> object:
     if isinstance(raw, bytes):
         if len(raw) > MAX_RESULT_BYTES:
             raise LauncherResultError()
+        raw_bytes = raw
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise LauncherResultError() from None
     elif isinstance(raw, str):
         try:
-            if len(raw.encode("utf-8")) > MAX_RESULT_BYTES:
+            raw_bytes = raw.encode("utf-8")
+            if len(raw_bytes) > MAX_RESULT_BYTES:
                 raise LauncherResultError()
         except UnicodeEncodeError:
             raise LauncherResultError() from None
@@ -218,13 +240,16 @@ def _json_load(raw: bytes | str) -> object:
                 depth -= 1
                 if depth < 0:
                     raise LauncherResultError()
-        return json.loads(
+        document = json.loads(
             text,
             object_pairs_hook=reject_duplicate,
             parse_constant=reject_constant,
             parse_int=bounded_int,
             parse_float=reject_float,
         )
+        if _serialize_result(document) != raw_bytes:
+            raise LauncherResultError()
+        return document
     except LauncherResultError:
         raise
     except (json.JSONDecodeError, TypeError, ValueError, RecursionError, MemoryError):
