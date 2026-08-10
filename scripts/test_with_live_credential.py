@@ -43,16 +43,47 @@ DOCUMENTED_HANDOFF_DOCS = (
     ROOT / "scripts" / "README.md",
     ROOT / "apps" / "web" / "tests" / "live" / "README.md",
 )
+README_PARSER_FIELDS = (
+    ("endpoint", "endpoint"),
+    ("marker_path", "marker-path"),
+    ("run_id", "run-id"),
+    ("credential_file", "credential-file"),
+    ("credential_identity", "credential-identity"),
+)
+DOCUMENTED_PARSER_FIELDS = {
+    ROOT / "scripts" / "README.md": README_PARSER_FIELDS,
+    ROOT / "apps" / "web" / "tests" / "live" / "README.md": README_PARSER_FIELDS,
+    ROOT / ".agents" / "skills" / "deploy-hermes-agent" / "SKILL.md": (
+        ("endpoint", "endpoint"),
+        ("credential_file", "credential-file"),
+    ),
+}
 EXPECTED_BUN_COMMAND = ["bun", "run", "--cwd", "apps/web", "test:e2e:live"]
+
+
+def canonical_parser_line(variable: str, field: str) -> str:
+    """Return the shell line that restores one LF for canonical parsing."""
+
+    return (
+        f'{variable}="$(printf \'%s\\n\' "$launcher_output" | '
+        f"python3 scripts/read_launcher_result.py {field})\""
+    )
+
+
+def assert_canonical_parser_handoff(path: Path, fields: tuple[tuple[str, str], ...]) -> None:
+    """Require docs to restore the LF stripped by shell command substitution."""
+
+    lines = {line.strip() for line in path.read_text(encoding="utf-8").splitlines()}
+    expected = {canonical_parser_line(variable, field) for variable, field in fields}
+    missing = sorted(expected - lines)
+    if missing:
+        raise AssertionError(f"Missing canonical parser handoff in {path}: {missing}")
 
 
 def documented_bun_command(path: Path) -> list[str]:
     """Extract one documented handoff command without executing README text."""
 
     lines = path.read_text(encoding="utf-8").splitlines()
-    marker_line = 'marker_path="$(printf \'%s\' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"'
-    if marker_line not in {line.strip() for line in lines}:
-        raise AssertionError(f"No exact marker handoff found in {path}")
     handoff_line = 'HERMES_LIVE_TARGET="$endpoint" \\'
     expected_lines = [
         'python3 scripts/with_live_credential.py \\',
@@ -402,6 +433,9 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertFalse(execvpe.called)
 
     def test_documented_handoff_invokes_valid_bun_command(self) -> None:
+        for document, fields in DOCUMENTED_PARSER_FIELDS.items():
+            with self.subTest(parser_document=document):
+                assert_canonical_parser_handoff(document, fields)
         for document in DOCUMENTED_HANDOFF_DOCS:
             with self.subTest(document=document):
                 self.assertEqual(documented_bun_command(document), EXPECTED_BUN_COMMAND)

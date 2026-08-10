@@ -41,11 +41,12 @@ INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 # This fail-closed selection gate freshly proves the immutable launcher
 # container ID is running and owns the one explicit loopback Dashboard port.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --marker "$MARKER_PATH")"
-endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-marker_path="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
-run_id="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
-credential_identity="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
+# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+marker_path="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py marker-path)"
+run_id="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py run-id)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+credential_identity="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-identity)"
 HERMES_LIVE_TARGET="$endpoint" \
   python3 scripts/with_live_credential.py \
     --marker "$marker_path" \

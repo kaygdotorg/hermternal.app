@@ -50,8 +50,9 @@ launcher_output="$(
 # handoff. It pins the immutable launcher container ID to running state and the
 # sole explicit 127.0.0.1:<requested-port>:9119 mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
-endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
 The launcher emits public metadata under `.result`. A successful `start` result
@@ -104,8 +105,9 @@ prefix, count, or remembered deployment.
 INSTANCE="${HERMES_INSTANCE:?set the exact launcher instance name}"
 # This freshly verifies the immutable container ID, running state, and loopback mapping.
 launcher_output="$(python3 scripts/hermes_agent.py endpoint --instance "$INSTANCE")"
-endpoint="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
-credential_file="$(printf '%s' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
+# Command substitution strips trailing LFs; restore exactly one for canonical parsing.
+endpoint="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py endpoint)"
+credential_file="$(printf '%s\n' "$launcher_output" | python3 scripts/read_launcher_result.py credential-file)"
 ```
 
 A successful `start` result is `ready`, not a handoff permit. The `endpoint`
