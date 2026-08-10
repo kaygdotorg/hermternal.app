@@ -360,7 +360,11 @@ Quarantine evidence uses 16 fixed slots per kind (`cleanup`, `replace`, and
 occupied, foreign, inaccessible, or raced slots are retained rather than removed.
 When no safe slot remains, cleanup fails closed and rewrites only the already
 owned marker/state descriptors into `cleanup_failed` evidence; it never creates
-an unbounded name or deletes a raced foreign inode.
+an unbounded name or deletes a raced foreign inode. Marker and state snapshots
+also carry bounded content generations. After every fake-engine action, cleanup
+and recovery revalidate both the exact identity and generation before deleting,
+quarantining, or replacing either record; a same-inode, same-size mutation stays
+private evidence rather than being adopted into a tombstone.
 Lifecycle actions use the freshly inspected immutable container ID, not the
 mutable container name, and rollback re-inspects that same ID before stopping
 it. If start, readiness, or state persistence fails, the recovery transaction

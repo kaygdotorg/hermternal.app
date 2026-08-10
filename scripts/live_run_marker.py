@@ -1248,6 +1248,7 @@ def _rewrite_marker_descriptor(
     expected: MarkerFileIdentity,
     old_content: bytes,
     new_content: bytes,
+    expected_generation: str | None = None,
 ) -> MarkerFileIdentity:
     """Commit a complete marker through its held inode under the lease.
 
@@ -1262,6 +1263,14 @@ def _rewrite_marker_descriptor(
         held = _held_marker_identity(descriptor)
         if held[:4] != expected[:4] or held[4] != expected[4]:
             _fail("marker_replaced")
+        if expected_generation is not None:
+            current_content = _read_bounded_descriptor(descriptor)
+            if content_generation(
+                current_content,
+                maximum=MAX_MARKER_BYTES,
+                code="marker_replaced",
+            ) != expected_generation:
+                _fail("marker_replaced")
         os.fchmod(descriptor, 0)
         os.ftruncate(descriptor, 0)
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -1476,6 +1485,7 @@ def rewrite_marker_exact(
     marker: RunMarker,
     expected: MarkerFileIdentity,
     *,
+    expected_generation: str | None = None,
     parent_fd: int | None = None,
 ) -> MarkerFileIdentity:
     """Rewrite one exact marker inode only as the bounded quota fallback.
@@ -1513,6 +1523,14 @@ def rewrite_marker_exact(
             if current != expected:
                 _fail("marker_replaced")
             old_content = _read_bounded_descriptor(descriptor)
+            if expected_generation is not None:
+                actual_generation = content_generation(
+                    old_content,
+                    maximum=MAX_MARKER_BYTES,
+                    code="marker_replaced",
+                )
+                if actual_generation != expected_generation:
+                    _fail("marker_replaced")
             return _rewrite_marker_descriptor(
                 parent_fd,
                 path.name,
@@ -1520,6 +1538,7 @@ def rewrite_marker_exact(
                 expected,
                 old_content,
                 new_content,
+                expected_generation,
             )
     except MarkerError:
         raise

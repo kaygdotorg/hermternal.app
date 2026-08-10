@@ -165,6 +165,24 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def marker_path(self, name: str = "fixture.json") -> Path:
         return self.runs / name
 
+    def mutate_record_same_size(self, path: Path, key: str, value: str) -> bytes:
+        """Mutate one valid record in place without changing inode or size."""
+
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document[key] = value
+        replacement = (
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        original = path.read_bytes()
+        self.assertEqual(len(replacement), len(original))
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+        try:
+            self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return replacement
+
     def make_spec(self, instance: str = "test-one", port: int = 19119):
         return launcher.make_spec(instance, port, roots=self.roots)
 
@@ -348,6 +366,42 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse((self.runs / "fixture.state.json").exists())
         self.assertFalse((self.runs / "fixture.credential").exists())
 
+    def test_raw_marker_constructor_exception_uses_bounded_code_and_exact_cleanup(self) -> None:
+        spec = self.make_spec()
+        created_container_id: list[str] = []
+
+        def capture_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                created_container_id.append(cidfile.read_text(encoding="ascii").strip())
+            return result
+
+        with mock.patch.object(
+            launcher.live_run_marker,
+            "new_marker",
+            side_effect=RuntimeError("synthetic marker-builder secret"),
+        ) as new_marker:
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, runner=capture_run)
+        self.assertEqual(new_marker.call_count, 1)
+        self.assertEqual(raised.exception.code, "marker_build_failed")
+        self.assertNotIn("synthetic marker-builder secret", str(raised.exception))
+        self.assertEqual(len(created_container_id), 1)
+        self.assertEqual(self.fake.containers, {})
+        remove_calls = [
+            command for command, _ in self.fake.calls if command[1:3] == ("rm", "--force")
+        ]
+        self.assertEqual(len(remove_calls), 1)
+        self.assertEqual(remove_calls[0][3], created_container_id[0])
+        for path in (
+            self.marker_path(),
+            self.runs / "fixture.state.json",
+            self.runs / "fixture.credential",
+            self.runs / "fixture.cidfile",
+        ):
+            self.assertFalse(path.exists(), path)
+
     def test_state_sync_failure_cleans_created_state_inode_without_orphan(self) -> None:
         original_sync = launcher._sync_parent
 
@@ -507,12 +561,19 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertTrue(target.exists())
         self.assertEqual(oversized.stat().st_size, launcher.live_run_marker.QUARANTINE_MAX_BYTES)
 
-    def test_quota_exhaustion_retains_cleanup_failed_tombstone_without_growth(self) -> None:
+    def test_quota_fallback_rewrites_owned_marker_and_state_in_place(self) -> None:
         spec = self.make_spec()
         self.start(spec)
+        original = self.load()
+        original_marker_identity = original.marker_identity
+        original_state_identity = original.state_identity
+        original_marker_generation = original.marker_generation
+        original_state_generation = original.state_generation
+        foreign_slots: dict[str, bytes] = {}
         for name in launcher.live_run_marker.quarantine_slot_names("cleanup"):
             occupied = self.runs / name
-            occupied.write_bytes(b"foreign")
+            foreign_slots[name] = b"foreign"
+            occupied.write_bytes(foreign_slots[name])
             occupied.chmod(0o600)
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.stop_instance(
@@ -526,6 +587,30 @@ class HermesAgentLauncherTests(unittest.TestCase):
         tombstone = self.load()
         self.assertEqual(tombstone.marker.status, "cleanup_failed")
         self.assertEqual(json.loads(tombstone.marker.state_path.read_text(encoding="utf-8"))["status"], "cleanup_failed")
+        # Quota fallback is an in-place rewrite of the exact parent entries:
+        # device, inode, mode, and link count survive while the bounded record
+        # size and generation may change with the cleanup_failed status.
+        assert original_marker_identity is not None
+        assert original_state_identity is not None
+        self.assertEqual(tombstone.marker_identity[:3], original_marker_identity[:3])
+        self.assertEqual(tombstone.marker_identity[4], original_marker_identity[4])
+        self.assertEqual(tombstone.state_identity[:3], original_state_identity[:3])
+        self.assertEqual(tombstone.state_identity[4], original_state_identity[4])
+        self.assertEqual(
+            tombstone.marker_identity[3],
+            len(tombstone.marker_path.read_bytes()),
+        )
+        self.assertEqual(
+            tombstone.state_identity[3],
+            len(tombstone.marker.state_path.read_bytes()),
+        )
+        self.assertIsNotNone(original_marker_generation)
+        self.assertIsNotNone(original_state_generation)
+        self.assertNotEqual(tombstone.marker_generation, original_marker_generation)
+        self.assertNotEqual(tombstone.state_generation, original_state_generation)
+        for name, content in foreign_slots.items():
+            self.assertEqual((self.runs / name).read_bytes(), content)
+        self.assertTrue(tombstone.marker.credential_path.exists())
         self.assertEqual(len(self.fake.containers), 0)
         parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -609,6 +694,119 @@ class HermesAgentLauncherTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "removed")
         self.assertEqual(len(self.fake.containers), 1)
+
+    def test_failed_run_without_cidfile_reports_missing_cidfile_first(self) -> None:
+        spec = self.make_spec()
+        self.fake.fail_run_for.add(spec.container)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec)
+        self.assertEqual(raised.exception.code, "cidfile_missing")
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertEqual(self.fake.containers, {})
+        self.assertFalse(tombstone.marker.credential_path.exists())
+        self.assertFalse(any(command[1:3] == ("rm", "--force") for command, _ in self.fake.calls))
+
+    def test_runner_exception_with_malformed_cidfile_preserves_container_start_error(self) -> None:
+        spec = self.make_spec()
+        malformed_identity: list[launcher.FileIdentity] = []
+
+        def raise_with_malformed_cidfile(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.write_bytes(b"not-a-container-id\\n")
+                cidfile.chmod(0o600)
+                malformed_identity.append(launcher._file_identity(cidfile, code="cidfile_invalid"))
+                raise RuntimeError("synthetic malformed cidfile secret")
+            return result
+
+        removed_cidfiles: list[dict[str, object]] = []
+        original_remove = launcher._remove_exact_file
+
+        def observe_exact_remove(path, **kwargs):
+            if path.name == "fixture.cidfile":
+                removed_cidfiles.append(dict(kwargs))
+            return original_remove(path, **kwargs)
+
+        with mock.patch.object(launcher, "_remove_exact_file", side_effect=observe_exact_remove):
+            with mock.patch.object(
+                launcher,
+                "_erase_credential_descriptor",
+                wraps=launcher._erase_credential_descriptor,
+            ) as erase_credential:
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    self.start(spec, runner=raise_with_malformed_cidfile)
+        self.assertEqual(raised.exception.code, "container_start_failed")
+        self.assertNotIn("synthetic malformed cidfile secret", str(raised.exception))
+        self.assertEqual(len(malformed_identity), 1)
+        self.assertEqual(len(removed_cidfiles), 1)
+        self.assertEqual(removed_cidfiles[0]["expected"], malformed_identity[0])
+        self.assertTrue(erase_credential.called)
+        self.assertEqual(len(self.fake.containers), 1)
+        self.assertFalse(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1:3] == ("rm", "--force") for command, _ in self.fake.calls))
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertTrue(self.marker_path().exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
+        self.assertFalse(tombstone.marker.credential_path.exists())
+        self.assertFalse((self.runs / "fixture.cidfile").exists())
+
+        self.fake.calls.clear()
+        result = launcher.stop_instance(
+            self.marker_path(),
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(result["status"], "removed")
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(len(self.fake.containers), 1)
+
+    def test_normal_return_with_malformed_cidfile_reports_cidfile_invalid(self) -> None:
+        malformed_identity: list[launcher.FileIdentity] = []
+
+        def return_with_malformed_cidfile(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                cidfile.write_bytes(b"not-a-container-id\\n")
+                cidfile.chmod(0o600)
+                malformed_identity.append(launcher._file_identity(cidfile, code="cidfile_invalid"))
+            return result
+
+        removed_cidfiles: list[dict[str, object]] = []
+        original_remove = launcher._remove_exact_file
+
+        def observe_exact_remove(path, **kwargs):
+            if path.name == "fixture.cidfile":
+                removed_cidfiles.append(dict(kwargs))
+            return original_remove(path, **kwargs)
+
+        with mock.patch.object(launcher, "container_id_from_run_result", side_effect=AssertionError("stdout fallback")):
+            with mock.patch.object(launcher, "_remove_exact_file", side_effect=observe_exact_remove):
+                with mock.patch.object(
+                    launcher,
+                    "_erase_credential_descriptor",
+                    wraps=launcher._erase_credential_descriptor,
+                ) as erase_credential:
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        self.start(self.make_spec(), runner=return_with_malformed_cidfile)
+        self.assertEqual(raised.exception.code, "cidfile_invalid")
+        self.assertEqual(len(malformed_identity), 1)
+        self.assertEqual(len(removed_cidfiles), 1)
+        self.assertEqual(removed_cidfiles[0]["expected"], malformed_identity[0])
+        self.assertTrue(erase_credential.called)
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertEqual(len(self.fake.containers), 1)
+        self.assertFalse(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        self.assertFalse(tombstone.marker.credential_path.exists())
 
     def test_success_without_cidfile_never_falls_back_to_stdout(self) -> None:
         def return_without_cidfile(command, environment, timeout):
@@ -924,6 +1122,33 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse((self.runs / "fixture.state.json").exists())
         self.assertFalse((self.runs / "fixture.credential").exists())
 
+    def test_cidfile_cleanup_failure_preserves_new_run_primary_error(self) -> None:
+        spec = self.make_spec()
+        original_remove = launcher._remove_exact_file
+
+        def fail_cidfile(path, **kwargs):
+            if path.name == "fixture.cidfile":
+                raise launcher.LauncherError("cidfile_remove_failed")
+            return original_remove(path, **kwargs)
+
+        def wildcard_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+                assert isinstance(ports, dict)
+                ports["9119/tcp"][0]["HostIp"] = "0.0.0.0"
+            return result
+
+        with mock.patch.object(launcher, "_remove_exact_file", side_effect=fail_cidfile):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, runner=wildcard_after_run)
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+        self.assertEqual(self.fake.containers, {})
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertTrue(self.runs.joinpath("fixture.cidfile").exists())
+        self.assertTrue(tombstone.marker.credential_path.exists())
+
     def test_new_run_mapping_failure_retains_tombstone_when_exact_cleanup_fails(self) -> None:
         spec = self.make_spec()
         self.fake.fail_rm_for.add(spec.container)
@@ -967,6 +1192,252 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "container_not_launcher_owned")
         self.assertFalse(any(command[1] in {"start", "stop", "rm"} for command, _ in self.fake.calls))
 
+    def test_stop_rejects_post_container_action_same_inode_same_size_marker_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        mutated: list[bytes] = []
+
+        def remove_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:3] == ("rm", "--force"):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker_path,
+                        "endpoint",
+                        "http://127.0.0.1:19110",
+                    )
+                )
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=remove_then_mutate,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertEqual(self.fake.containers, {})
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker_path.read_bytes(), mutated[0])
+
+    def test_stop_rejects_post_container_action_same_inode_same_size_state_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        mutated: list[bytes] = []
+
+        def remove_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:3] == ("rm", "--force"):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker.state_path,
+                        "username",
+                        "hermternal-tesx",
+                    )
+                )
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.stop_instance(
+                self.marker_path(),
+                roots=self.roots,
+                runner=remove_then_mutate,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+            )
+        self.assertEqual(raised.exception.code, "state_replaced")
+        self.assertEqual(self.fake.containers, {})
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker.state_path.read_bytes(), mutated[0])
+
+    def test_recovery_rejects_post_container_action_same_inode_same_size_marker_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        mutated: list[bytes] = []
+
+        def start_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:] == ("start", state.container_id):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker_path,
+                        "endpoint",
+                        "http://127.0.0.1:19110",
+                    )
+                )
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=start_then_mutate)
+        self.assertEqual(raised.exception.code, "marker_replaced")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker_path.read_bytes(), mutated[0])
+
+    def test_recovery_rejects_post_container_action_same_inode_same_size_state_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        mutated: list[bytes] = []
+
+        def start_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:] == ("start", state.container_id):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker.state_path,
+                        "username",
+                        "hermternal-tesx",
+                    )
+                )
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=start_then_mutate)
+        self.assertEqual(raised.exception.code, "state_replaced")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker.state_path.read_bytes(), mutated[0])
+
+    def test_cleanup_started_run_preserves_post_container_action_same_inode_same_size_marker_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        mutated: list[bytes] = []
+
+        def remove_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:3] == ("rm", "--force"):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker_path,
+                        "endpoint",
+                        "http://127.0.0.1:19110",
+                    )
+                )
+            return result
+
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            launcher._cleanup_started_run(
+                spec,
+                state.marker,
+                marker_identity=state.marker_identity,
+                state_identity=state.state_identity,
+                marker_generation=state.marker_generation,
+                state_generation=state.state_generation,
+                cidfile_identity=None,
+                runner=remove_then_mutate,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                parent_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(self.fake.containers, {})
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker_path.read_bytes(), mutated[0])
+
+    def test_cleanup_started_run_preserves_post_container_action_same_inode_same_size_state_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        mutated: list[bytes] = []
+
+        def remove_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:3] == ("rm", "--force"):
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker.state_path,
+                        "username",
+                        "hermternal-tesx",
+                    )
+                )
+            return result
+
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            launcher._cleanup_started_run(
+                spec,
+                state.marker,
+                marker_identity=state.marker_identity,
+                state_identity=state.state_identity,
+                marker_generation=state.marker_generation,
+                state_generation=state.state_generation,
+                cidfile_identity=None,
+                runner=remove_then_mutate,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                parent_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        self.assertEqual(self.fake.containers, {})
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker.state_path.read_bytes(), mutated[0])
+
+    def test_retain_cleanup_failed_preserves_same_inode_same_size_state_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        original_marker = state.marker_path.read_bytes()
+        mutated = self.mutate_record_same_size(
+            state.marker.state_path,
+            "username",
+            "hermternal-tesx",
+        )
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            retained = launcher._retain_cleanup_failed(
+                state,
+                expected_marker=state.marker_identity,
+                expected_state=state.state_identity,
+                marker_generation=state.marker_generation,
+                state_generation=state.state_generation,
+                parent_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        self.assertIsNone(retained)
+        self.assertEqual(state.marker.state_path.read_bytes(), mutated)
+        self.assertEqual(state.marker_path.read_bytes(), original_marker)
+
+    def test_retain_cleanup_failed_in_place_preserves_same_inode_same_size_marker_mutation(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        original_state = state.marker.state_path.read_bytes()
+        mutated = self.mutate_record_same_size(
+            state.marker_path,
+            "endpoint",
+            "http://127.0.0.1:19110",
+        )
+        tombstone = launcher.live_run_marker.cleanup_failed(state.marker)
+        parent_fd = os.open(self.runs, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            retained = launcher._retain_cleanup_failed_in_place(
+                state,
+                tombstone,
+                expected_marker=state.marker_identity,
+                expected_state=state.state_identity,
+                marker_generation=state.marker_generation,
+                state_generation=state.state_generation,
+                parent_fd=parent_fd,
+            )
+        finally:
+            os.close(parent_fd)
+        self.assertIsNone(retained)
+        self.assertEqual(state.marker_path.read_bytes(), mutated)
+        self.assertEqual(state.marker.state_path.read_bytes(), original_state)
+
     def test_stopped_bound_container_starts_only_by_pinned_id_and_rolls_back_exactly(self) -> None:
         spec = self.make_spec()
         self.start(spec)
@@ -991,6 +1462,150 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
         lifecycle = [command[1:] for command, _ in self.fake.calls if command[1] in {"start", "stop"}]
         self.assertEqual(lifecycle[-2:], [("start", state.container_id), ("stop", state.container_id)])
+
+    def test_recovery_readiness_error_remains_primary_when_rollback_fails(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+
+        def fail_rollback_after_start(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:] == ("start", state.container_id):
+                self.fake.fail_stop_for.add(spec.container)
+            return result
+
+        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise launcher.LauncherError("provider_readiness_timeout")
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=fail_rollback_after_start, readiness=not_ready)
+        self.assertEqual(raised.exception.code, "provider_readiness_timeout")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "container_recovery_rollback_failed")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+        lifecycle = [
+            command[1:]
+            for command, _ in self.fake.calls
+            if command[1] in {"start", "stop"}
+        ]
+        self.assertEqual(lifecycle[-2:], [("start", state.container_id), ("stop", state.container_id)])
+
+    def test_recovery_state_replacement_stays_primary_when_rollback_fails(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        mutated: list[bytes] = []
+
+        def start_then_mutate(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:] == ("start", state.container_id):
+                self.fake.fail_stop_for.add(spec.container)
+                mutated.append(
+                    self.mutate_record_same_size(
+                        state.marker.state_path,
+                        "username",
+                        "hermternal-tesx",
+                    )
+                )
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=start_then_mutate)
+        self.assertEqual(raised.exception.code, "state_replaced")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "container_recovery_rollback_failed")
+        self.assertTrue(mutated)
+        self.assertEqual(state.marker.state_path.read_bytes(), mutated[0])
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+
+    def test_recovery_raw_readiness_exception_normalizes_with_optional_secondary(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+
+        def fail_rollback_after_start(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if command[1:] == ("start", state.container_id):
+                self.fake.fail_stop_for.add(spec.container)
+            return result
+
+        def raw_not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise RuntimeError("synthetic readiness secret")
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, readiness=raw_not_ready)
+        self.assertEqual(raised.exception.code, "container_recovery_failed")
+        self.assertIsNone(raised.exception.secondary)
+        self.assertNotIn("synthetic readiness secret", str(raised.exception))
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=fail_rollback_after_start, readiness=raw_not_ready)
+        self.assertEqual(raised.exception.code, "container_recovery_failed")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "container_recovery_rollback_failed")
+        self.assertNotIn("synthetic readiness secret", str(raised.exception))
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+
+    def test_recovery_state_write_failure_rolls_back_by_pinned_id(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        original_write = launcher.write_state
+
+        def fail_recovery_state(*args, **kwargs):
+            if kwargs.get("replace"):
+                raise launcher.LauncherError("state_sync_failed")
+            return original_write(*args, **kwargs)
+
+        with mock.patch.object(launcher, "write_state", side_effect=fail_recovery_state):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec)
+        self.assertEqual(raised.exception.code, "state_sync_failed")
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+        lifecycle = [
+            command[1:]
+            for command, _ in self.fake.calls
+            if command[1] in {"start", "stop"}
+        ]
+        self.assertEqual(lifecycle[-2:], [("start", state.container_id), ("stop", state.container_id)])
+
+    def test_recovery_status_change_between_inspections_fails_before_start(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        self.fake.calls.clear()
+        inspect_count = 0
+
+        def mutate_between_inspections(command, environment, timeout):
+            nonlocal inspect_count
+            if command[1:3] == ("container", "inspect"):
+                inspect_count += 1
+                if inspect_count == 2:
+                    self.fake.containers[spec.container]["State"] = {"Status": "running"}
+            return self.fake(command, environment, timeout)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=mutate_between_inspections)
+        self.assertEqual(raised.exception.code, "container_recovery_race")
+        self.assertEqual(inspect_count, 2)
+        lifecycle = [
+            command[1:]
+            for command, _ in self.fake.calls
+            if command[1] in {"start", "stop"}
+        ]
+        self.assertEqual(lifecycle, [])
+        self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
 
     def test_readiness_failure_uses_marker_cleanup_and_removes_only_pinned_files(self) -> None:
         spec = self.make_spec()
@@ -1039,9 +1654,10 @@ class HermesAgentLauncherTests(unittest.TestCase):
             current: launcher.LauncherState,
             expected: launcher.FileIdentity,
             *,
+            expected_generation: str | None = None,
             parent_fd: int | None = None,
         ) -> None:
-            del current, expected, parent_fd
+            del current, expected, expected_generation, parent_fd
             raise launcher.LauncherError("marker_remove_failed")
 
         with mock.patch.object(launcher, "_remove_marker_last", side_effect=fail_marker_unlink):
@@ -1093,9 +1709,10 @@ class HermesAgentLauncherTests(unittest.TestCase):
             current: launcher.LauncherState,
             expected: tuple[int, int, int, int, int],
             *,
+            expected_generation: str | None = None,
             parent_fd: int | None = None,
         ) -> None:
-            del current, expected
+            del current, expected, expected_generation
             assert parent_fd is not None
             os.unlink(raced.marker_path.name, dir_fd=parent_fd)
             launcher.live_run_marker.create_marker(raced, parent_fd=parent_fd)

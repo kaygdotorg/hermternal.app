@@ -67,7 +67,9 @@ PortChecker = Callable[[int], bool]
 
 FileIdentity = tuple[int, int, int, int, int]
 ParentIdentity = tuple[int, int, int]
-_RENAME_EXPECTED: contextvars.ContextVar[tuple[int, str, str, FileIdentity, str] | None] = contextvars.ContextVar(
+_RENAME_EXPECTED: contextvars.ContextVar[
+    tuple[int, str, str, FileIdentity, str, str | None, int | None] | None
+] = contextvars.ContextVar(
     "hermes_rename_expected",
     default=None,
 )
@@ -534,7 +536,15 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
     target = os.fsencode(target_name)
     expected_claim = _RENAME_EXPECTED.get()
     if expected_claim is not None:
-        expected_parent, expected_source, expected_target, expected_identity, expected_code = expected_claim
+        (
+            expected_parent,
+            expected_source,
+            expected_target,
+            expected_identity,
+            expected_code,
+            expected_generation,
+            generation_maximum,
+        ) = expected_claim
         if (expected_parent, expected_source, expected_target) == (parent_fd, source_name, target_name):
             descriptor = -1
             try:
@@ -549,6 +559,13 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
                 current = _validated_fd_identity(descriptor, code=expected_code)
                 if current != expected_identity:
                     raise LauncherError(f"{expected_code}_replaced")
+                if expected_generation is not None and generation_maximum is not None:
+                    _require_descriptor_generation(
+                        descriptor,
+                        expected_generation,
+                        maximum=generation_maximum,
+                        replacement_code=f"{expected_code}_replaced",
+                    )
             except FileNotFoundError:
                 pass
             finally:
@@ -571,6 +588,13 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
             current = _validated_fd_identity(descriptor, code=expected_code)
             if current != expected_identity:
                 raise LauncherError(f"{expected_code}_replaced")
+            if expected_generation is not None and generation_maximum is not None:
+                _require_descriptor_generation(
+                    descriptor,
+                    expected_generation,
+                    maximum=generation_maximum,
+                    replacement_code=f"{expected_code}_replaced",
+                )
         except FileNotFoundError:
             raise LauncherError(f"{expected_code}_replaced") from None
         finally:
@@ -849,6 +873,7 @@ def write_state(
     *,
     replace: bool = False,
     expected: FileIdentity | None = None,
+    expected_generation: str | None = None,
     parent_fd: int | None = None,
 ) -> FileIdentity:
     paths = _marker_paths(binding.marker_path)
@@ -862,8 +887,22 @@ def write_state(
             expected = _file_identity(paths.state, code="state_write_failed")
         # Remove only the caller-pinned inode, then publish with O_EXCL. A
         # replacement that appears in the gap makes publication fail closed;
-        # it is never overwritten by an os.replace pathname race.
-        _remove_exact_file(paths.state, code="state_write_failed", expected=expected, parent_fd=parent_fd)
+        # it is never overwritten by an os.replace pathname race. The content
+        # generation closes the same-inode, same-size mutation window before
+        # the old state is claimed.
+        try:
+            _remove_exact_file(
+                paths.state,
+                code="state_write_failed",
+                expected=expected,
+                expected_generation=expected_generation,
+                generation_maximum=MAX_STATE_BYTES,
+                parent_fd=parent_fd,
+            )
+        except LauncherError as error:
+            if error.code == "state_write_failed_replaced":
+                raise LauncherError("state_replaced") from None
+            raise
     return _create_private_file(paths.state, content, code="state_write_failed", parent_fd=parent_fd)
 
 
@@ -885,11 +924,38 @@ def _read_bounded_private_descriptor(descriptor: int, *, maximum: int, code: str
     return bytes(raw)
 
 
+def _require_descriptor_generation(
+    descriptor: int,
+    expected_generation: str,
+    *,
+    maximum: int,
+    replacement_code: str,
+) -> None:
+    """Require one held private record to retain its captured bytes."""
+
+    try:
+        raw = _read_bounded_private_descriptor(
+            descriptor,
+            maximum=maximum,
+            code=replacement_code,
+        )
+        generation = live_run_marker.content_generation(
+            raw,
+            maximum=maximum,
+            code=replacement_code,
+        )
+    except (LauncherError, live_run_marker.MarkerError):
+        raise LauncherError(replacement_code) from None
+    if generation != expected_generation:
+        raise LauncherError(replacement_code)
+
+
 def _rewrite_state_exact(
     spec: InstanceSpec,
     binding: live_run_marker.RunMarker,
     expected: FileIdentity,
     *,
+    expected_generation: str | None = None,
     parent_fd: int,
 ) -> FileIdentity:
     """Rewrite one owned state inode with descriptor-backed rollback.
@@ -949,7 +1015,21 @@ def _rewrite_state_exact(
             maximum=MAX_STATE_BYTES,
             code="state_rewrite_failed",
         )
+        if expected_generation is not None:
+            _require_descriptor_generation(
+                descriptor,
+                expected_generation,
+                maximum=MAX_STATE_BYTES,
+                replacement_code="state_replaced",
+            )
         try:
+            if expected_generation is not None:
+                _require_descriptor_generation(
+                    descriptor,
+                    expected_generation,
+                    maximum=MAX_STATE_BYTES,
+                    replacement_code="state_replaced",
+                )
             os.fchmod(descriptor, 0)
             os.ftruncate(descriptor, 0)
             os.lseek(descriptor, 0, os.SEEK_SET)
@@ -2021,11 +2101,23 @@ def _rename_exact_noreplace(
     target_name: str,
     expected: FileIdentity,
     *,
+    expected_generation: str | None = None,
+    generation_maximum: int | None = None,
     code: str,
 ) -> None:
-    """Validate the source again inside the no-replace syscall boundary."""
+    """Validate identity and captured bytes inside the no-replace boundary."""
 
-    token = _RENAME_EXPECTED.set((parent_fd, source_name, target_name, expected, code))
+    token = _RENAME_EXPECTED.set(
+        (
+            parent_fd,
+            source_name,
+            target_name,
+            expected,
+            code,
+            expected_generation,
+            generation_maximum,
+        )
+    )
     try:
         _rename_noreplace(parent_fd, source_name, target_name)
     finally:
@@ -2037,6 +2129,8 @@ def _remove_exact_file(
     *,
     code: str,
     expected: FileIdentity | live_run_marker.CredentialIdentity | None = None,
+    expected_generation: str | None = None,
+    generation_maximum: int | None = None,
     missing_ok: bool = False,
     erase: bool = False,
     parent_fd: int | None = None,
@@ -2045,11 +2139,16 @@ def _remove_exact_file(
     """Claim one exact inode into bounded no-replace quarantine evidence.
 
     The source descriptor is held before the quarantine claim and checked again
-    immediately before the pathname syscall. The moved destination is opened
-    and compared with that held identity before any erase. A foreign source or
-    destination is never erased or restored over; its pathname/evidence remains
-    private and the operation fails closed.
+    immediately before the pathname syscall. When supplied, the captured
+    bounded-content generation is checked at both points as well; this closes
+    same-inode, same-size mutation without retaining record bytes in state. The
+    moved destination is opened and compared with that held identity before any
+    erase. A foreign source or destination is never erased or restored over; its
+    pathname/evidence remains private and the operation fails closed.
     """
+
+    if expected_generation is not None and generation_maximum is None:
+        raise LauncherError("ownership_snapshot_missing")
 
     expected_credential = expected if isinstance(expected, live_run_marker.CredentialIdentity) else None
     if expected_credential is not None:
@@ -2076,6 +2175,13 @@ def _remove_exact_file(
             if expected_tuple is not None and source_identity != expected_tuple:
                 raise LauncherError(f"{code}_replaced")
             expected_tuple = source_identity
+            if expected_generation is not None:
+                _require_descriptor_generation(
+                    source_fd,
+                    expected_generation,
+                    maximum=generation_maximum,
+                    replacement_code=f"{code}_replaced",
+                )
             if expected_credential is not None:
                 _require_credential_descriptor_generation(
                     source_fd,
@@ -2098,6 +2204,8 @@ def _remove_exact_file(
                         path.name,
                         candidate,
                         expected_tuple,
+                        expected_generation=expected_generation,
+                        generation_maximum=generation_maximum,
                         code=code,
                     )
                 except LauncherError as error:
@@ -2139,6 +2247,13 @@ def _remove_exact_file(
                         raise erase_error from None
                 raise LauncherError(f"{code}_replaced")
 
+            if expected_generation is not None:
+                _require_descriptor_generation(
+                    moved_fd,
+                    expected_generation,
+                    maximum=generation_maximum,
+                    replacement_code=f"{code}_replaced",
+                )
             if erase:
                 if expected_credential is not None:
                     _require_credential_descriptor_generation(
@@ -2270,14 +2385,57 @@ def _retain_cleanup_failed_in_place(
     *,
     expected_marker: FileIdentity | None,
     expected_state: FileIdentity | None,
+    marker_generation: str | None,
+    state_generation: str | None,
     parent_fd: int | None,
 ) -> None:
     """Retain cleanup evidence without allocating after quota saturation."""
 
     try:
+        # Validate every still-present record before rewriting either sibling.
+        # This prevents a same-inode mutation in the second record from being
+        # hidden after the first record has already become a tombstone. Missing
+        # records remain eligible for the historical recreation path.
+        if parent_fd is None:
+            return
+        if expected_state is not None and state_generation is not None:
+            try:
+                _revalidate_private_generation(
+                    state.marker.state_path,
+                    expected_state,
+                    state_generation,
+                    maximum=MAX_STATE_BYTES,
+                    code="state_identity",
+                    replacement_code="state_replaced",
+                    parent_fd=parent_fd,
+                )
+            except LauncherError as error:
+                if error.code != "state_identity_missing":
+                    return
+        if expected_marker is not None and marker_generation is not None:
+            try:
+                _revalidate_private_generation(
+                    state.marker_path,
+                    expected_marker,
+                    marker_generation,
+                    maximum=live_run_marker.MAX_MARKER_BYTES,
+                    code="marker_identity",
+                    replacement_code="marker_replaced",
+                    parent_fd=parent_fd,
+                )
+            except LauncherError as error:
+                if error.code != "marker_identity_missing":
+                    return
+
         if expected_state is not None:
             try:
-                _rewrite_state_exact(state.spec, tombstone, expected_state, parent_fd=parent_fd)
+                _rewrite_state_exact(
+                    state.spec,
+                    tombstone,
+                    expected_state,
+                    expected_generation=state_generation,
+                    parent_fd=parent_fd,
+                )
             except LauncherError as error:
                 if not error.code.endswith("_missing"):
                     return
@@ -2294,7 +2452,12 @@ def _retain_cleanup_failed_in_place(
 
         if expected_marker is not None:
             try:
-                live_run_marker.rewrite_marker_exact(tombstone, expected_marker, parent_fd=parent_fd)
+                live_run_marker.rewrite_marker_exact(
+                    tombstone,
+                    expected_marker,
+                    expected_generation=marker_generation,
+                    parent_fd=parent_fd,
+                )
             except live_run_marker.MarkerError as error:
                 if error.code != "marker_missing":
                     return
@@ -2320,6 +2483,8 @@ def _retain_cleanup_failed(
     *,
     expected_marker: FileIdentity | None = None,
     expected_state: FileIdentity | None = None,
+    marker_generation: str | None = None,
+    state_generation: str | None = None,
     parent_fd: int | None = None,
 ) -> None:
     """Retain a bounded tombstone without adopting raced pathnames.
@@ -2344,6 +2509,8 @@ def _retain_cleanup_failed(
                 state.marker.state_path,
                 code="state_remove_failed",
                 expected=expected_state,
+                expected_generation=state_generation,
+                generation_maximum=MAX_STATE_BYTES,
                 missing_ok=True,
                 parent_fd=parent_fd,
             )
@@ -2362,6 +2529,8 @@ def _retain_cleanup_failed(
                 state.marker_path,
                 code="marker_remove_failed",
                 expected=expected_marker,
+                expected_generation=marker_generation,
+                generation_maximum=live_run_marker.MAX_MARKER_BYTES,
                 missing_ok=True,
                 parent_fd=parent_fd,
             )
@@ -2373,6 +2542,8 @@ def _retain_cleanup_failed(
                 tombstone,
                 expected_marker=expected_marker,
                 expected_state=expected_state,
+                marker_generation=marker_generation,
+                state_generation=state_generation,
                 parent_fd=parent_fd,
             )
         # Cleanup evidence is best effort, but it must never turn an original
@@ -2390,6 +2561,8 @@ def _cleanup_started_run(
     *,
     marker_identity: FileIdentity | None,
     state_identity: FileIdentity | None,
+    marker_generation: str | None = None,
+    state_generation: str | None = None,
     cidfile_identity: FileIdentity | None,
     runner: Runner,
     executable: str,
@@ -2398,7 +2571,14 @@ def _cleanup_started_run(
 ) -> None:
     """Clean a just-created run by exact identities, even before publication."""
 
-    state = LauncherState(spec=spec, marker=binding, marker_identity=marker_identity, state_identity=state_identity)
+    state = LauncherState(
+        spec=spec,
+        marker=binding,
+        marker_identity=marker_identity,
+        state_identity=state_identity,
+        marker_generation=marker_generation,
+        state_generation=state_generation,
+    )
     cleanup_error: LauncherError | None = None
     container_unproven = False
     try:
@@ -2418,6 +2598,29 @@ def _cleanup_started_run(
     if cleanup_error is None:
         try:
             _remove_bound_container(state, runner, environment, executable)
+            if marker_identity is not None or state_identity is not None:
+                if parent_fd is None:
+                    raise LauncherError("ownership_snapshot_missing")
+                if marker_identity is not None:
+                    _revalidate_private_generation(
+                        binding.marker_path,
+                        marker_identity,
+                        marker_generation,
+                        maximum=live_run_marker.MAX_MARKER_BYTES,
+                        code="marker_identity",
+                        replacement_code="marker_replaced",
+                        parent_fd=parent_fd,
+                    )
+                if state_identity is not None:
+                    _revalidate_private_generation(
+                        binding.state_path,
+                        state_identity,
+                        state_generation,
+                        maximum=MAX_STATE_BYTES,
+                        code="state_identity",
+                        replacement_code="state_replaced",
+                        parent_fd=parent_fd,
+                    )
         except BaseException as error:
             cleanup_error = error if isinstance(error, LauncherError) else LauncherError("container_remove_failed")
             if isinstance(error, LauncherError) and error.code in {
@@ -2453,10 +2656,17 @@ def _cleanup_started_run(
                     binding.state_path,
                     code="state_remove_failed",
                     expected=state_identity,
+                    expected_generation=state_generation,
+                    generation_maximum=MAX_STATE_BYTES,
                     parent_fd=parent_fd,
                 )
             if marker_identity is not None:
-                _remove_marker_last(state, marker_identity, parent_fd=parent_fd)
+                _remove_marker_last(
+                    state,
+                    marker_identity,
+                    expected_generation=marker_generation,
+                    parent_fd=parent_fd,
+                )
         except BaseException as error:
             cleanup_error = error if isinstance(error, LauncherError) else LauncherError("cleanup_failed")
 
@@ -2468,11 +2678,15 @@ def _cleanup_started_run(
                 marker=binding.with_container_id(UNPROVEN_CONTAINER_ID),
                 marker_identity=marker_identity,
                 state_identity=state_identity,
+                marker_generation=marker_generation,
+                state_generation=state_generation,
             )
         _retain_cleanup_failed(
             tombstone_state,
             expected_marker=marker_identity,
             expected_state=state_identity,
+            marker_generation=marker_generation,
+            state_generation=state_generation,
             parent_fd=parent_fd,
         )
 
@@ -2527,11 +2741,13 @@ def _start_instance_with_parent(
             readiness(state.marker.endpoint, attempts, interval)
             _require_running_container(state, runner, environment, podman)
             _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+            _revalidate_state_records(state, parent_fd=runs_parent_fd)
             published_state_identity = write_state(
                 state.spec,
                 state.marker,
                 replace=True,
                 expected=state.state_identity,
+                expected_generation=state.state_generation,
                 parent_fd=runs_parent_fd,
             )
             current_state_identity, current_state_generation = _private_record_snapshot(
@@ -2584,11 +2800,13 @@ def _start_instance_with_parent(
             readiness(state.marker.endpoint, attempts, interval)
             _require_running_container(state, runner, environment, podman)
             _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
+            _revalidate_state_records(state, parent_fd=runs_parent_fd)
             published_state_identity = write_state(
                 state.spec,
                 state.marker,
                 replace=True,
                 expected=state.state_identity,
+                expected_generation=state.state_generation,
                 parent_fd=runs_parent_fd,
             )
             current_state_identity, current_state_generation = _private_record_snapshot(
@@ -2742,8 +2960,22 @@ def _start_instance_with_parent(
         except OwnedFileError as error:
             # write_state returns only after its parent sync succeeds. If that
             # sync fails after creation, retain the exact created inode here so
-            # cleanup cannot orphan the state sibling.
+            # cleanup cannot orphan the state sibling. Capture its generation
+            # from the same exact pathname before handing it to cleanup; a
+            # missing snapshot remains fail-closed evidence rather than an
+            # identity-only deletion path.
             state_identity = error.identity
+            try:
+                captured_state_identity, state_generation = _private_record_snapshot(
+                    paths.state,
+                    maximum=MAX_STATE_BYTES,
+                    code="state_identity",
+                    parent_fd=runs_parent_fd,
+                )
+                if captured_state_identity != state_identity:
+                    state_generation = None
+            except LauncherError:
+                state_generation = None
             raise
 
         assert credential_identity is not None
@@ -2890,6 +3122,8 @@ def _start_instance_with_parent(
                     binding,
                     marker_identity=marker_identity,
                     state_identity=state_identity,
+                    marker_generation=marker_generation,
+                    state_generation=state_generation,
                     cidfile_identity=cidfile_identity,
                     runner=runner,
                     executable=podman,
@@ -2899,9 +3133,18 @@ def _start_instance_with_parent(
             except BaseException:
                 try:
                     _retain_cleanup_failed(
-                        LauncherState(spec, binding, marker_identity=marker_identity, state_identity=state_identity),
+                        LauncherState(
+                            spec,
+                            binding,
+                            marker_identity=marker_identity,
+                            state_identity=state_identity,
+                            marker_generation=marker_generation,
+                            state_generation=state_generation,
+                        ),
                         expected_marker=marker_identity,
                         expected_state=state_identity,
+                        marker_generation=marker_generation,
+                        state_generation=state_generation,
                         parent_fd=runs_parent_fd,
                     )
                 except BaseException:
@@ -3055,6 +3298,7 @@ def _remove_marker_last(
     state: LauncherState,
     expected: FileIdentity,
     *,
+    expected_generation: str | None = None,
     parent_fd: int | None = None,
 ) -> None:
     """Remove the marker through the same pinned quarantine protocol."""
@@ -3064,6 +3308,8 @@ def _remove_marker_last(
             state.marker_path,
             code="marker_remove_failed",
             expected=expected,
+            expected_generation=expected_generation,
+            generation_maximum=live_run_marker.MAX_MARKER_BYTES,
             parent_fd=parent_fd,
         )
     except LauncherError as error:
@@ -3131,6 +3377,7 @@ def stop_instance(
             if not unknown_container:
                 _remove_bound_container(state, runner, environment, podman)
             _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
+            _revalidate_state_records(state, parent_fd=lease.parent_fd)
             _remove_exact_file(
                 state.marker.credential_path,
                 code="credential_remove_failed",
@@ -3143,10 +3390,17 @@ def stop_instance(
                 state.marker.state_path,
                 code="state_remove_failed",
                 expected=state_identity,
+                expected_generation=state.state_generation,
+                generation_maximum=MAX_STATE_BYTES,
                 missing_ok=state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED,
                 parent_fd=lease.parent_fd,
             )
-            _remove_marker_last(state, marker_identity, parent_fd=lease.parent_fd)
+            _remove_marker_last(
+                state,
+                marker_identity,
+                expected_generation=state.marker_generation,
+                parent_fd=lease.parent_fd,
+            )
         except BaseException as error:
             if isinstance(error, live_run_marker.MarkerError):
                 normalized = LauncherError(error.code)
@@ -3158,6 +3412,8 @@ def stop_instance(
                 state,
                 expected_marker=marker_identity,
                 expected_state=state_identity,
+                marker_generation=state.marker_generation,
+                state_generation=state.state_generation,
                 parent_fd=lease.parent_fd,
             )
             raise normalized
