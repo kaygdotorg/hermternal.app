@@ -138,15 +138,20 @@ earlier marker is not rediscovered, adopted, or rolled back by a broad batch
 cleanup.
 
 Data roots must use canonical absolute spellings with no `.` or `..` segments
-and must not traverse symlink aliases. On Darwin, use `/private/tmp` or
-`/private/var` spellings rather than `/tmp` or `/var`; the launcher rejects
-filesystem anchors and broad system roots before any `mkdir`, `fchmod`, or
-Podman call. New instance leaves are created and mode-checked through
-`openat`-style directory descriptors. Podman receives the canonical pathname,
-so the launcher revalidates its descriptor identity immediately before and
-after each bind/start or mount-inspection boundary; a same-user replacement
-racing the final pathname syscall is outside this pathname-based adapter's
-proof boundary and fails closed when observed.
+and must not traverse symlink aliases. Darwin `/tmp` and `/var` aliases,
+alternate `//` spellings, filesystem anchors, and broad roots such as
+`/private/tmp`, `/private/var`, and `/usr/local` are rejected. Use a
+sufficiently nested caller-specific descendant such as
+`/private/tmp/<private-root>` or `/private/var/<private-root>`. Missing private
+components are created and mode-checked through descriptor-relative
+`openat`-style directory operations; pathname `mkdir` and `chmod` are never
+used on the caller-supplied root. Podman receives the canonical pathname rather
+than a held host fd. The launcher revalidates the expected directory identity
+immediately before and after relevant bind/start and mount-inspection
+boundaries. An inspect `Mounts[].Source` string is consistency evidence, not
+inode proof. A same-user replacement racing the final pathname syscall remains
+outside this pathname-based adapter's proof boundary; an observed replacement
+fails closed.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation

@@ -241,11 +241,13 @@ non-finite readiness controls, unsupported image pins, malformed existing marker
 records, noncanonical or broad private roots, private-root symlinks, stale
 sibling records, and occupied new-run ports. Data roots must be absolute,
 lexically canonical, and free of `.` or `..` segments. Darwin `/tmp` and `/var`
-symlink aliases are rejected; use canonical `/private/tmp` and `/private/var`
-spellings instead. Filesystem anchors and broad system roots are rejected before
-any `mkdir`, descriptor-bound `fchmod`, or engine call. The launcher creates
-only the instance leaf through descriptor-relative `openat` operations and
-never pathname-`mkdir`/`chmod`s the caller-supplied root.
+symlink aliases, alternate `//` spellings, filesystem anchors, and broad roots
+such as `/private/tmp`, `/private/var`, and `/usr/local` are rejected. Use a
+sufficiently nested canonical caller-specific descendant, such as
+`/private/tmp/<private-root>`, instead. Missing private components are created
+only through descriptor-relative `openat` operations, with mode `0700` and
+identity checks after every open/create; the launcher never pathname-
+`mkdir`/`chmod`s the caller-supplied root.
 
 `start-many` repeats that record/root/port preflight for every marker before
 dispatching the first instance; the batch holds one descriptor-bound parent
@@ -255,9 +257,10 @@ between iterations, the affected marker fails before its next lifecycle
 boundary; earlier marker evidence is not rediscovered, adopted, or broadly
 rolled back. Podman accepts a pathname rather than a held host fd, so the
 launcher revalidates the canonical data-directory identity immediately before
-and after bind/start and mount inspection. A same-user replacement racing the
-final pathname syscall is outside this pathname-based adapter's proof boundary
-and fails closed when observed.
+and after bind/start and mount inspection. An inspect `Mounts[].Source` string
+is consistency evidence, not inode proof. A same-user replacement racing the
+final pathname syscall is outside this pathname-based adapter's proof boundary;
+any replacement observed by the surrounding checks fails closed.
 
 Other operations receive the same exact marker path; they never select by
 instance name, port, recency, or directory contents. Run them only after the
@@ -309,7 +312,10 @@ existing private `0700` runs directory. For example, a marker named
 same directory. `--credential-root` does not control live credential placement.
 The container data directory defaults to
 `~/.local/share/hermternal-tests/hermes-agent/`; that data root is separate from
-the marker-bound live files.
+the marker-bound live files. Each state record also persists the data
+directory's `device`, `inode`, `mode`, and `nlink`; future load, reuse, status,
+recovery, cleanup, and endpoint paths reject a replacement under the same
+pathname.
 
 A successful `start` result is `ready`, not a handoff permit. The following
 `endpoint` command is the source of truth for the exact caller-selected marker:
