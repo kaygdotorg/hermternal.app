@@ -21,7 +21,7 @@ FIELDS = frozenset(
     {"endpoint", "marker-path", "run-id", "credential-file", "credential-identity"}
 )
 MAX_RESULT_TEXT = 2048
-MAX_RESULT_BYTES = 4096
+MAX_PATH_BYTES = 4096
 MAX_NUMERIC_DIGITS = 64
 MAX_JSON_DEPTH = 32
 _ENDPOINT_PATTERN = re.compile(r"http://127\.0\.0\.1:(?P<port>[0-9]{1,5})\Z")
@@ -33,6 +33,55 @@ CREDENTIAL_IDENTITY_KEYS = frozenset(
 VERIFIED_ENDPOINT_RESULT_KEYS = frozenset(
     {"status", "endpoint", "marker_path", "run_id", "credential_file", "credential_identity"}
 )
+
+
+def _maximum_path_value() -> str:
+    """Return a valid absolute path that maximizes producer JSON escaping.
+
+    The path contract is measured in UTF-8 bytes. A non-BMP scalar consumes four
+    source bytes and becomes a twelve-byte UTF-16 surrogate escape pair in the
+    producer's ``ensure_ascii`` JSON, which is the largest valid expansion.
+    """
+
+    wide = "\U0010ffff"
+    wide_bytes = len(wide.encode("utf-8"))
+    count, remainder = divmod(MAX_PATH_BYTES - 1, wide_bytes)
+    return "/" + (wide * count) + ("a" * remainder)
+
+
+def _maximum_valid_result_document() -> dict[str, object]:
+    """Build the exact maximum closed six-key endpoint result document."""
+
+    maximum_path = _maximum_path_value()
+    maximum_number = int("9" * MAX_NUMERIC_DIGITS)
+    return {
+        "ok": True,
+        "operation": "endpoint",
+        "result": {
+            "status": "running",
+            "endpoint": "http://127.0.0.1:65535",
+            "marker_path": maximum_path,
+            "run_id": "f" * 64,
+            "credential_file": maximum_path,
+            "credential_identity": {
+                "device": maximum_number,
+                "inode": maximum_number,
+                "mode": 0o600,
+                "size": 256,
+                "nlink": 1,
+                "generation": "f" * 64,
+            },
+        },
+    }
+
+
+def _serialize_result(document: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n"
+    ).encode("ascii")
+
+
+MAX_RESULT_BYTES = len(_serialize_result(_maximum_valid_result_document()))
 
 
 class LauncherResultError(Exception):
@@ -61,7 +110,7 @@ def _metadata(value: object) -> str:
 
 
 def _path(value: object) -> str:
-    path = _metadata(value)
+    path = _bounded_text(value, MAX_PATH_BYTES)
     if not os.path.isabs(path) or os.path.normpath(path) != path:
         raise LauncherResultError()
     return path
@@ -99,7 +148,7 @@ def _endpoint(value: object) -> str:
         port = int(match.group("port"))
     except (TypeError, ValueError, OverflowError):
         raise LauncherResultError() from None
-    if not 1 <= port <= 65535:
+    if not 1 <= port <= 65535 or match.group("port") != str(port):
         raise LauncherResultError()
     return endpoint
 

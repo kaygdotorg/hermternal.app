@@ -102,6 +102,9 @@ class LiveRunMarkerTests(unittest.TestCase):
         identity = marker.credential_lstat(self.credential_path)
         rejected = (
             "HTTP://127.0.0.1:19119",
+            "http://127.0.0.1:01",
+            "http://127.0.0.1:001",
+            "http://127.0.0.1:00080",
             "http://127.0.0.1:019119",
             "http://127.0.0.1:19119/",
             "http://127.0.0.1:19119?",
@@ -122,6 +125,27 @@ class LiveRunMarkerTests(unittest.TestCase):
                     credential_identity=identity,
                 )
             self.assertEqual(raised.exception.code, "marker_schema_invalid")
+
+    def test_new_marker_validates_schema_before_credential_snapshot(self) -> None:
+        identity = marker.credential_lstat(self.credential_path)
+        with mock.patch.object(
+            marker,
+            "credential_snapshot",
+            side_effect=AssertionError("credential snapshot accessed before schema validation"),
+        ) as snapshot:
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.new_marker(
+                    self.marker_path,
+                    run_id="a" * 64,
+                    instance="fixture-one",
+                    container_id="b" * 64,
+                    container_name="hermternal-hermes-fixture-one",
+                    image="docker.io/nousresearch/hermes-agent:v1@sha256:" + "c" * 64,
+                    endpoint="http://127.0.0.1:\ud800",
+                    credential_identity=identity,
+                )
+        self.assertEqual(raised.exception.code, "marker_schema_invalid")
+        snapshot.assert_not_called()
 
     def test_private_directory_and_exact_canonical_path_are_required(self) -> None:
         self.assertEqual(marker.ensure_private_runs_dir(self.runs), self.runs)

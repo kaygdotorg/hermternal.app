@@ -443,7 +443,7 @@ def _validate_endpoint(value: object) -> str:
         port = int(match.group("port"))
     except (TypeError, ValueError, OverflowError):
         _fail("marker_schema_invalid")
-    if not 1 <= port <= 65535:
+    if not 1 <= port <= 65535 or match.group("port") != str(port):
         _fail("marker_schema_invalid")
     return endpoint
 
@@ -1854,21 +1854,29 @@ def new_marker(
     """Build a running marker from fully verified, already-created resources."""
 
     paths = marker_paths(marker_path, validate_parent=False)
+
+    def build_marker(identity: CredentialIdentity) -> RunMarker:
+        return RunMarker(
+            marker_path=paths.marker,
+            status=STATUS_RUNNING,
+            run_id=run_id,
+            instance=instance,
+            container_id=container_id,
+            container_name=container_name,
+            image=image,
+            endpoint=endpoint,
+            state_path=paths.state,
+            credential_path=paths.credential,
+            credential_identity=identity,
+        )
+
+    # Validate all schema fields before checking whether the credential exists.
+    # A malformed endpoint or surrogate must not trigger credential_snapshot or
+    # any other credential filesystem access while constructing a marker.
+    marker = validate_marker(build_marker(credential_identity))
     if not credential_identity.generation and paths.credential.exists():
         credential_identity = credential_snapshot(paths.credential)
-    marker = RunMarker(
-        marker_path=paths.marker,
-        status=STATUS_RUNNING,
-        run_id=run_id,
-        instance=instance,
-        container_id=container_id,
-        container_name=container_name,
-        image=image,
-        endpoint=endpoint,
-        state_path=paths.state,
-        credential_path=paths.credential,
-        credential_identity=credential_identity,
-    )
+        marker = build_marker(credential_identity)
     return validate_marker(marker)
 
 

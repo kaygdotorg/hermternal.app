@@ -263,10 +263,14 @@ or changed credential identity before any credential-file read.
 `read_launcher_result.py` accepts only the closed successful `endpoint` result
 with `.result.status` `running` and exposes exactly five selectable fields:
 `endpoint`, `marker-path`, `run-id`, `credential-file`, and
-`credential-identity`. It reads at most 4096 bytes from stdin before JSON
-parsing, rejects duplicate keys, non-finite constants, floats, integers longer
-than 64 digits, excessive nesting, malformed UTF-8, and lone-surrogate text,
-and emits only `launcher_result_invalid` for those failures. Endpoint handoff
+`credential-identity`. It reads at most the computed maximum serialized
+six-key endpoint result from stdin before JSON parsing. That bound is derived
+from the 4096-byte path contract, every closed-field maximum, producer
+`ensure_ascii` escaping, and the terminating newline; it is not an arbitrary
+transport cap. The parser rejects duplicate keys, non-finite constants, floats,
+integers longer than 64 digits, excessive nesting, malformed UTF-8, and
+lone-surrogate text, and emits only `launcher_result_invalid` for those
+failures. Endpoint handoff
 uses the exact canonical spelling `http://127.0.0.1:<port>` with no leading-zero
 port, path, query, fragment, alternate host, or case variation. The helper
 never selects a run, reads a marker, infers a port, or substitutes a remembered

@@ -79,6 +79,9 @@ class LauncherResultTests(unittest.TestCase):
         for endpoint in (
             "http://127.0.0.1",
             "HTTP://127.0.0.1:19124",
+            "http://127.0.0.1:01",
+            "http://127.0.0.1:001",
+            "http://127.0.0.1:00080",
             "http://127.0.0.1:019124",
             "http://localhost:19124",
             "http://[::1]:19124",
@@ -126,6 +129,24 @@ class LauncherResultTests(unittest.TestCase):
             self.assertEqual(stderr.getvalue(), "launcher_result_invalid\n")
             self.assertNotIn(raw.decode("utf-8", errors="ignore"), stderr.getvalue())
 
+    def test_exact_maximum_valid_compound_result_is_accepted(self) -> None:
+        document = parser._maximum_valid_result_document()
+        raw = parser._serialize_result(document)
+        self.assertEqual(len(raw), parser.MAX_RESULT_BYTES)
+        parsed = parser.parse_launcher_result(raw)
+        self.assertEqual(parsed["marker-path"], document["result"]["marker_path"])
+        self.assertEqual(parsed["credential-file"], document["result"]["credential_file"])
+
+    def test_one_byte_over_exact_maximum_result_is_rejected(self) -> None:
+        raw = parser._serialize_result(parser._maximum_valid_result_document())
+        self.assertEqual(len(raw), parser.MAX_RESULT_BYTES)
+        too_large = b" " + raw
+        self.assertEqual(len(too_large), parser.MAX_RESULT_BYTES + 1)
+        with mock_stdin(too_large), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            status = parser.main(["endpoint"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stderr.getvalue(), "launcher_result_invalid\n")
+
     def test_cli_bounds_total_input_and_rejects_pathological_json_without_traceback(self) -> None:
         valid = json.dumps(self.document).encode("utf-8")
         huge_integer = (
@@ -143,7 +164,6 @@ class LauncherResultTests(unittest.TestCase):
         ).encode("ascii")
         rejected = (
             b" " * (parser.MAX_RESULT_BYTES - len(valid) + 1) + valid,
-            b" " * (4548 - len(valid)) + valid,
             valid + b"\n" + valid,
             huge_integer,
             deep,
