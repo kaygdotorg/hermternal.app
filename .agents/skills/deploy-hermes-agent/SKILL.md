@@ -173,7 +173,15 @@ immutable container when its data proof remains valid, or retains bounded
 hook inside evidence cleanup and proves marker, state, credential, and cidfile
 absence before reporting removal. Launcher command vectors are validated before
 engine dispatch; the executable and each argument must be a non-empty NUL-free
-string.
+string. A new detached run selects its cidfile ID only after strict independent
+proof from the same successful Podman invocation: stdout must be exactly one
+canonical full lowercase ID line, and it must equal the cidfile ID before
+inspection, publication, or cleanup. Missing, extra, malformed, or mismatched
+stdout fails closed. Nonzero results preserve `container_start_failed` without
+selecting a cidfile-only ID. Runner exceptions or invalid/untrusted results
+never adopt or destructively remove a cidfile-only ID; they retain bounded
+`cleanup_failed` evidence with `UNPROVEN_CONTAINER_ID` and leave the cidfile as
+private evidence.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation

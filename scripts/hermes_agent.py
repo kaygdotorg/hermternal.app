@@ -1443,13 +1443,22 @@ def validate_container_id(value: object) -> str:
 
 
 def container_id_from_run_result(result: CommandResult) -> str:
-    """Parse only the one immutable ID emitted by this exact detached run."""
+    """Parse the one canonical full ID emitted by this detached invocation.
+
+    Detached ``podman run`` stdout is an independent witness, not a fallback
+    identity source. Require exactly one full lowercase ID line with one LF so a
+    missing, truncated, or extra output cannot be mistaken for this invocation's
+    container. Callers still require an exact byte-for-byte match with the
+    private cidfile before selecting any ID for inspection or cleanup.
+    """
 
     if result.returncode != 0:
         raise LauncherError("container_start_failed")
     raw = result.stdout
-    candidate = raw.rstrip("\r\n")
-    if not candidate or raw not in {candidate, candidate + "\n", candidate + "\r\n"}:
+    if not raw.endswith("\n") or raw.count("\n") != 1:
+        raise LauncherError("container_id_unproven")
+    candidate = raw[:-1]
+    if len(candidate) != 64 or "\r" in candidate:
         raise LauncherError("container_id_unproven")
     try:
         return validate_container_id(candidate)
@@ -4030,8 +4039,9 @@ def _start_instance_with_parent(
         raise LauncherError("port_unavailable")
 
     # Generate the opaque run identity before the first container-start command.
-    # The engine-emitted cidfile is the private immutable handoff for both a
-    # normal return and a runner that raises after creating the container.
+    # A successful detached invocation must provide two independent witnesses:
+    # canonical stdout from this exact Podman result and the private cidfile. The
+    # cidfile remains the selected identity only after an exact equality check.
     run_id = live_run_marker.new_run_id()
     credential_identity: live_run_marker.CredentialIdentity | None = None
     cidfile_identity: FileIdentity | None = None
@@ -4061,39 +4071,41 @@ def _start_instance_with_parent(
 
         # Keep invocation itself inside the transaction. A synchronous runner
         # may raise after the engine has created a container and written cidfile.
-        try:
-            started = invoke_runner(
-                runner,
-                run_arguments(spec, podman, run_id, cidfile=paths.cidfile, data_path=data_path),
-                child_environment,
-                300,
-                failure_code="container_start_failed",
-                private_path=data_path,
-                private_identity=data_identity,
-            )
-        except LauncherError as runner_error:
-            # The runner may raise after Podman has already written cidfile.
-            # Recover only that immutable engine-emitted ID; never inspect or
-            # adopt a mutable container name from this failure path. A malformed
-            # cidfile carries its exact inode for safe disposal but never proves
-            # a container identity.
-            _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
-            try:
-                run_container_id, cidfile_identity = read_cidfile(paths.cidfile, parent_fd=runs_parent_fd)
-            except OwnedFileError as error:
-                cidfile_identity = error.identity
-                raise runner_error
-            except LauncherError:
-                raise runner_error
-            raise runner_error
+        # Such a path has no trustworthy subprocess result: do not read, adopt,
+        # or destructively remove a cidfile-only ID. The outer failure path
+        # retains an UNPROVEN_CONTAINER_ID tombstone and leaves the cidfile as
+        # bounded evidence for an explicit later investigation.
+        started = invoke_runner(
+            runner,
+            run_arguments(spec, podman, run_id, cidfile=paths.cidfile, data_path=data_path),
+            child_environment,
+            300,
+            failure_code="container_start_failed",
+            private_path=data_path,
+            private_identity=data_identity,
+        )
+        if started.returncode != 0:
+            # A nonzero subprocess result is still the primary mutation error,
+            # but it is not a successful identity witness. Never select or
+            # remove a cidfile ID from this failed invocation.
+            raise LauncherError("container_start_failed")
+        invocation_container_id = container_id_from_run_result(started)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         try:
-            run_container_id, cidfile_identity = read_cidfile(paths.cidfile, parent_fd=runs_parent_fd)
+            cidfile_container_id, candidate_cidfile_identity = read_cidfile(
+                paths.cidfile,
+                parent_fd=runs_parent_fd,
+            )
         except OwnedFileError as error:
             cidfile_identity = error.identity
             raise
-        if started.returncode != 0:
-            raise LauncherError("container_start_failed")
+        if cidfile_container_id != invocation_container_id:
+            # Do not fall back to stdout or adopt the cidfile replacement. The
+            # mismatch proves that no single exact ID is safe to inspect, bind,
+            # publish, or remove; leave both engine and cidfile evidence intact.
+            raise LauncherError("container_id_mismatch")
+        run_container_id = cidfile_container_id
+        cidfile_identity = candidate_cidfile_identity
 
         try:
             binding = live_run_marker.new_marker(
