@@ -247,7 +247,15 @@ sufficiently nested canonical caller-specific descendant, such as
 `/private/tmp/<private-root>`, instead. Missing private components are created
 only through descriptor-relative `openat` operations, with mode `0700` and
 identity checks after every open/create; the launcher never pathname-
-`mkdir`/`chmod`s the caller-supplied root.
+`mkdir`/`chmod`s the caller-supplied root. New instance leaves are created
+beneath a held data-root descriptor, and the parent identity is checked before
+and after the child boundary. Failed-create cleanup compares the opened child
+device, inode, and mode again, then preserves the leaf and reports bounded
+`owned_path_cleanup_failed` evidence: Python exposes no descriptor-atomic exact
+-directory deletion operation, so this adapter never enters a pathname `rmdir`
+boundary. Subprocess vectors are validated before dispatch:
+the executable and every argument must be a non-empty string without NUL bytes,
+and malformed or non-string argv produces one bounded launcher error.
 
 `start-many` repeats that record/root/port preflight for every marker before
 dispatching the first instance; the batch holds one descriptor-bound parent
@@ -255,12 +263,25 @@ lease while each individual start repeats its checks. The preflight is advisory
 and the batch remains non-atomic. If a marker parent or data path is replaced
 between iterations, the affected marker fails before its next lifecycle
 boundary; earlier marker evidence is not rediscovered, adopted, or broadly
-rolled back. Podman accepts a pathname rather than a held host fd, so the
+rolled back. A later per-marker failure preserves only bounded exact
+`partial_results`, adds the `batch_partial_results` secondary code, and leaves
+earlier owned runs available for their caller-selected markers. The failed
+per-marker transaction retains its own bounded `cleanup_failed` evidence when
+exact cleanup cannot finish; callers stop or retry each returned marker
+explicitly. Podman accepts a pathname rather than a held host fd, so the
 launcher revalidates the canonical data-directory identity immediately before
 and after bind/start and mount inspection. An inspect `Mounts[].Source` string
 is consistency evidence, not inode proof. A same-user replacement racing the
 final pathname syscall is outside this pathname-based adapter's proof boundary;
-any replacement observed by the surrounding checks fails closed.
+any replacement observed by the surrounding checks fails closed. Before a
+successful ready, endpoint, or status result, the launcher runs a final
+all-record fence after its publication hook: marker and state inode/generation,
+credential identity/generation, retained parent, stable data identity, and the
+exact container/cidfile binding are checked as applicable. If that hook observes
+replacement, new-start cleanup removes the exact immutable container when its
+data proof remains valid or retains bounded `cleanup_failed` evidence when it
+does not. Stop keeps its final hook inside the evidence-removal transaction and
+proves the exact marker, state, credential, and cidfile names remain absent.
 
 Other operations receive the same exact marker path; they never select by
 instance name, port, recency, or directory contents. Run them only after the
@@ -313,9 +334,14 @@ same directory. `--credential-root` does not control live credential placement.
 The container data directory defaults to
 `~/.local/share/hermternal-tests/hermes-agent/`; that data root is separate from
 the marker-bound live files. Each state record also persists the data
-directory's `device`, `inode`, `mode`, and `nlink`; future load, reuse, status,
-recovery, cleanup, and endpoint paths reject a replacement under the same
-pathname.
+directory's stable `device`, `inode`, and `mode` identity; the marker retains
+the same identity as an independent witness. Future load, reuse, status,
+recovery, cleanup, and endpoint paths require the state and marker witnesses to
+match the currently opened directory and reject a replacement under the same
+pathname. A state file cannot rewrite its own data identity to authorize a new
+replacement tree. Records without `data_identity` are rejected as
+`instance_state_invalid`; this prototype has no approved/live records to
+migrate, so it never recaptures or adopts an unknown data pathname.
 
 A successful `start` result is `ready`, not a handoff permit. The following
 `endpoint` command is the source of truth for the exact caller-selected marker:
@@ -422,13 +448,17 @@ repository digest. It then polls bounded `GET /api/auth/providers` responses.
 Readiness requires HTTP 200 and a `basic` provider with
 `supports_password: true`. A failed start removes only the exact
 invocation-owned container, fresh credential, state, and marker after the
-immutable run binding is published. Data remains for diagnosis or retry; if
-exact cleanup fails, the private marker and state are retained as a bounded
-`cleanup_failed` tombstone. If the synchronous engine runner raises before a
-private cidfile yields an immutable container ID, the launcher never searches
-or adopts by name: it erases the known credential and retains a bounded private
-`cleanup_failed` tombstone with an unproven sentinel ID that stop removes only
-as metadata. This strict marker path does not expose a broad purge operation.
+immutable run binding is published when every identity fence allows it. Data
+remains for diagnosis or retry; if exact cleanup fails, the private marker and
+state are retained as a bounded `cleanup_failed` tombstone. A data-path proof
+failure can block container removal, so the tombstone preserves the exact ID and
+stable data witness for a later retry after the original tree is restored; it
+never authorizes the replacement tree. If the synchronous engine runner raises
+before a private cidfile yields an immutable container ID, the launcher never
+searches or adopts by name: it erases the known credential and retains a bounded
+private `cleanup_failed` tombstone with an unproven sentinel ID that stop removes
+only as metadata. This strict marker path does not expose a broad purge
+operation.
 Active rebind of an already-running container is intentionally unsupported;
 ordinary running-container reuse is non-destructive. Cleanup never runs a
 broad prune or glob and never removes data implicitly.
@@ -447,7 +477,12 @@ status, endpoint, stop, and credential-read operation captures the runs-director
 device, inode, and `0700` mode at entry, keeps that descriptor through all marker,
 state, credential, cidfile, cleanup, and tombstone work, and rechecks that the
 caller-selected pathname still names the held directory around every fake-engine
-boundary. Marker and state records are capped at 16 KiB before publication.
+boundary. The data-directory identity is also rechecked immediately before every
+successful public start, reuse, recovery, endpoint, and status return; stop
+rechecks it immediately before deleting marker/state/credential evidence. If a
+created child cannot be removed with a descriptor-atomic operation, cleanup
+preserves it and reports bounded `cleanup_failed` evidence rather than risking a
+same-name replacement. Marker and state records are capped at 16 KiB before publication.
 Quarantine evidence uses 16 fixed slots per kind (`cleanup`, `replace`, and
 `replace-tmp`), with at most 48 occupied entries and 131,072 aggregate bytes;
 occupied, foreign, inaccessible, or raced slots are retained rather than removed.

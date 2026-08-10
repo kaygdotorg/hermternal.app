@@ -135,7 +135,11 @@ per-marker transaction repeats those checks; the preflight is advisory and the
 batch remains non-atomic. If a marker parent or data path is replaced between
 iterations, that marker fails closed before its next lifecycle boundary; the
 earlier marker is not rediscovered, adopted, or rolled back by a broad batch
-cleanup.
+cleanup. A later per-marker failure reports only bounded exact `partial_results`
+with the `batch_partial_results` secondary code. The failed marker retains its
+own bounded `cleanup_failed` evidence when exact cleanup cannot finish; earlier
+owned runs remain available under their caller-selected markers and must be
+stopped or retried explicitly.
 
 Data roots must use canonical absolute spellings with no `.` or `..` segments
 and must not traverse symlink aliases. Darwin `/tmp` and `/var` aliases,
@@ -145,13 +149,31 @@ sufficiently nested caller-specific descendant such as
 `/private/tmp/<private-root>` or `/private/var/<private-root>`. Missing private
 components are created and mode-checked through descriptor-relative
 `openat`-style directory operations; pathname `mkdir` and `chmod` are never
-used on the caller-supplied root. Podman receives the canonical pathname rather
-than a held host fd. The launcher revalidates the expected directory identity
-immediately before and after relevant bind/start and mount-inspection
-boundaries. An inspect `Mounts[].Source` string is consistency evidence, not
-inode proof. A same-user replacement racing the final pathname syscall remains
-outside this pathname-based adapter's proof boundary; an observed replacement
-fails closed.
+used on the caller-supplied root. The instance child is created beneath a held
+data-root descriptor with parent and child identity checks before and after the
+boundary. Cleanup rechecks the child identity but preserves it when the only
+available `os.rmdir(name, dir_fd=...)` call is not descriptor-atomic; it reports
+bounded cleanup evidence instead of risking a same-name replacement. Podman
+receives the canonical pathname rather than a held host fd. The launcher
+revalidates the expected directory identity immediately before and after
+relevant bind/start and mount-inspection boundaries. An inspect `Mounts[].Source`
+string is consistency evidence, not inode proof. Persisted state stores only the
+data directory's stable `device`/`inode`/`mode` identity; the marker retains an
+independent matching witness. Records without that field are rejected as
+invalid because this prototype has no approved migration or safe pathname
+adoption path. A same-user replacement racing the final pathname syscall
+remains outside this pathname-based adapter's proof boundary; an observed
+replacement fails closed. Before a successful ready, endpoint, or status return,
+the launcher performs a final all-record fence after the publication hook:
+marker/state inode and generation, credential identity and generation, retained
+parent, stable data identity, and the exact container/cidfile binding are checked
+as applicable. A start-new or stopped recovery hook failure removes the exact
+immutable container when its data proof remains valid, or retains bounded
+`cleanup_failed` evidence when exact rollback is blocked. Stop keeps its final
+hook inside evidence cleanup and proves marker, state, credential, and cidfile
+absence before reporting removal. Launcher command vectors are validated before
+engine dispatch; the executable and each argument must be a non-empty NUL-free
+string.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation
@@ -181,7 +203,12 @@ launcher-owned container with its exact single loopback Dashboard mapping before
 returning selection metadata. If a browser runs outside the VM, use the approved
 tunnel with the endpoint selected from that verified output; do not replace it
 with a sample port or an unrelated listener. Retained stop metadata is never a
-live endpoint permit.
+live endpoint permit. The launcher performs a final data-directory identity
+fence immediately before every successful start, running-reuse, stopped-recovery,
+endpoint, and status return. Stop performs its final identity fence immediately
+before deleting marker, state, and credential evidence. A created data child is
+preserved when cleanup cannot prove descriptor-atomic removal; the bounded
+cleanup failure remains observable instead of deleting a raced replacement.
 
 ## Stop and clean up
 

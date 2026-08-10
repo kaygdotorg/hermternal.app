@@ -211,6 +211,43 @@ class HermesAgentLauncherTests(unittest.TestCase):
     def load(self, path: Path | None = None):
         return launcher.load_launcher_state(path or self.marker_path(), self.roots)
 
+    @staticmethod
+    def replace_final_record(path: Path, suffix: str) -> Path:
+        """Swap one exact private record for same-content replacement evidence."""
+
+        old = path.with_name(f"{path.name}.{suffix}-old")
+        content = path.read_bytes()
+        path.rename(old)
+        path.write_bytes(content)
+        path.chmod(0o600)
+        return old
+
+    @staticmethod
+    def replace_final_data(path: Path, suffix: str) -> Path:
+        """Swap a data leaf for a private replacement tree with visible evidence."""
+
+        old = path.with_name(f"{path.name}.{suffix}-old")
+        path.rename(old)
+        path.mkdir(mode=0o700)
+        path.chmod(0o700)
+        keep = path / "replacement.txt"
+        keep.write_text("replacement\n", encoding="utf-8")
+        keep.chmod(0o600)
+        return old
+
+    @staticmethod
+    def final_fence_code(operation: str, target: str) -> str:
+        """Return the bounded error expected for one deterministic swap."""
+
+        if operation == "stop":
+            return "owned_path_replaced" if target == "data" else "stop_evidence_replaced"
+        return {
+            "marker": "marker_replaced",
+            "state": "state_replaced",
+            "credential": "credential_identity_mismatch",
+            "data": "owned_path_replaced",
+        }[target]
+
     def test_default_image_is_exact_official_tag_and_digest(self) -> None:
         tag, digest = launcher.validate_image(launcher.DEFAULT_IMAGE)
         self.assertEqual(tag, "v2026.8.3")
@@ -473,6 +510,9 @@ class HermesAgentLauncherTests(unittest.TestCase):
             Path("/"),
             Path("/tmp"),
             Path("/var"),
+            Path("/private/tmp"),
+            Path("/private/var"),
+            Path("/usr/local"),
         )
         real_mkdir = launcher.os.mkdir
         real_fchmod = launcher.os.fchmod
@@ -566,7 +606,10 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse((outside / spec.instance).exists())
         self.assertTrue((backup / spec.instance).is_dir())
         self.assertEqual(stat.S_IMODE((backup / spec.instance).stat().st_mode), 0o700)
-        self.assertFalse(self.marker_path("bind-replacement.json").exists())
+        tombstone = launcher.live_run_marker.load_marker(self.marker_path("bind-replacement.json"))
+        self.assertEqual(tombstone.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+        self.assertTrue(self.marker_path("bind-replacement.state.json").exists())
+        self.assertFalse(self.marker_path("bind-replacement.credential").exists())
         self.assertTrue(any(command[1] == "run" for command, _ in self.fake.calls))
 
     def test_canonical_private_tmp_child_is_accepted_without_chmodding_parent(self) -> None:
@@ -789,6 +832,44 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse(new_marker.exists())
         self.assertEqual(self.fake.containers[existing.container]["State"]["Status"], "exited")
 
+    def test_start_many_failure_reports_bounded_partial_results_and_keeps_exact_evidence(self) -> None:
+        specs = launcher.specs_for_batch(
+            "partial-batch", 2, 19142, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
+        )
+        first = self.marker_path("partial-batch-1.json")
+        second = self.marker_path("partial-batch-2.json")
+        self.fake.fail_run_for.add(specs[1].container)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_many(
+                specs,
+                [first, second],
+                runner=self.fake,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+
+        self.assertEqual(raised.exception.code, "cidfile_missing")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "batch_partial_results")
+        self.assertEqual(len(raised.exception.partial_results), 1)
+        self.assertEqual(raised.exception.partial_results[0]["instance"], specs[0].instance)
+        self.assertEqual(raised.exception.partial_results[0]["status"], "ready")
+        self.assertTrue(first.exists())
+        second_state = second.with_name("partial-batch-2.state.json")
+        self.assertTrue(second.exists())
+        self.assertTrue(second_state.exists())
+        second_record = launcher.load_launcher_state(second, self.roots)
+        self.assertEqual(second_record.marker.status, "cleanup_failed")
+        self.assertEqual(self.fake.containers[specs[0].container]["State"]["Status"], "running")
+        self.assertNotIn(specs[0].container, self.fake.fail_run_for)
+        self.assertFalse(any(command[1:3] == ("rm", "--force") and command[3] == self.fake.containers[specs[0].container]["Id"] for command, _ in self.fake.calls))
+
     def test_duplicate_single_marker_fails_before_any_engine_boundary(self) -> None:
         operations = (
             ["start", "--instance", "fixture", "--port", "19119"],
@@ -980,7 +1061,10 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "credential_identity_mismatch")
         self.assertTrue(replaced)
         self.assertEqual((self.runs / "fixture.credential").read_bytes(), b"replacement-credential")
-        self.assertEqual(len(self.fake.containers), 1)
+        # The exact immutable ID remains safe to remove even when the
+        # credential pathname was swapped; the replacement credential is left
+        # as evidence under a bounded cleanup_failed tombstone.
+        self.assertEqual(len(self.fake.containers), 0)
         self.assertEqual(self.load().marker.status, "cleanup_failed")
 
     def test_marker_constructor_failure_still_cleans_exact_started_container(self) -> None:
@@ -2800,10 +2884,40 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 data_path=nul_root,
             )
         self.assertEqual(raised.exception.code, "owned_path_invalid")
-        result = launcher.run_command(("/bin/echo\x00bad",), {}, 1)
-        self.assertEqual(result.returncode, 124)
-        self.assertEqual(result.stdout, "")
-        self.assertEqual(result.stderr, "")
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.run_command(("/bin/echo\x00bad",), {}, 1)
+        self.assertEqual(raised.exception.code, "executable_invalid")
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.run_command(("/bin/echo", object()), {}, 1)
+        self.assertEqual(raised.exception.code, "command_invalid")
+
+    def test_command_vector_validation_and_bounded_error_metadata_are_explicit(self) -> None:
+        rejected = (
+            (),
+            "not-a-vector",
+            ("",),
+            ("/bin/echo", ""),
+            ("/bin/echo", "bad\x00argument"),
+            ("/bin/echo", 7),
+        )
+        for command in rejected:
+            with self.subTest(command=command), self.assertRaises(launcher.LauncherError):
+                launcher._validate_command_vector(command)  # type: ignore[arg-type]
+
+        self.assertEqual(
+            launcher._validate_command_vector(("/bin/echo", "ok")),
+            ("/bin/echo", "ok"),
+        )
+        error = launcher.LauncherError(
+            "batch_failed",
+            secondary=launcher.LauncherError("batch_partial_results"),
+            partial_results=(
+                {"status": "ready", "marker_path": "/private/tmp/runs/one.json"},
+            ),
+        )
+        self.assertEqual(error.code, "batch_failed")
+        self.assertEqual(error.secondary.code, "batch_partial_results")
+        self.assertEqual(len(error.partial_results), 1)
 
     def test_broad_anchors_and_alternate_double_slash_spellings_fail_lexically(self) -> None:
         rejected = (
@@ -2901,6 +3015,275 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         self.assertFalse(self.marker_path("component-race.json").exists())
 
+    def test_data_root_replacement_after_validation_cannot_redirect_new_child_creation(self) -> None:
+        data_parent = self.root / "root-parent"
+        data_parent.mkdir(mode=0o700)
+        data_parent.chmod(0o700)
+        data_root = data_parent / "data-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "root-replacement",
+            19165,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        old_root = data_parent / "data-root-old"
+        replacement = data_parent / "data-root-replacement"
+        real_revalidate = launcher._revalidate_private_directory_identity
+        root_checks = 0
+        swapped = False
+
+        def revalidate(path, expected):
+            nonlocal root_checks, swapped
+            result = real_revalidate(path, expected)
+            if path == data_root:
+                root_checks += 1
+                if root_checks == 2 and not swapped:
+                    data_root.rename(old_root)
+                    replacement.mkdir(mode=0o700)
+                    replacement.chmod(0o700)
+                    (replacement / "foreign.txt").write_text("preserve\n", encoding="utf-8")
+                    (replacement / "foreign.txt").chmod(0o600)
+                    data_root.mkdir(mode=0o700)
+                    data_root.chmod(0o700)
+                    swapped = True
+            return result
+
+        with mock.patch.object(launcher, "_revalidate_private_directory_identity", side_effect=revalidate):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=self.marker_path("root-replacement.json"))
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_root.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "foreign.txt").exists())
+        self.assertFalse((replacement / spec.instance).exists())
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(self.marker_path("root-replacement.json").exists())
+
+    def test_child_fileexists_race_is_not_adopted_or_cleaned(self) -> None:
+        data_root = self.root / "fileexists-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "fileexists-race",
+            19166,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        real_mkdir = launcher.os.mkdir
+        raced = False
+
+        def mkdir(name, mode=0o777, *, dir_fd=None):
+            nonlocal raced
+            if name == spec.instance and dir_fd is not None and not raced:
+                real_mkdir(name, mode=mode, dir_fd=dir_fd)
+                raced = True
+                raise FileExistsError(17, "synthetic child race")
+            return real_mkdir(name, mode=mode, dir_fd=dir_fd)
+
+        patched_mkdir = mock.Mock(side_effect=mkdir)
+        supports_dir_fd = set(launcher.os.supports_dir_fd)
+        supports_dir_fd.add(patched_mkdir)
+        with (
+            mock.patch.object(launcher.os, "supports_dir_fd", supports_dir_fd),
+            mock.patch.object(launcher.os, "mkdir", patched_mkdir),
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=self.marker_path("fileexists-race.json"))
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(raced)
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(self.marker_path("fileexists-race.json").exists())
+
+    def test_child_replacement_after_mkdir_before_identity_capture_is_preserved(self) -> None:
+        data_root = self.root / "after-open-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "after-open-race",
+            19167,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        old_child = data_root / "after-open-old"
+        swapped_child = data_root / "after-open-replacement"
+        swapped = False
+        real_hook = launcher._after_private_directory_open
+
+        def after_open(parent_fd, component, descriptor, created):
+            nonlocal swapped
+            real_hook(parent_fd, component, descriptor, created)
+            if component == spec.instance and created and not swapped:
+                spec.data_dir.rename(old_child)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                (spec.data_dir / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (spec.data_dir / "keep.txt").chmod(0o600)
+                swapped_child.mkdir(mode=0o700)
+                swapped_child.chmod(0o700)
+                swapped = True
+
+        with mock.patch.object(launcher, "_after_private_directory_open", side_effect=after_open):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=self.marker_path("after-open-race.json"))
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertIsNotNone(raised.exception.secondary)
+        self.assertEqual(raised.exception.secondary.code, "owned_path_cleanup_failed")
+        self.assertTrue(swapped)
+        self.assertTrue(old_child.is_dir())
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertTrue((spec.data_dir / "keep.txt").exists())
+        self.assertTrue(swapped_child.is_dir())
+        self.assertEqual(self.fake.calls, [])
+
+    def test_cleanup_recheck_preserves_replacement_before_rmdir(self) -> None:
+        data_root = self.root / "rmdir-race-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "rmdir-race",
+            19168,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        old_child = data_root / "rmdir-old"
+        swapped = False
+        failed = False
+        real_revalidate = launcher._revalidate_private_directory_identity
+        real_before = launcher._before_private_directory_rmdir
+
+        def fail_child(path, expected):
+            nonlocal failed
+            if path == spec.data_dir and not failed:
+                failed = True
+                raise launcher.LauncherError("owned_path_replaced")
+            return real_revalidate(path, expected)
+
+        def before_rmdir(parent_fd, component, expected):
+            nonlocal swapped
+            real_before(parent_fd, component, expected)
+            if component == spec.instance and not swapped:
+                spec.data_dir.rename(old_child)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                (spec.data_dir / "must-survive.txt").write_text("replacement\n", encoding="utf-8")
+                (spec.data_dir / "must-survive.txt").chmod(0o600)
+                swapped = True
+
+        with (
+            mock.patch.object(launcher, "_revalidate_private_directory_identity", side_effect=fail_child),
+            mock.patch.object(launcher, "_before_private_directory_rmdir", side_effect=before_rmdir),
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=self.marker_path("rmdir-race.json"))
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertIsNotNone(raised.exception.secondary)
+        self.assertEqual(raised.exception.secondary.code, "owned_path_cleanup_failed")
+        self.assertTrue(failed)
+        self.assertTrue(swapped)
+        self.assertTrue(old_child.is_dir())
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertTrue((spec.data_dir / "must-survive.txt").exists())
+        self.assertEqual(self.fake.calls, [])
+
+    def test_cleanup_never_enters_patched_rmdir_swap_boundary(self) -> None:
+        data_root = self.root / "rmdir-syscall-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "rmdir-syscall-race",
+            19169,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        old_child = data_root / "rmdir-syscall-old"
+        swapped = False
+        failed = False
+        real_revalidate = launcher._revalidate_private_directory_identity
+        real_before = launcher._before_private_directory_rmdir
+        real_rmdir = launcher.os.rmdir
+
+        def fail_child(path, expected):
+            nonlocal failed
+            result = real_revalidate(path, expected)
+            if path == spec.data_dir and not failed:
+                failed = True
+                raise launcher.LauncherError("owned_path_replaced")
+            return result
+
+        def swap_before_rmdir(parent_fd, component, expected):
+            nonlocal swapped
+            real_before(parent_fd, component, expected)
+            if component == spec.instance and not swapped:
+                spec.data_dir.rename(old_child)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                (spec.data_dir / "must-survive.txt").write_text("replacement\n", encoding="utf-8")
+                (spec.data_dir / "must-survive.txt").chmod(0o600)
+                swapped = True
+
+        def rmdir_that_would_swap(name, *, dir_fd=None):
+            del dir_fd
+            raise OSError(f"unexpected rmdir boundary: {name}")
+
+        patched_rmdir = mock.Mock(side_effect=rmdir_that_would_swap)
+        with (
+            mock.patch.object(launcher, "_revalidate_private_directory_identity", side_effect=fail_child),
+            mock.patch.object(launcher, "_before_private_directory_rmdir", side_effect=swap_before_rmdir),
+            mock.patch.object(launcher.os, "rmdir", patched_rmdir) as rmdir,
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=self.marker_path("rmdir-syscall-race.json"))
+
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "owned_path_cleanup_failed")
+        self.assertTrue(failed)
+        self.assertTrue(swapped)
+        rmdir.assert_not_called()
+        self.assertTrue(old_child.is_dir())
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertTrue((spec.data_dir / "must-survive.txt").exists())
+        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(launcher.os.rmdir, real_rmdir)
+
+    def test_failed_create_cleanup_preserves_same_identity_leaf_without_rmdir(self) -> None:
+        data_root = self.root / "same-identity-root"
+        data_root.mkdir(mode=0o700)
+        data_root.chmod(0o700)
+        spec = launcher.make_spec(
+            "same-identity-cleanup",
+            19175,
+            roots=launcher.Roots(self.roots.state, data_root, self.roots.credentials),
+        )
+        marker = self.marker_path("same-identity-cleanup.json")
+        real_hook = launcher._after_private_directory_open
+
+        def fail_after_open(parent_fd, component, descriptor, created):
+            real_hook(parent_fd, component, descriptor, created)
+            if component == spec.instance and created:
+                raise launcher.LauncherError("synthetic_child_failure")
+
+        patched_rmdir = mock.Mock(side_effect=AssertionError("unexpected pathname rmdir"))
+        with (
+            mock.patch.object(launcher, "_after_private_directory_open", side_effect=fail_after_open),
+            mock.patch.object(launcher.os, "rmdir", patched_rmdir) as rmdir,
+        ):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=marker)
+
+        self.assertEqual(raised.exception.code, "synthetic_child_failure")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "owned_path_cleanup_failed")
+        self.assertTrue(spec.data_dir.is_dir())
+        self.assertEqual(stat.S_IMODE(spec.data_dir.stat().st_mode), 0o700)
+        rmdir.assert_not_called()
+        self.assertEqual(self.fake.calls, [])
+        self.assertFalse(marker.exists())
+        self.assertFalse(marker.with_name("same-identity-cleanup.state.json").exists())
+        self.assertFalse(marker.with_name("same-identity-cleanup.credential").exists())
+        self.assertFalse(marker.with_name("same-identity-cleanup.cidfile").exists())
+
     def test_failed_create_cleanup_preserves_non_symlink_replacement_and_primary_error(self) -> None:
         data_parent = self.root / "cleanup-parent"
         data_root = data_parent / "created-root"
@@ -2965,15 +3348,171 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertTrue(swapped)
         self.assertTrue(old_data.is_dir())
         self.assertTrue(spec.data_dir.is_symlink())
-        self.assertFalse(marker.exists())
-        self.assertFalse(marker.with_name("final-data-race.state.json").exists())
+        tombstone = launcher.live_run_marker.load_marker(marker)
+        self.assertEqual(tombstone.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+        self.assertTrue(marker.with_name("final-data-race.state.json").exists())
         self.assertFalse(marker.with_name("final-data-race.credential").exists())
         self.assertIn(spec.container, self.fake.containers)
         self.assertTrue(outside.is_dir())
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_nested_data_content_survives_status_endpoint_reuse_recovery_and_stop(self) -> None:
+        spec = self.make_spec("nested-content", 19158)
+        marker = self.marker_path("nested-content.json")
+        self.start(spec, marker_path=marker)
+        nested = spec.data_dir / "sessions" / "2026" / "08"
+        nested.mkdir(mode=0o700, parents=True)
+        nested.chmod(0o700)
+        (nested / "transcript.json").write_text('{"messages":2}\n', encoding="utf-8")
+        (nested / "transcript.json").chmod(0o600)
+        (nested / "artifact.bin").write_bytes(b"synthetic-artifact")
+        (nested / "artifact.bin").chmod(0o600)
+
+        status = launcher.status_instance(
+            marker,
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(status["status"], "running")
+        endpoint = launcher.verify_handoff_endpoint(
+            self.load(marker),
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(endpoint["status"], "running")
+        reused, created = self.start(spec, marker_path=marker)
+        self.assertEqual(reused["status"], "ready")
+        self.assertFalse(created)
+
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        recovered, created = self.start(spec, marker_path=marker)
+        self.assertEqual(recovered["status"], "ready")
+        self.assertFalse(created)
+        removed = launcher.stop_instance(
+            marker,
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+        self.assertEqual(removed["status"], "removed")
+        self.assertTrue((nested / "transcript.json").exists())
+        self.assertTrue((nested / "artifact.bin").exists())
+
+    def test_state_data_identity_schema_is_exact_and_malformed_records_fail_closed(self) -> None:
+        spec = self.make_spec("state-schema", 19161)
+        self.start(spec)
+        state = self.load()
+        original = state.marker.state_path.read_bytes()
+        document = json.loads(original)
+        self.assertEqual(set(document["data_identity"]), {"device", "inode", "mode"})
+
+        def write_document(value: dict[str, object]) -> None:
+            state.marker.state_path.write_text(
+                json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            state.marker.state_path.chmod(0o600)
+
+        missing = dict(document)
+        missing.pop("data_identity")
+        write_document(missing)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.load_launcher_state(state.marker_path, self.roots)
+        self.assertEqual(raised.exception.code, "instance_state_invalid")
+
+        extra = json.loads(original)
+        extra["data_identity"]["nlink"] = 1
+        write_document(extra)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.load_launcher_state(state.marker_path, self.roots)
+        self.assertEqual(raised.exception.code, "instance_state_invalid")
+
+        malformed = json.loads(original)
+        malformed["data_identity"]["mode"] = 0o755
+        write_document(malformed)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.load_launcher_state(state.marker_path, self.roots)
+        self.assertEqual(raised.exception.code, "instance_state_invalid")
+        state.marker.state_path.write_bytes(original)
+        state.marker.state_path.chmod(0o600)
+
+    def test_state_identity_rewrite_to_replacement_never_authorizes_or_deletes(self) -> None:
+        spec = self.make_spec("state-witness", 19162)
+        marker = self.marker_path("state-witness.json")
+        self.start(spec, marker_path=marker)
+        state = self.load(marker)
+        original_data = self.root / "state-witness-old"
+        replacement = self.root / "state-witness-replacement"
+        spec.data_dir.rename(original_data)
+        replacement.mkdir(mode=0o700)
+        replacement.chmod(0o700)
+        spec.data_dir.mkdir(mode=0o700)
+        spec.data_dir.chmod(0o700)
+        document = json.loads(state.marker.state_path.read_text(encoding="utf-8"))
+        replacement_identity = launcher._current_private_directory_identity(spec.data_dir)
+        document["data_identity"] = launcher._directory_identity_document(replacement_identity)
+        state.marker.state_path.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        state.marker.state_path.chmod(0o600)
+
+        endpoint_args = type(
+            "Args",
+            (),
+            {
+                "operation": "endpoint",
+                "marker": str(marker),
+                "state_root": str(self.roots.state),
+                "data_root": str(self.roots.data),
+                "credential_root": str(self.roots.credentials),
+            },
+        )()
+        for operation in ("load", "start", "endpoint", "status", "stop"):
+            with self.subTest(operation=operation):
+                self.fake.calls.clear()
+                if operation == "load":
+                    action = lambda: launcher.load_launcher_state(marker, self.roots)
+                elif operation == "start":
+                    action = lambda: self.start(spec, marker_path=marker)
+                elif operation == "endpoint":
+                    action = lambda: launcher.execute(endpoint_args)
+                elif operation == "status":
+                    action = lambda: launcher.status_instance(marker, roots=self.roots)
+                else:
+                    action = lambda: launcher.stop_instance(marker, roots=self.roots, runner=self.fake, executable="/usr/bin/podman", source_environment={"PATH": "/usr/bin"})
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    action()
+                self.assertEqual(raised.exception.code, "instance_state_binding_mismatch")
+                self.assertEqual(self.fake.calls, [])
+                self.assertTrue(marker.exists())
+                self.assertTrue(state.marker.state_path.exists())
+        self.assertTrue((self.runs / "state-witness.credential").exists())
+        self.assertTrue(original_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+
+    def test_missing_marker_data_witness_is_explicitly_rejected_without_cleanup(self) -> None:
+        spec = self.make_spec("missing-witness", 19163)
+        marker = self.marker_path("missing-witness.json")
+        self.start(spec, marker_path=marker)
+        state = self.load(marker)
+        document = json.loads(marker.read_text(encoding="utf-8"))
+        document.pop("data_identity")
+        marker.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        marker.chmod(0o600)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.load_launcher_state(marker, self.roots)
+        self.assertEqual(raised.exception.code, "instance_state_binding_mismatch")
+        self.assertTrue(marker.exists())
+        self.assertTrue(state.marker.state_path.exists())
+        self.assertTrue(state.marker.credential_path.exists())
+
     def test_future_state_load_rejects_persisted_data_directory_replacement(self) -> None:
-        spec = self.make_spec("future-data-race", 19158)
+        spec = self.make_spec("future-data-race", 19164)
         self.start(spec)
         state = self.load()
         old_data = self.root / "future-data-old"
@@ -3027,6 +3566,492 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
         self.assertTrue(state.marker_path.exists())
 
+    def test_endpoint_final_return_fence_rejects_post_record_data_swap(self) -> None:
+        spec = self.make_spec("endpoint-final-race", 19169)
+        marker = self.marker_path("endpoint-final-race.json")
+        self.start(spec, marker_path=marker)
+        old_data = self.root / "endpoint-final-old"
+        replacement = self.root / "endpoint-final-replacement"
+        swapped = False
+
+        def swap_before_return(operation: str) -> None:
+            nonlocal swapped
+            if operation == "endpoint" and not swapped:
+                spec.data_dir.rename(old_data)
+                replacement.mkdir(mode=0o700)
+                replacement.chmod(0o700)
+                (replacement / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (replacement / "keep.txt").chmod(0o600)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                swapped = True
+
+        with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.verify_handoff_endpoint(
+                    self.load(marker),
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "keep.txt").exists())
+        self.assertTrue(marker.exists())
+        self.assertTrue(marker.with_name("endpoint-final-race.state.json").exists())
+        self.assertTrue(marker.with_name("endpoint-final-race.credential").exists())
+
+    def test_status_final_return_fence_rejects_post_record_data_swap(self) -> None:
+        spec = self.make_spec("status-final-race", 19170)
+        marker = self.marker_path("status-final-race.json")
+        self.start(spec, marker_path=marker)
+        old_data = self.root / "status-final-old"
+        replacement = self.root / "status-final-replacement"
+        swapped = False
+
+        def swap_before_return(operation: str) -> None:
+            nonlocal swapped
+            if operation == "status" and not swapped:
+                spec.data_dir.rename(old_data)
+                replacement.mkdir(mode=0o700)
+                replacement.chmod(0o700)
+                (replacement / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (replacement / "keep.txt").chmod(0o600)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                swapped = True
+
+        with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.status_instance(
+                    marker,
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "keep.txt").exists())
+        self.assertTrue(marker.exists())
+        self.assertTrue(marker.with_name("status-final-race.state.json").exists())
+        self.assertTrue(marker.with_name("status-final-race.credential").exists())
+
+    def test_stop_evidence_cleanup_fence_preserves_replacement_and_owned_records(self) -> None:
+        spec = self.make_spec("stop-final-race", 19171)
+        marker = self.marker_path("stop-final-race.json")
+        self.start(spec, marker_path=marker)
+        old_data = self.root / "stop-final-old"
+        replacement = self.root / "stop-final-replacement"
+        swapped = False
+
+        def swap_before_cleanup() -> None:
+            nonlocal swapped
+            if not swapped:
+                spec.data_dir.rename(old_data)
+                replacement.mkdir(mode=0o700)
+                replacement.chmod(0o700)
+                (replacement / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (replacement / "keep.txt").chmod(0o600)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                swapped = True
+
+        with mock.patch.object(launcher, "_before_stop_evidence_cleanup", side_effect=swap_before_cleanup):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher.stop_instance(
+                    marker,
+                    roots=self.roots,
+                    runner=self.fake,
+                    executable="/usr/bin/podman",
+                    source_environment={"PATH": "/usr/bin"},
+                )
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "keep.txt").exists())
+        self.assertTrue(marker.exists())
+        self.assertTrue(marker.with_name("stop-final-race.state.json").exists())
+        self.assertTrue(marker.with_name("stop-final-race.credential").exists())
+
+    def test_start_new_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"new-final-{target}", 19200 + index)
+                marker = self.marker_path(f"new-final-{target}.json")
+                paths = launcher._marker_paths(marker)
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "start-new" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        replacement_old = self.replace_final_record(
+                            getattr(paths, target),
+                            target,
+                        )
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        self.start(spec, marker_path=marker)
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertTrue(getattr(paths, target).exists() if target != "data" else spec.data_dir.exists())
+                self.assertEqual(raised.exception.code, self.final_fence_code("start-new", target))
+                if target == "data":
+                    self.assertIn(spec.container, self.fake.containers)
+                else:
+                    self.assertNotIn(spec.container, self.fake.containers)
+                if target in {"credential", "data"}:
+                    tombstone = launcher.live_run_marker.load_marker(marker)
+                    self.assertEqual(tombstone.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+
+    def test_running_reuse_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"running-final-{target}", 19210 + index)
+                marker = self.marker_path(f"running-final-{target}.json")
+                self.start(spec, marker_path=marker)
+                paths = launcher._marker_paths(marker)
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "start-running" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        replacement_old = self.replace_final_record(
+                            getattr(paths, target),
+                            target,
+                        )
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        self.start(spec, marker_path=marker)
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+                self.assertEqual(raised.exception.code, self.final_fence_code("start-running", target))
+
+    def test_stopped_recovery_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"recovery-final-{target}", 19220 + index)
+                marker = self.marker_path(f"recovery-final-{target}.json")
+                self.start(spec, marker_path=marker)
+                self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+                paths = launcher._marker_paths(marker)
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "start-recovery" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        replacement_old = self.replace_final_record(
+                            getattr(paths, target),
+                            target,
+                        )
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        self.start(spec, marker_path=marker)
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertEqual(raised.exception.code, self.final_fence_code("start-recovery", target))
+                if target == "data":
+                    self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+                    tombstone = launcher.live_run_marker.load_marker(marker)
+                    self.assertEqual(tombstone.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+                else:
+                    self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "exited")
+
+    def test_endpoint_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"endpoint-final-{target}", 19230 + index)
+                marker = self.marker_path(f"endpoint-final-{target}.json")
+                self.start(spec, marker_path=marker)
+                paths = launcher._marker_paths(marker)
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "endpoint" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        replacement_old = self.replace_final_record(
+                            getattr(paths, target),
+                            target,
+                        )
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.verify_handoff_endpoint(
+                            self.load(marker),
+                            runner=self.fake,
+                            executable="/usr/bin/podman",
+                            source_environment={"PATH": "/usr/bin"},
+                        )
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertEqual(raised.exception.code, self.final_fence_code("endpoint", target))
+                self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+
+    def test_status_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"status-final-{target}", 19240 + index)
+                marker = self.marker_path(f"status-final-{target}.json")
+                self.start(spec, marker_path=marker)
+                paths = launcher._marker_paths(marker)
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "status" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        replacement_old = self.replace_final_record(
+                            getattr(paths, target),
+                            target,
+                        )
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.status_instance(
+                            marker,
+                            roots=self.roots,
+                            runner=self.fake,
+                            executable="/usr/bin/podman",
+                            source_environment={"PATH": "/usr/bin"},
+                        )
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertEqual(raised.exception.code, self.final_fence_code("status", target))
+                self.assertEqual(self.fake.containers[spec.container]["State"]["Status"], "running")
+
+    def test_stop_final_return_fences_all_trusted_evidence(self) -> None:
+        for index, target in enumerate(("marker", "state", "credential", "data"), start=1):
+            with self.subTest(target=target):
+                spec = self.make_spec(f"stop-final-{target}", 19250 + index)
+                marker = self.marker_path(f"stop-final-{target}.json")
+                self.start(spec, marker_path=marker)
+                paths = launcher._marker_paths(marker)
+                original_record = {
+                    "marker": paths.marker.read_bytes(),
+                    "state": paths.state.read_bytes(),
+                    "credential": paths.credential.read_bytes(),
+                }
+                original_record_identity = {
+                    name: (os.stat(path).st_dev, os.stat(path).st_ino)
+                    for name, path in (
+                        ("marker", paths.marker),
+                        ("state", paths.state),
+                        ("credential", paths.credential),
+                    )
+                }
+                swapped = False
+                replacement_old: Path | None = None
+
+                def swap_before_return(operation: str) -> None:
+                    nonlocal replacement_old, swapped
+                    if operation != "stop" or swapped:
+                        return
+                    if target == "data":
+                        replacement_old = self.replace_final_data(spec.data_dir, target)
+                    else:
+                        path = getattr(paths, target)
+                        path.write_bytes(original_record[target])
+                        path.chmod(0o600)
+                        replacement_old = path
+                    swapped = True
+
+                with mock.patch.object(launcher, "_before_public_return", side_effect=swap_before_return):
+                    with self.assertRaises(launcher.LauncherError) as raised:
+                        launcher.stop_instance(
+                            marker,
+                            roots=self.roots,
+                            runner=self.fake,
+                            executable="/usr/bin/podman",
+                            source_environment={"PATH": "/usr/bin"},
+                        )
+                self.assertTrue(swapped)
+                self.assertIsNotNone(replacement_old)
+                assert replacement_old is not None
+                self.assertTrue(replacement_old.exists())
+                if target == "data":
+                    self.assertEqual(
+                        (spec.data_dir / "replacement.txt").read_text(encoding="utf-8"),
+                        "replacement\n",
+                    )
+                self.assertEqual(raised.exception.code, self.final_fence_code("stop", target))
+                if target != "data":
+                    replacement_identity = os.stat(getattr(paths, target))
+                    self.assertNotEqual(
+                        (replacement_identity.st_dev, replacement_identity.st_ino),
+                        original_record_identity[target],
+                    )
+                    self.assertEqual(
+                        getattr(paths, target).read_bytes(),
+                        original_record[target],
+                    )
+                self.assertNotIn(spec.container, self.fake.containers)
+                if target == "data":
+                    tombstone = launcher.live_run_marker.load_marker(marker)
+                    self.assertEqual(tombstone.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+
+    def test_running_reuse_write_state_posthook_rejects_data_swap_before_ready(self) -> None:
+        spec = self.make_spec("running-post-write", 19172)
+        marker = self.marker_path("running-post-write.json")
+        self.start(spec, marker_path=marker)
+        old_data = self.root / "running-post-write-old"
+        replacement = self.root / "running-post-write-replacement"
+        original_write = launcher.write_state
+        swapped = False
+
+        def write_and_swap(*args, **kwargs):
+            nonlocal swapped
+            identity = original_write(*args, **kwargs)
+            if not swapped:
+                spec.data_dir.rename(old_data)
+                replacement.mkdir(mode=0o700)
+                replacement.chmod(0o700)
+                (replacement / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (replacement / "keep.txt").chmod(0o600)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                swapped = True
+            return identity
+
+        with mock.patch.object(launcher, "write_state", side_effect=write_and_swap):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=marker)
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "keep.txt").exists())
+        self.assertTrue(marker.exists())
+        self.assertTrue(marker.with_name("running-post-write.state.json").exists())
+
+    def test_stopped_recovery_write_state_posthook_rejects_data_swap_before_ready(self) -> None:
+        spec = self.make_spec("stopped-post-write", 19173)
+        marker = self.marker_path("stopped-post-write.json")
+        self.start(spec, marker_path=marker)
+        self.fake.containers[spec.container]["State"] = {"Status": "exited"}
+        old_data = self.root / "stopped-post-write-old"
+        replacement = self.root / "stopped-post-write-replacement"
+        original_write = launcher.write_state
+        swapped = False
+
+        def write_and_swap(*args, **kwargs):
+            nonlocal swapped
+            identity = original_write(*args, **kwargs)
+            if not swapped:
+                spec.data_dir.rename(old_data)
+                replacement.mkdir(mode=0o700)
+                replacement.chmod(0o700)
+                (replacement / "keep.txt").write_text("replacement\n", encoding="utf-8")
+                (replacement / "keep.txt").chmod(0o600)
+                spec.data_dir.mkdir(mode=0o700)
+                spec.data_dir.chmod(0o700)
+                swapped = True
+            return identity
+
+        with mock.patch.object(launcher, "write_state", side_effect=write_and_swap):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(spec, marker_path=marker)
+        self.assertEqual(raised.exception.code, "owned_path_replaced")
+        self.assertTrue(swapped)
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(replacement.is_dir())
+        self.assertTrue((replacement / "keep.txt").exists())
+        self.assertTrue(marker.exists())
+        self.assertTrue(marker.with_name("stopped-post-write.state.json").exists())
+
+    def test_start_invalid_runner_fails_before_any_marker_data_or_engine_boundary(self) -> None:
+        spec = self.make_spec("invalid-runner-direct", 19174)
+        before = sorted(path.name for path in self.runs.iterdir())
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.start_instance(
+                spec,
+                marker_path=self.marker_path("invalid-runner-direct.json"),
+                runner=None,
+                readiness=self.ready,
+                port_checker=lambda port: True,
+                executable="/usr/bin/podman",
+                source_environment={"PATH": "/usr/bin"},
+                attempts=1,
+                interval=0,
+            )
+        self.assertEqual(raised.exception.code, "runner_invalid")
+        self.assertEqual(sorted(path.name for path in self.runs.iterdir()), before)
+        self.assertFalse((self.runs / launcher.live_run_marker.LIFECYCLE_LOCK_NAME).exists())
+        self.assertFalse(spec.roots.data.exists())
+        self.assertEqual(self.fake.calls, [])
+
     def test_start_many_invalid_runner_fails_before_shared_lease(self) -> None:
         specs = launcher.specs_for_batch(
             "invalid-runner", 2, 19161, image=launcher.DEFAULT_IMAGE, username=launcher.DEFAULT_USERNAME, roots=self.roots
@@ -3048,6 +4073,17 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertFalse((self.runs / ".lifecycle.lock").exists())
         self.assertFalse(paths[0].exists())
         self.assertFalse(paths[1].exists())
+
+    def test_private_directory_walk_close_failure_is_bounded_secondary_after_primary(self) -> None:
+        close_failure = launcher.LauncherError("descriptor_close_failed")
+        with mock.patch.object(launcher, "_close_fd_best_effort", return_value=close_failure):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                with launcher._private_directory_walk(self.runs, create=False):
+                    raise launcher.LauncherError("private_walk_primary")
+        self.assertEqual(raised.exception.code, "private_walk_primary")
+        self.assertIsNotNone(raised.exception.secondary)
+        assert raised.exception.secondary is not None
+        self.assertEqual(raised.exception.secondary.code, "descriptor_close_failed")
 
     def test_persistent_lease_close_failure_is_observable_without_masking_primary(self) -> None:
         close_failure = launcher.LauncherError("descriptor_close_failed")

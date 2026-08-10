@@ -147,6 +147,48 @@ class LiveRunMarkerTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "marker_schema_invalid")
         snapshot.assert_not_called()
 
+    def test_secure_marker_capabilities_fail_closed_before_any_marker_or_lock_boundary(self) -> None:
+        value = self.make_marker()
+        for capability in ("O_NOFOLLOW", "O_DIRECTORY"):
+            with self.subTest(capability=capability), mock.patch.object(marker.os, capability, 0):
+                with self.assertRaises(marker.MarkerError) as raised:
+                    marker.ensure_private_runs_dir(self.runs)
+                self.assertEqual(raised.exception.code, "runs_dir_invalid")
+                with self.assertRaises(marker.MarkerError) as raised:
+                    marker.create_marker(value)
+                self.assertEqual(raised.exception.code, "marker_invalid")
+                with self.assertRaises(marker.MarkerError) as raised:
+                    marker._open_runs_parent(self.runs, code="parent_invalid")
+                self.assertEqual(raised.exception.code, "parent_invalid")
+                self.assertFalse(self.marker_path.exists())
+                self.assertFalse((self.runs / marker.LIFECYCLE_LOCK_NAME).exists())
+
+        supports_dir_fd = set(marker.os.supports_dir_fd)
+        supports_dir_fd.discard(marker.os.open)
+        with mock.patch.object(marker.os, "supports_dir_fd", supports_dir_fd):
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.ensure_private_runs_dir(self.runs)
+            self.assertEqual(raised.exception.code, "runs_dir_invalid")
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker.create_marker(value)
+            self.assertEqual(raised.exception.code, "marker_invalid")
+            with self.assertRaises(marker.MarkerError) as raised:
+                marker._open_runs_parent(self.runs, code="parent_invalid")
+            self.assertEqual(raised.exception.code, "parent_invalid")
+        self.assertFalse(self.marker_path.exists())
+        self.assertFalse((self.runs / marker.LIFECYCLE_LOCK_NAME).exists())
+
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        try:
+            with mock.patch.object(marker.os, "O_NOFOLLOW", 0):
+                with self.assertRaises(marker.MarkerError) as raised:
+                    with marker.exclusive_lifecycle_lease(parent_fd):
+                        pass
+            self.assertEqual(raised.exception.code, "lifecycle_lease_failed")
+            self.assertFalse((self.runs / marker.LIFECYCLE_LOCK_NAME).exists())
+        finally:
+            os.close(parent_fd)
+
     def test_private_directory_and_exact_canonical_path_are_required(self) -> None:
         self.assertEqual(marker.ensure_private_runs_dir(self.runs), self.runs)
         with self.assertRaises(marker.MarkerError) as raised:
@@ -407,6 +449,49 @@ class LiveRunMarkerTests(unittest.TestCase):
                 second.join()
         self.assertEqual(first.exitcode, 0)
         self.assertEqual(second.exitcode, 0)
+
+    def test_lock_unlock_failure_is_bounded_and_visible_after_success(self) -> None:
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        try:
+            real_flock = marker.fcntl.flock
+
+            def fail_unlock(descriptor: int, operation: int) -> None:
+                if operation == marker.fcntl.LOCK_UN:
+                    raise OSError("synthetic unlock failure")
+                real_flock(descriptor, operation)
+
+            with mock.patch.object(marker.fcntl, "flock", side_effect=fail_unlock):
+                with self.assertRaises(marker.MarkerError) as raised:
+                    with marker.exclusive_lifecycle_lease(parent_fd):
+                        pass
+            self.assertEqual(raised.exception.code, "lifecycle_lease_failed_cleanup_failed")
+            self.assertTrue((self.runs / marker.LIFECYCLE_LOCK_NAME).exists())
+        finally:
+            os.close(parent_fd)
+
+    def test_lock_close_failure_is_bounded_and_primary_body_error_remains_primary(self) -> None:
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        try:
+            with mock.patch.object(marker.os, "close", side_effect=OSError("synthetic close failure")):
+                with self.assertRaises(marker.MarkerError) as raised:
+                    with marker.exclusive_lifecycle_lease(parent_fd):
+                        pass
+            self.assertEqual(raised.exception.code, "lifecycle_lease_failed_cleanup_failed")
+        finally:
+            os.close(parent_fd)
+
+        parent_fd = marker.open_runs_parent(self.marker_path)
+        try:
+            with mock.patch.object(marker.os, "close", side_effect=OSError("synthetic close failure")):
+                with self.assertRaises(marker.MarkerError) as raised:
+                    with marker.exclusive_lifecycle_lease(parent_fd):
+                        raise marker.MarkerError("primary_marker_failure")
+            self.assertEqual(raised.exception.code, "primary_marker_failure")
+            self.assertIsNotNone(raised.exception.secondary)
+            assert raised.exception.secondary is not None
+            self.assertEqual(raised.exception.secondary.code, "lifecycle_lease_failed_cleanup_failed")
+        finally:
+            os.close(parent_fd)
 
     def test_quarantine_lease_serializes_separate_processes(self) -> None:
         context = multiprocessing.get_context("fork")

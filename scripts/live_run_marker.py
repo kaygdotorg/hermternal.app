@@ -62,8 +62,11 @@ MARKER_KEYS = frozenset(
         "state_path",
         "credential_path",
         "credential_identity",
+        "data_identity",
     }
 )
+LEGACY_MARKER_KEYS = MARKER_KEYS - {"data_identity"}
+DIRECTORY_IDENTITY_KEYS = frozenset({"device", "inode", "mode"})
 CREDENTIAL_IDENTITY_KEYS = frozenset({"device", "inode", "mode", "size", "nlink"})
 CREDENTIAL_IDENTITY_KEYS_WITH_GENERATION = frozenset((*CREDENTIAL_IDENTITY_KEYS, "generation"))
 GENERATION_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
@@ -72,6 +75,7 @@ CLEANUP_KEYS = frozenset({"cleanup_cidfile_path", "cleanup_cidfile_identity"})
 
 MarkerFileIdentity = tuple[int, int, int, int, int]
 CidfileIdentity = tuple[int, int, int, int, int]
+DirectoryIdentity = tuple[int, int, int]
 ParentIdentity = tuple[int, int, int]
 _MARKER_RENAME_EXPECTED: contextvars.ContextVar[
     tuple[int, str, str, MarkerFileIdentity, int | None] | None
@@ -116,8 +120,9 @@ _QUARANTINE_KINDS = ("cleanup", "replace", "replace-tmp")
 class MarkerError(Exception):
     """Stable fail-closed marker error without path or run-ID echoing."""
 
-    def __init__(self, code: str = "marker_invalid") -> None:
+    def __init__(self, code: str = "marker_invalid", *, secondary: "MarkerError | None" = None) -> None:
         self.code = code
+        self.secondary = secondary
         super().__init__(code)
 
 
@@ -233,6 +238,10 @@ class RunMarker:
     state_path: Path
     credential_path: Path
     credential_identity: CredentialIdentity
+    # Standalone marker helpers may omit this field for compatibility, but the
+    # launcher lifecycle always supplies it and rejects records without the
+    # independently retained data-root identity before reuse or handoff.
+    data_identity: DirectoryIdentity | None = None
     cleanup_cidfile_path: Path | None = None
     cleanup_cidfile_identity: CidfileIdentity | None = None
 
@@ -251,6 +260,12 @@ class RunMarker:
             "credential_path": str(self.credential_path),
             "credential_identity": self.credential_identity.document(),
         }
+        if self.data_identity is not None:
+            document["data_identity"] = {
+                "device": self.data_identity[0],
+                "inode": self.data_identity[1],
+                "mode": self.data_identity[2],
+            }
         if self.cleanup_cidfile_path is not None or self.cleanup_cidfile_identity is not None:
             if self.cleanup_cidfile_path is None or self.cleanup_cidfile_identity is None:
                 _fail("marker_schema_invalid")
@@ -281,6 +296,7 @@ class RunMarker:
             state_path=self.state_path,
             credential_path=self.credential_path,
             credential_identity=self.credential_identity,
+            data_identity=self.data_identity,
             cleanup_cidfile_path=self.cleanup_cidfile_path,
             cleanup_cidfile_identity=self.cleanup_cidfile_identity,
         )
@@ -298,6 +314,7 @@ class RunMarker:
             state_path=self.state_path,
             credential_path=self.credential_path,
             credential_identity=self.credential_identity,
+            data_identity=self.data_identity,
             cleanup_cidfile_path=self.cleanup_cidfile_path,
             cleanup_cidfile_identity=self.cleanup_cidfile_identity,
         )
@@ -315,6 +332,39 @@ class MarkerPaths:
 
 def _fail(code: str) -> None:
     raise MarkerError(code)
+
+
+def _attach_secondary_marker_failure(primary: BaseException, secondary: MarkerError) -> None:
+    """Preserve bounded marker cleanup evidence without masking the primary."""
+
+    if getattr(primary, "secondary", None) is None:
+        try:
+            setattr(primary, "secondary", secondary)
+        except Exception:
+            pass
+
+
+def _required_marker_flag(name: str, code: str) -> int:
+    value = getattr(os, name, None)
+    if type(value) is not int or value <= 0:
+        _fail(code)
+    return value
+
+
+def _require_secure_marker_capabilities(code: str = "marker_invalid") -> None:
+    """Require descriptor-relative, no-follow marker primitives before I/O."""
+
+    _required_marker_flag("O_NOFOLLOW", code)
+    _required_marker_flag("O_DIRECTORY", code)
+    _required_marker_flag("O_CLOEXEC", code)
+    supports_dir_fd = getattr(os, "supports_dir_fd", None)
+    if (
+        not isinstance(supports_dir_fd, (set, frozenset, tuple, list))
+        or os.open not in supports_dir_fd
+        or not hasattr(os, "fchmod")
+        or not hasattr(fcntl, "flock")
+    ):
+        _fail(code)
 
 
 def content_generation(
@@ -386,6 +436,7 @@ def canonical_path(value: str | Path, *, code: str = "marker_path_invalid") -> P
 def ensure_private_runs_dir(path: str | Path) -> Path:
     """Validate one existing private runs directory without following links."""
 
+    _require_secure_marker_capabilities("runs_dir_invalid")
     directory = canonical_path(path, code="runs_dir_invalid")
     try:
         info = directory.lstat()
@@ -448,13 +499,30 @@ def _validate_endpoint(value: object) -> str:
     return endpoint
 
 
+def _directory_identity_from_document(value: object) -> DirectoryIdentity:
+    """Parse the lifecycle data-root identity retained in a marker."""
+
+    if not isinstance(value, dict) or set(value) != DIRECTORY_IDENTITY_KEYS:
+        _fail("marker_schema_invalid")
+    values = tuple(value[key] for key in ("device", "inode", "mode"))
+    if any(type(item) is not int or item < 0 for item in values):
+        _fail("marker_schema_invalid")
+    identity = values  # type: ignore[assignment]
+    if identity[2] != 0o700:
+        _fail("marker_schema_invalid")
+    return identity
+
+
 def _validate_marker_document(document: object, requested_path: Path) -> RunMarker:
     if not isinstance(document, dict):
         _fail("marker_schema_invalid")
     keys = set(document)
-    if keys != MARKER_KEYS and not (
-        keys == MARKER_KEYS | CLEANUP_KEYS and document.get("status") == STATUS_CLEANUP_FAILED
-    ):
+    valid_base = keys in {MARKER_KEYS, LEGACY_MARKER_KEYS}
+    valid_cleanup = (
+        document.get("status") == STATUS_CLEANUP_FAILED
+        and keys in {MARKER_KEYS | CLEANUP_KEYS, LEGACY_MARKER_KEYS | CLEANUP_KEYS}
+    )
+    if not valid_base and not valid_cleanup:
         _fail("marker_schema_invalid")
     if document.get("schema") != SCHEMA:
         _fail("marker_schema_invalid")
@@ -493,9 +561,12 @@ def _validate_marker_document(document: object, requested_path: Path) -> RunMark
         # same-directory alternate cannot become a second run-scoped resource.
         _fail("marker_path_mismatch")
     identity = CredentialIdentity.from_document(document.get("credential_identity"))
+    data_identity: DirectoryIdentity | None = None
+    if "data_identity" in keys:
+        data_identity = _directory_identity_from_document(document.get("data_identity"))
     cleanup_path: Path | None = None
     cleanup_identity: CidfileIdentity | None = None
-    if keys == MARKER_KEYS | CLEANUP_KEYS:
+    if CLEANUP_KEYS.issubset(keys):
         cleanup_path = canonical_path(document.get("cleanup_cidfile_path"), code="cidfile_path_invalid")
         if cleanup_path != requested_path.with_name(f"{requested_path.stem}.cidfile"):
             _fail("marker_path_mismatch")
@@ -522,6 +593,7 @@ def _validate_marker_document(document: object, requested_path: Path) -> RunMark
         state_path=state_path,
         credential_path=credential_path,
         credential_identity=identity,
+        data_identity=data_identity,
         cleanup_cidfile_path=cleanup_path,
         cleanup_cidfile_identity=cleanup_identity,
     )
@@ -614,6 +686,7 @@ def revalidate_runs_parent_path(
 def _validate_runs_parent_fd(parent_fd: int, *, code: str = "marker_invalid") -> None:
     """Validate a caller-held private runs directory without reopening its path."""
 
+    _require_secure_marker_capabilities(code)
     current = parent_identity(parent_fd, code=code)
     expected = _EXPECTED_PARENT_IDENTITY.get()
     if expected is not None and current != expected:
@@ -623,18 +696,22 @@ def _validate_runs_parent_fd(parent_fd: int, *, code: str = "marker_invalid") ->
 def _open_runs_parent(directory: Path, *, code: str = "marker_invalid") -> int:
     """Hold one validated private runs directory across marker operations."""
 
+    _require_secure_marker_capabilities(code)
     try:
         descriptor = os.open(
             directory,
             os.O_RDONLY
-            | getattr(os, "O_DIRECTORY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0),
+            | _required_marker_flag("O_DIRECTORY", "marker_invalid")
+            | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+            | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
         )
         try:
             _validate_runs_parent_fd(descriptor, code=code)
-        except MarkerError:
-            os.close(descriptor)
+        except MarkerError as error:
+            try:
+                os.close(descriptor)
+            except OSError:
+                _attach_secondary_marker_failure(error, MarkerError("marker_parent_close_failed"))
             raise
         return descriptor
     except MarkerError:
@@ -659,13 +736,15 @@ def _lock_identity(info: os.stat_result, *, code: str) -> MarkerFileIdentity:
 
 @contextlib.contextmanager
 def _exclusive_lock(parent_fd: int, name: str, *, code: str) -> Iterator[int]:
+    _require_secure_marker_capabilities(code)
     _validate_runs_parent_fd(parent_fd, code=code)
     descriptor = -1
+    primary_error: BaseException | None = None
     try:
         try:
             descriptor = os.open(
                 name,
-                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDWR | os.O_CREAT | _required_marker_flag("O_NOFOLLOW", "marker_invalid") | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                 MARKER_MODES,
                 dir_fd=parent_fd,
             )
@@ -681,16 +760,26 @@ def _exclusive_lock(parent_fd: int, name: str, *, code: str) -> Iterator[int]:
         if before != after:
             _fail(f"{code}_replaced")
         yield descriptor
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
+        cleanup_error: MarkerError | None = None
         if descriptor >= 0:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
             except OSError:
-                pass
+                cleanup_error = MarkerError(f"{code}_cleanup_failed")
             try:
                 os.close(descriptor)
             except OSError:
-                pass
+                if cleanup_error is None:
+                    cleanup_error = MarkerError(f"{code}_cleanup_failed")
+        if cleanup_error is not None:
+            if primary_error is not None:
+                _attach_secondary_marker_failure(primary_error, cleanup_error)
+            else:
+                raise cleanup_error
 
 
 @contextlib.contextmanager
@@ -745,9 +834,9 @@ def quarantine_slot_names(kind: str) -> tuple[str, ...]:
 def _quarantine_open_flags() -> int:
     return (
         os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_CLOEXEC", 0)
+        | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+        | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+        | _required_marker_flag("O_CLOEXEC", "marker_invalid")
     )
 
 
@@ -871,8 +960,8 @@ def create_marker(marker: RunMarker, *, parent_fd: int | None = None) -> MarkerF
                         os.O_RDWR
                         | os.O_CREAT
                         | os.O_EXCL
-                        | getattr(os, "O_NOFOLLOW", 0)
-                        | getattr(os, "O_CLOEXEC", 0),
+                        | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                        | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                         0,
                         dir_fd=parent_fd,
                     )
@@ -951,9 +1040,9 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
             descriptor = os.open(
                 source_name,
                 os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+                | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                 dir_fd=parent_fd,
             )
             current = _marker_file_identity(os.fstat(descriptor))
@@ -978,9 +1067,9 @@ def _rename_noreplace(parent_fd: int, source_name: str, target_name: str) -> Non
             descriptor = os.open(
                 source_name,
                 os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+                | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                 dir_fd=parent_fd,
             )
             current = _marker_file_identity(os.fstat(descriptor))
@@ -1169,8 +1258,8 @@ def _publish_marker_from_descriptor(
                 staging_fd = os.open(
                     staging_name,
                     os.O_RDWR
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                    | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                     dir_fd=parent_fd,
                 )
                 staging_identity = _marker_file_identity(os.fstat(staging_fd))
@@ -1226,8 +1315,8 @@ def _publish_marker_from_descriptor(
                     os.O_WRONLY
                     | os.O_CREAT
                     | os.O_EXCL
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                    | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                     0,
                     dir_fd=parent_fd,
                 )
@@ -1410,9 +1499,9 @@ def replace_marker(
                 source_fd = os.open(
                     path.name,
                     os.O_RDWR
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                    | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+                    | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                     dir_fd=parent_fd,
                 )
             except FileNotFoundError:
@@ -1434,8 +1523,8 @@ def replace_marker(
                         os.O_RDWR
                         | os.O_CREAT
                         | os.O_EXCL
-                        | getattr(os, "O_NOFOLLOW", 0)
-                        | getattr(os, "O_CLOEXEC", 0),
+                        | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                        | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                         0,
                         dir_fd=parent_fd,
                     )
@@ -1562,9 +1651,9 @@ def rewrite_marker_exact(
                 descriptor = os.open(
                     path.name,
                     os.O_RDWR
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_NONBLOCK", 0)
-                    | getattr(os, "O_CLOEXEC", 0),
+                    | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                    | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+                    | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                     dir_fd=parent_fd,
                 )
             except FileNotFoundError:
@@ -1627,9 +1716,9 @@ def _read_marker_record_with_bytes(
             descriptor = os.open(
                 path.name,
                 os.O_RDONLY
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0)
-                | getattr(os, "O_CLOEXEC", 0),
+                | _required_marker_flag("O_NOFOLLOW", "marker_invalid")
+                | _required_marker_flag("O_NONBLOCK", "marker_invalid")
+                | _required_marker_flag("O_CLOEXEC", "marker_invalid"),
                 dir_fd=parent_fd,
             )
         except FileNotFoundError:
@@ -1752,15 +1841,13 @@ def load_marker(
 def credential_lstat(path: str | Path, *, parent_fd: int | None = None) -> CredentialIdentity:
     """Inspect one exact credential path without opening or reading its value."""
 
+    _require_secure_marker_capabilities("credential_identity_invalid")
     credential = canonical_path(path, code="credential_path_invalid")
+    owns_parent = parent_fd is None
     if parent_fd is None:
-        try:
-            info = credential.lstat()
-        except OSError:
-            _fail("credential_identity_invalid")
-        return CredentialIdentity.from_stat(info)
-
-    _validate_runs_parent_fd(code="credential_identity_invalid", parent_fd=parent_fd)
+        parent_fd = _open_runs_parent(credential.parent, code="credential_identity_invalid")
+    else:
+        _validate_runs_parent_fd(code="credential_identity_invalid", parent_fd=parent_fd)
     descriptor = -1
     try:
         try:
@@ -1776,6 +1863,11 @@ def credential_lstat(path: str | Path, *, parent_fd: int | None = None) -> Crede
         if descriptor >= 0:
             try:
                 os.close(descriptor)
+            except OSError:
+                pass
+        if owns_parent and parent_fd is not None:
+            try:
+                os.close(parent_fd)
             except OSError:
                 pass
 
@@ -1850,6 +1942,7 @@ def new_marker(
     image: str,
     endpoint: str,
     credential_identity: CredentialIdentity,
+    data_identity: DirectoryIdentity | None = None,
 ) -> RunMarker:
     """Build a running marker from fully verified, already-created resources."""
 
@@ -1868,6 +1961,7 @@ def new_marker(
             state_path=paths.state,
             credential_path=paths.credential,
             credential_identity=identity,
+            data_identity=data_identity,
         )
 
     # Validate all schema fields before checking whether the credential exists.
@@ -1889,6 +1983,8 @@ def cleanup_failed(marker: RunMarker) -> RunMarker:
 __all__ = [
     "CREDENTIAL_MODE",
     "CREDENTIAL_IDENTITY_KEYS",
+    "DIRECTORY_IDENTITY_KEYS",
+    "DirectoryIdentity",
     "CredentialIdentity",
     "MARKER_KEYS",
     "MARKER_MODES",
