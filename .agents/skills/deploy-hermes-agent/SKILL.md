@@ -166,22 +166,28 @@ remains outside this pathname-based adapter's proof boundary; an observed
 replacement fails closed. Before a successful ready, endpoint, or status return,
 the launcher performs a final all-record fence after the publication hook:
 marker/state inode and generation, credential identity and generation, retained
-parent, stable data identity, and the exact container/cidfile binding are checked
-as applicable. A start-new or stopped recovery hook failure removes the exact
+parent, stable data identity, the engine-witnessed container binding, and the
+cidfile content generation are checked as applicable. A start-new or stopped
+recovery hook failure removes the exact
 immutable container when its data proof remains valid, or retains bounded
 `cleanup_failed` evidence when exact rollback is blocked. Stop keeps its final
 hook inside evidence cleanup and proves marker, state, credential, and cidfile
 absence before reporting removal. Launcher command vectors are validated before
 engine dispatch; the executable and each argument must be a non-empty NUL-free
-string. A new detached run selects its cidfile ID only after strict independent
-proof from the same successful Podman invocation: stdout must be exactly one
-canonical full lowercase ID line, and it must equal the cidfile ID before
-inspection, publication, or cleanup. Missing, extra, malformed, or mismatched
-stdout fails closed. Nonzero results preserve `container_start_failed` without
-selecting a cidfile-only ID. Runner exceptions or invalid/untrusted results
-never adopt or destructively remove a cidfile-only ID; they retain bounded
-`cleanup_failed` evidence with `UNPROVEN_CONTAINER_ID` and leave the cidfile as
-private evidence.
+string. A new detached run first inspects the exact deterministic container name with
+this transaction's opaque run-id label. That engine-side projection is the
+causal invocation witness for the actual ID, labels, image, data mount, running
+state, and loopback mapping; it is not a fallback name scan or adoption path.
+Stdout is only a strict claimed-output check: it must be exactly one canonical
+full lowercase container ID line, and it is never authoritative for inspect,
+publication, or cleanup. The cidfile ID must match the engine-witnessed ID, and
+its bounded content generation must be retained for exact cleanup. Missing,
+extra, malformed, mismatched, or later same-inode/same-size cidfile content
+fails closed and preserves private evidence. Nonzero results preserve
+`container_start_failed` without selecting a cidfile-only ID. Runner exceptions
+or invalid/untrusted results never adopt or destructively remove a cidfile-only
+ID; they retain bounded `cleanup_failed` evidence with
+`UNPROVEN_CONTAINER_ID` and leave the cidfile as private evidence.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation

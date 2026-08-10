@@ -1558,14 +1558,14 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "cidfile_invalid")
         self.assertEqual(stdout_witness.call_count, 1)
         self.assertEqual(len(malformed_identity), 1)
-        self.assertEqual(len(removed_cidfiles), 1)
-        self.assertEqual(removed_cidfiles[0]["expected"], malformed_identity[0])
+        self.assertEqual(removed_cidfiles, [])
         self.assertTrue(erase_credential.called)
         tombstone = self.load()
         self.assertEqual(tombstone.marker.status, "cleanup_failed")
         self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
         self.assertEqual(len(self.fake.containers), 1)
         self.assertFalse(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        self.assertEqual((self.runs / "fixture.cidfile").read_bytes(), b"not-a-container-id\\n")
         self.assertFalse(tombstone.marker.credential_path.exists())
 
     def test_success_without_cidfile_requires_cidfile_after_stdout_witness(self) -> None:
@@ -1616,11 +1616,114 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.containers[spec.container]["Id"], original_id[0])
         self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
         self.assertFalse(any(command[1] in {"rm", "start", "stop"} for command, _ in self.fake.calls))
-        self.assertFalse(any(command[1:3] == ("container", "inspect") for command, _ in self.fake.calls))
+        inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
+        self.assertEqual([command[3] for command in inspect_calls], [spec.container])
+        self.assertNotIn(replacement_id, {command[3] for command in inspect_calls})
         tombstone = self.load()
         self.assertEqual(tombstone.marker.status, "cleanup_failed")
         self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
         self.assertFalse(tombstone.marker.credential_path.exists())
+
+    def test_matching_claims_cannot_override_engine_invocation_identity(self) -> None:
+        spec = self.make_spec()
+        actual_id: list[str] = []
+        replacement_id = "f" * 64
+
+        def forge_claims_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                actual_id.append(str(self.fake.containers[spec.container]["Id"]))
+                cidfile = Path(command[command.index("--cidfile") + 1])
+                replacement = (replacement_id + "\n").encode("ascii")
+                descriptor = os.open(cidfile, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                return launcher.CommandResult(0, replacement_id + "\n")
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, runner=forge_claims_after_run)
+        self.assertEqual(raised.exception.code, "container_id_mismatch")
+        self.assertEqual(actual_id, [self.fake.containers[spec.container]["Id"]])
+        self.assertNotEqual(actual_id[0], replacement_id)
+        self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
+        inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
+        self.assertEqual([command[3] for command in inspect_calls], [spec.container])
+        self.assertNotIn(replacement_id, {command[3] for command in inspect_calls})
+        self.assertFalse(any(command[1] in {"start", "stop", "rm"} for command, _ in self.fake.calls))
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        self.assertFalse(tombstone.marker.credential_path.exists())
+        self.assertIn(spec.container, self.fake.containers)
+
+    def test_cidfile_cleanup_requires_same_content_generation(self) -> None:
+        replacement_id = "9" * 64
+        mutated = False
+        original_hook = launcher._before_rename_syscall
+
+        def mutate_cidfile_before_claim(parent_fd, source_name, target_name):
+            nonlocal mutated
+            if source_name == "fixture.cidfile" and not mutated:
+                mutated = True
+                cidfile = self.runs / source_name
+                replacement = (replacement_id + "\n").encode("ascii")
+                descriptor = os.open(cidfile, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            original_hook(parent_fd, source_name, target_name)
+
+        def not_ready(endpoint: str, attempts: int, interval: float) -> None:
+            del endpoint, attempts, interval
+            raise launcher.LauncherError("provider_readiness_timeout")
+
+        with mock.patch.object(launcher, "_before_rename_syscall", side_effect=mutate_cidfile_before_claim):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(self.make_spec(), readiness=not_ready)
+        self.assertEqual(raised.exception.code, "provider_readiness_timeout")
+        self.assertTrue(mutated)
+        self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
+        self.assertEqual(self.fake.containers, {})
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertTrue(tombstone.marker.credential_path.exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
+
+    def test_ready_path_cidfile_rewrite_is_not_quarantined(self) -> None:
+        replacement_id = "8" * 64
+        mutated = False
+        original_remove = launcher._remove_exact_file
+
+        def mutate_before_cidfile_remove(path, **kwargs):
+            nonlocal mutated
+            if path.name == "fixture.cidfile" and not mutated:
+                mutated = True
+                replacement = (replacement_id + "\n").encode("ascii")
+                descriptor = os.open(path, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    self.assertEqual(os.pwrite(descriptor, replacement, 0), len(replacement))
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            return original_remove(path, **kwargs)
+
+        with mock.patch.object(launcher, "_remove_exact_file", side_effect=mutate_before_cidfile_remove):
+            with self.assertRaises(launcher.LauncherError) as raised:
+                self.start(self.make_spec())
+        self.assertTrue(mutated)
+        self.assertIn("cidfile_remove_failed", raised.exception.code)
+        self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
+        self.assertEqual(self.fake.containers, {})
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertTrue(tombstone.marker.credential_path.exists())
+        self.assertTrue(tombstone.marker.state_path.exists())
 
     def test_nonzero_run_cidfile_same_size_overwrite_preserves_primary_failure(self) -> None:
         spec = self.make_spec()
@@ -1703,8 +1806,11 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "container_inspect_failed")
         self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
         self.assertTrue((self.runs / "fixture.state.json").exists())
-        self.assertTrue((self.runs / "fixture.credential").exists())
+        self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertTrue((self.runs / "fixture.cidfile").exists())
         self.assertEqual(len(self.fake.containers), 1)
+
+        self.fake.calls.clear()
 
         def raise_on_remove(command, environment, timeout):
             if command[1:3] == ("rm", "--force"):
@@ -1719,8 +1825,9 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 executable="/usr/bin/podman",
                 source_environment={"PATH": "/usr/bin"},
             )
-        self.assertEqual(raised.exception.code, "container_remove_failed")
+        self.assertEqual(raised.exception.code, "stop_evidence_replaced")
         self.assertEqual(launcher.live_run_marker.load_marker(self.marker_path()).status, "cleanup_failed")
+        self.assertEqual(self.fake.calls, [])
         self.assertEqual(len(self.fake.containers), 1)
 
     def test_new_run_never_adopts_same_name_replacement_after_run(self) -> None:
@@ -1748,19 +1855,22 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 attempts=1,
                 interval=0,
             )
-        self.assertEqual(raised.exception.code, "container_inspect_failed")
+        self.assertEqual(raised.exception.code, "container_id_mismatch")
         self.assertIsNotNone(original_id)
         self.assertIn(spec.container, self.fake.containers)
         self.assertEqual(self.fake.containers[spec.container]["Id"], "d" * 64)
         inspect_calls = [command for command, _ in self.fake.calls if command[1:3] == ("container", "inspect")]
         self.assertTrue(inspect_calls)
-        self.assertEqual(inspect_calls[0][3], original_id)
-        self.assertFalse(self.marker_path().exists())
-        self.assertFalse((self.runs / "fixture.state.json").exists())
+        self.assertEqual(inspect_calls[0][3], spec.container)
+        self.assertFalse(any(command[3] == original_id for command in inspect_calls))
+        self.assertTrue(self.marker_path().exists())
+        tombstone = self.load()
+        self.assertEqual(tombstone.marker.status, "cleanup_failed")
+        self.assertEqual(tombstone.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
         self.assertFalse((self.runs / "fixture.credential").exists())
+        self.assertTrue((self.runs / "fixture.cidfile").exists())
         self.assertFalse(any(command[1] == "rm" for command, _ in self.fake.calls))
-        self.assertFalse(any(command[1] == "start" for command, _ in self.fake.calls))
-        self.assertTrue(any(command[1:4] == ("container", "exists", original_id) for command, _ in self.fake.calls))
+        self.assertFalse(any(command[1] in {"start", "stop"} for command, _ in self.fake.calls))
 
     def test_same_marker_reuses_one_running_instance_without_second_run_or_fresh_credential(self) -> None:
         spec = self.make_spec()

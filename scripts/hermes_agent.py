@@ -144,6 +144,15 @@ class CommandResult:
 
 
 @dataclass(frozen=True)
+class CidfileProof:
+    """One valid cidfile identity plus a bounded proof of its exact bytes."""
+
+    container_id: str
+    identity: FileIdentity
+    generation: str
+
+
+@dataclass(frozen=True)
 class Roots:
     state: Path
     data: Path
@@ -1443,13 +1452,14 @@ def validate_container_id(value: object) -> str:
 
 
 def container_id_from_run_result(result: CommandResult) -> str:
-    """Parse the one canonical full ID emitted by this detached invocation.
+    """Parse one strict claimed ID line from a detached-run result.
 
-    Detached ``podman run`` stdout is an independent witness, not a fallback
-    identity source. Require exactly one full lowercase ID line with one LF so a
-    missing, truncated, or extra output cannot be mistaken for this invocation's
-    container. Callers still require an exact byte-for-byte match with the
-    private cidfile before selecting any ID for inspection or cleanup.
+    Detached ``podman run`` stdout is caller-visible claim data, not an
+    authoritative identity witness or fallback source. Require exactly one full
+    lowercase ID line with one LF so missing, truncated, or extra output fails
+    closed. Lifecycle callers compare this claim with the engine-side invocation
+    inspection and the private cidfile, but never use it to choose an engine
+    target.
     """
 
     if result.returncode != 0:
@@ -2023,6 +2033,41 @@ def require_loopback_endpoint_mapping(spec: InstanceSpec, document: dict[str, ob
         raise LauncherError("container_endpoint_unproven")
 
 
+def _inspect_invocation_container(
+    spec: InstanceSpec,
+    run_id: str,
+    runner: Runner,
+    environment: Mapping[str, str],
+    executable: str,
+    *,
+    private_path: Path,
+    private_identity: DirectoryIdentity,
+) -> tuple[dict[str, object], RecoverySnapshot]:
+    """Obtain the engine-side ID for this exact detached invocation.
+
+    The run command's deterministic name and opaque run-id label are the
+    invocation capability, not an ID-discovery fallback. Inspect that exact
+    engine object before any stdout or cidfile claim can become a target. A
+    missing, foreign, or replaced object fails closed without probing a claimed
+    ID, so a caller-controlled matching stdout/cidfile pair cannot orphan the
+    actual container under a substituted identity.
+    """
+
+    document = inspect_container(
+        spec,
+        runner,
+        environment,
+        executable,
+        target=spec.container,
+        private_path=private_path,
+        private_identity=private_identity,
+    )
+    snapshot = recovery_snapshot(spec, document, run_id=run_id)
+    if snapshot.status != "running":
+        raise LauncherError("container_not_running")
+    return document, snapshot
+
+
 def verify_handoff_endpoint(
     state: LauncherState,
     *,
@@ -2180,8 +2225,8 @@ def run_arguments(
     return _validate_command_vector(arguments)
 
 
-def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> tuple[str, FileIdentity]:
-    """Read one engine-emitted ID through a held private parent and entry fd."""
+def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> CidfileProof:
+    """Read one cidfile ID and retain a bounded proof of its exact bytes."""
 
     try:
         cidfile = live_run_marker.canonical_path(path, code="cidfile_path_invalid")
@@ -2245,7 +2290,15 @@ def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> tuple[str
             container_id = validate_container_id(candidate)
         except LauncherError:
             raise LauncherError("cidfile_invalid") from None
-        return container_id, after_identity
+        try:
+            generation = live_run_marker.content_generation(
+                bytes(raw),
+                maximum=66,
+                code="cidfile_identity",
+            )
+        except live_run_marker.MarkerError as error:
+            raise LauncherError(error.code) from None
+        return CidfileProof(container_id, after_identity, generation)
     except OwnedFileError:
         raise
     except LauncherError as error:
@@ -3594,6 +3647,7 @@ def _cleanup_started_run(
     marker_generation: str | None = None,
     state_generation: str | None = None,
     cidfile_identity: FileIdentity | None,
+    cidfile_generation: str | None = None,
     data_identity: DirectoryIdentity | None = None,
     runner: Runner,
     executable: str,
@@ -3684,16 +3738,25 @@ def _cleanup_started_run(
                 data_path_unproven = True
 
     if cidfile_identity is not None:
-        try:
-            _remove_exact_file(
-                binding.marker_path.with_name(f"{binding.marker_path.stem}.cidfile"),
-                code="cidfile_remove_failed",
-                expected=cidfile_identity,
-                parent_fd=parent_fd,
-            )
-        except BaseException:
+        if cidfile_generation is None:
+            # An inode snapshot without its exact bounded bytes cannot prove
+            # that the cidfile still contains the invocation-bound ID. Preserve
+            # it as evidence instead of quarantining a same-inode replacement.
             if cleanup_error is None:
-                cleanup_error = LauncherError("cidfile_remove_failed")
+                cleanup_error = LauncherError("cidfile_identity_unproven")
+        else:
+            try:
+                _remove_exact_file(
+                    binding.marker_path.with_name(f"{binding.marker_path.stem}.cidfile"),
+                    code="cidfile_remove_failed",
+                    expected=cidfile_identity,
+                    expected_generation=cidfile_generation,
+                    generation_maximum=66,
+                    parent_fd=parent_fd,
+                )
+            except BaseException:
+                if cleanup_error is None:
+                    cleanup_error = LauncherError("cidfile_remove_failed")
 
     if cleanup_error is None or data_path_unproven:
         try:
@@ -4039,12 +4102,13 @@ def _start_instance_with_parent(
         raise LauncherError("port_unavailable")
 
     # Generate the opaque run identity before the first container-start command.
-    # A successful detached invocation must provide two independent witnesses:
-    # canonical stdout from this exact Podman result and the private cidfile. The
-    # cidfile remains the selected identity only after an exact equality check.
+    # A successful detached invocation must later provide an engine-side witness
+    # tied to this exact name/run-id pair. Stdout and cidfile are claims that must
+    # match that witness; neither can select an engine target by itself.
     run_id = live_run_marker.new_run_id()
     credential_identity: live_run_marker.CredentialIdentity | None = None
     cidfile_identity: FileIdentity | None = None
+    cidfile_generation: str | None = None
     binding: live_run_marker.RunMarker | None = None
     marker_identity: FileIdentity | None = None
     state_identity: FileIdentity | None = None
@@ -4089,23 +4153,40 @@ def _start_instance_with_parent(
             # but it is not a successful identity witness. Never select or
             # remove a cidfile ID from this failed invocation.
             raise LauncherError("container_start_failed")
-        invocation_container_id = container_id_from_run_result(started)
+        # Stdout is only a strict claimed-output check. It is not an identity
+        # source: the engine-side inspection below supplies the causal witness.
+        claimed_stdout_id = container_id_from_run_result(started)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         try:
-            cidfile_container_id, candidate_cidfile_identity = read_cidfile(
-                paths.cidfile,
-                parent_fd=runs_parent_fd,
-            )
+            cidfile_proof = read_cidfile(paths.cidfile, parent_fd=runs_parent_fd)
         except OwnedFileError as error:
             cidfile_identity = error.identity
             raise
-        if cidfile_container_id != invocation_container_id:
-            # Do not fall back to stdout or adopt the cidfile replacement. The
-            # mismatch proves that no single exact ID is safe to inspect, bind,
-            # publish, or remove; leave both engine and cidfile evidence intact.
+        cidfile_identity = cidfile_proof.identity
+        cidfile_generation = cidfile_proof.generation
+
+        invocation_document, invocation_snapshot = _inspect_invocation_container(
+            spec,
+            run_id,
+            runner,
+            child_environment,
+            podman,
+            private_path=data_path,
+            private_identity=data_identity,
+        )
+        if (
+            claimed_stdout_id != invocation_snapshot.container_id
+            or cidfile_proof.container_id != invocation_snapshot.container_id
+        ):
+            # The exact run-name/run-id inspection is authoritative for this
+            # invocation. Never inspect, bind, publish, or remove either
+            # caller-controlled claimed ID when it disagrees with that witness.
             raise LauncherError("container_id_mismatch")
-        run_container_id = cidfile_container_id
-        cidfile_identity = candidate_cidfile_identity
+        run_container_id = invocation_snapshot.container_id
+        # Select the engine-witnessed ID before validating endpoint metadata so
+        # an endpoint failure can still clean up this exact container. No
+        # claimed stdout/cidfile ID is used as a target.
+        require_loopback_endpoint_mapping(spec, invocation_document)
 
         try:
             binding = live_run_marker.new_marker(
@@ -4270,13 +4351,18 @@ def _start_instance_with_parent(
         _revalidate_credential_identity(binding, parent_fd=runs_parent_fd)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         if cidfile_identity is not None:
+            if cidfile_generation is None:
+                raise LauncherError("cidfile_identity_unproven")
             _remove_exact_file(
                 paths.cidfile,
                 code="cidfile_remove_failed",
                 expected=cidfile_identity,
+                expected_generation=cidfile_generation,
+                generation_maximum=66,
                 parent_fd=runs_parent_fd,
             )
             cidfile_identity = None
+            cidfile_generation = None
             # Cidfile removal is the last injected filesystem boundary before
             # publication. Recheck the exact data directory after it; a swap
             # here must fail and enter exact cleanup instead of returning a
@@ -4350,6 +4436,7 @@ def _start_instance_with_parent(
                     marker_generation=marker_generation,
                     state_generation=state_generation,
                     cidfile_identity=cidfile_identity,
+                    cidfile_generation=cidfile_generation,
                     runner=runner,
                     executable=podman,
                     source_environment=source_environment,
@@ -4376,19 +4463,9 @@ def _start_instance_with_parent(
                 except BaseException:
                     pass
         elif credential_identity is not None:
-            # No immutable ID exists: never rediscover or adopt by mutable
-            # name. Erase only the credential and retain a private sentinel
-            # tombstone as bounded evidence of the unknown engine outcome.
-            if cidfile_identity is not None:
-                try:
-                    _remove_exact_file(
-                        paths.cidfile,
-                        code="cidfile_remove_failed",
-                        expected=cidfile_identity,
-                        parent_fd=runs_parent_fd,
-                    )
-                except BaseException:
-                    pass
+            # No invocation-bound ID exists: never rediscover or adopt by mutable
+            # name. Erase only the credential, retain the cidfile as private
+            # evidence, and retain a sentinel tombstone for the unknown outcome.
             try:
                 _remove_exact_file(
                     paths.credential,

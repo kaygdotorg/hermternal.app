@@ -277,7 +277,8 @@ any replacement observed by the surrounding checks fails closed. Before a
 successful ready, endpoint, or status result, the launcher runs a final
 all-record fence after its publication hook: marker and state inode/generation,
 credential identity/generation, retained parent, stable data identity, and the
-exact container/cidfile binding are checked as applicable. If that hook observes
+exact engine-witnessed container plus cidfile content binding are checked as
+applicable. If that hook observes
 replacement, new-start cleanup removes the exact immutable container when its
 data proof remains valid or retains bounded `cleanup_failed` evidence when it
 does not. Stop keeps its final hook inside the evidence-removal transaction and
@@ -446,10 +447,10 @@ or treat the transient entry as proof; rerun the exact caller-selected
 `start` first requires local rootless Podman and verifies the requested official
 repository digest. It then polls bounded `GET /api/auth/providers` responses.
 Readiness requires HTTP 200 and a `basic` provider with
-`supports_password: true`. A failed start with a trusted exact
-invocation/cidfile witness removes only the exact invocation-owned container,
-fresh credential, state, and marker after the immutable run binding is published
-when every identity fence allows it. Data
+`supports_password: true`. A failed start with a trusted engine-side invocation
+witness and matching cidfile content proof removes only the exact
+invocation-owned container, fresh credential, state, and marker after the
+immutable run binding is published when every identity fence allows it. Data
 remains for diagnosis or retry; if exact cleanup fails, the private marker and
 state are retained as a bounded `cleanup_failed` tombstone. A data-path proof
 failure can block container removal, so the tombstone preserves the exact ID and
@@ -457,11 +458,11 @@ stable data witness for a later retry after the original tree is restored; it
 never authorizes the replacement tree. If the synchronous engine runner raises
 at any point, even after Podman has written a cidfile, the result is not a
 trustworthy invocation witness. The launcher never searches, adopts, or
-destructively removes a cidfile-only ID; it
-erases the known credential and retains a bounded private `cleanup_failed`
-tombstone with an unproven sentinel ID while leaving the cidfile as evidence.
-Stop never sends that sentinel or a cidfile-only ID to Podman. This strict marker
-path does not expose a broad purge operation.
+destructively removes a cidfile-only ID; it erases the known credential,
+retains the cidfile as private evidence, and retains a bounded `cleanup_failed`
+tombstone with an unproven sentinel ID. Stop never sends that sentinel or a
+cidfile-only ID to Podman. This strict marker path does not expose a broad purge
+operation.
 Active rebind of an already-running container is intentionally unsupported;
 ordinary running-container reuse is non-destructive. Cleanup never runs a
 broad prune or glob and never removes data implicitly.
@@ -469,20 +470,26 @@ broad prune or glob and never removes data implicitly.
 An existing container is reused only after its launcher labels prove the exact
 instance, loopback port, and immutable image identity. A stopped owned
 container is started only after the requested port is available, then readiness
-is checked. A new run accepts the cidfile ID only after an independent witness check from
-that same successful detached Podman invocation. Stdout must be exactly one
+is checked. A new run first inspects the exact deterministic name carrying this
+transaction's opaque run-id label. That engine-side projection proves the actual
+container ID plus its labels, image, data mount, running state, and loopback
+mapping; it is an invocation capability check, never a fallback name scan or
+adoption path. Only after that witness is captured may the launcher compare
+claims from the detached result and cidfile. Stdout must be exactly one
 canonical full lowercase container ID line; missing, extra, malformed, or
-mismatched stdout fails closed. The cidfile is read through the same held private
-runs-directory fd used by credential, state, and marker publication, and its ID
-must equal the invocation's stdout ID before any inspect, bind, publication, or
-cleanup action selects it. Stdout is never a fallback or discovery source. A
-nonzero subprocess result preserves `container_start_failed` and never selects a
-cidfile-only ID. A runner exception or any untrusted/invalid result likewise
-never adopts or destructively removes a cidfile-only ID: it retains bounded
-`cleanup_failed` evidence with `UNPROVEN_CONTAINER_ID` and leaves the cidfile for
-later investigation. A malformed, missing, replaced, or foreign cidfile fails
-closed and retains bounded private cleanup evidence rather than publishing
-`ready`. Each start,
+mismatched stdout fails closed. Stdout is non-authoritative and is never used to
+select an inspect, bind, publication, or cleanup target. The cidfile is read
+through the same held private runs-directory fd used by credential, state, and
+marker publication; its ID must equal the engine-witnessed ID, and its bounded
+content generation is retained for exact cleanup. A later same-inode or
+same-size cidfile rewrite therefore remains evidence instead of being
+quarantined as trusted ownership. A nonzero subprocess result preserves
+`container_start_failed` and never selects a cidfile-only ID. A runner exception
+or any untrusted/invalid result likewise never adopts or destructively removes a
+cidfile-only ID: it retains bounded `cleanup_failed` evidence with
+`UNPROVEN_CONTAINER_ID` and leaves the cidfile for later investigation. A
+malformed, missing, replaced, or foreign cidfile fails closed and retains
+bounded private cleanup evidence rather than publishing `ready`. Each start,
 status, endpoint, stop, and credential-read operation captures the runs-directory
 device, inode, and `0700` mode at entry, keeps that descriptor through all marker,
 state, credential, cidfile, cleanup, and tombstone work, and rechecks that the
