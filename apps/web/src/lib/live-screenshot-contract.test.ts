@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  LIVE_SCREENSHOT_COMMAND,
   LIVE_SCREENSHOT_PUBLIC_CONTRACT,
   blockedLiveScreenshotManifest,
   captureReviewedLiveScreenshots,
@@ -11,6 +12,61 @@ import {
 } from '../../tests/live/live-screenshot-contract.mjs';
 
 const temporaryDirectories: string[] = [];
+
+const MARKER_AUTHORITY_ANCHORS = Object.freeze([
+  'synthetic and mock-only when run offline',
+  'HERMES_RUNS_DIR',
+  'HERMES_MARKER_PATH',
+  'endpoint --marker "$MARKER_PATH"',
+  'same held runs-directory descriptor',
+  'run.credential`, `run.state.json`, and `run.cidfile`',
+  'read_launcher_result.py marker-path',
+  'read_launcher_result.py credential-identity',
+  '--credential-identity "$credential_identity"',
+  'fclonefileat',
+  'no-replace quarantine evidence',
+  'cleanup/replacement quarantine slots',
+  'No live Hermes run, credential handoff, browser capture, or retainable screenshot was performed here'
+]);
+
+const WATERMARK_ANCHORS = Object.freeze([
+  'nonextractable Web Crypto HMAC-SHA-256 key',
+  '`h1:` tag',
+  'Canonical history projections are strict on both shape and value',
+  'existing durable canonical session',
+  'exactly one bounded `GET /api/sessions/:sessionId/messages?limit=500&offset=0` read before the prompt',
+  'computes the transient watermark as `max(messages[].id)`, or zero for an empty history',
+  'exactly one exact prompt',
+  'source-provided event-envelope `session_id`',
+  'source status `complete`',
+  'one explicit canonical history read',
+  'post-watermark user prompt',
+  'HERMTERNAL_LIVE_RECONCILIATION=1',
+  'live-proof ledger prompt count remains zero',
+  'no-match-uncertain',
+  'multiple-matches-ambiguous',
+  'no-submit reconciliation spec'
+]);
+
+const SCREENSHOT_SUPPORT_ANCHORS = Object.freeze([
+  'Task #422 adds only the support surfaces required by the approved correction suite',
+  'compatible e5-lineage support ports',
+  'live-support-parent-compat.mjs',
+  'browser-resolved `timezoneId` `UTC`',
+  '`capture-manifest.json` pins the closed fields',
+  'exact client commit',
+  'official Hermes image digest',
+  LIVE_SCREENSHOT_COMMAND
+]);
+
+const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
+  'INSTANCE=',
+  '--instance',
+  'with_live_credential.py "$credential_file"',
+  'The executed authorized live proof reached',
+  'The disposable instance had no authenticated inference provider'
+]);
+const BROAD_LIVE_COMMAND_PATTERN = new RegExp('bun run --cwd apps/web test:e2e:live(?! --grep)', 'u');
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -62,6 +118,29 @@ describe('live screenshot contract', () => {
     expect(() => inspectPublicPng(png(1440, 960, 'tEXt'), { width: 1440, height: 960 })).toThrow(
       'disallowed tEXt metadata'
     );
+  });
+
+  it('documents both approved proof contracts without stale launcher or run claims', async () => {
+    const readme = await readFile(resolve(process.cwd(), 'tests/live/README.md'), 'utf8');
+
+    for (const anchor of MARKER_AUTHORITY_ANCHORS) expect(readme).toContain(anchor);
+    for (const anchor of WATERMARK_ANCHORS) expect(readme).toContain(anchor);
+    for (const anchor of SCREENSHOT_SUPPORT_ANCHORS) expect(readme).toContain(anchor);
+
+    expect(readme.split('The host is test-only.').length - 1).toBe(1);
+    expect(readme.split('This lane serves the production static build').length - 1).toBe(1);
+    const screenshotCommandPattern = new RegExp(
+      'bun run --cwd apps/web test:e2e:live(?: --grep "[^"]+")?',
+      'gu'
+    );
+    const screenshotCommands = [...readme.matchAll(screenshotCommandPattern)].map(
+      (match) => match[0]
+    );
+    expect(screenshotCommands.length).toBeGreaterThan(0);
+    expect(screenshotCommands.every((command) => command === LIVE_SCREENSHOT_COMMAND)).toBe(true);
+
+    for (const staleText of STALE_LAUNCHER_OR_PROOF_TEXT) expect(readme).not.toContain(staleText);
+    expect(readme).not.toMatch(BROAD_LIVE_COMMAND_PATTERN);
   });
 
   it('publishes only scrubbed and independently approved exact-dimension images', async () => {
