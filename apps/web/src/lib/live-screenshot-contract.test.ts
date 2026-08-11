@@ -225,6 +225,22 @@ async function expectMissing(path: string) {
   await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
 }
 
+function readOptionalGitConfigValue(
+  runGit: (cwd: string, args: string[]) => string,
+  cwd: string,
+  key: string
+) {
+  try {
+    return runGit(cwd, ['config', '--get', key]).trim();
+  } catch (error) {
+    const candidate = error as { status?: unknown; stdout?: unknown; stderr?: unknown };
+    expect(candidate.status).toBe(1);
+    expect(candidate.stdout).toBe('');
+    expect(candidate.stderr).toBe('');
+    return undefined;
+  }
+}
+
 async function mutateSameSizeFile(path: string) {
   const beforeBytes = await readFile(path);
   const beforeStats = await lstat(path);
@@ -427,6 +443,9 @@ describe('live screenshot contract', () => {
     expect(captureSource).toContain('filterOverrides');
     expect(captureSource).toContain('config.worktree');
     expect(captureSource).toContain('include.path');
+    expect(captureSource).toContain('spawnSync');
+    expect(captureSource).toContain('result.stderr');
+    expect(captureSource).toContain("stdio: ['ignore', 'pipe', 'pipe']");
     expect(captureSource).toContain('GIT_NO_REPLACE_OBJECTS');
     expect(captureSource).toContain('--no-replace-objects');
     const trustedGitArgumentsSource = captureSource.slice(
@@ -575,7 +594,9 @@ if (mode === 'clean') {
     runGit(['add', '.gitattributes', 'clean.txt', 'process.txt']);
     runGit(['commit', '--quiet', '-m', 'initial']);
     runGit(['config', 'extensions.worktreeConfig', 'true']);
-    expect(runGit(['config', '--get', 'extensions.worktreeConfig']).trim()).toBe('true');
+    runGit(['config', '--worktree', 'extensions.worktreeConfig', 'false']);
+    expect(runGit(['config', '--local', '--get', 'extensions.worktreeConfig']).trim()).toBe('true');
+    expect(runGit(['config', '--worktree', '--get', 'extensions.worktreeConfig']).trim()).toBe('false');
     runGit(['config', 'filter.local-clean.clean', cleanCommand]);
     runGit(['config', '--worktree', 'filter.worktree-process.process', processCommand]);
     runGit(['config', '--worktree', 'core.fsmonitor', fsmonitorCommand]);
@@ -604,7 +625,9 @@ if (mode === 'clean') {
       expect(after.mtimeMs).toBe(before.mtimeMs);
     }
 
-    // The vulnerable parent path reaches all three independently marked
+    // The common extension stays true while config.worktree overrides its own
+    // extension value to false; the vulnerable parent still reads its
+    // worktree-scoped helpers. It reaches all three independently marked
     // helpers. Explicit renormalization makes clean/process helper reachability
     // deterministic; the fsmonitor response is intentionally minimal, so a Git
     // protocol error is not evidence that the helper was unreachable.
@@ -650,13 +673,107 @@ if (mode === 'clean') {
     await expect(readFile(fsmonitorMarker, 'utf8')).rejects.toThrow();
   });
 
+  it.each([
+    ['absent', undefined],
+    ['false', 'false']
+  ] as const)('ignores malicious config.worktree when common extensions.worktreeConfig is %s', async (mode, configuredValue) => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-worktree-config-ignored-'));
+    temporaryDirectories.push(root);
+    const mainRepository = join(root, 'main');
+    const worktree = join(root, 'worktree');
+    const marker = join(root, 'worktree-filter-ran');
+    const helper = join(root, 'worktree-filter.mjs');
+    await mkdir(mainRepository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (cwd: string, args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      helper,
+      String.raw`import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], 'worktree');
+process.stdin.pipe(process.stdout);
+`,
+      'utf8'
+    );
+    await chmod(helper, 0o700);
+    const cleanCommand = [process.execPath, helper, marker].map(shellQuote).join(' ');
+
+    runGit(mainRepository, ['init', '--quiet']);
+    runGit(mainRepository, ['config', 'user.name', 'synthetic-live-proof']);
+    runGit(mainRepository, ['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(mainRepository, '.gitattributes'), 'tracked.txt filter=worktree-evil\n', 'utf8');
+    await writeFile(join(mainRepository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(mainRepository, ['add', '.gitattributes', 'tracked.txt']);
+    runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktree, 'HEAD']);
+    if (configuredValue !== undefined) {
+      runGit(mainRepository, ['config', 'extensions.worktreeConfig', configuredValue]);
+    }
+    const extensionValue = readOptionalGitConfigValue(
+      runGit,
+      mainRepository,
+      'extensions.worktreeConfig'
+    );
+    if (mode === 'absent') expect(extensionValue).not.toBe('true');
+    else expect(extensionValue).toBe('false');
+
+    const worktreeGitDir = resolve(runGit(worktree, ['rev-parse', '--git-dir']).trim());
+    await writeFile(
+      join(worktreeGitDir, 'config.worktree'),
+      `[filter "worktree-evil"]\n\tclean = ${cleanCommand}\n`,
+      'utf8'
+    );
+    const trackedPath = join(worktree, 'tracked.txt');
+    const trackedBefore = await lstat(trackedPath);
+    await writeFile(trackedPath, 'dirty\n', 'utf8');
+    await utimes(trackedPath, trackedBefore.atimeMs / 1000, trackedBefore.mtimeMs / 1000);
+
+    // The vulnerable parent ignores config.worktree when the common extension
+    // is absent or false, so this renormalization must not reach the helper.
+    try {
+      runGit(worktree, ['add', '--renormalize', 'tracked.txt']);
+    } catch {
+      // A helper protocol failure is acceptable only if the marker proves a reach.
+    }
+    await expectMissing(marker);
+    runGit(worktree, ['reset', '--quiet', '--', 'tracked.txt']);
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const state = captureModule.readLiveScreenshotRepositoryState(worktree);
+    expect(state.topology).toBe('linked-worktree');
+    expect(state.workTree).toBe(await realpath(worktree));
+    expect(state.dirtyTrackedFiles).toContain('tracked.txt');
+    await expectMissing(marker);
+  });
+
   it('rejects repository config includes before helper discovery', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-live-git-include-'));
     temporaryDirectories.push(root);
     const repository = join(root, 'repository');
     const includedConfig = join(root, 'included.config');
+    const marker = join(root, 'included-filter-ran');
+    const helper = join(root, 'included-filter.mjs');
     await mkdir(repository, { mode: 0o700 });
-    await writeFile(includedConfig, '[filter "evil"]\n\tclean = /bin/false\n', 'utf8');
+    const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      helper,
+      String.raw`import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], 'included');
+process.stdin.pipe(process.stdout);
+`,
+      'utf8'
+    );
+    await chmod(helper, 0o700);
+    const cleanCommand = [process.execPath, helper, marker].map(shellQuote).join(' ');
+    await writeFile(includedConfig, `[filter "evil"]\n\tclean = ${cleanCommand}\n`, 'utf8');
     const gitConfiguration = getLiveScreenshotGitChildConfiguration();
     const runGit = (args: string[]) =>
       execFileSync(gitConfiguration.executable, args, {
@@ -669,15 +786,87 @@ if (mode === 'clean') {
     runGit(['init', '--quiet']);
     runGit(['config', 'user.name', 'synthetic-live-proof']);
     runGit(['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(repository, '.gitattributes'), 'tracked.txt filter=evil\n', 'utf8');
     await writeFile(join(repository, 'tracked.txt'), 'clean\n', 'utf8');
-    runGit(['add', 'tracked.txt']);
+    runGit(['add', '.gitattributes', 'tracked.txt']);
     runGit(['commit', '--quiet', '-m', 'initial']);
     runGit(['config', 'include.path', includedConfig]);
+
+    await writeFile(join(repository, 'tracked.txt'), 'dirty\n', 'utf8');
+    try {
+      runGit(['add', '--renormalize', 'tracked.txt']);
+    } catch {
+      // The vulnerable parent may fail after receiving the clean request.
+    }
+    expect(await readFile(marker, 'utf8')).toBe('included');
+    await rm(marker, { force: true });
 
     const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
     expect(() => captureModule.readLiveScreenshotRepositoryState(repository)).toThrow(
       'live screenshot repository topology is unsafe or unsupported'
     );
+    await expectMissing(marker);
+  });
+
+  it('rejects include.path in applicable config.worktree before helper discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-worktree-include-'));
+    temporaryDirectories.push(root);
+    const mainRepository = join(root, 'main');
+    const worktree = join(root, 'worktree');
+    const includedConfig = join(root, 'included.config');
+    const marker = join(root, 'worktree-included-filter-ran');
+    const helper = join(root, 'worktree-included-filter.mjs');
+    await mkdir(mainRepository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (cwd: string, args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      helper,
+      String.raw`import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[2], 'worktree-included');
+process.stdin.pipe(process.stdout);
+`,
+      'utf8'
+    );
+    await chmod(helper, 0o700);
+    const cleanCommand = [process.execPath, helper, marker].map(shellQuote).join(' ');
+    await writeFile(includedConfig, `[filter "evil"]\n\tclean = ${cleanCommand}\n`, 'utf8');
+
+    runGit(mainRepository, ['init', '--quiet']);
+    runGit(mainRepository, ['config', 'user.name', 'synthetic-live-proof']);
+    runGit(mainRepository, ['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(mainRepository, '.gitattributes'), 'tracked.txt filter=evil\n', 'utf8');
+    await writeFile(join(mainRepository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(mainRepository, ['add', '.gitattributes', 'tracked.txt']);
+    runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktree, 'HEAD']);
+    runGit(mainRepository, ['config', 'extensions.worktreeConfig', 'true']);
+    expect(readOptionalGitConfigValue(runGit, mainRepository, 'extensions.worktreeConfig')).toBe('true');
+    runGit(worktree, ['config', '--worktree', 'include.path', includedConfig]);
+    expect(runGit(worktree, ['config', '--worktree', '--get', 'include.path']).trim()).toBe(includedConfig);
+
+    await writeFile(join(worktree, 'tracked.txt'), 'dirty\n', 'utf8');
+    try {
+      runGit(worktree, ['add', '--renormalize', 'tracked.txt']);
+    } catch {
+      // The vulnerable parent may fail after receiving the clean request.
+    }
+    expect(await readFile(marker, 'utf8')).toBe('worktree-included');
+    await rm(marker, { force: true });
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    expect(() => captureModule.readLiveScreenshotRepositoryState(worktree)).toThrow(
+      'live screenshot repository topology is unsafe or unsupported'
+    );
+    await expectMissing(marker);
   });
 
   it('attests an ordinary linked worktree without extensions.worktreeConfig', async () => {
@@ -703,6 +892,13 @@ if (mode === 'clean') {
     runGit(mainRepository, ['add', 'tracked.txt']);
     runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
     runGit(mainRepository, ['worktree', 'add', '--quiet', worktree, 'HEAD']);
+
+    const extensionValue = readOptionalGitConfigValue(
+      runGit,
+      mainRepository,
+      'extensions.worktreeConfig'
+    );
+    expect(extensionValue === undefined || extensionValue === 'false').toBe(true);
 
     const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
     const state = captureModule.readLiveScreenshotRepositoryState(worktree);

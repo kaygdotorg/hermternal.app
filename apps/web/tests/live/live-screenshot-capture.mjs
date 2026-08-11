@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync,
@@ -2072,6 +2072,42 @@ export function getLiveScreenshotRepositoryIdentity(
 }
 
 /**
+ * Run a bounded Git config probe while retaining both output streams. The
+ * synchronous exec helper exposes stderr only after a child failure, so a
+ * successful warning could otherwise be mistaken for a clean configuration
+ * result. A status-1 no-match is accepted only when both streams are empty.
+ *
+ * @param {{ executable: string, environment: NodeJS.ProcessEnv }} childConfiguration
+ * @param {string} cwd
+ * @param {string[]} args
+ * @returns {Buffer | undefined}
+ */
+function runGitConfigProbe(childConfiguration, cwd, args) {
+  const result = spawnSync(childConfiguration.executable, args, {
+    cwd,
+    encoding: 'buffer',
+    env: childConfiguration.environment,
+    maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  if (
+    result.error ||
+    !Number.isInteger(result.status) ||
+    !Buffer.isBuffer(result.stdout) ||
+    !Buffer.isBuffer(result.stderr)
+  ) {
+    rejectRepositoryTopology();
+  }
+  if (result.stderr.length !== 0) rejectRepositoryTopology();
+  if (result.status === 1) {
+    if (result.stdout.length === 0) return undefined;
+    rejectRepositoryTopology();
+  }
+  if (result.status !== 0) rejectRepositoryTopology();
+  return result.stdout;
+}
+
+/**
  * Read the worktree-config extension from the validated common config file.
  * Git rejects `config --worktree` for ordinary linked worktrees unless this
  * extension is enabled, so treating that command failure as a topology error
@@ -2083,57 +2119,35 @@ export function getLiveScreenshotRepositoryIdentity(
  */
 function readCommonWorktreeConfigEnabled(identity, childConfiguration) {
   const commonConfigPath = readCanonicalRepositoryFile(join(identity.commonDir, 'config'));
-  let output;
-  try {
-    output = execFileSync(
-      childConfiguration.executable,
-      [
-        '--git-dir',
-        identity.gitDir,
-        '--work-tree',
-        identity.workTree,
-        '-c',
-        `core.worktree=${identity.workTree}`,
-        '-c',
-        'core.attributesFile=/dev/null',
-        '-c',
-        'core.fsmonitor=false',
-        '-c',
-        'core.hooksPath=/dev/null',
-        '-c',
-        'diff.external=',
-        '-c',
-        'diff.trustExitCode=false',
-        '--no-replace-objects',
-        '--no-optional-locks',
-        'config',
-        '--no-includes',
-        '--file',
-        commonConfigPath,
-        '--bool',
-        '--get',
-        'extensions.worktreeConfig'
-      ],
-      {
-        cwd: identity.workTree,
-        encoding: 'buffer',
-        env: childConfiguration.environment,
-        maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
-        stdio: ['ignore', 'pipe', 'ignore']
-      }
-    );
-  } catch (error) {
-    const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
-    if (
-      candidate.status === 1 &&
-      Buffer.isBuffer(candidate.stdout) &&
-      candidate.stdout.length === 0
-    ) {
-      return false;
-    }
-    rejectRepositoryTopology();
-  }
-  if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
+  const output = runGitConfigProbe(childConfiguration, identity.workTree, [
+    '--git-dir',
+    identity.gitDir,
+    '--work-tree',
+    identity.workTree,
+    '-c',
+    `core.worktree=${identity.workTree}`,
+    '-c',
+    'core.attributesFile=/dev/null',
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'diff.external=',
+    '-c',
+    'diff.trustExitCode=false',
+    '--no-replace-objects',
+    '--no-optional-locks',
+    'config',
+    '--no-includes',
+    '--file',
+    commonConfigPath,
+    '--bool',
+    '--get',
+    'extensions.worktreeConfig'
+  ]);
+  if (output === undefined) return false;
+  if (output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
     rejectRepositoryTopology();
   }
   const text = output.toString('utf8');
@@ -2164,57 +2178,35 @@ function readLocalFilterKeys(identity) {
   const scopes = ['local'];
   if (readCommonWorktreeConfigEnabled(identity, childConfiguration)) scopes.push('worktree');
   for (const scope of scopes) {
-    let output;
-    try {
-      output = execFileSync(
-        childConfiguration.executable,
-        [
-          '--git-dir',
-          identity.gitDir,
-          '--work-tree',
-          identity.workTree,
-          '-c',
-          `core.worktree=${identity.workTree}`,
-          '-c',
-          'core.attributesFile=/dev/null',
-          '-c',
-          'core.fsmonitor=false',
-          '-c',
-          'core.hooksPath=/dev/null',
-          '-c',
-          'diff.external=',
-          '-c',
-          'diff.trustExitCode=false',
-          '--no-replace-objects',
-          '--no-optional-locks',
-          'config',
-          `--${scope}`,
-          '--null',
-          '--name-only',
-          '--get-regexp',
-          '^(include.*|filter\\..+\\.(clean|process))$'
-        ],
-        {
-          cwd: identity.workTree,
-          encoding: 'buffer',
-          env: childConfiguration.environment,
-          maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
-          stdio: ['ignore', 'pipe', 'ignore']
-        }
-      );
-    } catch (error) {
-      const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
-      if (
-        candidate.status === 1 &&
-        Buffer.isBuffer(candidate.stdout) &&
-        candidate.stdout.length === 0
-      ) {
-        continue;
-      }
+    const output = runGitConfigProbe(childConfiguration, identity.workTree, [
+      '--git-dir',
+      identity.gitDir,
+      '--work-tree',
+      identity.workTree,
+      '-c',
+      `core.worktree=${identity.workTree}`,
+      '-c',
+      'core.attributesFile=/dev/null',
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'diff.external=',
+      '-c',
+      'diff.trustExitCode=false',
+      '--no-replace-objects',
+      '--no-optional-locks',
+      'config',
+      `--${scope}`,
+      '--null',
+      '--name-only',
+      '--get-regexp',
+      '^(include.*|filter\\..+\\.(clean|process))$'
+    ]);
+    if (output === undefined) continue;
+    if (output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
       rejectRepositoryTopology();
-    }
-    if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
-      continue;
     }
     const text = output.toString('utf8');
     if (!Buffer.from(text, 'utf8').equals(output) || !text.endsWith('\0')) {
