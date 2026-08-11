@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -120,14 +121,16 @@ class FakePodman:
                 },
                 "State": {"Status": "running"},
             }
-            return launcher.CommandResult(
-                0,
-                container_id + "\n",
-                invocation_receipt=launcher._make_invocation_receipt(
-                    container_id,
-                    name,
-                    labels["io.hermternal.run-id"],
-                ),
+            return launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    0,
+                    container_id + "\n",
+                    invocation_receipt=launcher._make_invocation_receipt(
+                        container_id,
+                        name,
+                        labels["io.hermternal.run-id"],
+                    ),
+                )
             )
         if args[:1] == ("start",):
             target = args[1]
@@ -197,6 +200,26 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
     def make_spec(self, instance: str = "test-one", port: int = 19119):
         return launcher.make_spec(instance, port, roots=self.roots)
+
+    @staticmethod
+    def bound_result(
+        container_id: str,
+        container_name: str,
+        run_id: str,
+    ) -> launcher.CommandResult:
+        """Build one synthetic adapter result with exact-result authority."""
+
+        return launcher._bind_invocation_result(
+            launcher.CommandResult(
+                0,
+                container_id + "\n",
+                invocation_receipt=launcher._make_invocation_receipt(
+                    container_id,
+                    container_name,
+                    run_id,
+                ),
+            )
+        )
 
     @staticmethod
     def ready(endpoint: str, attempts: int, interval: float) -> None:
@@ -330,6 +353,183 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(result.invocation_receipt.container_id, container_id)
         self.assertEqual(result.invocation_receipt.container_name, "hermternal-test-one")
         self.assertEqual(result.invocation_receipt.run_id, run_id)
+
+    def test_receipt_authorization_is_one_shot_and_binds_the_exact_result(self) -> None:
+        spec = self.make_spec()
+        run_id = "b" * 64
+        result = self.bound_result("a" * 64, spec.container, run_id)
+        launcher.invocation_receipt_from_run_result(result, spec=spec, run_id=run_id)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invocation_receipt_from_run_result(result, spec=spec, run_id=run_id)
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+        original = self.bound_result("c" * 64, spec.container, run_id)
+        replacement = self.bound_result("d" * 64, spec.container, run_id)
+        assert replacement.invocation_receipt is not None
+        object.__setattr__(original, "invocation_receipt", replacement.invocation_receipt)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invocation_receipt_from_run_result(original, spec=spec, run_id=run_id)
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+    def test_concurrent_consumers_have_one_successful_authorization(self) -> None:
+        spec = self.make_spec()
+        run_id = "e" * 64
+        result = self.bound_result("f" * 64, spec.container, run_id)
+        barrier = threading.Barrier(2)
+        outcomes: list[bool] = []
+        outcomes_lock = threading.Lock()
+
+        def consume() -> None:
+            barrier.wait()
+            try:
+                launcher.invocation_receipt_from_run_result(
+                    result,
+                    spec=spec,
+                    run_id=run_id,
+                )
+            except launcher.LauncherError:
+                outcome = False
+            else:
+                outcome = True
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=consume) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(outcomes), [False, True])
+
+    def test_validated_view_mutation_fails_before_exact_id_inspect(self) -> None:
+        spec = self.make_spec()
+        run_id = "1" * 64
+        view = launcher.invocation_receipt_from_run_result(
+            self.bound_result("2" * 64, spec.container, run_id),
+            spec=spec,
+            run_id=run_id,
+        )
+        object.__setattr__(view, "container_id", "3" * 64)
+        with mock.patch.object(launcher, "inspect_container") as inspect:
+            with self.assertRaises(launcher.LauncherError) as raised:
+                launcher._inspect_invocation_container(
+                    spec,
+                    view,
+                    lambda *_args: None,
+                    {},
+                    "/usr/bin/podman",
+                    private_path=self.root,
+                    private_identity=(1, 2, 3),
+                )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+        inspect.assert_not_called()
+
+    def test_runner_returns_immutable_snapshot_and_rejects_result_clones(self) -> None:
+        spec = self.make_spec()
+        run_id = "4" * 64
+        results: list[launcher.CommandResult] = []
+
+        def adapter(*_args):
+            result = self.bound_result("5" * 64, spec.container, run_id)
+            results.append(result)
+            return result
+
+        validated = launcher.invoke_runner(
+            adapter,
+            ("synthetic", "run"),
+            {"PATH": "/usr/bin"},
+            1,
+            failure_code="runner_result_invalid",
+        )
+        result = results[0]
+        self.assertIs(type(validated), launcher.ValidatedCommandResult)
+        self.assertIs(type(validated.invocation_receipt), launcher.InvocationSnapshot)
+        with self.assertRaises((AttributeError, TypeError)):
+            object.__setattr__(validated, "invocation_receipt", None)
+
+        for clone in (dataclasses.replace(result), copy.copy(result), copy.deepcopy(result)):
+            with self.subTest(clone=type(clone).__name__):
+                with self.assertRaises(launcher.LauncherError) as raised:
+                    launcher.invocation_receipt_from_run_result(
+                        clone,
+                        spec=spec,
+                        run_id=run_id,
+                    )
+                self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+        class ResultSubclass(launcher.CommandResult):
+            pass
+
+        forged = ResultSubclass(0, "6" * 64 + "\n", invocation_receipt=result.invocation_receipt)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invocation_receipt_from_run_result(
+                forged,
+                spec=spec,
+                run_id=run_id,
+            )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+    def test_pre_registered_result_cannot_cross_runner_invocation(self) -> None:
+        spec = self.make_spec()
+        run_id = "9" * 64
+        foreign = self.bound_result("a" * 64, spec.container, run_id)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                lambda *_args: foreign,
+                ("synthetic", "run"),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="container_start_failed",
+            )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+    def test_two_registered_results_from_one_runner_call_fail_closed(self) -> None:
+        spec = self.make_spec()
+        run_id = "b" * 64
+
+        def adapter(*_args):
+            self.bound_result("c" * 64, spec.container, run_id)
+            return self.bound_result("d" * 64, spec.container, run_id)
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                adapter,
+                ("synthetic", "run"),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="container_start_failed",
+            )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+    def test_nonzero_and_exception_paths_never_create_invocation_authority(self) -> None:
+        spec = self.make_spec()
+        run_id = "7" * 64
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    125,
+                    "8" * 64 + "\n",
+                    invocation_receipt=launcher._make_invocation_receipt(
+                        "8" * 64,
+                        spec.container,
+                        run_id,
+                    ),
+                )
+            )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+        def raises(*_args):
+            raise RuntimeError("synthetic adapter failure")
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                raises,
+                ("synthetic", "run"),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="container_start_failed",
+            )
+        self.assertEqual(raised.exception.code, "container_start_failed")
 
     def test_direct_subprocess_run_rejects_noncanonical_output_without_receipt(self) -> None:
         spec = self.make_spec()
@@ -1979,7 +2179,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         self.assertEqual(len(self.fake.containers), 1)
 
-    def test_new_run_never_adopts_same_name_replacement_after_cloned_receipt(self) -> None:
+    def test_new_run_never_adopts_same_name_replacement_after_registered_receipt_swap(self) -> None:
         spec = self.make_spec()
         original_id: str | None = None
         replacement_id = "d" * 64
@@ -2001,15 +2201,25 @@ class HermesAgentLauncherTests(unittest.TestCase):
                 cidfile.write_text(replacement_id + "\n", encoding="ascii")
                 cidfile.chmod(0o600)
                 self.assertIsNotNone(result.invocation_receipt)
-                # A dataclass clone retaining copied fields is not an adapter
-                # receipt. It must fail before the replacement name is inspected.
+                assert result.invocation_receipt is not None
+                # Even a separately registered receipt for B is bound to B's
+                # own result, not this A invocation. Returning only its receipt
+                # must fail before the replacement name is inspected.
+                replacement_result = launcher._bind_invocation_result(
+                    launcher.CommandResult(
+                        0,
+                        replacement_id + "\n",
+                        invocation_receipt=launcher._make_invocation_receipt(
+                            replacement_id,
+                            spec.container,
+                            result.invocation_receipt.run_id,
+                        ),
+                    )
+                )
                 return launcher.CommandResult(
                     0,
                     replacement_id + "\n",
-                    invocation_receipt=dataclasses.replace(
-                        result.invocation_receipt,
-                        container_id=replacement_id,
-                    ),
+                    invocation_receipt=replacement_result.invocation_receipt,
                 )
             return result
 

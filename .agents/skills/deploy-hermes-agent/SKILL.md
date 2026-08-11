@@ -174,16 +174,18 @@ immutable container when its data proof remains valid, or retains bounded
 hook inside evidence cleanup and proves marker, state, credential, and cidfile
 absence before reporting removal. Launcher command vectors are validated before
 engine dispatch; the executable and each argument must be a non-empty NUL-free
-string. A new detached run must receive a trusted detached-run adapter receipt before
-it can select any immutable container ID. The direct local subprocess adapter
-parses the canonical full ID inside its own successful `run` call; the offline
-FakePodman adapter creates an equivalent receipt from the synthetic engine
-object. An arbitrary runner result has no receipt capability. Authorization
-is bound to the exact adapter-created receipt object and private immutable field
-snapshot; dataclass replacement, reconstruction, copy/deepcopy, subclassing,
-or field mutation cannot retarget it. The receipt ID must equal the strict
-stdout claim and private cidfile ID, after which the launcher inspects only that
-immutable receipt ID and validates its labels,
+string. A new detached run must receive a trusted detached-run adapter receipt bound
+to the exact successful `CommandResult` before it can select any immutable
+container ID. Validation consumes that one-shot authority and returns a private
+immutable snapshot; the adapter-owned result is never returned to lifecycle
+callers. The direct local subprocess adapter parses the canonical full ID inside
+its own successful `run` call; the offline FakePodman adapter creates an
+equivalent bound result from the synthetic engine object. An arbitrary runner
+result has no receipt capability. A receipt, copied result, separately
+registered matching receipt, dataclass replacement, reconstruction,
+copy/deepcopy, subclass, or field mutation therefore fails closed. The receipt
+ID must equal the strict stdout claim and private cidfile ID, after which the
+launcher inspects only that immutable snapshot ID and validates its labels,
 image, data mount, running state, and loopback mapping. It never inspects the
 mutable deterministic name to discover or adopt an ID. Stdout is never
 authoritative for inspect, publication, or cleanup. A name replacement carrying
@@ -194,10 +196,12 @@ fails closed and preserves private evidence. Nonzero results preserve
 `container_start_failed` without selecting a cidfile-only ID. Runner exceptions
 or invalid/untrusted results never adopt or destructively remove a cidfile-only
 ID; they retain bounded `cleanup_failed` evidence with
-`UNPROVEN_CONTAINER_ID` and leave the cidfile as private evidence. An ambiguous
-exact-ID inspect or exists response also preserves marker, state, credential,
-and cidfile evidence. An unknown tombstone returns `stop_evidence_unproven`
-without contacting Podman; it never sends the sentinel or a cidfile-only ID.
+`UNPROVEN_CONTAINER_ID` and retain any existing cidfile as private evidence. A
+name-based `container_exists` call is only a pre-run collision gate; it never
+discovers or adopts an ID. An ambiguous exact-ID inspect preserves marker,
+state, credential, and cidfile evidence. An unknown tombstone returns
+`stop_evidence_unproven` without contacting Podman; it never sends the sentinel
+or a cidfile-only ID.
 
 The `start-many` result contains bounded batch status and marker metadata, not
 handoff endpoint or credential metadata. Only after the guarded mutation

@@ -25,6 +25,7 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -32,7 +33,7 @@ import urllib.request
 import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping, NamedTuple, Sequence
 
 
 if str(Path(__file__).resolve().parent) not in sys.path:
@@ -139,14 +140,12 @@ class OwnedFileError(LauncherError):
 
 @dataclass(frozen=True)
 class InvocationReceipt:
-    """Trusted adapter proof captured by the detached-run operation.
+    """Untrusted receipt-shaped data emitted by an approved adapter.
 
-    Stdout, cidfiles, and mutable engine names are claims. Only the direct local
-    subprocess adapter or an explicitly approved synthetic adapter may create a
-    receipt through ``_make_invocation_receipt``. Authorization is bound to this
-    exact object and an immutable field snapshot kept in a private weak registry;
-    dataclass reconstruction, copying, subclassing, or field mutation cannot
-    manufacture a second receipt for a different container.
+    Stdout, cidfiles, and mutable engine names are claims. Only an approved
+    adapter may attach this object to a result with ``_bind_invocation_result``.
+    The binding is to that exact ``CommandResult`` and is consumed once. A
+    receipt object, its fields, or a copy is never an authority by itself.
     """
 
     container_id: str
@@ -154,24 +153,54 @@ class InvocationReceipt:
     run_id: str
 
     def __copy__(self) -> "InvocationReceipt":
-        """Return an unregistered copy that cannot authorize a lifecycle bind."""
+        """Return an unbound copy; receipt trust is never copied."""
 
         return InvocationReceipt(self.container_id, self.container_name, self.run_id)
 
     def __deepcopy__(self, memo: dict[int, object]) -> "InvocationReceipt":
-        """Return an unregistered deep copy; receipt trust is never copied."""
+        """Return an unbound deep copy; receipt trust is never copied."""
 
         del memo
         return InvocationReceipt(self.container_id, self.container_name, self.run_id)
 
 
-# Keep only weak references so receipts do not accumulate for the process
-# lifetime. The snapshot is paired with object identity and checked on every
-# lifecycle bind, so a forged or mutated object cannot reuse adapter authority.
-_TRUSTED_INVOCATION_RECEIPTS: dict[
-    int,
-    tuple[weakref.ReferenceType[InvocationReceipt], tuple[str, str, str]],
-] = {}
+@dataclass(frozen=True)
+class InvocationSnapshot:
+    """Private immutable value captured when one raw result is consumed.
+
+    The object is still checked against its weak identity registry before any
+    exact-ID inspect. This protects the lifecycle boundary even if a caller
+    uses ``object.__setattr__`` against a frozen dataclass.
+    """
+
+    container_id: str
+    container_name: str
+    run_id: str
+
+
+@dataclass(frozen=True)
+class _InvocationResultBinding:
+    result: weakref.ReferenceType["CommandResult"]
+    receipt: InvocationReceipt
+    raw_fields: tuple[int, str, str]
+    snapshot: tuple[str, str, str]
+    invocation_token: object | None
+
+
+@dataclass(frozen=True)
+class _InvocationObjectBinding:
+    value: weakref.ReferenceType[object]
+    snapshot: tuple[str, str, str]
+
+
+# These registries are intentionally separate. The first binds authority to the
+# adapter's exact raw result and is consumed by result validation. The second
+# binds a validated internal snapshot or compatibility view until exact-ID
+# inspection consumes it. A lock makes both transfers one-shot under races.
+_INVOCATION_BINDING_LOCK = threading.RLock()
+_TRUSTED_INVOCATION_RESULTS: dict[int, _InvocationResultBinding] = {}
+_TRUSTED_INVOCATION_SNAPSHOTS: dict[int, _InvocationObjectBinding] = {}
+_TRUSTED_INVOCATION_VIEWS: dict[int, _InvocationObjectBinding] = {}
 
 
 @dataclass(frozen=True)
@@ -182,28 +211,195 @@ class CommandResult:
     invocation_receipt: InvocationReceipt | None = None
 
 
+class ValidatedCommandResult(NamedTuple):
+    """Immutable result returned after the untrusted runner boundary."""
+
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    invocation_receipt: InvocationSnapshot | None = None
+
+
+_ACTIVE_INVOCATION_TOKEN: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "hermternal_active_invocation_token",
+    default=None,
+)
+_ACTIVE_INVOCATION_RESULTS: contextvars.ContextVar[tuple[CommandResult, ...]] = contextvars.ContextVar(
+    "hermternal_active_invocation_results",
+    default=(),
+)
+
+
 def _make_invocation_receipt(
     container_id: str,
     container_name: str,
     run_id: str,
 ) -> InvocationReceipt:
-    """Create one adapter-only receipt bound to its exact object identity."""
+    """Create receipt-shaped data; only result binding grants authority."""
 
-    receipt = InvocationReceipt(container_id, container_name, run_id)
-    key = id(receipt)
-    snapshot = (container_id, container_name, run_id)
+    return InvocationReceipt(container_id, container_name, run_id)
 
-    def remove_dead_receipt(
-        reference: weakref.ReferenceType[InvocationReceipt],
+
+def _bind_invocation_result(result: CommandResult) -> CommandResult:
+    """Bind one approved adapter result to its exact one-shot receipt.
+
+    The raw result remains an adapter-owned object. Validation consumes this
+    entry before returning a ``ValidatedCommandResult`` snapshot, so a copied
+    result or separately registered matching receipt cannot substitute for it.
+    When called inside ``invoke_runner``, the binding also carries that call's
+    private token; a result prepared by another runner call cannot cross the
+    direct-invocation boundary even when its fields match.
+    """
+
+    if (
+        type(result) is not CommandResult
+        or type(result.returncode) is not int
+        or result.returncode != 0
+        or type(result.invocation_receipt) is not InvocationReceipt
+    ):
+        raise LauncherError("container_invocation_unproven")
+    receipt = result.invocation_receipt
+    assert receipt is not None
+    try:
+        snapshot = (receipt.container_id, receipt.container_name, receipt.run_id)
+    except (AttributeError, TypeError):
+        raise LauncherError("container_invocation_unproven") from None
+    if any(type(value) is not str for value in snapshot):
+        raise LauncherError("container_invocation_unproven")
+    invocation_token = _ACTIVE_INVOCATION_TOKEN.get()
+    key = id(result)
+
+    def remove_dead_result(
+        reference: weakref.ReferenceType[CommandResult],
         *,
         key: int = key,
     ) -> None:
-        current = _TRUSTED_INVOCATION_RECEIPTS.get(key)
-        if current is not None and current[0] is reference:
-            _TRUSTED_INVOCATION_RECEIPTS.pop(key, None)
+        with _INVOCATION_BINDING_LOCK:
+            current = _TRUSTED_INVOCATION_RESULTS.get(key)
+            if current is not None and current.result is reference:
+                _TRUSTED_INVOCATION_RESULTS.pop(key, None)
 
-    _TRUSTED_INVOCATION_RECEIPTS[key] = (weakref.ref(receipt, remove_dead_receipt), snapshot)
-    return receipt
+    binding = _InvocationResultBinding(
+        result=weakref.ref(result, remove_dead_result),
+        receipt=receipt,
+        raw_fields=(result.returncode, result.stdout, result.stderr),
+        snapshot=snapshot,
+        invocation_token=invocation_token,
+    )
+    # Install only one binding for this exact result. Replacing a binding would
+    # permit a second adapter result to inherit the first invocation's authority.
+    with _INVOCATION_BINDING_LOCK:
+        if key in _TRUSTED_INVOCATION_RESULTS:
+            raise LauncherError("container_invocation_unproven")
+        _TRUSTED_INVOCATION_RESULTS[key] = binding
+    if invocation_token is not None:
+        _ACTIVE_INVOCATION_RESULTS.set(_ACTIVE_INVOCATION_RESULTS.get() + (result,))
+    return result
+
+
+def _register_invocation_object(
+    value: InvocationSnapshot | InvocationReceipt,
+    snapshot: tuple[str, str, str],
+    registry: dict[int, _InvocationObjectBinding],
+) -> None:
+    """Register one internal object for exact, one-shot downstream use."""
+
+    key = id(value)
+
+    def remove_dead_value(
+        reference: weakref.ReferenceType[object],
+        *,
+        key: int = key,
+        registry: dict[int, _InvocationObjectBinding] = registry,
+    ) -> None:
+        with _INVOCATION_BINDING_LOCK:
+            current = registry.get(key)
+            if current is not None and current.value is reference:
+                registry.pop(key, None)
+
+    reference = weakref.ref(value, remove_dead_value)
+    with _INVOCATION_BINDING_LOCK:
+        if key in registry:
+            raise LauncherError("container_invocation_unproven")
+        registry[key] = _InvocationObjectBinding(reference, snapshot)
+
+
+def _claim_invocation_result(result: CommandResult) -> _InvocationResultBinding | None:
+    """Consume the exact raw result binding, including failed attempts."""
+
+    key = id(result)
+    with _INVOCATION_BINDING_LOCK:
+        binding = _TRUSTED_INVOCATION_RESULTS.pop(key, None)
+    if binding is None:
+        return None
+    if binding.result() is not result:
+        raise LauncherError("container_invocation_unproven")
+    return binding
+
+
+def _discard_invocation_result(result: object) -> None:
+    """Burn a direct result when a later boundary fails before validation."""
+
+    if type(result) is CommandResult:
+        try:
+            _claim_invocation_result(result)
+        except LauncherError:
+            pass
+
+
+def _discard_active_invocation_results() -> None:
+    """Burn every adapter result produced during a failed runner call."""
+
+    for result in _ACTIVE_INVOCATION_RESULTS.get():
+        _discard_invocation_result(result)
+
+
+def _validated_snapshot_values(
+    value: InvocationSnapshot | InvocationReceipt,
+    *,
+    spec: "InstanceSpec",
+    run_id: str | None,
+    consume: bool,
+) -> tuple[str, str, str]:
+    """Return only the registry snapshot for a validated exact-ID value."""
+
+    if type(value) is InvocationSnapshot:
+        registry = _TRUSTED_INVOCATION_SNAPSHOTS
+    elif type(value) is InvocationReceipt:
+        registry = _TRUSTED_INVOCATION_VIEWS
+    else:
+        raise LauncherError("container_invocation_unproven")
+    key = id(value)
+    with _INVOCATION_BINDING_LOCK:
+        binding = registry.get(key)
+        if binding is None or binding.value() is not value:
+            raise LauncherError("container_invocation_unproven")
+        try:
+            fields = (value.container_id, value.container_name, value.run_id)
+        except (AttributeError, TypeError):
+            registry.pop(key, None)
+            raise LauncherError("container_invocation_unproven") from None
+        if fields != binding.snapshot:
+            registry.pop(key, None)
+            raise LauncherError("container_invocation_unproven")
+        if consume:
+            registry.pop(key, None)
+        snapshot = binding.snapshot
+    if snapshot[1] != spec.container or (run_id is not None and snapshot[2] != run_id):
+        with _INVOCATION_BINDING_LOCK:
+            current = registry.get(key)
+            if current is binding:
+                registry.pop(key, None)
+        raise LauncherError("container_invocation_unproven")
+    try:
+        validate_container_id(snapshot[0])
+    except LauncherError:
+        with _INVOCATION_BINDING_LOCK:
+            current = registry.get(key)
+            if current is binding:
+                registry.pop(key, None)
+        raise LauncherError("container_invocation_unproven") from None
+    return snapshot
 
 
 @dataclass(frozen=True)
@@ -541,11 +737,11 @@ def run_command(command: Sequence[str], environment: Mapping[str, str], timeout:
         # secret-free instead of leaking Python's raw exception text.
         return CommandResult(124, "")
     result = CommandResult(completed.returncode, _bounded_text(completed.stdout))
-    return CommandResult(
-        result.returncode,
-        result.stdout,
-        result.stderr,
-        _direct_run_receipt(values, result),
+    receipt = _direct_run_receipt(values, result)
+    if receipt is None:
+        return result
+    return _bind_invocation_result(
+        CommandResult(result.returncode, result.stdout, result.stderr, receipt)
     )
 
 
@@ -578,15 +774,28 @@ def _revalidate_active_parent() -> None:
         )
 
 
-def _validate_command_result(result: object, *, failure_code: str) -> CommandResult:
-    """Normalize every untrusted runner result before any caller reads it."""
+def _validate_command_result(
+    result: object,
+    *,
+    failure_code: str,
+    invocation_token: object | None = None,
+) -> ValidatedCommandResult:
+    """Consume one raw result and return an immutable caller-owned snapshot.
+
+    The exact adapter result is claimed before field validation. Any malformed
+    or mutated attempt therefore burns the one-shot binding instead of leaving a
+    reusable receipt behind. A normal result returns a tuple-like immutable
+    snapshot; a trusted detached-run result transfers only its private snapshot,
+    never the adapter-owned object or receipt.
+    """
 
     # Reject subclasses before touching fields: an injected adapter can expose
-    # properties that raise or change between reads, while the exact dataclass
-    # has only ordinary immutable fields. Return a base snapshot so callers do
-    # not retain an adapter-owned object after this boundary.
+    # properties that raise or change between reads. The exact raw dataclass is
+    # only an input boundary; callers receive ``ValidatedCommandResult`` below.
     if type(result) is not CommandResult:
         raise LauncherError(failure_code)
+    binding = _claim_invocation_result(result)
+    active_results = _ACTIVE_INVOCATION_RESULTS.get()
     try:
         returncode = result.returncode
         stdout = result.stdout
@@ -598,12 +807,46 @@ def _validate_command_result(result: object, *, failure_code: str) -> CommandRes
             if type(output) is not str or len(output.encode("utf-8")) > MAX_COMMAND_BYTES:
                 raise LauncherError(failure_code)
         if invocation_receipt is not None and type(invocation_receipt) is not InvocationReceipt:
-            raise LauncherError(failure_code)
+            raise LauncherError("container_invocation_unproven")
+        if binding is None:
+            if invocation_receipt is not None:
+                raise LauncherError("container_invocation_unproven")
+            snapshot: InvocationSnapshot | None = None
+        else:
+            if (
+                binding.invocation_token is not invocation_token
+                or (
+                    invocation_token is not None
+                    and (len(active_results) != 1 or active_results[0] is not result)
+                )
+            ):
+                raise LauncherError("container_invocation_unproven")
+            if (
+                invocation_receipt is not binding.receipt
+                or (returncode, stdout, stderr) != binding.raw_fields
+            ):
+                raise LauncherError("container_invocation_unproven")
+            try:
+                receipt_fields = (
+                    invocation_receipt.container_id,
+                    invocation_receipt.container_name,
+                    invocation_receipt.run_id,
+                )
+            except (AttributeError, TypeError):
+                raise LauncherError("container_invocation_unproven") from None
+            if receipt_fields != binding.snapshot:
+                raise LauncherError("container_invocation_unproven")
+            snapshot = InvocationSnapshot(*binding.snapshot)
+            _register_invocation_object(
+                snapshot,
+                binding.snapshot,
+                _TRUSTED_INVOCATION_SNAPSHOTS,
+            )
     except LauncherError:
         raise
     except (AttributeError, MemoryError, UnicodeEncodeError, ValueError):
         raise LauncherError(failure_code) from None
-    return CommandResult(returncode, stdout, stderr, invocation_receipt)
+    return ValidatedCommandResult(returncode, stdout, stderr, snapshot)
 
 
 def invoke_runner(
@@ -615,13 +858,15 @@ def invoke_runner(
     failure_code: str,
     private_path: Path | None = None,
     private_identity: DirectoryIdentity | None = None,
-) -> CommandResult:
+) -> ValidatedCommandResult:
     """Treat every injected engine boundary as an untrusted bounded call.
 
     Podman accepts a pathname rather than a held directory descriptor. Callers
     that dispatch a bind therefore pass the descriptor snapshot for an
     immediate pre/post pathname identity check; a replacement becomes a
-    bounded launcher failure instead of silently changing the host tree.
+    bounded launcher failure instead of silently changing the host tree. A
+    successful call returns an immutable result snapshot, never the adapter's
+    mutable result object.
     """
 
     _revalidate_active_parent()
@@ -629,24 +874,56 @@ def invoke_runner(
         if private_path is None or private_identity is None:
             raise LauncherError(failure_code)
         _revalidate_private_directory_identity(private_path, private_identity)
+
+    # A token is scoped to this one runner call. Approved adapters bind their
+    # exact returned result to it; a pre-registered result from another call,
+    # even with matching fields, cannot cross this invocation boundary.
+    invocation_token = object()
+    token_handle = _ACTIVE_INVOCATION_TOKEN.set(invocation_token)
+    results_handle = _ACTIVE_INVOCATION_RESULTS.set(())
     try:
-        result = runner(command, environment, timeout)
-    except BaseException:
-        # Recheck even when the adapter raises: a runner can replace the
-        # private parent after creating a resource and before reporting error.
+        try:
+            result = runner(command, environment, timeout)
+        except BaseException:
+            # Recheck even when the adapter raises: a runner can replace the
+            # private parent after creating a resource and before reporting error.
+            _discard_active_invocation_results()
+            try:
+                _revalidate_active_parent()
+                if private_path is not None and private_identity is not None:
+                    _revalidate_private_directory_identity(private_path, private_identity)
+            except BaseException as secondary:
+                primary = LauncherError(failure_code)
+                _attach_secondary_failure(primary, secondary)
+                raise primary from None
+            raise LauncherError(failure_code) from None
         try:
             _revalidate_active_parent()
             if private_path is not None and private_identity is not None:
                 _revalidate_private_directory_identity(private_path, private_identity)
-        except BaseException as secondary:
-            primary = LauncherError(failure_code)
-            _attach_secondary_failure(primary, secondary)
-            raise primary from None
-        raise LauncherError(failure_code) from None
-    _revalidate_active_parent()
-    if private_path is not None and private_identity is not None:
-        _revalidate_private_directory_identity(private_path, private_identity)
-    return _validate_command_result(result, failure_code=failure_code)
+        except BaseException:
+            # A direct adapter result cannot remain a reusable capability when
+            # the surrounding pathname fence fails before normal validation.
+            _discard_active_invocation_results()
+            _discard_invocation_result(result)
+            raise
+        try:
+            validated = _validate_command_result(
+                result,
+                failure_code=failure_code,
+                invocation_token=invocation_token,
+            )
+        except BaseException:
+            _discard_active_invocation_results()
+            _discard_invocation_result(result)
+            raise
+        active_results = _ACTIVE_INVOCATION_RESULTS.get()
+        if active_results and (len(active_results) != 1 or active_results[0] is not result):
+            _discard_active_invocation_results()
+        return validated
+    finally:
+        _ACTIVE_INVOCATION_RESULTS.reset(results_handle)
+        _ACTIVE_INVOCATION_TOKEN.reset(token_handle)
 
 
 def podman_path() -> str:
@@ -1569,56 +1846,43 @@ def invocation_receipt_from_run_result(
     spec: InstanceSpec,
     run_id: str,
 ) -> InvocationReceipt:
-    """Require the exact adapter-produced receipt for one detached run.
+    """Consume one exact result and return a guarded compatibility view.
 
-    A normal ``CommandResult`` is deliberately insufficient. An arbitrary
-    runner can copy labels, stdout, and cidfile bytes after replacing a name,
-    while dataclass replacement, copying, reconstruction, subclassing, or
-    field mutation can otherwise imitate the receipt shape. The private weak
-    registry binds authorization to the original object and field snapshot, so
-    every such clone or forgery fails closed before any engine target is
-    inspected.
+    The returned receipt is deliberately not the authority used by lifecycle
+    code. It is a detached view over the immutable snapshot produced by
+    ``_validate_command_result`` and is registered for one exact downstream
+    inspect only. Mutating it, copying it, or substituting another registered
+    receipt fails before an engine target is selected. Internal lifecycle paths
+    retain the immutable ``InvocationSnapshot`` on ``ValidatedCommandResult``.
     """
 
-    receipt = result.invocation_receipt
-    if type(receipt) is not InvocationReceipt:
+    validated = _validate_command_result(
+        result,
+        failure_code="container_invocation_unproven",
+    )
+    snapshot = validated.invocation_receipt
+    if type(snapshot) is not InvocationSnapshot:
         raise LauncherError("container_invocation_unproven")
-    registered = _TRUSTED_INVOCATION_RECEIPTS.get(id(receipt))
-    if registered is None or registered[0]() is not receipt:
-        raise LauncherError("container_invocation_unproven")
-    try:
-        fields = (receipt.container_id, receipt.container_name, receipt.run_id)
-    except (AttributeError, TypeError):
-        raise LauncherError("container_invocation_unproven") from None
-    if fields != registered[1]:
-        # Frozen dataclasses can still be altered with object-level reflection;
-        # compare the adapter snapshot so field forgery cannot retarget the
-        # exact object that originally carried the receipt.
-        raise LauncherError("container_invocation_unproven")
-    if (
-        type(receipt.container_id) is not str
-        or type(receipt.container_name) is not str
-        or type(receipt.run_id) is not str
-        or receipt.container_name != spec.container
-        or receipt.run_id != run_id
-    ):
-        raise LauncherError("container_invocation_unproven")
-    try:
-        validate_container_id(receipt.container_id)
-    except LauncherError:
-        raise LauncherError("container_invocation_unproven") from None
-    return receipt
+    values = _validated_snapshot_values(
+        snapshot,
+        spec=spec,
+        run_id=run_id,
+        consume=True,
+    )
+    view = InvocationReceipt(*values)
+    _register_invocation_object(view, values, _TRUSTED_INVOCATION_VIEWS)
+    return view
 
 
-def container_id_from_run_result(result: CommandResult) -> str:
+def container_id_from_run_result(result: CommandResult | ValidatedCommandResult) -> str:
     """Parse one strict claimed ID line from a detached-run result.
 
     Detached ``podman run`` stdout is caller-visible claim data, not an
     authoritative identity witness or fallback source. Require exactly one full
     lowercase ID line with one LF so missing, truncated, or extra output fails
-    closed. Lifecycle callers compare this claim with the exact trusted adapter
-    receipt and private cidfile, then inspect only the receipt ID; stdout never
-    chooses an engine target.
+    closed. Lifecycle callers compare this claim with the exact trusted
+    invocation snapshot and private cidfile, then inspect only the snapshot ID;
+    stdout never chooses an engine target.
     """
 
     if result.returncode != 0:
@@ -2193,7 +2457,7 @@ def require_loopback_endpoint_mapping(spec: InstanceSpec, document: dict[str, ob
 
 def _inspect_invocation_container(
     spec: InstanceSpec,
-    receipt: InvocationReceipt,
+    receipt: InvocationSnapshot | InvocationReceipt,
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
@@ -2201,28 +2465,34 @@ def _inspect_invocation_container(
     private_path: Path,
     private_identity: DirectoryIdentity,
 ) -> tuple[dict[str, object], RecoverySnapshot]:
-    """Inspect only the immutable ID supplied by the approved run adapter.
+    """Inspect only a one-shot registry-bound immutable invocation ID.
 
     The deterministic name is checked as ordinary metadata after selecting the
     adapter's immutable ID; it is never an inspect target or an ID-discovery
-    fallback. If the adapter cannot attach this receipt, callers fail closed
-    before this function is reached. A missing or replaced immutable object is
-    therefore uncertainty, not permission to inspect a same-name object.
+    fallback. The snapshot or compatibility view is consumed and checked before
+    ``inspect_container`` runs, so object-level field mutation, reconstruction,
+    copying, subclassing, and same-name replacement cannot select a target.
     """
 
+    container_id, _, invocation_run_id = _validated_snapshot_values(
+        receipt,
+        spec=spec,
+        run_id=None,
+        consume=True,
+    )
     document = inspect_container(
         spec,
         runner,
         environment,
         executable,
-        target=receipt.container_id,
+        target=container_id,
         private_path=private_path,
         private_identity=private_identity,
     )
-    snapshot = recovery_snapshot(spec, document, run_id=receipt.run_id)
+    snapshot = recovery_snapshot(spec, document, run_id=invocation_run_id)
     if snapshot.status != "running":
         raise LauncherError("container_not_running")
-    if snapshot.container_id != receipt.container_id:
+    if snapshot.container_id != container_id:
         raise LauncherError("container_replaced")
     return document, snapshot
 
@@ -4292,8 +4562,8 @@ def _start_instance_with_parent(
         # may raise after the engine has created a container and written cidfile.
         # Such a path has no trustworthy subprocess result: do not read, adopt,
         # or destructively remove a cidfile-only ID. The outer failure path
-        # retains an UNPROVEN_CONTAINER_ID tombstone and leaves the cidfile as
-        # bounded evidence for an explicit later investigation.
+        # retains an UNPROVEN_CONTAINER_ID tombstone and preserves any existing
+        # cidfile as bounded evidence for an explicit later investigation.
         started = invoke_runner(
             runner,
             run_arguments(spec, podman, run_id, cidfile=paths.cidfile, data_path=data_path),
@@ -4310,6 +4580,15 @@ def _start_instance_with_parent(
             raise LauncherError("container_start_failed")
         # Stdout is only a strict claimed-output check. It is not an identity
         # source: the approved adapter witness below supplies the immutable ID.
+        invocation_receipt = started.invocation_receipt
+        if type(invocation_receipt) is not InvocationSnapshot:
+            raise LauncherError("container_invocation_unproven")
+        invocation_values = _validated_snapshot_values(
+            invocation_receipt,
+            spec=spec,
+            run_id=run_id,
+            consume=False,
+        )
         claimed_stdout_id = container_id_from_run_result(started)
         _revalidate_private_parent_path(paths.marker, runs_parent_fd, code="runs_dir")
         try:
@@ -4319,20 +4598,15 @@ def _start_instance_with_parent(
             raise
         cidfile_identity = cidfile_proof.identity
         cidfile_generation = cidfile_proof.generation
-        invocation_receipt = invocation_receipt_from_run_result(
-            started,
-            spec=spec,
-            run_id=run_id,
-        )
         if (
-            claimed_stdout_id != invocation_receipt.container_id
-            or cidfile_proof.container_id != invocation_receipt.container_id
+            claimed_stdout_id != invocation_values[0]
+            or cidfile_proof.container_id != invocation_values[0]
         ):
-            # Claims are compared only with the adapter-produced immutable ID.
-            # Never inspect, bind, publish, or remove either claimed ID when it
-            # disagrees with that receipt.
+            # Claims are compared only with the adapter-produced immutable ID
+            # snapshot. Never inspect, bind, publish, or remove either claimed ID
+            # when it disagrees with that snapshot.
             raise LauncherError("container_id_mismatch")
-        run_container_id = invocation_receipt.container_id
+        run_container_id = invocation_values[0]
         invocation_document, invocation_snapshot = _inspect_invocation_container(
             spec,
             invocation_receipt,

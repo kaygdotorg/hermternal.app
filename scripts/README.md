@@ -455,23 +455,25 @@ cleanup fails, the private marker and state are retained as a bounded
 `cleanup_failed` tombstone. A data-path proof failure can block container
 removal, so the tombstone preserves the exact ID and stable data witness for a
 later retry after the original tree is restored; it never authorizes the
-replacement tree. The receipt is authorized only as the exact object created
-inside the adapter and its private immutable field snapshot; it is not a field
-that an arbitrary runner may copy. Dataclass replacement, reconstruction,
-copy/deepcopy, subclassing, or field mutation therefore fails closed. The direct
-local subprocess adapter parses the canonical detached-run ID inside its own
-call, while the offline FakePodman adapter creates a receipt from the synthetic
+replacement tree. The receipt is authorized only for the exact adapter-created `CommandResult`
+and is consumed once; validation returns a private immutable snapshot rather
+than the adapter-owned object. A receipt, copied result, separately registered
+matching receipt, dataclass replacement, reconstruction, copy/deepcopy,
+subclass, or field mutation therefore fails closed. The direct local subprocess
+adapter parses the canonical detached-run ID inside its own call, while the
+offline FakePodman adapter creates an equivalent bound result from the synthetic
 engine object at run time. The ordinary subprocess result, stdout, cidfile,
 mutable name, and copied labels do not prove causality by themselves. If no
-trusted receipt is present, the
-launcher fails with `container_invocation_unproven` before any post-run inspect,
-publication, start, stop, or rm target is selected. It retains the cidfile and a
-bounded `cleanup_failed` tombstone with `UNPROVEN_CONTAINER_ID`. If an exact-ID
-inspect or exists query is ambiguous, cleanup preserves the marker, state,
-credential, and cidfile evidence instead of treating absence as proven. Stop
-never sends the sentinel or a cidfile-only ID to Podman; an unknown tombstone
-returns `stop_evidence_unproven` without contacting the engine. This strict
-marker path does not expose a broad purge operation.
+trusted receipt is present, the launcher fails with
+`container_invocation_unproven` before any post-run inspect, publication, start,
+stop, or rm target is selected. It retains any existing cidfile and a bounded
+`cleanup_failed` tombstone with `UNPROVEN_CONTAINER_ID`. Name-based
+`container_exists` is only a pre-run collision gate; it never discovers or
+adopts an ID. If an exact-ID inspect is ambiguous, cleanup preserves the marker,
+state, credential, and cidfile evidence instead of treating absence as proven.
+Stop never sends the sentinel or a cidfile-only ID to Podman; an unknown
+tombstone returns `stop_evidence_unproven` without contacting the engine. This
+strict marker path does not expose a broad purge operation.
 Active rebind of an already-running container is intentionally unsupported;
 ordinary running-container reuse is non-destructive. Cleanup never runs a
 broad prune or glob and never removes data implicitly.
@@ -479,23 +481,25 @@ broad prune or glob and never removes data implicitly.
 An existing container is reused only after its launcher labels prove the exact
 instance, loopback port, and immutable image identity. A stopped owned
 container is started only after the requested port is available, then readiness
-is checked. A new run must receive a trusted detached-run adapter receipt before
-it can select any immutable container ID. The receipt ID must equal the strict
-canonical stdout claim and the private cidfile ID; stdout and cidfile remain
-claims, never identity sources. The launcher then inspects only that receipt ID
-and validates the copied labels, image, data mount, running state, and loopback
-mapping. It never inspects the mutable deterministic name to discover or adopt
-an ID. A hostile runner can replace the name with B and copy every label while
-returning B in stdout and the cidfile; without an independent receipt for the
-actual A invocation, this fails with `container_id_mismatch` or
+is checked. A new run must receive a trusted detached-run adapter receipt bound
+to the exact successful `CommandResult`; validation consumes that one-shot
+authority and returns an immutable downstream snapshot before selecting any
+immutable container ID. The receipt ID must equal the strict canonical stdout
+claim and the private cidfile ID; stdout and cidfile remain claims, never
+identity sources. The launcher then inspects only that snapshot ID and validates
+the copied labels, image, data mount, running state, and loopback mapping. It
+never inspects the mutable deterministic name to discover or adopt an ID. A
+hostile runner can replace the name with B and copy every label while returning
+B in stdout and the cidfile; without an independent receipt for the actual A
+invocation, this fails with `container_id_mismatch` or
 `container_invocation_unproven` before B reaches inspect, publication, start,
 stop, or rm. A nonzero subprocess result preserves `container_start_failed` and
 never selects a cidfile-only ID. A runner exception or any untrusted/invalid
 result likewise never adopts or destructively removes a cidfile-only ID: it
 retains bounded `cleanup_failed` evidence with `UNPROVEN_CONTAINER_ID` and
-leaves the cidfile for later investigation. A malformed, missing, replaced, or
-foreign cidfile fails closed and retains bounded private cleanup evidence rather
-than publishing `ready`. Each start,
+retains any existing cidfile for later investigation. A malformed, missing,
+replaced, or foreign cidfile fails closed and retains bounded private cleanup
+evidence rather than publishing `ready`. Each start,
 status, endpoint, stop, and credential-read operation captures the runs-directory
 device, inode, and `0700` mode at entry, keeps that descriptor through all marker,
 state, credential, cidfile, cleanup, and tombstone work, and rechecks that the
