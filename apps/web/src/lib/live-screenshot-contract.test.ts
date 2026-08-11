@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   LIVE_SCREENSHOT_COMMAND,
@@ -10,6 +11,14 @@ import {
   captureReviewedLiveScreenshots,
   inspectPublicPng
 } from '../../tests/live/live-screenshot-contract.mjs';
+import {
+  LIVE_PLAYWRIGHT_TIMEZONE_ID,
+  LIVE_RECONCILIATION_TEST_IGNORE,
+  LIVE_RECONCILIATION_TEST_MATCH,
+  createLivePlaywrightConfig,
+  getLivePlaywrightPaths,
+  isLiveReconciliationEnabled
+} from '../../tests/live/live-playwright-config.mjs';
 
 const temporaryDirectories: string[] = [];
 
@@ -67,6 +76,12 @@ const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
   'The disposable instance had no authenticated inference provider'
 ]);
 const BROAD_LIVE_COMMAND_PATTERN = new RegExp('bun run --cwd apps/web test:e2e:live(?! --grep)', 'u');
+const OFFICIAL_RECONCILIATION_SKIP =
+  "test.skip(reconciliationOnly, 'official Hermes prompt lane is disabled during read-only reconciliation');";
+const COMPATIBILITY_PROBES = Object.freeze([
+  'tests/live/live-proof-parent-compat.mjs',
+  'tests/live/live-support-parent-compat.mjs'
+]);
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -141,6 +156,57 @@ describe('live screenshot contract', () => {
 
     for (const staleText of STALE_LAUNCHER_OR_PROOF_TEXT) expect(readme).not.toContain(staleText);
     expect(readme).not.toMatch(BROAD_LIVE_COMMAND_PATTERN);
+  });
+
+  it('executes approved compatibility probes and enforces reconciliation-only selection', async () => {
+    const appRoot = process.cwd();
+    const repositoryRoot = resolve(appRoot, '../..');
+
+    for (const probe of COMPATIBILITY_PROBES) {
+      const output = execFileSync(process.execPath, [resolve(appRoot, probe)], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      expect(output).toContain(probe.includes('proof-parent') ? 'live-proof-parent-compat:' : 'live-support-parent-compat:');
+    }
+
+    expect(isLiveReconciliationEnabled({})).toBe(false);
+    expect(isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: '1' })).toBe(true);
+    expect(() =>
+      isLiveReconciliationEnabled({ HERMTERNAL_LIVE_RECONCILIATION: 'true' })
+    ).toThrow('HERMTERNAL_LIVE_RECONCILIATION must equal exactly 1 when set');
+
+    const paths = getLivePlaywrightPaths(
+      pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href
+    );
+    const reconciliationConfig = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory: join(tmpdir(), 'hermternal-live-reconciliation-regression'),
+      launchOptions: {},
+      desktopChrome: {},
+      reconciliationOnly: true
+    });
+    expect(reconciliationConfig.testMatch).toBe(LIVE_RECONCILIATION_TEST_MATCH);
+    expect(reconciliationConfig.testIgnore).toEqual([...LIVE_RECONCILIATION_TEST_IGNORE]);
+    expect(reconciliationConfig.testIgnore).toContain('**/official-hermes.spec.ts');
+    expect(reconciliationConfig.testIgnore).toContain('**/*capture*.spec.ts');
+    expect(reconciliationConfig.use.timezoneId).toBe(LIVE_PLAYWRIGHT_TIMEZONE_ID);
+
+    const normalConfig = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory: join(tmpdir(), 'hermternal-live-normal-regression'),
+      launchOptions: {},
+      desktopChrome: {},
+      reconciliationOnly: false
+    });
+    expect(normalConfig.testMatch).toBeUndefined();
+    expect(normalConfig.testIgnore).toBeUndefined();
+
+    const officialSpec = await readFile(resolve(appRoot, 'tests/live/official-hermes.spec.ts'), 'utf8');
+    expect(officialSpec).toContain(OFFICIAL_RECONCILIATION_SKIP);
   });
 
   it('publishes only scrubbed and independently approved exact-dimension images', async () => {

@@ -20,6 +20,10 @@ import {
   removeLiveArtifacts,
   scrubLivePage
 } from '../../tests/live/live-artifact-policy.mjs';
+import {
+  createLivePlaywrightConfig,
+  getLivePlaywrightPaths
+} from '../../tests/live/live-playwright-config.mjs';
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -1450,24 +1454,54 @@ test('sequential test sees the same root', async ({}, testInfo) => {
   it('pins the live config to no media artifacts, no retained output, and safe reporting', async () => {
     const config = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
 
-    expect(config).toContain('outputDir: livePlaywrightOutputDirectory');
-    expect(config).toContain("join(liveOutputDirectory, '.playwright-output')");
+    expect(config).toContain('createLivePlaywrightConfig');
+    expect(config).toContain('outputDirectory: liveOutputDirectory');
+    const configFactory = await readFile(resolve(appRoot, 'tests/live/live-playwright-config.mjs'), 'utf8');
+    expect(configFactory).toContain("outputDir: join(outputDirectory, '.playwright-output')");
+    const paths = getLivePlaywrightPaths(
+      pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href
+    );
+    const generatedConfig = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory: join(tmpdir(), 'hermternal-live-artifact-policy-config'),
+      launchOptions: {},
+      desktopChrome: {}
+    });
+    expect(generatedConfig.outputDir).toBe(
+      join(tmpdir(), 'hermternal-live-artifact-policy-config', '.playwright-output')
+    );
+    expect(generatedConfig.preserveOutput).toBe('never');
+    expect(generatedConfig.reporter).toEqual([[paths.safeReporterFile]]);
+    expect(generatedConfig.globalTeardown).toBe(paths.teardownFile);
+    expect(generatedConfig.use).toMatchObject({
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      colorScheme: 'light',
+      locale: 'en-US',
+      timezoneId: 'UTC'
+    });
+    expect(generatedConfig.use.contextOptions).toEqual({ reducedMotion: 'reduce' });
+    expect(generatedConfig.use.viewport).toEqual({ width: 1440, height: 960 });
+    expect(generatedConfig.use.deviceScaleFactor).toBe(1);
+    expect(generatedConfig.projects).toHaveLength(1);
+    expect(generatedConfig.projects[0].use).toMatchObject({
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      colorScheme: 'light',
+      locale: 'en-US',
+      timezoneId: 'UTC',
+      viewport: { width: 1440, height: 960 },
+      deviceScaleFactor: 1,
+      contextOptions: { reducedMotion: 'reduce' }
+    });
     expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
-    expect(config).toContain("preserveOutput: 'never'");
-    expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
-    expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
-    expect(config).toContain("process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null'");
-    expect(config).toContain('live-ipc-guard.cjs');
+    expect(config).toContain('PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = devNull');
+    expect(configFactory).toContain("ipcGuardFile: join(liveTestsDirectory, 'live-ipc-guard.cjs')");
     expect(config).toContain('assertLiveRunnerDebugDisabled');
     expect(config).toContain('NODE_OPTIONS');
-    expect(config).toContain("trace: 'off'");
-    expect(config).toContain("video: 'off'");
-    expect(config).toContain("screenshot: 'off'");
-    expect(config).toContain("reducedMotion: 'reduce'");
-    expect(config).toContain("locale: 'en-US'");
-    expect(config).toContain("timezoneId: 'UTC'");
-    expect(config).toContain('viewport: { width: 1440, height: 960 }');
-    expect(config).toContain('deviceScaleFactor: 1');
     const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
     expect(capture).toContain("route: '/'");
     expect(capture).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
