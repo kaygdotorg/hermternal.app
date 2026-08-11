@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { getLiveScreenshotGitChildConfiguration } from './live-trusted-executables.mjs';
 
 const PARENT_COMMIT = 'a7d43f636424dcd02bf65743966db30e5aeb30f0';
 const BRIDGE_PARENT_COMMIT = '4c1cd74f6d703a99a29ef85a08142df45234e9f5';
@@ -20,10 +21,16 @@ const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
  * of package managers, browser runners, and live Hermes services.
  */
 function loadExactParentLedger() {
+  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
   const source = execFileSync(
-    'git',
+    gitConfiguration.executable,
     ['show', `${PARENT_COMMIT}:${LEDGER_PATH}`],
-    { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
+    {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: gitConfiguration.environment,
+      stdio: ['ignore', 'pipe', 'pipe']
+    }
   );
   return import(`data:text/javascript;base64,${Buffer.from(source, 'utf8').toString('base64')}`);
 }
@@ -44,6 +51,7 @@ function loadChildLedger() {
  * @param {'parent'|'child'|'registration-child'} mode
  */
 function runBridgeProbe(mode) {
+  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
   const script = `
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -55,10 +63,13 @@ const repositoryRoot = ${JSON.stringify(repositoryRoot)};
 const bridgePath = ${JSON.stringify(BRIDGE_PATH)};
 const childBridgePath = ${JSON.stringify(childBridgePath)};
 const parentCommit = ${JSON.stringify(BRIDGE_PARENT_COMMIT)};
+const gitExecutable = ${JSON.stringify(gitConfiguration.executable)};
+const gitEnvironment = ${JSON.stringify(gitConfiguration.environment)};
 const source = mode === 'parent'
-  ? execFileSync('git', ['show', parentCommit + ':' + bridgePath], {
+  ? execFileSync(gitExecutable, ['show', parentCommit + ':' + bridgePath], {
       cwd: repositoryRoot,
       encoding: 'utf8',
+      env: gitEnvironment,
       stdio: ['ignore', 'pipe', 'pipe']
     })
   : readFileSync(childBridgePath, 'utf8');

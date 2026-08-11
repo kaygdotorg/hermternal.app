@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { getLiveScreenshotGitChildConfiguration } from './live-trusted-executables.mjs';
 
 export const OFFICIAL_HERMES_IMAGE =
   'docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e';
@@ -185,8 +186,10 @@ export async function captureReviewedLiveScreenshots({
   reviewHook
 }) {
   if (!/^[0-9a-f]{40}$/.test(clientCommit)) throw new Error('client commit must be an exact SHA');
-  const checkoutHead = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
+  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+  const checkoutHead = execFileSync(gitConfiguration.executable, ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
     encoding: 'utf8',
+    env: gitConfiguration.environment,
     stdio: ['ignore', 'pipe', 'ignore']
   }).trim();
   if (checkoutHead !== clientCommit) throw new Error('client commit did not match the tested checkout');

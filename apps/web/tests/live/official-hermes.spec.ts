@@ -321,6 +321,8 @@ test('browser UI reaches the official Hermes gateway through completion', async 
     completionCount: 1
   });
   setLiveProofStatus(testInfo, { phase: 'reconciled', delivery: 'reconciled' });
+  // Screenshot sanitization is clone-only: it must preserve this authenticated
+  // context until the logout cookie and browser-state assertions below.
   await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState, proof });
 
   const loginSequence = findEventSequence(

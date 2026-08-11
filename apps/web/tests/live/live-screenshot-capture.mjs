@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { assertLiveProofLedgerCaptureReady } from './live-proof-ledger.mjs';
 import { LIVE_SCREENSHOT_COMMAND } from './live-screenshot-contract.mjs';
 import { LIVE_PLAYWRIGHT_TIMEZONE_ID } from './live-playwright-config.mjs';
+import { getLiveScreenshotGitChildConfiguration } from './live-trusted-executables.mjs';
 
 /**
  * This module is the only explicit screenshot path in the live lane. It is
@@ -217,6 +218,10 @@ export const LIVE_SCREENSHOT_HERMES_ATTESTATION = 'official-upstream-image-diges
 
 const LIVE_SCREENSHOT_PENDING_REVIEW = 'pending-independent-review';
 const LIVE_SCREENSHOT_APPROVED_REVIEW = 'independent-approved';
+export const LIVE_SCREENSHOT_REVIEW_SCHEMA = 'hermternal.independent-image-review.v1';
+export const LIVE_SCREENSHOT_REVIEW_KIND = 'independent-human-visual';
+const REVIEW_RECORD_KEYS = ['schema', 'decision', 'review_kind', 'image_sha256'];
+const MAX_REVIEW_RECORD_BYTES = 4096;
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_BROWSER_VERSION_LENGTH = 128;
 const MAX_RETAINED_FILE_STEM_LENGTH = 64;
@@ -630,6 +635,129 @@ function assertImageBytes(value) {
 export function sha256Hex(bytes) {
   const safeBytes = assertImageBytes(bytes);
   return createHash('sha256').update(safeBytes).digest('hex');
+}
+
+/**
+ * Validate the closed independent review record. The record is intentionally
+ * small and canonical so a review decision cannot be reused for another image.
+ *
+ * @param {unknown} value
+ * @param {string} [expectedImageSha256]
+ */
+export function validateIndependentImageReviewRecord(value, expectedImageSha256) {
+  requireExactKeys(value, REVIEW_RECORD_KEYS, 'independent image review');
+  const review = /** @type {Record<string, unknown>} */ (value);
+  if (
+    review.schema !== LIVE_SCREENSHOT_REVIEW_SCHEMA ||
+    review.decision !== 'approved' ||
+    review.review_kind !== LIVE_SCREENSHOT_REVIEW_KIND ||
+    typeof review.image_sha256 !== 'string' ||
+    !SHA256_PATTERN.test(review.image_sha256) ||
+    (expectedImageSha256 !== undefined && review.image_sha256 !== expectedImageSha256)
+  ) {
+    throw new Error('independent image review record was not a closed approval');
+  }
+  return Object.freeze({
+    schema: review.schema,
+    decision: review.decision,
+    review_kind: review.review_kind,
+    image_sha256: review.image_sha256
+  });
+}
+
+/**
+ * Parse one canonical bounded review record. Canonical JSON comparison rejects
+ * duplicate keys, unknown fields, hidden whitespace, and alternate key order.
+ *
+ * @param {Buffer} bytes
+ * @param {string} [expectedImageSha256]
+ */
+function parseIndependentImageReviewRecord(bytes, expectedImageSha256) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_REVIEW_RECORD_BYTES) {
+    throw new Error('independent image review record was not bounded');
+  }
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) {
+    throw new Error('independent image review record was not valid UTF-8');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('independent image review record was not valid JSON');
+  }
+  const review = validateIndependentImageReviewRecord(parsed, expectedImageSha256);
+  const canonical = JSON.stringify(review);
+  if (text !== canonical && text !== `${canonical}\n`) {
+    throw new Error('independent image review record was not canonical');
+  }
+  return review;
+}
+
+/**
+ * Validate an existing review record path before page mutation and retain its
+ * device/inode/size so a replacement cannot become an approval later.
+ *
+ * @typedef {{ candidate: string, dev: number, ino: number, size: number, canonical: string, parent: { candidate: string, dev: number, ino: number, canonical: string } }} ReviewRecordEvidence
+ * @param {string} path
+ * @returns {ReviewRecordEvidence}
+ */
+function safeReviewRecordEvidence(path) {
+  if (typeof path !== 'string' || !path.startsWith('/') || resolve(path) !== path) {
+    throw new Error('live screenshot retention review record path is not absolute');
+  }
+  const candidate = resolve(path);
+  const parent = safeDestinationEvidence(dirname(candidate));
+  let stats;
+  let canonical;
+  try {
+    stats = lstatSync(candidate);
+    canonical = realpathSync(candidate);
+  } catch {
+    throw new Error('live screenshot retention review record is unavailable');
+  }
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  if (
+    !stats.isFile() ||
+    stats.isSymbolicLink() ||
+    stats.size === 0 ||
+    stats.size > MAX_REVIEW_RECORD_BYTES ||
+    (stats.mode & 0o022) !== 0 ||
+    (currentUid !== undefined && stats.uid !== currentUid && stats.uid !== 0) ||
+    canonical !== candidate
+  ) {
+    throw new Error('live screenshot retention review record is unsafe');
+  }
+  return { candidate, dev: stats.dev, ino: stats.ino, size: stats.size, canonical, parent };
+}
+
+/** @param {ReviewRecordEvidence} evidence */
+function assertSameReviewRecord(evidence) {
+  const current = safeReviewRecordEvidence(evidence.candidate);
+  if (
+    current.dev !== evidence.dev ||
+    current.ino !== evidence.ino ||
+    current.size !== evidence.size ||
+    current.canonical !== evidence.canonical ||
+    current.parent.dev !== evidence.parent.dev ||
+    current.parent.ino !== evidence.parent.ino
+  ) {
+    throw new Error('live screenshot retention review record changed');
+  }
+}
+
+/** @param {ReviewRecordEvidence} evidence @param {string} [expectedImageSha256] */
+function readIndependentImageReviewRecord(evidence, expectedImageSha256) {
+  assertSameReviewRecord(evidence);
+  let bytes;
+  try {
+    bytes = readFileSync(evidence.candidate);
+  } catch {
+    throw new Error('live screenshot retention review record is unavailable');
+  }
+  const review = parseIndependentImageReviewRecord(bytes, expectedImageSha256);
+  assertSameReviewRecord(evidence);
+  return review;
 }
 
 /**
@@ -1166,8 +1294,8 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
   }
 
   /** @param {Storage} storage */
-  const scrubStorage = (storage) => {
-    if (!storage || typeof storage.length !== 'number' || typeof storage.key !== 'function' || typeof storage.clear !== 'function') {
+  const inspectStorage = (storage) => {
+    if (!storage || typeof storage.length !== 'number' || typeof storage.key !== 'function' || typeof storage.getItem !== 'function') {
       throw new Error('live screenshot capture storage boundary is unavailable');
     }
     let entryCount = 0;
@@ -1186,15 +1314,13 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
       containsPrivacyMarker(key);
       containsPrivacyMarker(value);
     }
-    storage.clear();
-    if (storage.length !== 0) throw new Error('live screenshot capture storage was not cleared');
     return entryCount;
   };
   if (typeof localStorage === 'undefined' || typeof sessionStorage === 'undefined') {
     throw new Error('live screenshot capture storage boundary is unavailable');
   }
-  const localStorageEntryCount = scrubStorage(localStorage);
-  const sessionStorageEntryCount = scrubStorage(sessionStorage);
+  const localStorageEntryCount = inspectStorage(localStorage);
+  const sessionStorageEntryCount = inspectStorage(sessionStorage);
 
   const listIndexedDbDatabases = async () => {
     if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function' || typeof indexedDB.open !== 'function') {
@@ -1238,13 +1364,6 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
       cursor.continue();
     };
   });
-  /** @param {string} name @returns {Promise<void>} */
-  const deleteIndexedDb = (name) => new Promise((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(name);
-    request.onerror = () => reject(new Error('live screenshot capture IndexedDB deletion failed'));
-    request.onblocked = () => reject(new Error('live screenshot capture IndexedDB deletion was blocked'));
-    request.onsuccess = () => resolve(undefined);
-  });
   const indexedDbBefore = await listIndexedDbDatabases();
   let indexedDbStoreCount = 0;
   let indexedDbRecordCount = 0;
@@ -1268,13 +1387,16 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     } finally {
       database.close();
     }
-    await deleteIndexedDb(databaseName);
   }
-  if ((await listIndexedDbDatabases()).length !== 0) {
-    throw new Error('live screenshot capture IndexedDB was not cleared');
+  const indexedDbAfter = await listIndexedDbDatabases();
+  if (
+    indexedDbAfter.length !== indexedDbBefore.length ||
+    indexedDbAfter.some((database, index) => database?.name !== indexedDbBefore[index]?.name)
+  ) {
+    throw new Error('live screenshot capture IndexedDB changed during inspection');
   }
 
-  if (typeof caches === 'undefined' || typeof caches.keys !== 'function' || typeof caches.open !== 'function' || typeof caches.delete !== 'function') {
+  if (typeof caches === 'undefined' || typeof caches.keys !== 'function' || typeof caches.open !== 'function') {
     throw new Error('live screenshot capture Cache Storage boundary is unavailable');
   }
   const cacheNames = await caches.keys();
@@ -1314,12 +1436,13 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
       if (cacheBodyBytes > maxCacheBodyBytes) privacyOverflow();
       containsPrivacyMarker(body);
     }
-    if (!(await caches.delete(cacheName))) {
-      throw new Error('live screenshot capture Cache Storage was not cleared');
-    }
   }
-  if ((await caches.keys()).length !== 0) {
-    throw new Error('live screenshot capture Cache Storage was not cleared');
+  const cacheNamesAfter = await caches.keys();
+  if (
+    cacheNamesAfter.length !== cacheNames.length ||
+    cacheNamesAfter.some((name, index) => name !== cacheNames[index])
+  ) {
+    throw new Error('live screenshot capture Cache Storage changed during inspection');
   }
   preview.querySelectorAll('.model-control select').forEach((select) => {
     const candidate = /** @type {HTMLSelectElement} */ (select);
@@ -1453,11 +1576,12 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     removedValueCount: oldLiveValues.length,
     prohibitedNodeCount: 0,
     privacy: {
-      localStorageCleared: true,
-      sessionStorageCleared: true,
-      indexedDbCleared: true,
-      cacheStorageCleared: true,
-      serviceWorkerCacheCleared: true,
+      authenticatedContextPreserved: true,
+      localStoragePreserved: true,
+      sessionStoragePreserved: true,
+      indexedDbPreserved: true,
+      cacheStoragePreserved: true,
+      serviceWorkerCachePreserved: true,
       localStorageEntries: localStorageEntryCount,
       sessionStorageEntries: sessionStorageEntryCount,
       indexedDbDatabases: indexedDbBefore.length,
@@ -1468,6 +1592,25 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
       cacheHeaders: cacheHeaderCount,
       cacheBodyBytes
     }
+  });
+}
+
+/**
+ * Run a local provenance-only git command with a fixed executable and a
+ * scrubbed child environment. The credential launcher may have placed
+ * HERMES_TEST_PASSWORD in this Node process, so inheriting process.env here
+ * would expose it to a subprocess unrelated to browser authentication.
+ *
+ * @param {string[]} args
+ * @param {string} cwd
+ */
+function runTrustedGit(args, cwd) {
+  const childConfiguration = getLiveScreenshotGitChildConfiguration();
+  return execFileSync(childConfiguration.executable, args, {
+    cwd,
+    encoding: 'utf8',
+    env: childConfiguration.environment,
+    stdio: ['ignore', 'pipe', 'ignore']
   });
 }
 
@@ -1488,11 +1631,7 @@ function requireCaptureGate(environment, repositoryRoot = LIVE_SCREENSHOT_REPOSI
   }
   let checkoutSha;
   try {
-    checkoutSha = execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
+    checkoutSha = runTrustedGit(['rev-parse', 'HEAD'], repositoryRoot).trim();
   } catch {
     throw new Error('live screenshot capture could not attest the client checkout');
   }
@@ -1501,11 +1640,10 @@ function requireCaptureGate(environment, repositoryRoot = LIVE_SCREENSHOT_REPOSI
   }
   let dirtyTrackedFiles;
   try {
-    dirtyTrackedFiles = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=no'], {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
+    dirtyTrackedFiles = runTrustedGit(
+      ['status', '--porcelain=v1', '--untracked-files=no'],
+      repositoryRoot
+    ).trim();
   } catch {
     throw new Error('live screenshot capture could not attest a clean client checkout');
   }
@@ -1623,18 +1761,9 @@ async function captureLiveChatScreenshot({
     throw new Error('live screenshot capture Chromium provenance is not pinned');
   }
 
-  if (typeof pageContext.cookies !== 'function' || typeof pageContext.clearCookies !== 'function') {
-    throw new Error('live screenshot capture cookie boundary is unavailable');
-  }
-  const cookiesBefore = await pageContext.cookies();
-  if (!Array.isArray(cookiesBefore)) {
-    throw new Error('live screenshot capture cookie boundary is unavailable');
-  }
-  await pageContext.clearCookies();
-  const cookiesAfter = await pageContext.cookies();
-  if (!Array.isArray(cookiesAfter) || cookiesAfter.length !== 0) {
-    throw new Error('live screenshot capture cookie boundary is unavailable');
-  }
+  // The sanitizer is intentionally clone-only. It must not clear cookies or
+  // persistent browser state because the official spec performs its same-context
+  // logout assertions immediately after this helper returns.
 
   await page.emulateMedia({
     colorScheme: theme,
@@ -1673,11 +1802,12 @@ async function captureLiveChatScreenshot({
     presentation.prohibitedNodeCount !== 0 ||
     presentation.captureSelector !== LIVE_SCREENSHOT_CAPTURE_SELECTOR ||
     !privacy ||
-    privacy.localStorageCleared !== true ||
-    privacy.sessionStorageCleared !== true ||
-    privacy.indexedDbCleared !== true ||
-    privacy.cacheStorageCleared !== true ||
-    privacy.serviceWorkerCacheCleared !== true
+    privacy.authenticatedContextPreserved !== true ||
+    privacy.localStoragePreserved !== true ||
+    privacy.sessionStoragePreserved !== true ||
+    privacy.indexedDbPreserved !== true ||
+    privacy.cacheStoragePreserved !== true ||
+    privacy.serviceWorkerCachePreserved !== true
   ) {
     throw new Error('live screenshot capture presentation was not sanitized');
   }
@@ -1722,8 +1852,9 @@ async function captureLiveChatScreenshot({
 
 /**
  * The live spec calls this helper after its stable-state assertions. Default
- * runs return before touching the page. Retention additionally requires an
- * explicit independent-review value and an operator-supplied destination.
+ * runs return before touching the page. Retention additionally requires a
+ * pre-existing canonical independent review record whose exact image hash is
+ * checked again after the in-memory capture and before publication.
  *
  * @returns {Promise<LiveScreenshotCapture | undefined>}
  * @param {{ page: any, uiState: 'empty' | 'ready', proof: Record<string, unknown>, environment?: Record<string, string | undefined>, provenance?: ChromiumProvenance }} options
@@ -1738,17 +1869,22 @@ export async function captureLiveChatScreenshotIfEnabled({
   if (!isLiveScreenshotCaptureEnabled(environment)) return undefined;
   assertLiveProofLedgerCaptureReady(proof);
   let retentionDestination;
+  /** @type {ReviewRecordEvidence | undefined} */
+  let retentionReview;
   if (environment[LIVE_SCREENSHOT_RETAIN_ENV] === '1') {
-    if (environment[LIVE_SCREENSHOT_REVIEW_ENV] !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
-      throw new Error('live screenshot retention requires independent approval');
+    const reviewPath = environment[LIVE_SCREENSHOT_REVIEW_ENV];
+    if (!reviewPath) {
+      throw new Error('live screenshot retention requires an independent review record path');
     }
     const destination = environment[LIVE_SCREENSHOT_DESTINATION_ENV];
     if (!destination) {
       throw new Error('live screenshot retention requires an explicit destination');
     }
     // Validate review and destination identity before any page method can
-    // mutate the live page or create a screenshot. Persistence repeats this
-    // check after capture to close the preflight-to-publish TOCTOU window.
+    // mutate the live page or create a screenshot. Persistence repeats both
+    // checks after capture to close the preflight-to-publish TOCTOU window.
+    retentionReview = safeReviewRecordEvidence(reviewPath);
+    readIndependentImageReviewRecord(retentionReview);
     retentionDestination = safeDestinationEvidence(destination);
   }
   const clientSha = requireCaptureGate(environment);
@@ -1766,12 +1902,18 @@ export async function captureLiveChatScreenshotIfEnabled({
     provenance
   });
   if (!capture) throw new Error('live screenshot capture result is unavailable');
-  if (retentionDestination) {
+  if (retentionDestination && retentionReview) {
+    const imageSha256 = capture.manifest.imageSha256;
+    if (typeof imageSha256 !== 'string' || !SHA256_PATTERN.test(imageSha256)) {
+      throw new Error('live screenshot capture image hash is unavailable');
+    }
+    const review = readIndependentImageReviewRecord(retentionReview, imageSha256);
     await persistApprovedLiveScreenshot({
       capture,
       destinationDirectory: retentionDestination.candidate,
       fileStem: LIVE_SCREENSHOT_FILE_STEM,
-      review: LIVE_SCREENSHOT_APPROVED_REVIEW
+      review,
+      reviewEvidence: retentionReview
     });
   }
   return capture;
@@ -2316,7 +2458,8 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
  *   capture: { bytes: Uint8Array, manifest: Record<string, unknown> },
  *   destinationDirectory: string,
  *   fileStem?: string,
- *   review: 'independent-approved',
+ *   review: Record<string, unknown>,
+ *   reviewEvidence?: ReviewRecordEvidence,
  *   provenance?: ChromiumProvenance,
  *   beforeAtomicPublish?: (directory: string) => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
@@ -2327,13 +2470,11 @@ export async function persistApprovedLiveScreenshot({
   destinationDirectory,
   fileStem = LIVE_SCREENSHOT_FILE_STEM,
   review,
+  reviewEvidence,
   provenance,
   beforeAtomicPublish,
   beforeStagingCleanup
 }) {
-  if (review !== LIVE_SCREENSHOT_APPROVED_REVIEW) {
-    throw new Error('live screenshot retention requires independent approval');
-  }
   if (!capture || !isRecord(capture) || !isRecord(capture.manifest)) {
     throw new Error('live screenshot capture result is unavailable');
   }
@@ -2350,8 +2491,16 @@ export async function persistApprovedLiveScreenshot({
   if (sourceManifest.review !== LIVE_SCREENSHOT_PENDING_REVIEW) {
     throw new Error('live screenshot capture is not awaiting independent review');
   }
-  if (sourceManifest.imageSha256 !== sha256Hex(bytes)) {
+  const imageSha256 = sha256Hex(bytes);
+  if (sourceManifest.imageSha256 !== imageSha256) {
     throw new Error('live screenshot bytes do not match the manifest hash');
+  }
+  const reviewRecord = validateIndependentImageReviewRecord(review, imageSha256);
+  if (reviewEvidence) {
+    const rereadReview = readIndependentImageReviewRecord(reviewEvidence, imageSha256);
+    if (JSON.stringify(rereadReview) !== JSON.stringify(reviewRecord)) {
+      throw new Error('live screenshot retention review record changed');
+    }
   }
   const currentProvenance = provenance ?? readPinnedChromiumProvenance();
   if (
@@ -2449,6 +2598,18 @@ export async function persistApprovedLiveScreenshot({
     const destinationStats = lstatSync(evidence.candidate);
     if (stagingEvidence.dev !== destinationStats.dev) {
       throw new Error('live screenshot staging filesystem is not atomic');
+    }
+    // Recompute the in-memory image hash and reread the independent approval
+    // immediately before publication. No earlier preflight result alone can
+    // authorize a changed image or a replaced review record.
+    if (sha256Hex(bytes) !== imageSha256) {
+      throw new Error('live screenshot bytes changed before publication');
+    }
+    if (reviewEvidence) {
+      const rereadReview = readIndependentImageReviewRecord(reviewEvidence, imageSha256);
+      if (JSON.stringify(rereadReview) !== JSON.stringify(reviewRecord)) {
+        throw new Error('live screenshot retention review record changed');
+      }
     }
 
     assertSameDestination(evidence);

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getLiveScreenshotGitChildConfiguration } from './live-trusted-executables.mjs';
 
 const PARENT_COMMIT = '77c6701c652a6bbd23d2c32227dcd61c34dd8c33';
 const probeDirectory = dirname(fileURLToPath(import.meta.url));
@@ -35,9 +36,11 @@ const TEST_TITLE_PATTERN = /\btest\('([^']+)'/gu;
  */
 function readGitFile(commit, path) {
   try {
-    return execFileSync('git', ['show', `${commit}:${path}`], {
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    return execFileSync(gitConfiguration.executable, ['show', `${commit}:${path}`], {
       cwd: repositoryRoot,
       encoding: 'utf8',
+      env: gitConfiguration.environment,
       stdio: ['ignore', 'pipe', 'ignore']
     });
   } catch {

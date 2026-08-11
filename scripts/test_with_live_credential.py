@@ -579,12 +579,12 @@ class LiveProofCredentialTests(unittest.TestCase):
         raw = self.value + (b"x" * (256 - len(self.value)))
         self._write_credential(raw)
         stderr = io.StringIO()
-        with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
+        with mock.patch.object(helper.os, "execve") as execve, contextlib.redirect_stderr(stderr):
             status = helper.main(self.cli_args("synthetic-proof"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
-        self.assertFalse(execvpe.called)
+        self.assertFalse(execve.called)
         self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
     def test_runner_debug_fails_before_loading_marker_or_starting_child(self) -> None:
@@ -602,7 +602,7 @@ class LiveProofCredentialTests(unittest.TestCase):
                     ),
                     mock.patch.object(helper, "read_credential_file") as read_credential_file,
                     mock.patch.object(helper.live_run_marker, "open_runs_parent") as open_runs_parent,
-                    mock.patch.object(helper.os, "execvpe") as execvpe,
+                    mock.patch.object(helper.os, "execve") as execve,
                     contextlib.redirect_stderr(stderr),
                 ):
                     status = helper.main(self.cli_args("synthetic-proof"))
@@ -611,7 +611,7 @@ class LiveProofCredentialTests(unittest.TestCase):
                 self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
                 read_credential_file.assert_not_called()
                 open_runs_parent.assert_not_called()
-                self.assertFalse(execvpe.called)
+                self.assertFalse(execve.called)
                 self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
     def test_valid_value_is_only_passed_to_child_environment(self) -> None:
@@ -627,7 +627,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             "HERMTERNAL_PAPER_PARITY_APPROVED": "1",
             "HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA": "a" * 40,
             "HERMTERNAL_LIVE_SCREENSHOT_RETAIN": "1",
-            "HERMTERNAL_LIVE_SCREENSHOT_REVIEW": "independent-approved",
+            "HERMTERNAL_LIVE_SCREENSHOT_REVIEW": "/synthetic/review.json",
             "HERMTERNAL_LIVE_SCREENSHOT_DESTINATION": "/synthetic/destination",
         }
         inherited_secrets = {
@@ -648,20 +648,22 @@ class LiveProofCredentialTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.dict(helper.os.environ, {**safe_environment, **inherited_secrets}, clear=True),
-            mock.patch.object(helper.os, "execvpe", side_effect=OSError) as execvpe,
+            mock.patch.object(helper, "_resolve_trusted_executable", return_value="/trusted/bin/node") as resolve_executable,
+            mock.patch.object(helper.os, "execve", side_effect=OSError) as execve,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
-            status = helper.main(self.cli_args("synthetic-proof", "--flag"))
+            status = helper.main(self.cli_args("node", "--flag"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "live_proof_command_failed\n")
-        call = execvpe.call_args
+        resolve_executable.assert_called_once_with("node")
+        call = execve.call_args
         self.assertIsNotNone(call)
         command, arguments, environment = call.args
-        self.assertEqual(command, "synthetic-proof")
-        self.assertEqual(arguments, ["synthetic-proof", "--flag"])
+        self.assertEqual(command, "/trusted/bin/node")
+        self.assertEqual(arguments, ["/trusted/bin/node", "--flag"])
         self.assertEqual(
             environment,
             {**safe_environment, "HERMES_TEST_PASSWORD": self.value.decode("ascii")},
@@ -670,15 +672,48 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertNotIn(self.value.decode("ascii"), " ".join(arguments))
         self.assertEqual(self.credential_path.read_bytes(), raw)
 
+    def test_command_selection_rejects_ambient_or_unreviewed_executables(self) -> None:
+        self._write_credential(self.value + b"\n")
+        for command in ("synthetic-proof", "./node", "/tmp/node"):
+            with self.subTest(command=command):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.object(helper.os, "execve") as execve,
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = helper.main(self.cli_args(command))
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr.getvalue(), "live_proof_command_invalid\n")
+                execve.assert_not_called()
+
+    def test_fixed_resolution_returns_canonical_executable_without_path_lookup(self) -> None:
+        candidate = Path("/usr/bin/git")
+        self.assertTrue(candidate.exists())
+        with (
+            mock.patch.dict(
+                helper.os.environ,
+                {"PATH": str(self.root / "attacker-bin")},
+                clear=False,
+            ),
+            mock.patch.dict(
+                helper.TRUSTED_EXECUTABLE_CANDIDATES,
+                {"node": (str(candidate),)},
+                clear=False,
+            ),
+        ):
+            resolved = helper._resolve_trusted_executable("node")
+        self.assertTrue(Path(resolved).is_absolute())
+        self.assertEqual(Path(resolved), candidate.resolve())
+
     def test_invalid_shape_never_starts_child(self) -> None:
         self._write_credential(self.value + b"\n ")
         stderr = io.StringIO()
-        with mock.patch.object(helper.os, "execvpe") as execvpe, contextlib.redirect_stderr(stderr):
+        with mock.patch.object(helper.os, "execve") as execve, contextlib.redirect_stderr(stderr):
             status = helper.main(self.cli_args("synthetic-proof"))
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "credential_file_invalid\n")
-        self.assertFalse(execvpe.called)
+        self.assertFalse(execve.called)
 
     def test_proof_json_rejects_duplicates_oversize_and_pathological_numbers_before_child(self) -> None:
         identity = json.dumps(
@@ -705,14 +740,14 @@ class LiveProofCredentialTests(unittest.TestCase):
                 stderr = io.StringIO()
                 with (
                     mock.patch.object(helper, "read_credential_file") as read_credential_file,
-                    mock.patch.object(helper.os, "execvpe") as execvpe,
+                    mock.patch.object(helper.os, "execve") as execve,
                     contextlib.redirect_stderr(stderr),
                 ):
                     status = helper.main(arguments)
                 self.assertEqual(status, 1)
                 self.assertEqual(stderr.getvalue(), "proof_invalid\n")
                 self.assertFalse(read_credential_file.called)
-                self.assertFalse(execvpe.called)
+                self.assertFalse(execve.called)
                 self.assertNotIn("Traceback", stderr.getvalue())
                 self.assertNotIn("p" * 100, stderr.getvalue())
                 self.assertNotIn("9" * 100, stderr.getvalue())
@@ -724,26 +759,26 @@ class LiveProofCredentialTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             mock.patch.object(helper, "read_credential_file") as read_credential_file,
-            mock.patch.object(helper.os, "execvpe") as execvpe,
+            mock.patch.object(helper.os, "execve") as execve,
             contextlib.redirect_stderr(stderr),
         ):
             status = helper.main(arguments)
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "proof_invalid\n")
         self.assertFalse(read_credential_file.called)
-        self.assertFalse(execvpe.called)
+        self.assertFalse(execve.called)
 
     def test_legacy_positional_credential_form_is_rejected(self) -> None:
         stderr = io.StringIO()
         with (
-            mock.patch.object(helper.os, "execvpe") as execvpe,
+            mock.patch.object(helper.os, "execve") as execve,
             contextlib.redirect_stderr(stderr),
         ):
             status = helper.main([str(self.credential_path), "--", "synthetic-proof"])
 
         self.assertEqual(status, 1)
         self.assertEqual(stderr.getvalue(), "proof_required\n")
-        self.assertFalse(execvpe.called)
+        self.assertFalse(execve.called)
         self.assertNotIn(str(self.credential_path), stderr.getvalue())
 
     def test_start_mutations_guard_stale_marker_handoff_and_preserve_failure(self) -> None:
@@ -895,8 +930,24 @@ class LiveProofCredentialTests(unittest.TestCase):
                 ),
             }
         )
+        wrapper = Path(self.temporary.name) / "patched-handoff.py"
+        wrapper.write_text(
+            "import importlib.util, os, sys\n"
+            f"spec = importlib.util.spec_from_file_location('with_live_credential', {str(SCRIPT)!r})\n"
+            "helper = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(helper)\n"
+            "helper._resolve_trusted_executable = lambda command: os.environ['FAKE_EXECUTABLE'] if command == 'node' else (_ for _ in ()).throw(helper.LiveProofCredentialError('live_proof_command_invalid'))\n"
+            "raise SystemExit(helper.main(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        environment["FAKE_EXECUTABLE"] = str(fake_node)
+        proof = self.proof()
         result = subprocess.run(
-            ["/bin/sh", "-c", documented_skill_handoff_script(SKILL_DOC)],
+            [
+                sys.executable,
+                str(wrapper),
+                *self.cli_args("node", "/path/to/browser-smoke.mjs"),
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -941,8 +992,19 @@ class LiveProofCredentialTests(unittest.TestCase):
         environment["PATH"] = f"{bin_directory}{os.pathsep}{environment['PATH']}"
         environment["HERMTERNAL_LIVE_SCREENSHOT_DESTINATION"] = str(capture)
         environment["HERMES_LIVE_TARGET"] = "http://127.0.0.1:19124"
+        wrapper = Path(self.temporary.name) / "patched-bun-handoff.py"
+        wrapper.write_text(
+            "import importlib.util, os, sys\n"
+            f"spec = importlib.util.spec_from_file_location('with_live_credential', {str(SCRIPT)!r})\n"
+            "helper = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(helper)\n"
+            "helper._resolve_trusted_executable = lambda command: os.environ['FAKE_EXECUTABLE'] if command == 'bun' else (_ for _ in ()).throw(helper.LiveProofCredentialError('live_proof_command_invalid'))\n"
+            "raise SystemExit(helper.main(sys.argv[1:]))\n",
+            encoding="utf-8",
+        )
+        environment["FAKE_EXECUTABLE"] = str(fake_bun)
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), *self.cli_args(*EXPECTED_BUN_COMMAND)],
+            [sys.executable, str(wrapper), *self.cli_args(*EXPECTED_BUN_COMMAND)],
             check=False,
             capture_output=True,
             text=True,

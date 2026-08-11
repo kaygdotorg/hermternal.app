@@ -23,6 +23,7 @@ import {
   LIVE_PROOF_ASSISTANT_MARKER,
   LIVE_PROOF_PROMPT
 } from '../../tests/live/live-proof-ledger.mjs';
+import { getLiveScreenshotGitChildConfiguration } from '../../tests/live/live-trusted-executables.mjs';
 import {
   parseReconciliationSessionMessages,
   reconcileLiveHistory
@@ -87,7 +88,10 @@ const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
   'explicit allowlist',
   'inherited `HERMES_TEST_PASSWORD`',
   'exactly 500 messages',
-  'duplicate exact assistant markers'
+  'duplicate exact assistant markers',
+  'sanitizer audits storage without clearing',
+  'hermternal.independent-image-review.v1',
+  'exact scrubbed PNG SHA-256'
 ]);
 
 const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
@@ -263,6 +267,50 @@ describe('live screenshot contract', () => {
         environment: {}
       })
     ).resolves.toBeUndefined();
+  });
+
+  it('binds provenance children, exact-hash review, and logout-safe capture ordering', async () => {
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    expect(gitConfiguration.executable.startsWith('/')).toBe(true);
+    expect(gitConfiguration.environment).not.toHaveProperty('HERMES_TEST_PASSWORD');
+    expect(gitConfiguration.environment).not.toHaveProperty('NODE_OPTIONS');
+    expect(gitConfiguration.environment).not.toHaveProperty('HTTP_PROXY');
+    expect(gitConfiguration.environment.PATH).toBe('/usr/bin:/bin:/usr/sbin:/sbin');
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const imageSha256 = 'a'.repeat(64);
+    const review = {
+      schema: 'hermternal.independent-image-review.v1',
+      decision: 'approved',
+      review_kind: 'independent-human-visual',
+      image_sha256: imageSha256
+    };
+    expect(captureModule.validateIndependentImageReviewRecord(review, imageSha256)).toEqual(review);
+    expect(() =>
+      captureModule.validateIndependentImageReviewRecord(
+        { ...review, image_sha256: 'b'.repeat(64) },
+        imageSha256
+      )
+    ).toThrow('independent image review record was not a closed approval');
+    expect(() =>
+      captureModule.validateIndependentImageReviewRecord(
+        { ...review, extra: 'not-allowed' },
+        imageSha256
+      )
+    ).toThrow('unexpected shape');
+
+    const appRoot = process.cwd();
+    const captureSource = await readFile(resolve(appRoot, 'tests/live/live-screenshot-capture.mjs'), 'utf8');
+    expect(captureSource).toContain('getLiveScreenshotGitChildConfiguration');
+    expect(captureSource).toContain('env: childConfiguration.environment');
+    expect(captureSource).not.toContain("execFileSync('git'");
+    expect(captureSource).not.toContain('pageContext.clearCookies');
+    expect(captureSource).toContain('authenticatedContextPreserved: true');
+    const officialSpec = await readFile(resolve(appRoot, 'tests/live/official-hermes.spec.ts'), 'utf8');
+    expect(officialSpec.indexOf(OFFICIAL_SCREENSHOT_CAPTURE_CALL)).toBeLessThan(
+      officialSpec.indexOf('const cookiesBeforeLogout = await context.cookies(proofOrigin);')
+    );
+    expect(officialSpec).toContain('sanitization is clone-only');
   });
 
   it('fails closed at the reconciliation history cap and keeps Node/page matching parity', async () => {
@@ -443,7 +491,11 @@ describe('live screenshot contract', () => {
       screenshot: async ({ path }: { path: string }) => writeFile(path, png(viewport.width, viewport.height))
     };
     const repositoryRoot = resolve(process.cwd(), '../..');
-    const clientCommit = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const clientCommit = execFileSync(gitConfiguration.executable, ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      env: gitConfiguration.environment
+    }).trim();
     const manifest = await captureReviewedLiveScreenshots({
       page: page as unknown as import('@playwright/test').Page,
       outputRoot,
