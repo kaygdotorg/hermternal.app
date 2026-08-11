@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -94,10 +94,14 @@ const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
   'exact scrubbed PNG SHA-256',
   'explicit `--git-dir` and `--work-tree` paths',
   'repository-local config cannot redirect status',
-  'fsmonitor-helper parent bypass',
+  'distinct clean/process/fsmonitor helper bypasses',
   'clean/process filters',
   'reciprocal linked-worktree metadata',
-  'GIT_NO_REPLACE_OBJECTS'
+  'GIT_ATTR_NOSYSTEM',
+  'GIT_NO_REPLACE_OBJECTS',
+  '--no-replace-objects',
+  'config.worktree',
+  'include.path'
 ]);
 
 const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
@@ -383,6 +387,7 @@ describe('live screenshot contract', () => {
     expect(gitConfiguration.environment).not.toHaveProperty('HTTP_PROXY');
     expect(gitConfiguration.environment.GIT_CONFIG_SYSTEM).toBe('/dev/null');
     expect(gitConfiguration.environment.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+    expect(gitConfiguration.environment.GIT_ATTR_NOSYSTEM).toBe('1');
     expect(gitConfiguration.environment.GIT_NO_REPLACE_OBJECTS).toBe('1');
     expect(gitConfiguration.environment.PATH).toBe('/usr/bin:/bin:/usr/sbin:/sbin');
 
@@ -419,7 +424,18 @@ describe('live screenshot contract', () => {
     expect(captureSource).toContain('core.fsmonitor=false');
     expect(captureSource).toContain('core.hooksPath=/dev/null');
     expect(captureSource).toContain('filterOverrides');
+    expect(captureSource).toContain('config.worktree');
+    expect(captureSource).toContain('include.path');
     expect(captureSource).toContain('GIT_NO_REPLACE_OBJECTS');
+    expect(captureSource).toContain('--no-replace-objects');
+    const trustedGitArgumentsSource = captureSource.slice(
+      captureSource.indexOf('function trustedGitArguments'),
+      captureSource.indexOf('function runTrustedGit')
+    );
+    expect(trustedGitArgumentsSource).toContain("'--no-replace-objects'");
+    expect(trustedGitArgumentsSource.indexOf("'--no-replace-objects'")).toBeLessThan(
+      trustedGitArgumentsSource.indexOf('...args')
+    );
     expect(captureSource).toContain('--path-format=absolute');
     expect(captureSource).toContain('readLiveScreenshotRepositoryState');
     expect(captureSource).not.toContain("execFileSync('git'");
@@ -443,13 +459,15 @@ describe('live screenshot contract', () => {
     expect(officialSpec).toContain('sanitization is clone-only');
   });
 
-  it('rejects a local core.worktree bypass without executing fsmonitor helpers', async () => {
+  it('neutralizes distinct local and worktree helpers selected by tracked attributes', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-live-git-provenance-'));
     temporaryDirectories.push(root);
     const repository = join(root, 'repository');
     const alternateWorktree = join(root, 'alternate-worktree');
-    const helperMarker = join(root, 'fsmonitor-helper-ran');
-    const helper = join(root, 'fsmonitor-helper.mjs');
+    const cleanMarker = join(root, 'clean-filter-ran');
+    const processMarker = join(root, 'process-filter-ran');
+    const fsmonitorMarker = join(root, 'fsmonitor-helper-ran');
+    const helper = join(root, 'helpers.mjs');
     const attributesFile = join(root, 'attributes');
     const hooks = join(root, 'hooks');
     await mkdir(repository, { mode: 0o700 });
@@ -457,12 +475,84 @@ describe('live screenshot contract', () => {
     await mkdir(hooks, { mode: 0o700 });
     await writeFile(
       helper,
-      `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(helperMarker)}, 'ran');\n`,
+      String.raw`import { writeFileSync } from 'node:fs';
+const [, , mode, marker] = process.argv;
+const writePacket = (value) => {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const length = bytes.length + 4;
+  process.stdout.write(length.toString(16).padStart(4, '0'));
+  process.stdout.write(bytes);
+};
+const flush = () => process.stdout.write('0000');
+if (mode === 'clean') {
+  writeFileSync(marker, 'clean');
+  process.stdin.pipe(process.stdout);
+} else if (mode === 'fsmonitor') {
+  writeFileSync(marker, 'fsmonitor');
+  writePacket('git-fsmonitor-server\0version=2\0');
+  flush();
+} else if (mode === 'process') {
+  let pending = Buffer.alloc(0);
+  let phase = 'handshake';
+  let header = [];
+  let content = [];
+  const consume = (packet) => {
+    if (packet === null) {
+      if (phase === 'handshake') {
+        writePacket('git-filter-server');
+        writePacket('version=2');
+        flush();
+        phase = 'capabilities';
+      } else if (phase === 'capabilities') {
+        writePacket('capability=clean');
+        flush();
+        phase = 'header';
+      } else if (phase === 'header') {
+        phase = 'content';
+      } else {
+        if (header.some((value) => value.toString('utf8').startsWith('command=clean'))) {
+          writeFileSync(marker, 'process');
+        }
+        writePacket('status=success');
+        flush();
+        for (const value of content) writePacket(value);
+        flush();
+        flush();
+        header = [];
+        content = [];
+        phase = 'header';
+      }
+      return;
+    }
+    if (phase === 'header') header.push(packet);
+    if (phase === 'content') content.push(packet);
+  };
+  process.stdin.on('data', (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    for (;;) {
+      if (pending.length < 4) return;
+      const length = Number.parseInt(pending.subarray(0, 4).toString('ascii'), 16);
+      if (length === 0) {
+        pending = pending.subarray(4);
+        consume(null);
+        continue;
+      }
+      if (!Number.isInteger(length) || length < 4 || pending.length < length) return;
+      consume(pending.subarray(4, length));
+      pending = pending.subarray(length);
+    }
+  });
+}
+`,
       'utf8'
     );
     await chmod(helper, 0o700);
-    await writeFile(attributesFile, '*.txt filter=evil\n', 'utf8');
+    await writeFile(attributesFile, '*.txt filter=ignored-by-attributes-file\n', 'utf8');
 
+    const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const cleanCommand = [process.execPath, helper, 'clean', cleanMarker].map(shellQuote).join(' ');
+    const processCommand = [process.execPath, helper, 'process', processMarker].map(shellQuote).join(' ');
+    const fsmonitorCommand = [process.execPath, helper, 'fsmonitor', fsmonitorMarker].map(shellQuote).join(' ');
     const gitConfiguration = getLiveScreenshotGitChildConfiguration();
     const runGit = (args: string[]) =>
       execFileSync(gitConfiguration.executable, args, {
@@ -474,46 +564,115 @@ describe('live screenshot contract', () => {
       });
 
     runGit(['init', '--quiet']);
-    await writeFile(join(repository, 'tracked.txt'), 'clean\n', 'utf8');
-    await writeFile(join(alternateWorktree, 'tracked.txt'), 'clean\n', 'utf8');
-    runGit(['add', 'tracked.txt']);
-    runGit([
-      '-c',
-      'user.name=synthetic-live-proof',
-      '-c',
-      'user.email=synthetic-live-proof@example.invalid',
-      'commit',
-      '--quiet',
-      '-m',
-      'initial'
-    ]);
-    runGit(['config', 'core.worktree', alternateWorktree]);
-    runGit(['config', 'core.fsmonitor', helper]);
+    runGit(['config', 'user.name', 'synthetic-live-proof']);
+    runGit(['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    runGit(['config', 'core.checkStat', 'minimal']);
+    runGit(['config', 'core.trustctime', 'false']);
+    await writeFile(join(repository, '.gitattributes'), 'clean.txt filter=local-clean\nprocess.txt filter=worktree-process\n', 'utf8');
+    await writeFile(join(repository, 'clean.txt'), 'clean\n', 'utf8');
+    await writeFile(join(repository, 'process.txt'), 'clean\n', 'utf8');
+    runGit(['add', '.gitattributes', 'clean.txt', 'process.txt']);
+    runGit(['commit', '--quiet', '-m', 'initial']);
+    runGit(['config', 'extensions.worktreeConfig', 'true']);
+    runGit(['config', 'filter.local-clean.clean', cleanCommand]);
+    runGit(['config', '--worktree', 'filter.worktree-process.process', processCommand]);
+    runGit(['config', '--worktree', 'core.fsmonitor', fsmonitorCommand]);
     runGit(['config', 'core.hooksPath', hooks]);
     runGit(['config', 'core.attributesFile', attributesFile]);
-    runGit(['config', 'filter.evil.clean', helper]);
-    runGit(['config', 'filter.evil.process', helper]);
-    await writeFile(join(repository, 'tracked.txt'), 'dirty actual worktree\n', 'utf8');
+    expect(runGit(['check-attr', 'filter', '--', 'clean.txt'])).toContain('local-clean');
+    expect(runGit(['check-attr', 'filter', '--', 'process.txt'])).toContain('worktree-process');
 
-    // This is the vulnerable parent behavior: repository-local core.worktree
-    // redirects status to the clean alternate path, core.fsmonitor runs a
-    // helper, and the attributes/filter pair can run a clean/process helper.
+    const cleanPath = join(repository, 'clean.txt');
+    const processPath = join(repository, 'process.txt');
+    const cleanBefore = await lstat(cleanPath);
+    const processBefore = await lstat(processPath);
+    await writeFile(cleanPath, 'dirty\n', 'utf8');
+    await writeFile(processPath, 'dirty\n', 'utf8');
+    await utimes(cleanPath, cleanBefore.atimeMs / 1000, cleanBefore.mtimeMs / 1000);
+    await utimes(processPath, processBefore.atimeMs / 1000, processBefore.mtimeMs / 1000);
+    const cleanAfter = await lstat(cleanPath);
+    const processAfter = await lstat(processPath);
+    for (const [before, after] of [[cleanBefore, cleanAfter], [processBefore, processAfter]]) {
+      expect(after.dev).toBe(before.dev);
+      expect(after.ino).toBe(before.ino);
+      expect(after.size).toBe(before.size);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+    }
+
+    // The vulnerable parent path reaches all three independently marked
+    // helpers. The fsmonitor response is intentionally minimal, so a Git
+    // protocol error is not evidence that the helper was unreachable.
+    try {
+      runGit(['-c', 'core.fsmonitor=false', 'status', '--porcelain=v1', '--untracked-files=no']);
+    } catch {
+      // A deliberately simple clean/process fixture may make status fail after
+      // the helper request; the distinct markers are the non-vacuous proof.
+    }
+    try {
+      runGit(['-c', 'core.fsmonitor=false', 'add', '--renormalize', 'process.txt']);
+    } catch {
+      // The protocol fixture may fail after receiving the clean request.
+    }
+    expect(await readFile(cleanMarker, 'utf8')).toBe('clean');
+    expect(await readFile(processMarker, 'utf8')).toBe('process');
+    await rm(cleanMarker, { force: true });
+    await rm(processMarker, { force: true });
     try {
       runGit(['status', '--porcelain=v1', '--untracked-files=no']);
     } catch {
-      // A malicious filter is allowed to make the vulnerable parent command
-      // fail; helper execution is the non-vacuous part of this reproduction.
+      // The fsmonitor fixture need only prove that Git reached the configured
+      // helper; hardened status disables it before any helper can run.
     }
-    expect(await readFile(helperMarker, 'utf8')).toBe('ran');
-    await rm(helperMarker, { force: true });
+    expect(await readFile(fsmonitorMarker, 'utf8')).toBe('fsmonitor');
+    await rm(fsmonitorMarker, { force: true });
+    await rm(cleanMarker, { force: true });
+    await rm(processMarker, { force: true });
+
+    await writeFile(join(alternateWorktree, '.gitattributes'), await readFile(join(repository, '.gitattributes')));
+    await writeFile(join(alternateWorktree, 'clean.txt'), 'clean\n', 'utf8');
+    await writeFile(join(alternateWorktree, 'process.txt'), 'clean\n', 'utf8');
+    runGit(['config', 'core.worktree', alternateWorktree]);
 
     const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
     const state = captureModule.readLiveScreenshotRepositoryState(repository);
     expect(state.topology).toBe('directory');
     expect(state.workTree).not.toBe(alternateWorktree);
     expect(state.clientSha).toMatch(/^[a-f0-9]{40}$/u);
-    expect(state.dirtyTrackedFiles).toContain('tracked.txt');
-    await expect(readFile(helperMarker, 'utf8')).rejects.toThrow();
+    expect(state.dirtyTrackedFiles).toContain('clean.txt');
+    expect(state.dirtyTrackedFiles).toContain('process.txt');
+    await expect(readFile(cleanMarker, 'utf8')).rejects.toThrow();
+    await expect(readFile(processMarker, 'utf8')).rejects.toThrow();
+    await expect(readFile(fsmonitorMarker, 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects repository config includes before helper discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-git-include-'));
+    temporaryDirectories.push(root);
+    const repository = join(root, 'repository');
+    const includedConfig = join(root, 'included.config');
+    await mkdir(repository, { mode: 0o700 });
+    await writeFile(includedConfig, '[filter "evil"]\n\tclean = /bin/false\n', 'utf8');
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd: repository,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    runGit(['init', '--quiet']);
+    runGit(['config', 'user.name', 'synthetic-live-proof']);
+    runGit(['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(repository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit(['commit', '--quiet', '-m', 'initial']);
+    runGit(['config', 'include.path', includedConfig]);
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    expect(() => captureModule.readLiveScreenshotRepositoryState(repository)).toThrow(
+      'live screenshot repository topology is unsafe or unsupported'
+    );
   });
 
   it('rejects repointed linked-worktree metadata even when skip-worktree hides dirtiness', async () => {
@@ -547,6 +706,14 @@ describe('live screenshot contract', () => {
     const worktreeTwoPointer = await readFile(join(worktreeTwo, '.git'), 'utf8');
     await writeFile(join(worktreeOne, '.git'), worktreeTwoPointer, 'utf8');
     const worktreeTwoGitDirectory = resolve(mainRepository, '.git', 'worktrees', 'wt2');
+    // Complete the forged swap: wt1's .git points to wt2 metadata, and wt2's
+    // metadata points back to wt1's .git. The selected skip-worktree index bit
+    // remains the foreign source that makes the vulnerable status appear clean.
+    await writeFile(
+      join(worktreeTwoGitDirectory, 'gitdir'),
+      `gitdir: ${join(worktreeOne, '.git')}\n`,
+      'utf8'
+    );
     const parentStatus = execFileSync(
       gitConfiguration.executable,
       [
@@ -844,15 +1011,30 @@ describe('live screenshot contract', () => {
     await writeFile(reviewPath, reviewText, { encoding: 'utf8', mode: 0o600 });
     const reviewEvidence = await createReviewEvidence(reviewPath, reviewText);
 
-    const replacementFirstByte = fixture.imageSha256[0] === '0' ? '1' : '0';
-    const mutatedReviewText = reviewText.replace(
-      fixture.imageSha256,
-      `${replacementFirstByte}${fixture.imageSha256.slice(1)}`
+    const alternateImageSha256 = fixture.imageSha256[0] === '0'
+      ? `1${fixture.imageSha256.slice(1)}`
+      : `0${fixture.imageSha256.slice(1)}`;
+    const mutatedReview = {
+      ...fixture.review,
+      image_sha256: alternateImageSha256
+    };
+    expect(
+      fixture.captureModule.validateIndependentImageReviewRecord(
+        mutatedReview,
+        alternateImageSha256
+      )
+    ).toEqual(mutatedReview);
+    const mutatedReviewText = `${JSON.stringify(mutatedReview)}\n`;
+    expect(Buffer.byteLength(mutatedReviewText, 'utf8')).toBe(
+      Buffer.byteLength(reviewText, 'utf8')
     );
     const beforeMutation = await lstat(reviewPath);
+    const beforeDigest = createHash('sha256').update(reviewText, 'utf8').digest('hex');
     await writeFile(reviewPath, mutatedReviewText, 'utf8');
     const afterMutation = await lstat(reviewPath);
+    const afterDigest = createHash('sha256').update(mutatedReviewText, 'utf8').digest('hex');
     expect(mutatedReviewText).not.toBe(reviewText);
+    expect(afterDigest).not.toBe(beforeDigest);
     expect(afterMutation.dev).toBe(beforeMutation.dev);
     expect(afterMutation.ino).toBe(beforeMutation.ino);
     expect(afterMutation.size).toBe(beforeMutation.size);
@@ -867,6 +1049,114 @@ describe('live screenshot contract', () => {
       })
     ).rejects.toThrow('live screenshot retention review record changed');
     await expectMissing(join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle'));
+  });
+
+  it('rejects a semantically valid review mutation after preflight and before atomic rename', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-review-callback-'));
+    temporaryDirectories.push(root);
+    const fixture = await createRetentionFixture(root);
+    const reviewPath = join(await realpath(root), 'review.json');
+    const reviewText = `${JSON.stringify(fixture.review)}\n`;
+    await writeFile(reviewPath, reviewText, { encoding: 'utf8', mode: 0o600 });
+    const reviewEvidence = await createReviewEvidence(reviewPath, reviewText);
+    const alternateImageSha256 = fixture.imageSha256[0] === '0'
+      ? `1${fixture.imageSha256.slice(1)}`
+      : `0${fixture.imageSha256.slice(1)}`;
+    const mutatedReview = { ...fixture.review, image_sha256: alternateImageSha256 };
+    const mutatedReviewText = `${JSON.stringify(mutatedReview)}\n`;
+    expect(
+      fixture.captureModule.validateIndependentImageReviewRecord(
+        mutatedReview,
+        alternateImageSha256
+      )
+    ).toEqual(mutatedReview);
+    expect(Buffer.byteLength(mutatedReviewText, 'utf8')).toBe(
+      Buffer.byteLength(reviewText, 'utf8')
+    );
+    let atomicRenameObserved = false;
+    const bundlePath = join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle');
+
+    await expect(
+      fixture.captureModule.persistApprovedLiveScreenshot({
+        capture: fixture.capture,
+        destinationDirectory: fixture.retainedDirectory,
+        review: fixture.review,
+        reviewEvidence,
+        provenance: fixture.provenance,
+        beforeAtomicPublish: async () => {
+          await writeFile(reviewPath, mutatedReviewText, 'utf8');
+        },
+        afterAtomicPublishBeforeVerify: async () => {
+          atomicRenameObserved = true;
+        }
+      })
+    ).rejects.toThrow('live screenshot retention review record changed');
+
+    expect(atomicRenameObserved).toBe(false);
+    await expectMissing(bundlePath);
+    expect(JSON.parse(await readFile(reviewPath, 'utf8'))).toEqual(mutatedReview);
+  });
+
+  it('rejects an unexpected staged entry inside the atomic child', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-staged-shape-'));
+    temporaryDirectories.push(root);
+    const fixture = await createRetentionFixture(root);
+    const bundlePath = join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle');
+
+    await expect(
+      fixture.captureModule.persistApprovedLiveScreenshot({
+        capture: fixture.capture,
+        destinationDirectory: fixture.retainedDirectory,
+        review: fixture.review,
+        provenance: fixture.provenance,
+        beforeAtomicPublish: async (stagingDirectory) => {
+          await writeFile(join(stagingDirectory, 'unexpected.txt'), 'unexpected\n', {
+            encoding: 'utf8',
+            flag: 'wx',
+            mode: 0o600
+          });
+        }
+      })
+    ).rejects.toThrow('live screenshot retention publication and cleanup failed');
+
+    await expectMissing(bundlePath);
+  });
+
+  it('preserves a tainted bundle when an unexpected entry appears after enumeration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-published-shape-'));
+    temporaryDirectories.push(root);
+    const fixture = await createRetentionFixture(root);
+    const bundlePath = join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle');
+    let initialEntries: string[] = [];
+
+    await expect(
+      fixture.captureModule.persistApprovedLiveScreenshot({
+        capture: fixture.capture,
+        destinationDirectory: fixture.retainedDirectory,
+        review: fixture.review,
+        provenance: fixture.provenance,
+        afterPublishedEnumeration: async (publishedBundlePath) => {
+          initialEntries = (await readdir(publishedBundlePath)).sort();
+          await writeFile(join(publishedBundlePath, 'unexpected.txt'), 'unexpected\n', {
+            encoding: 'utf8',
+            flag: 'wx',
+            mode: 0o600
+          });
+        }
+      })
+    ).rejects.toThrow('live screenshot retention publication and cleanup failed');
+
+    expect(initialEntries).toEqual(['manifest.json', 'screenshot.png']);
+    expect((await readdir(bundlePath)).sort()).toEqual([
+      'manifest.json',
+      'screenshot.png',
+      'unexpected.txt'
+    ]);
+    expect(await readFile(join(bundlePath, 'unexpected.txt'), 'utf8')).toBe('unexpected\n');
+    expect(await readFile(join(bundlePath, 'screenshot.png'))).toEqual(fixture.bytes);
+    expect(JSON.parse(await readFile(join(bundlePath, 'manifest.json'), 'utf8')).imageSha256).toBe(
+      fixture.imageSha256
+    );
   });
 
   it.each(['screenshot.png', 'manifest.json'] as const)(

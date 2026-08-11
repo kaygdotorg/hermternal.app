@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  readdirSync,
   realpathSync,
   promises as fsPromises
 } from 'node:fs';
@@ -287,6 +288,8 @@ def verify_source():
             or source_stat.st_ino != source_ino
         ):
             raise OSError(errno.EAGAIN, 'staging directory identity changed')
+        if sorted(os.listdir(source_directory_fd)) != ['manifest.json', 'screenshot.png']:
+            raise OSError(errno.EAGAIN, 'staging bundle shape changed')
         for name, expected_dev, expected_ino, expected_size, expected_sha256 in (
             (b'screenshot.png', screenshot_dev, screenshot_ino, screenshot_size, screenshot_sha256),
             (b'manifest.json', manifest_dev, manifest_ino, manifest_size, manifest_sha256),
@@ -1785,6 +1788,37 @@ function readCanonicalRepositoryDirectory(path) {
 }
 
 /** @param {string} path */
+function readCanonicalRepositoryFile(path) {
+  assertAbsoluteRepositoryPath(path);
+  let before;
+  let canonical;
+  let after;
+  try {
+    before = lstatSync(path);
+    if (!before.isFile() || before.isSymbolicLink()) rejectRepositoryTopology();
+    canonical = realpathSync(path);
+    after = lstatSync(path);
+  } catch (error) {
+    if (error instanceof Error && error.message === REPOSITORY_TOPOLOGY_ERROR) throw error;
+    rejectRepositoryTopology();
+  }
+  if (
+    !canonical ||
+    canonical !== resolve(path) ||
+    !before ||
+    !after ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    !after.isFile() ||
+    after.isSymbolicLink()
+  ) {
+    rejectRepositoryTopology();
+  }
+  return canonical;
+}
+
+/** @param {string} path */
 function readBoundedRepositoryText(path) {
   assertAbsoluteRepositoryPath(path);
   let before;
@@ -1838,6 +1872,114 @@ function resolveDeclaredRepositoryPath(base, declared) {
   return candidate;
 }
 
+/**
+ * Scan every linked-worktree metadata directory and require a stable bijection
+ * between metadata directories and worktree `.git` files. Checking only the
+ * selected metadata directory is insufficient: an attacker can repoint the
+ * requested `.git` file and its selected `gitdir` pointer while leaving a
+ * foreign metadata directory available to supply the index.
+ *
+ * @param {string} commonDir
+ * @returns {{ mappings: Array<{ metadataPath: string, workTree: string, dotGit: string }>, fingerprint: string }}
+ */
+function readLinkedWorktreeMappings(commonDir) {
+  const worktreesDirectory = readCanonicalRepositoryDirectory(join(commonDir, 'worktrees'));
+  let entries;
+  try {
+    entries = readdirSync(worktreesDirectory).sort();
+  } catch {
+    rejectRepositoryTopology();
+  }
+  if (
+    entries.length === 0 ||
+    entries.some(
+      (entry) =>
+        typeof entry !== 'string' ||
+        entry.length === 0 ||
+        entry.length > GIT_METADATA_MAX_BYTES ||
+        entry === '.' ||
+        entry === '..' ||
+        entry.includes('/') ||
+        entry.includes('\0')
+    )
+  ) {
+    rejectRepositoryTopology();
+  }
+
+  const dotGitOwners = new Map();
+  const workTreeOwners = new Map();
+  const mappings = [];
+  const fingerprint = [];
+  for (const entry of entries) {
+    const metadataPath = join(worktreesDirectory, entry);
+    if (readCanonicalRepositoryDirectory(metadataPath) !== metadataPath) {
+      rejectRepositoryTopology();
+    }
+    const metadataStats = lstatSync(metadataPath);
+    const commondirPath = join(metadataPath, 'commondir');
+    const commondirText = readBoundedRepositoryText(commondirPath);
+    const commonDirMatch = commondirText.match(COMMONDIR_POINTER_PATTERN);
+    if (!commonDirMatch) rejectRepositoryTopology();
+    const declaredCommonDir = readCanonicalRepositoryDirectory(
+      resolveDeclaredRepositoryPath(metadataPath, commonDirMatch[1])
+    );
+    if (declaredCommonDir !== commonDir) rejectRepositoryTopology();
+
+    const metadataGitdirPath = join(metadataPath, 'gitdir');
+    const metadataGitdirText = readBoundedRepositoryText(metadataGitdirPath);
+    const metadataGitdirMatch = metadataGitdirText.match(COMMONDIR_POINTER_PATTERN);
+    if (!metadataGitdirMatch) rejectRepositoryTopology();
+    const dotGit = readCanonicalRepositoryFile(
+      resolveDeclaredRepositoryPath(metadataPath, metadataGitdirMatch[1])
+    );
+    if (parse(dotGit).base !== '.git') rejectRepositoryTopology();
+    const workTree = readCanonicalRepositoryDirectory(dirname(dotGit));
+    if (join(workTree, '.git') !== dotGit) rejectRepositoryTopology();
+
+    const dotGitText = readBoundedRepositoryText(dotGit);
+    const dotGitMatch = dotGitText.match(GITDIR_POINTER_PATTERN);
+    if (!dotGitMatch) rejectRepositoryTopology();
+    const reciprocalMetadataPath = readCanonicalRepositoryDirectory(
+      resolveDeclaredRepositoryPath(workTree, dotGitMatch[1])
+    );
+    if (reciprocalMetadataPath !== metadataPath) rejectRepositoryTopology();
+
+    if (dotGitOwners.has(dotGit) || workTreeOwners.has(workTree)) {
+      rejectRepositoryTopology();
+    }
+    dotGitOwners.set(dotGit, metadataPath);
+    workTreeOwners.set(workTree, metadataPath);
+    const dotGitStats = lstatSync(dotGit);
+    const workTreeStats = lstatSync(workTree);
+    fingerprint.push({
+      entry,
+      metadataPath,
+      metadataDev: metadataStats.dev,
+      metadataIno: metadataStats.ino,
+      commondirText,
+      metadataGitdirText,
+      dotGit,
+      dotGitDev: dotGitStats.dev,
+      dotGitIno: dotGitStats.ino,
+      dotGitSize: dotGitStats.size,
+      dotGitText,
+      workTree,
+      workTreeDev: workTreeStats.dev,
+      workTreeIno: workTreeStats.ino
+    });
+    mappings.push({ metadataPath, workTree, dotGit });
+  }
+
+  let rereadEntries;
+  try {
+    rereadEntries = readdirSync(worktreesDirectory).sort();
+  } catch {
+    rejectRepositoryTopology();
+  }
+  if (JSON.stringify(rereadEntries) !== JSON.stringify(entries)) rejectRepositoryTopology();
+  return { mappings, fingerprint: JSON.stringify(fingerprint) };
+}
+
 /** @param {string} repositoryRoot @returns {LiveScreenshotRepositoryIdentity} */
 function readRepositoryIdentity(repositoryRoot) {
   assertAbsoluteRepositoryPath(repositoryRoot);
@@ -1875,12 +2017,6 @@ function readRepositoryIdentity(repositoryRoot) {
   const commonDir = readCanonicalRepositoryDirectory(
     resolveDeclaredRepositoryPath(gitDir, commonDirMatch[1])
   );
-  const reciprocalGitdirPath = join(gitDir, 'gitdir');
-  const reciprocalGitdirText = readBoundedRepositoryText(reciprocalGitdirPath);
-  const reciprocalGitdirMatch = reciprocalGitdirText.match(COMMONDIR_POINTER_PATTERN);
-  if (!reciprocalGitdirMatch) rejectRepositoryTopology();
-  const reciprocalDotGit = resolveDeclaredRepositoryPath(gitDir, reciprocalGitdirMatch[1]);
-  if (reciprocalDotGit !== dotGit) rejectRepositoryTopology();
   const relativeGitDir = relative(commonDir, gitDir).split(sep).filter(Boolean);
   if (
     parse(commonDir).base !== '.git' ||
@@ -1891,19 +2027,32 @@ function readRepositoryIdentity(repositoryRoot) {
   ) {
     rejectRepositoryTopology();
   }
-  // Re-read every reciprocal pointer and directory identity before returning.
-  // A linked-worktree metadata swap must not be able to pair wt1's requested
-  // path with wt2's index while preserving a superficially valid topology.
+
+  const requestedDotGit = readCanonicalRepositoryFile(dotGit);
+  const firstMappings = readLinkedWorktreeMappings(commonDir);
+  const requestedMappings = firstMappings.mappings.filter(
+    (mapping) => mapping.workTree === workTree && mapping.dotGit === requestedDotGit
+  );
+  if (requestedMappings.length !== 1) rejectRepositoryTopology();
+
+  // Re-scan every reciprocal pointer and identity before returning. A linked
+  // worktree metadata swap must not be able to pair wt1's requested path with
+  // wt2's index while leaving a superficially valid selected pair behind.
   if (
     readCanonicalRepositoryDirectory(workTree) !== workTree ||
     readCanonicalRepositoryDirectory(gitDir) !== gitDir ||
     readCanonicalRepositoryDirectory(commonDir) !== commonDir ||
     readBoundedRepositoryText(dotGit) !== dotGitText ||
-    readBoundedRepositoryText(commondirPath) !== commondirText ||
-    readBoundedRepositoryText(reciprocalGitdirPath) !== reciprocalGitdirText
+    readBoundedRepositoryText(commondirPath) !== commondirText
   ) {
     rejectRepositoryTopology();
   }
+  const secondMappings = readLinkedWorktreeMappings(commonDir);
+  if (secondMappings.fingerprint !== firstMappings.fingerprint) rejectRepositoryTopology();
+  const stableRequestedMappings = secondMappings.mappings.filter(
+    (mapping) => mapping.workTree === workTree && mapping.dotGit === requestedDotGit
+  );
+  if (stableRequestedMappings.length !== 1) rejectRepositoryTopology();
   return Object.freeze({ workTree, gitDir, commonDir, topology: 'linked-worktree' });
 }
 
@@ -1923,74 +2072,89 @@ export function getLiveScreenshotRepositoryIdentity(
 }
 
 /**
- * Read only the names of repository-local clean/process filters. `git config`
- * does not inspect a worktree or invoke filters, so this preflight can safely
- * discover every dynamic key before a status command. Unsupported key syntax
- * fails closed rather than constructing an ambiguous command-line override.
+ * Read only the names of repository-local and applicable worktree
+ * clean/process filters. `git config` does not inspect a worktree or invoke
+ * filters, so this preflight can safely discover every dynamic key before a
+ * status command. Querying both scopes matters when extensions.worktreeConfig
+ * stores the selected worktree's filters in config.worktree. `include.path`
+ * and `includeIf.*.path` directives are rejected rather than followed: an
+ * included file would be another mutable helper source that this provenance
+ * boundary has not independently bound.
+ * Unsupported key syntax fails closed rather than constructing an ambiguous
+ * command-line override.
  *
  * @param {LiveScreenshotRepositoryIdentity} identity
  * @returns {string[]}
  */
 function readLocalFilterKeys(identity) {
   const childConfiguration = getLiveScreenshotGitChildConfiguration();
-  let output;
-  try {
-    output = execFileSync(
-      childConfiguration.executable,
-      [
-        '--git-dir',
-        identity.gitDir,
-        '--work-tree',
-        identity.workTree,
-        '-c',
-        `core.worktree=${identity.workTree}`,
-        '-c',
-        'core.attributesFile=/dev/null',
-        '-c',
-        'core.fsmonitor=false',
-        '-c',
-        'core.hooksPath=/dev/null',
-        '-c',
-        'diff.external=',
-        '-c',
-        'diff.trustExitCode=false',
-        '--no-optional-locks',
-        'config',
-        '--local',
-        '--null',
-        '--name-only',
-        '--get-regexp',
-        '^filter\\..+\\.(clean|process)$'
-      ],
-      {
-        cwd: identity.workTree,
-        encoding: 'buffer',
-        env: childConfiguration.environment,
-        maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
-        stdio: ['ignore', 'pipe', 'ignore']
+  const keys = new Set();
+  for (const scope of ['local', 'worktree']) {
+    let output;
+    try {
+      output = execFileSync(
+        childConfiguration.executable,
+        [
+          '--git-dir',
+          identity.gitDir,
+          '--work-tree',
+          identity.workTree,
+          '-c',
+          `core.worktree=${identity.workTree}`,
+          '-c',
+          'core.attributesFile=/dev/null',
+          '-c',
+          'core.fsmonitor=false',
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'diff.external=',
+          '-c',
+          'diff.trustExitCode=false',
+          '--no-replace-objects',
+          '--no-optional-locks',
+          'config',
+          `--${scope}`,
+          '--null',
+          '--name-only',
+          '--get-regexp',
+          '^(include.*|filter\\..+\\.(clean|process))$'
+        ],
+        {
+          cwd: identity.workTree,
+          encoding: 'buffer',
+          env: childConfiguration.environment,
+          maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }
+      );
+    } catch (error) {
+      const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
+      if (
+        candidate.status === 1 &&
+        Buffer.isBuffer(candidate.stdout) &&
+        candidate.stdout.length === 0
+      ) {
+        continue;
       }
-    );
-  } catch (error) {
-    const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
-    if (
-      candidate.status === 1 &&
-      Buffer.isBuffer(candidate.stdout) &&
-      candidate.stdout.length === 0
-    ) {
-      return [];
+      rejectRepositoryTopology();
     }
-    rejectRepositoryTopology();
+    if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
+      continue;
+    }
+    const text = output.toString('utf8');
+    if (!Buffer.from(text, 'utf8').equals(output) || !text.endsWith('\0')) {
+      rejectRepositoryTopology();
+    }
+    const scopeKeys = text.slice(0, -1).split('\0');
+    for (const key of scopeKeys) {
+      if (key.startsWith('include') || !FILTER_KEY_PATTERN.test(key)) {
+        rejectRepositoryTopology();
+      }
+      keys.add(key);
+    }
   }
-  if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
-    return [];
-  }
-  const text = output.toString('utf8');
-  if (!Buffer.from(text, 'utf8').equals(output) || !text.endsWith('\0')) {
-    rejectRepositoryTopology();
-  }
-  const keys = text.slice(0, -1).split('\0');
-  if (keys.some((key) => !FILTER_KEY_PATTERN.test(key))) rejectRepositoryTopology();
-  return [...new Set(keys)];
+  return [...keys].sort();
 }
 
 /**
@@ -2023,6 +2187,7 @@ function trustedGitArguments(identity, args) {
     '-c',
     'diff.trustExitCode=false',
     ...(identity.filterOverrides ?? []).flatMap((key) => ['-c', `${key}=`]),
+    '--no-replace-objects',
     '--no-optional-locks',
     ...args
   ];
@@ -2800,10 +2965,18 @@ function runAtomicRename(args, fileDescriptors) {
  * the staged bytes are still bound to the reviewed in-memory evidence and a
  * replaced destination receives no bytes.
  *
- * @param {{ stagingDirectory: string, stagingEvidence: StagingEvidence, destination: DirectoryEvidence, beforeAtomicPublish?: (directory: string) => Promise<void> }} options
+ * @param {{ stagingDirectory: string, stagingEvidence: StagingEvidence, destination: DirectoryEvidence, beforeAtomicPublish?: (directory: string) => Promise<void>, reviewEvidence?: ReviewRecordEvidence, imageSha256?: string, expectedReview?: Record<string, unknown> }} options
  * @returns {Promise<{ renamed: boolean, closeFailure?: Error }>}
  */
-async function publishStagedBundle({ stagingDirectory, stagingEvidence, destination, beforeAtomicPublish }) {
+async function publishStagedBundle({
+  stagingDirectory,
+  stagingEvidence,
+  destination,
+  beforeAtomicPublish,
+  reviewEvidence,
+  imageSha256,
+  expectedReview
+}) {
   const stagingParentPath = dirname(stagingDirectory);
   const stagingName = basename(stagingDirectory);
   if (resolve(stagingParentPath) !== resolve(stagingEvidence.parent.path)) {
@@ -2839,6 +3012,12 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
     // after the JavaScript preflight so the fixed child digest check is the
     // final source gate immediately before the atomic rename.
     if (beforeAtomicPublish) await beforeAtomicPublish(stagingDirectory);
+    if (reviewEvidence && imageSha256 && expectedReview) {
+      const rereadReview = readIndependentImageReviewRecord(reviewEvidence, imageSha256);
+      if (JSON.stringify(rereadReview) !== JSON.stringify(expectedReview)) {
+        throw new Error('live screenshot retention review record changed');
+      }
+    }
     await runAtomicRename(
       [
         '-c',
@@ -2872,7 +3051,8 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
       error.message.includes('destination changed') ||
       error.message.includes('staging identity') ||
       error.message.includes('staging entry') ||
-      error.message.includes('staging parent')
+      error.message.includes('staging parent') ||
+      error.message.startsWith('live screenshot retention review record ')
     )) {
       failure = error;
     } else {
@@ -2902,8 +3082,9 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
  * @param {string} bundlePath
  * @param {Buffer} expectedBytes
  * @param {string} expectedManifestText
+ * @param {(bundlePath: string) => Promise<void>} [afterInitialEnumeration]
  */
-async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifestText) {
+async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifestText, afterInitialEnumeration) {
   let bundleStats;
   try {
     bundleStats = lstatSync(bundlePath);
@@ -2922,6 +3103,11 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
   if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
     throw new Error('live screenshot retention published bundle shape changed');
   }
+  // Test-only adversarial hook. The real lane never supplies it. The final
+  // directory-entry check below must catch an unexpected file inserted after
+  // this initial enumeration rather than returning success for a broadened
+  // public bundle.
+  if (afterInitialEnumeration) await afterInitialEnumeration(bundlePath);
   /** @type {Record<string, StagingFileIdentity>} */
   const identities = {};
   /** @type {Record<string, { bytes: Buffer, dev: number, ino: number, size: number, sha256: string }>} */
@@ -2961,8 +3147,18 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
   ) {
     throw new Error('live screenshot retention published manifest changed');
   }
-  const afterBundleStats = lstatSync(bundlePath);
-  if (afterBundleStats.dev !== bundleStats.dev || afterBundleStats.ino !== bundleStats.ino) {
+  let afterBundleStats;
+  try {
+    afterBundleStats = lstatSync(bundlePath);
+  } catch {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  if (
+    !afterBundleStats.isDirectory() ||
+    afterBundleStats.isSymbolicLink() ||
+    afterBundleStats.dev !== bundleStats.dev ||
+    afterBundleStats.ino !== bundleStats.ino
+  ) {
     throw new Error('live screenshot retention published bundle identity changed');
   }
   for (const entry of entries) {
@@ -2978,6 +3174,63 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
       second.size !== before.size ||
       second.sha256 !== before.sha256 ||
       !second.bytes.equals(firstSnapshots[entry].bytes)
+    ) {
+      throw new Error('live screenshot retention published bundle entry changed');
+    }
+  }
+  let finalEntries;
+  try {
+    finalEntries = (await fsPromises.readdir(bundlePath)).sort();
+  } catch {
+    throw new Error('live screenshot retention published bundle shape changed');
+  }
+  let finalBundleStats;
+  try {
+    finalBundleStats = lstatSync(bundlePath);
+  } catch {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  if (
+    !finalBundleStats.isDirectory() ||
+    finalBundleStats.isSymbolicLink() ||
+    finalBundleStats.dev !== bundleStats.dev ||
+    finalBundleStats.ino !== bundleStats.ino
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  if (JSON.stringify(finalEntries) !== JSON.stringify(entries)) {
+    throw new Error('live screenshot retention published bundle shape changed');
+  }
+  for (const entry of finalEntries) {
+    const entryPath = join(bundlePath, entry);
+    let finalEntryStats;
+    try {
+      finalEntryStats = lstatSync(entryPath);
+    } catch {
+      throw new Error('live screenshot retention published bundle entry changed');
+    }
+    if (
+      !finalEntryStats.isFile() ||
+      finalEntryStats.isSymbolicLink() ||
+      (finalEntryStats.mode & 0o077) !== 0
+    ) {
+      throw new Error('live screenshot retention published bundle entry changed');
+    }
+    const finalSnapshot = readStableRegularFile(
+      entryPath,
+      entry === 'screenshot.png' ? MAX_IMAGE_BYTES : MAX_REVIEW_RECORD_BYTES,
+      'live screenshot retention published bundle entry changed'
+    );
+    const expected = identities[entry];
+    if (
+      !expected ||
+      finalEntryStats.dev !== expected.dev ||
+      finalEntryStats.ino !== expected.ino ||
+      finalEntryStats.size !== expected.size ||
+      finalSnapshot.dev !== expected.dev ||
+      finalSnapshot.ino !== expected.ino ||
+      finalSnapshot.size !== expected.size ||
+      finalSnapshot.sha256 !== expected.sha256
     ) {
       throw new Error('live screenshot retention published bundle entry changed');
     }
@@ -3076,6 +3329,7 @@ async function removePublishedBundleExact(bundlePath, destination, expected) {
  *   provenance?: ChromiumProvenance,
  *   beforeAtomicPublish?: (directory: string) => Promise<void>,
  *   afterAtomicPublishBeforeVerify?: (bundlePath: string) => Promise<void>,
+ *   afterPublishedEnumeration?: (bundlePath: string) => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
@@ -3088,6 +3342,7 @@ export async function persistApprovedLiveScreenshot({
   provenance,
   beforeAtomicPublish,
   afterAtomicPublishBeforeVerify,
+  afterPublishedEnumeration,
   beforeStagingCleanup
 }) {
   if (!capture || !isRecord(capture) || !isRecord(capture.manifest)) {
@@ -3242,7 +3497,10 @@ export async function persistApprovedLiveScreenshot({
       stagingDirectory,
       stagingEvidence,
       destination: evidence,
-      beforeAtomicPublish
+      beforeAtomicPublish,
+      reviewEvidence,
+      imageSha256,
+      expectedReview: reviewRecord
     });
     // The atomic rename has already moved the source when `renamed` is true;
     // close failures must not send the outer cleanup back to the old pathname.
@@ -3254,7 +3512,13 @@ export async function persistApprovedLiveScreenshot({
     // post-publication mutation makes verification fail, exact-identity
     // cleanup below removes the tainted bundle before this helper returns.
     if (afterAtomicPublishBeforeVerify) await afterAtomicPublishBeforeVerify(bundlePath);
-    await verifyPublishedBundle(bundlePath, bytes, manifestText);
+    await verifyPublishedBundle(
+      bundlePath,
+      bytes,
+      manifestText,
+      afterPublishedEnumeration
+    );
+    assertSameDestination(evidence);
     publishedNeedsCleanup = false;
     if (publication.closeFailure) throw publication.closeFailure;
     result = {
