@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -90,7 +90,10 @@ const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
   'duplicate exact assistant markers',
   'sanitizer audits storage without clearing',
   'hermternal.independent-image-review.v1',
-  'exact scrubbed PNG SHA-256'
+  'exact scrubbed PNG SHA-256',
+  'explicit `--git-dir` and `--work-tree` paths',
+  'repository-local config cannot redirect status',
+  'fsmonitor-helper parent bypass'
 ]);
 
 const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
@@ -282,6 +285,8 @@ describe('live screenshot contract', () => {
     expect(gitConfiguration.environment).not.toHaveProperty('HERMES_TEST_PASSWORD');
     expect(gitConfiguration.environment).not.toHaveProperty('NODE_OPTIONS');
     expect(gitConfiguration.environment).not.toHaveProperty('HTTP_PROXY');
+    expect(gitConfiguration.environment.GIT_CONFIG_SYSTEM).toBe('/dev/null');
+    expect(gitConfiguration.environment.GIT_CONFIG_GLOBAL).toBe('/dev/null');
     expect(gitConfiguration.environment.PATH).toBe('/usr/bin:/bin:/usr/sbin:/sbin');
 
     const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
@@ -310,6 +315,13 @@ describe('live screenshot contract', () => {
     const captureSource = await readFile(resolve(appRoot, 'tests/live/live-screenshot-capture.mjs'), 'utf8');
     expect(captureSource).toContain('getLiveScreenshotGitChildConfiguration');
     expect(captureSource).toContain('env: childConfiguration.environment');
+    expect(captureSource).toContain('--git-dir');
+    expect(captureSource).toContain('--work-tree');
+    expect(captureSource).toContain('core.worktree=');
+    expect(captureSource).toContain('core.fsmonitor=false');
+    expect(captureSource).toContain('core.hooksPath=/dev/null');
+    expect(captureSource).toContain('--path-format=absolute');
+    expect(captureSource).toContain('readLiveScreenshotRepositoryState');
     expect(captureSource).not.toContain("execFileSync('git'");
     expect(captureSource).not.toContain('pageContext.clearCookies');
     expect(captureSource).toContain('authenticatedContextPreserved: true');
@@ -329,6 +341,69 @@ describe('live screenshot contract', () => {
       officialSpec.indexOf('const cookiesBeforeLogout = await context.cookies(proofOrigin);')
     );
     expect(officialSpec).toContain('sanitization is clone-only');
+  });
+
+  it('rejects a local core.worktree bypass without executing fsmonitor helpers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-git-provenance-'));
+    temporaryDirectories.push(root);
+    const repository = join(root, 'repository');
+    const alternateWorktree = join(root, 'alternate-worktree');
+    const helperMarker = join(root, 'fsmonitor-helper-ran');
+    const helper = join(root, 'fsmonitor-helper.mjs');
+    const hooks = join(root, 'hooks');
+    await mkdir(repository, { mode: 0o700 });
+    await mkdir(alternateWorktree, { mode: 0o700 });
+    await mkdir(hooks, { mode: 0o700 });
+    await writeFile(
+      helper,
+      `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(helperMarker)}, 'ran');\n`,
+      'utf8'
+    );
+    await chmod(helper, 0o700);
+
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd: repository,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    runGit(['init', '--quiet']);
+    await writeFile(join(repository, 'tracked.txt'), 'clean\n', 'utf8');
+    await writeFile(join(alternateWorktree, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit([
+      '-c',
+      'user.name=synthetic-live-proof',
+      '-c',
+      'user.email=synthetic-live-proof@example.invalid',
+      'commit',
+      '--quiet',
+      '-m',
+      'initial'
+    ]);
+    runGit(['config', 'core.worktree', alternateWorktree]);
+    runGit(['config', 'core.fsmonitor', helper]);
+    runGit(['config', 'core.hooksPath', hooks]);
+    await writeFile(join(repository, 'tracked.txt'), 'dirty actual worktree\n', 'utf8');
+
+    // This is the vulnerable parent behavior: repository-local core.worktree
+    // redirects status to the clean alternate path, and core.fsmonitor runs a
+    // helper before the result is returned.
+    expect(runGit(['status', '--porcelain=v1', '--untracked-files=no'])).toBe('');
+    expect(await readFile(helperMarker, 'utf8')).toBe('ran');
+    await rm(helperMarker, { force: true });
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const state = captureModule.readLiveScreenshotRepositoryState(repository);
+    expect(state.topology).toBe('directory');
+    expect(state.workTree).not.toBe(alternateWorktree);
+    expect(state.clientSha).toMatch(/^[a-f0-9]{40}$/u);
+    expect(state.dirtyTrackedFiles).toContain('tracked.txt');
+    await expect(readFile(helperMarker, 'utf8')).rejects.toThrow();
   });
 
   it('fails closed at the reconciliation history cap and keeps Node/page matching parity', async () => {

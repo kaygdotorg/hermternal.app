@@ -1602,23 +1602,286 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
   });
 }
 
+const GIT_METADATA_MAX_BYTES = 4096;
+const GIT_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
+const REPOSITORY_TOPOLOGY_ERROR = 'live screenshot repository topology is unsafe or unsupported';
+const GITDIR_POINTER_PATTERN = /^gitdir: ([^\r\n]+)\n$/u;
+const COMMONDIR_POINTER_PATTERN = /^([^\r\n]+)\n$/u;
+
+/** @typedef {{ workTree: string, gitDir: string, commonDir: string, topology: 'directory' | 'linked-worktree' }} LiveScreenshotRepositoryIdentity */
+
+/** @returns {never} */
+function rejectRepositoryTopology() {
+  throw new Error(REPOSITORY_TOPOLOGY_ERROR);
+}
+
+/** @param {unknown} path */
+function assertAbsoluteRepositoryPath(path) {
+  if (
+    typeof path !== 'string' ||
+    path.length === 0 ||
+    path.length > GIT_METADATA_MAX_BYTES ||
+    !path.startsWith('/') ||
+    resolve(path) !== path ||
+    path.includes('\0')
+  ) {
+    rejectRepositoryTopology();
+  }
+}
+
+/** @param {string} path */
+function readCanonicalRepositoryDirectory(path) {
+  assertAbsoluteRepositoryPath(path);
+  let before;
+  let canonical;
+  let after;
+  try {
+    before = lstatSync(path);
+    if (!before.isDirectory() || before.isSymbolicLink()) rejectRepositoryTopology();
+    canonical = realpathSync(path);
+    after = lstatSync(path);
+  } catch (error) {
+    if (error instanceof Error && error.message === REPOSITORY_TOPOLOGY_ERROR) throw error;
+    rejectRepositoryTopology();
+  }
+  if (
+    !canonical ||
+    !before ||
+    !after ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    !after.isDirectory() ||
+    after.isSymbolicLink()
+  ) {
+    rejectRepositoryTopology();
+  }
+  return canonical;
+}
+
+/** @param {string} path */
+function readBoundedRepositoryText(path) {
+  assertAbsoluteRepositoryPath(path);
+  let before;
+  let text;
+  let after;
+  try {
+    before = lstatSync(path);
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      before.size === 0 ||
+      before.size > GIT_METADATA_MAX_BYTES
+    ) {
+      rejectRepositoryTopology();
+    }
+    text = readFileSync(path, 'utf8');
+    after = lstatSync(path);
+  } catch (error) {
+    if (error instanceof Error && error.message === REPOSITORY_TOPOLOGY_ERROR) throw error;
+    rejectRepositoryTopology();
+  }
+  if (
+    !before ||
+    !after ||
+    typeof text !== 'string' ||
+    Buffer.byteLength(text, 'utf8') !== before.size ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino ||
+    before.size !== after.size ||
+    !after.isFile() ||
+    after.isSymbolicLink()
+  ) {
+    rejectRepositoryTopology();
+  }
+  return text;
+}
+
+/** @param {string} base @param {string} declared */
+function resolveDeclaredRepositoryPath(base, declared) {
+  if (
+    typeof declared !== 'string' ||
+    declared.length === 0 ||
+    declared.length > GIT_METADATA_MAX_BYTES ||
+    declared.includes('\0') ||
+    /[\r\n]/u.test(declared)
+  ) {
+    rejectRepositoryTopology();
+  }
+  const candidate = resolve(base, declared);
+  assertAbsoluteRepositoryPath(candidate);
+  return candidate;
+}
+
+/** @param {string} repositoryRoot @returns {LiveScreenshotRepositoryIdentity} */
+function readRepositoryIdentity(repositoryRoot) {
+  assertAbsoluteRepositoryPath(repositoryRoot);
+  const workTree = readCanonicalRepositoryDirectory(repositoryRoot);
+  const dotGit = join(workTree, '.git');
+  let dotGitStats;
+  try {
+    dotGitStats = lstatSync(dotGit);
+  } catch {
+    rejectRepositoryTopology();
+  }
+  if (!dotGitStats || dotGitStats.isSymbolicLink()) rejectRepositoryTopology();
+
+  if (dotGitStats.isDirectory()) {
+    const gitDir = readCanonicalRepositoryDirectory(dotGit);
+    return Object.freeze({
+      workTree,
+      gitDir,
+      commonDir: gitDir,
+      topology: 'directory'
+    });
+  }
+
+  if (!dotGitStats.isFile()) rejectRepositoryTopology();
+  const gitDirMatch = readBoundedRepositoryText(dotGit).match(GITDIR_POINTER_PATTERN);
+  if (!gitDirMatch) rejectRepositoryTopology();
+  const gitDir = readCanonicalRepositoryDirectory(
+    resolveDeclaredRepositoryPath(workTree, gitDirMatch[1])
+  );
+  const commondirPath = join(gitDir, 'commondir');
+  const commonDirMatch = readBoundedRepositoryText(commondirPath).match(COMMONDIR_POINTER_PATTERN);
+  if (!commonDirMatch) rejectRepositoryTopology();
+  const commonDir = readCanonicalRepositoryDirectory(
+    resolveDeclaredRepositoryPath(gitDir, commonDirMatch[1])
+  );
+  const relativeGitDir = relative(commonDir, gitDir).split(sep).filter(Boolean);
+  if (
+    parse(commonDir).base !== '.git' ||
+    relativeGitDir.length !== 2 ||
+    relativeGitDir[0] !== 'worktrees' ||
+    relativeGitDir[1] === '.' ||
+    relativeGitDir[1] === '..'
+  ) {
+    rejectRepositoryTopology();
+  }
+  return Object.freeze({ workTree, gitDir, commonDir, topology: 'linked-worktree' });
+}
+
 /**
- * Run a local provenance-only git command with a fixed executable and a
+ * Resolve the repository identity from the worktree's `.git` entry rather than
+ * asking Git to discover it through repository-local configuration. A linked
+ * worktree is accepted only when its `gitdir` and `commondir` files describe
+ * Git's standard `<common>/worktrees/<name>` topology; separate or ambiguous
+ * layouts fail closed before a child process starts.
+ *
+ * @param {string} [repositoryRoot]
+ */
+export function getLiveScreenshotRepositoryIdentity(
+  repositoryRoot = LIVE_SCREENSHOT_REPOSITORY_ROOT
+) {
+  return readRepositoryIdentity(repositoryRoot);
+}
+
+/**
+ * Build a provenance-only Git command. Repository-local configuration remains
+ * readable by Git for object-format compatibility, but it cannot select the
+ * worktree or execute helpers: filesystem-derived `--git-dir`/`--work-tree`
+ * identity and command-line overrides win over `core.worktree`, fsmonitor,
+ * hooks, external diff, and optional index writes.
+ *
+ * @param {LiveScreenshotRepositoryIdentity} identity
+ * @param {string[]} args
+ */
+function trustedGitArguments(identity, args) {
+  return [
+    '--git-dir',
+    identity.gitDir,
+    '--work-tree',
+    identity.workTree,
+    '-c',
+    `core.worktree=${identity.workTree}`,
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'diff.external=',
+    '-c',
+    'diff.trustExitCode=false',
+    '--no-optional-locks',
+    ...args
+  ];
+}
+
+/**
+ * Run a local provenance-only Git command with a fixed executable and a
  * scrubbed child environment. The credential launcher may have placed
  * HERMES_TEST_PASSWORD in this Node process, so inheriting process.env here
  * would expose it to a subprocess unrelated to browser authentication.
  *
  * @param {string[]} args
- * @param {string} cwd
+ * @param {LiveScreenshotRepositoryIdentity} identity
  */
-function runTrustedGit(args, cwd) {
+function runTrustedGit(args, identity) {
   const childConfiguration = getLiveScreenshotGitChildConfiguration();
-  return execFileSync(childConfiguration.executable, args, {
-    cwd,
+  return execFileSync(childConfiguration.executable, trustedGitArguments(identity, args), {
+    cwd: identity.workTree,
     encoding: 'utf8',
     env: childConfiguration.environment,
+    maxBuffer: GIT_OUTPUT_MAX_BYTES,
     stdio: ['ignore', 'pipe', 'ignore']
   });
+}
+
+/** @param {string} output @param {LiveScreenshotRepositoryIdentity} identity */
+function assertGitIdentityOutput(output, identity) {
+  const lines = output.endsWith('\n') ? output.slice(0, -1).split('\n') : [];
+  if (lines.length !== 5 || lines.some((line) => line.length === 0)) rejectRepositoryTopology();
+  const [gitDir, commonDir, workTree, insideWorkTree, bareRepository] = lines;
+  if (
+    readCanonicalRepositoryDirectory(gitDir) !== identity.gitDir ||
+    readCanonicalRepositoryDirectory(commonDir) !== identity.commonDir ||
+    readCanonicalRepositoryDirectory(workTree) !== identity.workTree ||
+    insideWorkTree !== 'true' ||
+    bareRepository !== 'false'
+  ) {
+    rejectRepositoryTopology();
+  }
+}
+
+/** @param {string} output */
+function readCommitSha(output) {
+  const value = output.endsWith('\n') ? output.slice(0, -1) : '';
+  if (!COMMIT_SHA_PATTERN.test(value)) rejectRepositoryTopology();
+  return value;
+}
+
+/**
+ * Attest the exact worktree and Git directories, then read the commit and
+ * tracked dirtiness through those explicit paths. This is exported for the
+ * offline adversarial regression probe; the public screenshot manifest still
+ * receives only the commit SHA.
+ *
+ * @param {string} [repositoryRoot]
+ */
+export function readLiveScreenshotRepositoryState(
+  repositoryRoot = LIVE_SCREENSHOT_REPOSITORY_ROOT
+) {
+  const identity = readRepositoryIdentity(repositoryRoot);
+  const identityOutput = runTrustedGit(
+    [
+      'rev-parse',
+      '--path-format=absolute',
+      '--absolute-git-dir',
+      '--git-common-dir',
+      '--show-toplevel',
+      '--is-inside-work-tree',
+      '--is-bare-repository'
+    ],
+    identity
+  );
+  assertGitIdentityOutput(identityOutput, identity);
+  const clientSha = readCommitSha(
+    runTrustedGit(['rev-parse', '--verify', 'HEAD^{commit}'], identity)
+  );
+  const dirtyTrackedFiles = runTrustedGit(
+    ['status', '--porcelain=v1', '--untracked-files=no', '--ignore-submodules=none'],
+    identity
+  );
+  return Object.freeze({ ...identity, clientSha, dirtyTrackedFiles });
 }
 
 /**
@@ -1636,25 +1899,16 @@ function requireCaptureGate(environment, repositoryRoot = LIVE_SCREENSHOT_REPOSI
   if (typeof clientSha !== 'string' || !COMMIT_SHA_PATTERN.test(clientSha)) {
     throw new Error('live screenshot capture requires an explicit full client SHA');
   }
-  let checkoutSha;
+  let checkout;
   try {
-    checkoutSha = runTrustedGit(['rev-parse', 'HEAD'], repositoryRoot).trim();
+    checkout = readLiveScreenshotRepositoryState(repositoryRoot);
   } catch {
     throw new Error('live screenshot capture could not attest the client checkout');
   }
-  if (checkoutSha !== clientSha) {
+  if (checkout.clientSha !== clientSha) {
     throw new Error('live screenshot capture client SHA does not match the checkout');
   }
-  let dirtyTrackedFiles;
-  try {
-    dirtyTrackedFiles = runTrustedGit(
-      ['status', '--porcelain=v1', '--untracked-files=no'],
-      repositoryRoot
-    ).trim();
-  } catch {
-    throw new Error('live screenshot capture could not attest a clean client checkout');
-  }
-  if (dirtyTrackedFiles.length > 0) {
+  if (checkout.dirtyTrackedFiles.trim().length > 0) {
     throw new Error('live screenshot capture requires a clean tracked checkout');
   }
   return clientSha;
