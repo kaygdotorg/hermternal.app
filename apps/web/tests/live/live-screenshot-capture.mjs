@@ -3,9 +3,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   accessSync,
+  closeSync,
   constants as fsConstants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   promises as fsPromises
 } from 'node:fs';
@@ -232,6 +236,7 @@ const SAFE_FILE_STEM_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const FORBIDDEN_PUBLIC_TEXT_PATTERN =
   /(?:password|credential|cookie|ticket|prompt|transcript|provider|websocket|web-socket|pty|stdout|stderr|trace|dom|html|request[._ -]?id|session[._ -]?id|hostname|secret)/iu;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const NOFOLLOW_READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 const TRUSTED_PYTHON_EXECUTABLES = Object.freeze([
   '/usr/bin/python3',
   '/opt/homebrew/bin/python3',
@@ -242,6 +247,7 @@ const TRUSTED_STAGING_SYSTEM_ROOT = process.platform === 'darwin' ? '/private/tm
 const ATOMIC_RENAME_SCRIPT = String.raw`
 import ctypes
 import errno
+import hashlib
 import os
 import platform
 import stat
@@ -258,9 +264,11 @@ parent_ino = int(sys.argv[8])
 screenshot_dev = int(sys.argv[9])
 screenshot_ino = int(sys.argv[10])
 screenshot_size = int(sys.argv[11])
-manifest_dev = int(sys.argv[12])
-manifest_ino = int(sys.argv[13])
-manifest_size = int(sys.argv[14])
+screenshot_sha256 = sys.argv[12]
+manifest_dev = int(sys.argv[13])
+manifest_ino = int(sys.argv[14])
+manifest_size = int(sys.argv[15])
+manifest_sha256 = sys.argv[16]
 
 def verify_source():
     parent_stat = os.fstat(source_fd)
@@ -279,18 +287,43 @@ def verify_source():
             or source_stat.st_ino != source_ino
         ):
             raise OSError(errno.EAGAIN, 'staging directory identity changed')
-        for name, expected_dev, expected_ino, expected_size in (
-            (b'screenshot.png', screenshot_dev, screenshot_ino, screenshot_size),
-            (b'manifest.json', manifest_dev, manifest_ino, manifest_size),
+        for name, expected_dev, expected_ino, expected_size, expected_sha256 in (
+            (b'screenshot.png', screenshot_dev, screenshot_ino, screenshot_size, screenshot_sha256),
+            (b'manifest.json', manifest_dev, manifest_ino, manifest_size, manifest_sha256),
         ):
-            entry_stat = os.stat(name, dir_fd=source_directory_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISREG(entry_stat.st_mode)
-                or entry_stat.st_dev != expected_dev
-                or entry_stat.st_ino != expected_ino
-                or entry_stat.st_size != expected_size
-            ):
-                raise OSError(errno.EAGAIN, 'staging entry identity changed')
+            entry_fd = os.open(
+                name,
+                os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0),
+                dir_fd=source_directory_fd,
+            )
+            try:
+                entry_stat = os.fstat(entry_fd)
+                if (
+                    not stat.S_ISREG(entry_stat.st_mode)
+                    or entry_stat.st_dev != expected_dev
+                    or entry_stat.st_ino != expected_ino
+                    or entry_stat.st_size != expected_size
+                ):
+                    raise OSError(errno.EAGAIN, 'staging entry identity changed')
+                digest = hashlib.sha256()
+                remaining = expected_size
+                while remaining > 0:
+                    chunk = os.read(entry_fd, min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise OSError(errno.EAGAIN, 'staging entry content changed')
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if digest.hexdigest() != expected_sha256:
+                    raise OSError(errno.EAGAIN, 'staging entry content changed')
+                after_entry_stat = os.fstat(entry_fd)
+                if (
+                    after_entry_stat.st_dev != expected_dev
+                    or after_entry_stat.st_ino != expected_ino
+                    or after_entry_stat.st_size != expected_size
+                ):
+                    raise OSError(errno.EAGAIN, 'staging entry identity changed')
+            finally:
+                os.close(entry_fd)
     finally:
         os.close(source_directory_fd)
 
@@ -695,10 +728,69 @@ function parseIndependentImageReviewRecord(bytes, expectedImageSha256) {
 }
 
 /**
- * Validate an existing review record path before page mutation and retain its
- * device/inode/size so a replacement cannot become an approval later.
+ * Read a bounded regular file through a no-follow descriptor and prove that its
+ * descriptor identity and size remain stable for the complete read. The digest
+ * is part of the evidence so same-inode, same-size content replacement cannot
+ * silently become a different approval or publication input.
  *
- * @typedef {{ candidate: string, dev: number, ino: number, size: number, canonical: string, parent: { candidate: string, dev: number, ino: number, canonical: string } }} ReviewRecordEvidence
+ * @param {string} path
+ * @param {number} maxBytes
+ * @param {string} unavailableMessage
+ */
+function readStableRegularFile(path, maxBytes, unavailableMessage) {
+  let fileDescriptor;
+  try {
+    fileDescriptor = openSync(path, NOFOLLOW_READ_FLAGS);
+    const before = fstatSync(fileDescriptor);
+    if (!before.isFile() || before.isSymbolicLink() || before.size <= 0 || before.size > maxBytes) {
+      throw new Error(unavailableMessage);
+    }
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < before.size) {
+      const count = readSync(fileDescriptor, bytes, offset, before.size - offset, null);
+      if (count <= 0) throw new Error(unavailableMessage);
+      offset += count;
+    }
+    const after = fstatSync(fileDescriptor);
+    if (
+      !after.isFile() ||
+      after.isSymbolicLink() ||
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      offset !== before.size
+    ) {
+      throw new Error(unavailableMessage);
+    }
+    return Object.freeze({
+      bytes,
+      dev: before.dev,
+      ino: before.ino,
+      size: before.size,
+      sha256: createHash('sha256').update(bytes).digest('hex')
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === unavailableMessage) throw error;
+    throw new Error(unavailableMessage);
+  } finally {
+    if (fileDescriptor !== undefined) {
+      try {
+        closeSync(fileDescriptor);
+      } catch {
+        // The bounded read result remains the primary evidence failure.
+      }
+    }
+  }
+}
+
+/**
+ * Validate an existing review record path before page mutation and retain its
+ * device/inode/size and initial byte digest so a replacement cannot become an
+ * approval later. The digest is intentionally independent of the reviewed
+ * image hash: a same-size rewrite of the review decision itself must fail.
+ *
+ * @typedef {{ candidate: string, dev: number, ino: number, size: number, sha256: string, canonical: string, parent: { candidate: string, dev: number, ino: number, canonical: string } }} ReviewRecordEvidence
  * @param {string} path
  * @returns {ReviewRecordEvidence}
  */
@@ -728,7 +820,31 @@ function safeReviewRecordEvidence(path) {
   ) {
     throw new Error('live screenshot retention review record is unsafe');
   }
-  return { candidate, dev: stats.dev, ino: stats.ino, size: stats.size, canonical, parent };
+  let snapshot;
+  try {
+    snapshot = readStableRegularFile(
+      candidate,
+      MAX_REVIEW_RECORD_BYTES,
+      'live screenshot retention review record is unavailable'
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === 'live screenshot retention review record is unavailable') {
+      throw error;
+    }
+    throw new Error('live screenshot retention review record is unavailable');
+  }
+  if (snapshot.dev !== stats.dev || snapshot.ino !== stats.ino || snapshot.size !== stats.size) {
+    throw new Error('live screenshot retention review record changed');
+  }
+  return {
+    candidate,
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    sha256: snapshot.sha256,
+    canonical,
+    parent
+  };
 }
 
 /** @param {ReviewRecordEvidence} evidence */
@@ -738,6 +854,7 @@ function assertSameReviewRecord(evidence) {
     current.dev !== evidence.dev ||
     current.ino !== evidence.ino ||
     current.size !== evidence.size ||
+    current.sha256 !== evidence.sha256 ||
     current.canonical !== evidence.canonical ||
     current.parent.dev !== evidence.parent.dev ||
     current.parent.ino !== evidence.parent.ino
@@ -749,13 +866,20 @@ function assertSameReviewRecord(evidence) {
 /** @param {ReviewRecordEvidence} evidence @param {string} [expectedImageSha256] */
 function readIndependentImageReviewRecord(evidence, expectedImageSha256) {
   assertSameReviewRecord(evidence);
-  let bytes;
-  try {
-    bytes = readFileSync(evidence.candidate);
-  } catch {
-    throw new Error('live screenshot retention review record is unavailable');
+  const snapshot = readStableRegularFile(
+    evidence.candidate,
+    MAX_REVIEW_RECORD_BYTES,
+    'live screenshot retention review record is unavailable'
+  );
+  if (
+    snapshot.dev !== evidence.dev ||
+    snapshot.ino !== evidence.ino ||
+    snapshot.size !== evidence.size ||
+    snapshot.sha256 !== evidence.sha256
+  ) {
+    throw new Error('live screenshot retention review record changed');
   }
-  const review = parseIndependentImageReviewRecord(bytes, expectedImageSha256);
+  const review = parseIndependentImageReviewRecord(snapshot.bytes, expectedImageSha256);
   assertSameReviewRecord(evidence);
   return review;
 }
@@ -1608,7 +1732,9 @@ const REPOSITORY_TOPOLOGY_ERROR = 'live screenshot repository topology is unsafe
 const GITDIR_POINTER_PATTERN = /^gitdir: ([^\r\n]+)\n$/u;
 const COMMONDIR_POINTER_PATTERN = /^([^\r\n]+)\n$/u;
 
-/** @typedef {{ workTree: string, gitDir: string, commonDir: string, topology: 'directory' | 'linked-worktree' }} LiveScreenshotRepositoryIdentity */
+/** @typedef {{ workTree: string, gitDir: string, commonDir: string, topology: 'directory' | 'linked-worktree', filterOverrides?: string[] }} LiveScreenshotRepositoryIdentity */
+const FILTER_KEY_PATTERN = /^filter\.[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:clean|process)$/u;
+const GIT_CONFIG_OUTPUT_MAX_BYTES = 128 * 1024;
 
 /** @returns {never} */
 function rejectRepositoryTopology() {
@@ -1736,17 +1862,25 @@ function readRepositoryIdentity(repositoryRoot) {
   }
 
   if (!dotGitStats.isFile()) rejectRepositoryTopology();
-  const gitDirMatch = readBoundedRepositoryText(dotGit).match(GITDIR_POINTER_PATTERN);
+  const dotGitText = readBoundedRepositoryText(dotGit);
+  const gitDirMatch = dotGitText.match(GITDIR_POINTER_PATTERN);
   if (!gitDirMatch) rejectRepositoryTopology();
   const gitDir = readCanonicalRepositoryDirectory(
     resolveDeclaredRepositoryPath(workTree, gitDirMatch[1])
   );
   const commondirPath = join(gitDir, 'commondir');
-  const commonDirMatch = readBoundedRepositoryText(commondirPath).match(COMMONDIR_POINTER_PATTERN);
+  const commondirText = readBoundedRepositoryText(commondirPath);
+  const commonDirMatch = commondirText.match(COMMONDIR_POINTER_PATTERN);
   if (!commonDirMatch) rejectRepositoryTopology();
   const commonDir = readCanonicalRepositoryDirectory(
     resolveDeclaredRepositoryPath(gitDir, commonDirMatch[1])
   );
+  const reciprocalGitdirPath = join(gitDir, 'gitdir');
+  const reciprocalGitdirText = readBoundedRepositoryText(reciprocalGitdirPath);
+  const reciprocalGitdirMatch = reciprocalGitdirText.match(COMMONDIR_POINTER_PATTERN);
+  if (!reciprocalGitdirMatch) rejectRepositoryTopology();
+  const reciprocalDotGit = resolveDeclaredRepositoryPath(gitDir, reciprocalGitdirMatch[1]);
+  if (reciprocalDotGit !== dotGit) rejectRepositoryTopology();
   const relativeGitDir = relative(commonDir, gitDir).split(sep).filter(Boolean);
   if (
     parse(commonDir).base !== '.git' ||
@@ -1754,6 +1888,19 @@ function readRepositoryIdentity(repositoryRoot) {
     relativeGitDir[0] !== 'worktrees' ||
     relativeGitDir[1] === '.' ||
     relativeGitDir[1] === '..'
+  ) {
+    rejectRepositoryTopology();
+  }
+  // Re-read every reciprocal pointer and directory identity before returning.
+  // A linked-worktree metadata swap must not be able to pair wt1's requested
+  // path with wt2's index while preserving a superficially valid topology.
+  if (
+    readCanonicalRepositoryDirectory(workTree) !== workTree ||
+    readCanonicalRepositoryDirectory(gitDir) !== gitDir ||
+    readCanonicalRepositoryDirectory(commonDir) !== commonDir ||
+    readBoundedRepositoryText(dotGit) !== dotGitText ||
+    readBoundedRepositoryText(commondirPath) !== commondirText ||
+    readBoundedRepositoryText(reciprocalGitdirPath) !== reciprocalGitdirText
   ) {
     rejectRepositoryTopology();
   }
@@ -1776,11 +1923,83 @@ export function getLiveScreenshotRepositoryIdentity(
 }
 
 /**
+ * Read only the names of repository-local clean/process filters. `git config`
+ * does not inspect a worktree or invoke filters, so this preflight can safely
+ * discover every dynamic key before a status command. Unsupported key syntax
+ * fails closed rather than constructing an ambiguous command-line override.
+ *
+ * @param {LiveScreenshotRepositoryIdentity} identity
+ * @returns {string[]}
+ */
+function readLocalFilterKeys(identity) {
+  const childConfiguration = getLiveScreenshotGitChildConfiguration();
+  let output;
+  try {
+    output = execFileSync(
+      childConfiguration.executable,
+      [
+        '--git-dir',
+        identity.gitDir,
+        '--work-tree',
+        identity.workTree,
+        '-c',
+        `core.worktree=${identity.workTree}`,
+        '-c',
+        'core.attributesFile=/dev/null',
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'diff.external=',
+        '-c',
+        'diff.trustExitCode=false',
+        '--no-optional-locks',
+        'config',
+        '--local',
+        '--null',
+        '--name-only',
+        '--get-regexp',
+        '^filter\\..+\\.(clean|process)$'
+      ],
+      {
+        cwd: identity.workTree,
+        encoding: 'buffer',
+        env: childConfiguration.environment,
+        maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }
+    );
+  } catch (error) {
+    const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
+    if (
+      candidate.status === 1 &&
+      Buffer.isBuffer(candidate.stdout) &&
+      candidate.stdout.length === 0
+    ) {
+      return [];
+    }
+    rejectRepositoryTopology();
+  }
+  if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
+    return [];
+  }
+  const text = output.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(output) || !text.endsWith('\0')) {
+    rejectRepositoryTopology();
+  }
+  const keys = text.slice(0, -1).split('\0');
+  if (keys.some((key) => !FILTER_KEY_PATTERN.test(key))) rejectRepositoryTopology();
+  return [...new Set(keys)];
+}
+
+/**
  * Build a provenance-only Git command. Repository-local configuration remains
  * readable by Git for object-format compatibility, but it cannot select the
  * worktree or execute helpers: filesystem-derived `--git-dir`/`--work-tree`
- * identity and command-line overrides win over `core.worktree`, fsmonitor,
- * hooks, external diff, and optional index writes.
+ * identity and command-line overrides win over `core.worktree`, attributes,
+ * fsmonitor, hooks, external diff, optional index writes, and every discovered
+ * clean/process filter.
  *
  * @param {LiveScreenshotRepositoryIdentity} identity
  * @param {string[]} args
@@ -1794,6 +2013,8 @@ function trustedGitArguments(identity, args) {
     '-c',
     `core.worktree=${identity.workTree}`,
     '-c',
+    'core.attributesFile=/dev/null',
+    '-c',
     'core.fsmonitor=false',
     '-c',
     'core.hooksPath=/dev/null',
@@ -1801,6 +2022,7 @@ function trustedGitArguments(identity, args) {
     'diff.external=',
     '-c',
     'diff.trustExitCode=false',
+    ...(identity.filterOverrides ?? []).flatMap((key) => ['-c', `${key}=`]),
     '--no-optional-locks',
     ...args
   ];
@@ -1808,9 +2030,11 @@ function trustedGitArguments(identity, args) {
 
 /**
  * Run a local provenance-only Git command with a fixed executable and a
- * scrubbed child environment. The credential launcher may have placed
- * HERMES_TEST_PASSWORD in this Node process, so inheriting process.env here
- * would expose it to a subprocess unrelated to browser authentication.
+ * scrubbed child environment. The trusted configuration includes
+ * GIT_NO_REPLACE_OBJECTS=1 so a replace ref cannot change HEAD^{tree} while
+ * leaving the attested commit SHA unchanged. The credential launcher may have
+ * placed HERMES_TEST_PASSWORD in this Node process, so inheriting process.env
+ * here would expose it to a subprocess unrelated to browser authentication.
  *
  * @param {string[]} args
  * @param {LiveScreenshotRepositoryIdentity} identity
@@ -1861,6 +2085,10 @@ export function readLiveScreenshotRepositoryState(
   repositoryRoot = LIVE_SCREENSHOT_REPOSITORY_ROOT
 ) {
   const identity = readRepositoryIdentity(repositoryRoot);
+  const trustedIdentity = Object.freeze({
+    ...identity,
+    filterOverrides: readLocalFilterKeys(identity)
+  });
   const identityOutput = runTrustedGit(
     [
       'rev-parse',
@@ -1871,15 +2099,15 @@ export function readLiveScreenshotRepositoryState(
       '--is-inside-work-tree',
       '--is-bare-repository'
     ],
-    identity
+    trustedIdentity
   );
-  assertGitIdentityOutput(identityOutput, identity);
+  assertGitIdentityOutput(identityOutput, trustedIdentity);
   const clientSha = readCommitSha(
-    runTrustedGit(['rev-parse', '--verify', 'HEAD^{commit}'], identity)
+    runTrustedGit(['rev-parse', '--verify', 'HEAD^{commit}'], trustedIdentity)
   );
   const dirtyTrackedFiles = runTrustedGit(
     ['status', '--porcelain=v1', '--untracked-files=no', '--ignore-submodules=none'],
-    identity
+    trustedIdentity
   );
   return Object.freeze({ ...identity, clientSha, dirtyTrackedFiles });
 }
@@ -2324,7 +2552,7 @@ function pathExists(path) {
 }
 
 /**
- * @typedef {{ dev: number, ino: number, size: number }} StagingFileIdentity
+ * @typedef {{ dev: number, ino: number, size: number, sha256: string }} StagingFileIdentity
  * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot: StagingFileIdentity, manifest: StagingFileIdentity }} StagingEvidence
  * @typedef {{ dev: number, ino: number, parent: StagingParentEvidence, screenshot?: StagingFileIdentity, manifest?: StagingFileIdentity }} StagingCleanupEvidence
  */
@@ -2404,6 +2632,19 @@ async function removePrivateStagingDirectory(directory, expected) {
     ) {
       throw new Error('live screenshot staging entry identity changed during cleanup');
     }
+    const currentContent = readStableRegularFile(
+      entryPath,
+      entry === 'screenshot.png' ? MAX_IMAGE_BYTES : MAX_REVIEW_RECORD_BYTES,
+      'live screenshot staging entry changed during cleanup'
+    );
+    if (
+      currentContent.dev !== expectedEntry.dev ||
+      currentContent.ino !== expectedEntry.ino ||
+      currentContent.size !== expectedEntry.size ||
+      currentContent.sha256 !== expectedEntry.sha256
+    ) {
+      throw new Error('live screenshot staging entry changed during cleanup');
+    }
     try {
       await fsPromises.unlink(entryPath);
     } catch {
@@ -2429,9 +2670,9 @@ async function removePrivateStagingDirectory(directory, expected) {
 }
 
 /**
- * Validate and snapshot the private staging directory identity. The returned
- * device/inode/size evidence is passed to the atomic rename child, which
- * revalidates the source immediately before the no-overwrite rename.
+ * Validate and snapshot the private staging directory identity and content
+ * digests. The returned evidence is passed to the atomic rename child, which
+ * revalidates the source bytes immediately before the no-overwrite rename.
  *
  * @param {string} directory
  * @param {StagingParentEvidence} parent
@@ -2464,7 +2705,20 @@ async function verifyPrivateStagingDirectory(directory, parent) {
     if (!entryStats.isFile() || entryStats.isSymbolicLink() || (entryStats.mode & 0o077) !== 0) {
       throw new Error('live screenshot staging bundle contains an unsafe entry');
     }
-    files[entry] = { dev: entryStats.dev, ino: entryStats.ino, size: entryStats.size };
+    const content = readStableRegularFile(
+      entryPath,
+      entry === 'screenshot.png' ? MAX_IMAGE_BYTES : MAX_REVIEW_RECORD_BYTES,
+      'live screenshot staging bundle content is unavailable'
+    );
+    if (content.dev !== entryStats.dev || content.ino !== entryStats.ino || content.size !== entryStats.size) {
+      throw new Error('live screenshot staging bundle entry changed');
+    }
+    files[entry] = {
+      dev: entryStats.dev,
+      ino: entryStats.ino,
+      size: entryStats.size,
+      sha256: content.sha256
+    };
   }
   return {
     dev: stats.dev,
@@ -2493,9 +2747,11 @@ async function assertStagingEvidence(directory, expected) {
     observed.screenshot.dev !== expected.screenshot.dev ||
     observed.screenshot.ino !== expected.screenshot.ino ||
     observed.screenshot.size !== expected.screenshot.size ||
+    observed.screenshot.sha256 !== expected.screenshot.sha256 ||
     observed.manifest.dev !== expected.manifest.dev ||
     observed.manifest.ino !== expected.manifest.ino ||
-    observed.manifest.size !== expected.manifest.size
+    observed.manifest.size !== expected.manifest.size ||
+    observed.manifest.sha256 !== expected.manifest.sha256
   ) {
     throw new Error('live screenshot staging identity changed');
   }
@@ -2540,9 +2796,9 @@ function runAtomicRename(args, fileDescriptors) {
  * rename. The Python shim calls the platform's no-replace rename primitive
  * (`renameatx_np` on macOS and `renameat2` on Linux) using open directory file
  * descriptors. It revalidates the staging parent, directory, and both bundle
- * files by device/inode/size immediately before rename, so a source swap cannot
- * publish attacker-controlled bytes and a replaced destination receives no
- * bytes.
+ * files by device/inode/size and SHA-256 digest immediately before rename, so
+ * the staged bytes are still bound to the reviewed in-memory evidence and a
+ * replaced destination receives no bytes.
  *
  * @param {{ stagingDirectory: string, stagingEvidence: StagingEvidence, destination: DirectoryEvidence, beforeAtomicPublish?: (directory: string) => Promise<void> }} options
  * @returns {Promise<{ renamed: boolean, closeFailure?: Error }>}
@@ -2576,12 +2832,13 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
     ) {
       throw new Error('live screenshot staging identity changed');
     }
-    // Test-only adversarial hook. The real lane never supplies it; all source
-    // and destination identities are revalidated after this hook returns.
-    if (beforeAtomicPublish) await beforeAtomicPublish(stagingDirectory);
     await assertStagingEvidence(stagingDirectory, stagingEvidence);
     assertSameDestination(destination);
     await assertDestinationHandle(destinationHandle, destination);
+    // Test-only adversarial hook. The real lane never supplies it. It runs
+    // after the JavaScript preflight so the fixed child digest check is the
+    // final source gate immediately before the atomic rename.
+    if (beforeAtomicPublish) await beforeAtomicPublish(stagingDirectory);
     await runAtomicRename(
       [
         '-c',
@@ -2597,9 +2854,11 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
         String(stagingEvidence.screenshot.dev),
         String(stagingEvidence.screenshot.ino),
         String(stagingEvidence.screenshot.size),
+        stagingEvidence.screenshot.sha256,
         String(stagingEvidence.manifest.dev),
         String(stagingEvidence.manifest.ino),
-        String(stagingEvidence.manifest.size)
+        String(stagingEvidence.manifest.size),
+        stagingEvidence.manifest.sha256
       ],
       [stagingParent.fd, destinationHandle.fd]
     );
@@ -2636,10 +2895,9 @@ async function publishStagedBundle({ stagingDirectory, stagingEvidence, destinat
 
 /**
  * Verify the published bundle before reporting success. This checks the exact
- * two-entry shape, private regular-file identities, manifest bytes, PNG bytes,
- * and image hash after the atomic rename. Any replacement or content drift is
- * reported with a fixed message; the final pathname is never accepted merely
- * because the directory rename returned success.
+ * two-entry shape, private regular-file identities, and byte digests after the
+ * atomic rename. Each entry is read again after the first content comparison so
+ * a same-size mutation after that comparison cannot turn into a success.
  *
  * @param {string} bundlePath
  * @param {Buffer} expectedBytes
@@ -2664,8 +2922,10 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
   if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
     throw new Error('live screenshot retention published bundle shape changed');
   }
-  /** @type {Record<string, { dev: number, ino: number, size: number }>} */
+  /** @type {Record<string, StagingFileIdentity>} */
   const identities = {};
+  /** @type {Record<string, { bytes: Buffer, dev: number, ino: number, size: number, sha256: string }>} */
+  const firstSnapshots = {};
   for (const entry of entries) {
     const entryPath = join(bundlePath, entry);
     let stats;
@@ -2677,20 +2937,28 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
     if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o077) !== 0) {
       throw new Error('live screenshot retention published bundle entry is unsafe');
     }
-    identities[entry] = { dev: stats.dev, ino: stats.ino, size: stats.size };
+    const snapshot = readStableRegularFile(
+      entryPath,
+      entry === 'screenshot.png' ? MAX_IMAGE_BYTES : MAX_REVIEW_RECORD_BYTES,
+      'live screenshot retention published bundle content is unavailable'
+    );
+    if (snapshot.dev !== stats.dev || snapshot.ino !== stats.ino || snapshot.size !== stats.size) {
+      throw new Error('live screenshot retention published bundle entry changed');
+    }
+    identities[entry] = snapshot;
+    firstSnapshots[entry] = snapshot;
   }
-  let screenshot;
-  let manifest;
-  try {
-    screenshot = await fsPromises.readFile(join(bundlePath, 'screenshot.png'));
-    manifest = await fsPromises.readFile(join(bundlePath, 'manifest.json'), 'utf8');
-  } catch {
-    throw new Error('live screenshot retention published bundle content is unavailable');
-  }
-  if (!screenshot.equals(expectedBytes) || sha256Hex(screenshot) !== sha256Hex(expectedBytes)) {
+  const expectedManifestBytes = Buffer.from(expectedManifestText, 'utf8');
+  if (
+    !firstSnapshots['screenshot.png'].bytes.equals(expectedBytes) ||
+    firstSnapshots['screenshot.png'].sha256 !== sha256Hex(expectedBytes)
+  ) {
     throw new Error('live screenshot retention published PNG changed');
   }
-  if (manifest !== expectedManifestText) {
+  if (
+    !firstSnapshots['manifest.json'].bytes.equals(expectedManifestBytes) ||
+    firstSnapshots['manifest.json'].sha256 !== createHash('sha256').update(expectedManifestBytes).digest('hex')
+  ) {
     throw new Error('live screenshot retention published manifest changed');
   }
   const afterBundleStats = lstatSync(bundlePath);
@@ -2698,15 +2966,98 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
     throw new Error('live screenshot retention published bundle identity changed');
   }
   for (const entry of entries) {
-    const after = lstatSync(join(bundlePath, entry));
+    const second = readStableRegularFile(
+      join(bundlePath, entry),
+      entry === 'screenshot.png' ? MAX_IMAGE_BYTES : MAX_REVIEW_RECORD_BYTES,
+      'live screenshot retention published bundle entry changed'
+    );
     const before = identities[entry];
     if (
-      after.dev !== before.dev ||
-      after.ino !== before.ino ||
-      after.size !== before.size
+      second.dev !== before.dev ||
+      second.ino !== before.ino ||
+      second.size !== before.size ||
+      second.sha256 !== before.sha256 ||
+      !second.bytes.equals(firstSnapshots[entry].bytes)
     ) {
       throw new Error('live screenshot retention published bundle entry changed');
     }
+  }
+}
+
+/**
+ * Remove a just-published bundle only when its directory and both entries are
+ * still the exact inodes moved from staging. This is the failure path for a
+ * post-publication verification mismatch: same-inode mutations are removed as
+ * tainted evidence, while replacements and unexpected entries are preserved.
+ *
+ * @param {string} bundlePath
+ * @param {DirectoryEvidence} destination
+ * @param {StagingEvidence} expected
+ */
+async function removePublishedBundleExact(bundlePath, destination, expected) {
+  assertSameDestination(destination);
+  let bundleStats;
+  try {
+    bundleStats = lstatSync(bundlePath);
+  } catch (error) {
+    if (isNotFoundError(error)) return;
+    throw new Error('live screenshot retention published bundle cleanup failed');
+  }
+  if (
+    !bundleStats.isDirectory() ||
+    bundleStats.isSymbolicLink() ||
+    bundleStats.dev !== expected.dev ||
+    bundleStats.ino !== expected.ino
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  let entries;
+  try {
+    entries = (await fsPromises.readdir(bundlePath)).sort();
+  } catch {
+    throw new Error('live screenshot retention published bundle cleanup failed');
+  }
+  if (entries.length !== 2 || entries[0] !== 'manifest.json' || entries[1] !== 'screenshot.png') {
+    throw new Error('live screenshot retention published bundle cleanup found unexpected entry');
+  }
+  for (const entry of entries) {
+    const entryPath = join(bundlePath, entry);
+    let entryStats;
+    try {
+      entryStats = lstatSync(entryPath);
+    } catch {
+      throw new Error('live screenshot retention published bundle cleanup entry disappeared');
+    }
+    const expectedEntry = entry === 'screenshot.png' ? expected.screenshot : expected.manifest;
+    if (
+      !entryStats.isFile() ||
+      entryStats.isSymbolicLink() ||
+      entryStats.dev !== expectedEntry.dev ||
+      entryStats.ino !== expectedEntry.ino
+    ) {
+      throw new Error('live screenshot retention published bundle entry identity changed');
+    }
+  }
+  for (const entry of entries) {
+    try {
+      await fsPromises.unlink(join(bundlePath, entry));
+    } catch {
+      throw new Error('live screenshot retention published bundle cleanup failed');
+    }
+  }
+  const afterBundleStats = lstatSync(bundlePath);
+  if (
+    !afterBundleStats.isDirectory() ||
+    afterBundleStats.isSymbolicLink() ||
+    afterBundleStats.dev !== expected.dev ||
+    afterBundleStats.ino !== expected.ino
+  ) {
+    throw new Error('live screenshot retention published bundle identity changed');
+  }
+  try {
+    await fsPromises.rmdir(bundlePath);
+  } catch {
+    throw new Error('live screenshot retention published bundle cleanup failed');
   }
 }
 
@@ -2724,6 +3075,7 @@ async function verifyPublishedBundle(bundlePath, expectedBytes, expectedManifest
  *   reviewEvidence?: ReviewRecordEvidence,
  *   provenance?: ChromiumProvenance,
  *   beforeAtomicPublish?: (directory: string) => Promise<void>,
+ *   afterAtomicPublishBeforeVerify?: (bundlePath: string) => Promise<void>,
  *   beforeStagingCleanup?: (directory: string) => Promise<void>
  * }} options
  */
@@ -2735,6 +3087,7 @@ export async function persistApprovedLiveScreenshot({
   reviewEvidence,
   provenance,
   beforeAtomicPublish,
+  afterAtomicPublishBeforeVerify,
   beforeStagingCleanup
 }) {
   if (!capture || !isRecord(capture) || !isRecord(capture.manifest)) {
@@ -2803,6 +3156,7 @@ export async function persistApprovedLiveScreenshot({
   /** @type {StagingEvidence | undefined} */
   let stagingEvidence;
   let published = false;
+  let publishedNeedsCleanup = false;
   let result;
   let operationError;
   try {
@@ -2839,7 +3193,8 @@ export async function persistApprovedLiveScreenshot({
     stagingIdentity.screenshot = {
       dev: screenshotStats.dev,
       ino: screenshotStats.ino,
-      size: screenshotStats.size
+      size: screenshotStats.size,
+      sha256: sha256Hex(bytes)
     };
     await fsPromises.writeFile(join(stagingDirectory, 'manifest.json'), manifestText, {
       encoding: 'utf8',
@@ -2853,10 +3208,18 @@ export async function persistApprovedLiveScreenshot({
     stagingIdentity.manifest = {
       dev: manifestStats.dev,
       ino: manifestStats.ino,
-      size: manifestStats.size
+      size: manifestStats.size,
+      sha256: createHash('sha256').update(manifestText, 'utf8').digest('hex')
     };
     stagingEvidence = await verifyPrivateStagingDirectory(stagingDirectory, stagingParentEvidence);
     stagingIdentity = stagingEvidence;
+    const expectedManifestSha256 = createHash('sha256').update(manifestText, 'utf8').digest('hex');
+    if (
+      stagingEvidence.screenshot.sha256 !== imageSha256 ||
+      stagingEvidence.manifest.sha256 !== expectedManifestSha256
+    ) {
+      throw new Error('live screenshot staging bundle content changed before publication');
+    }
     const destinationStats = lstatSync(evidence.candidate);
     if (stagingEvidence.dev !== destinationStats.dev) {
       throw new Error('live screenshot staging filesystem is not atomic');
@@ -2885,8 +3248,14 @@ export async function persistApprovedLiveScreenshot({
     // close failures must not send the outer cleanup back to the old pathname.
     published = publication.renamed;
     if (!published) throw new Error('live screenshot retention bundle publication failed');
+    publishedNeedsCleanup = true;
     assertSameDestination(evidence);
+    // Test-only adversarial hook. The real lane never supplies it; if a
+    // post-publication mutation makes verification fail, exact-identity
+    // cleanup below removes the tainted bundle before this helper returns.
+    if (afterAtomicPublishBeforeVerify) await afterAtomicPublishBeforeVerify(bundlePath);
     await verifyPublishedBundle(bundlePath, bytes, manifestText);
+    publishedNeedsCleanup = false;
     if (publication.closeFailure) throw publication.closeFailure;
     result = {
       bundlePath,
@@ -2902,6 +3271,13 @@ export async function persistApprovedLiveScreenshot({
 
   /** @type {Error[]} */
   const cleanupFailures = [];
+  if (published && publishedNeedsCleanup && stagingEvidence) {
+    try {
+      await removePublishedBundleExact(bundlePath, evidence, stagingEvidence);
+    } catch {
+      cleanupFailures.push(new Error('live screenshot published bundle cleanup failed'));
+    }
+  }
   if (stagingDirectory && stagingIdentity && !published) {
     try {
       // Test-only race hook runs before identity-anchored cleanup. If it

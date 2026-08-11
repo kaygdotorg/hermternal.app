@@ -25,6 +25,8 @@ const TRUSTED_GIT_ENVIRONMENT = Object.freeze({
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_CONFIG_SYSTEM: '/dev/null',
   GIT_CONFIG_GLOBAL: '/dev/null',
+  // A replace ref can change HEAD^{tree} while leaving HEAD's SHA unchanged.
+  GIT_NO_REPLACE_OBJECTS: '1',
   GIT_OPTIONAL_LOCKS: '0'
 });
 

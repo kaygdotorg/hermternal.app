@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -93,7 +94,10 @@ const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
   'exact scrubbed PNG SHA-256',
   'explicit `--git-dir` and `--work-tree` paths',
   'repository-local config cannot redirect status',
-  'fsmonitor-helper parent bypass'
+  'fsmonitor-helper parent bypass',
+  'clean/process filters',
+  'reciprocal linked-worktree metadata',
+  'GIT_NO_REPLACE_OBJECTS'
 ]);
 
 const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
@@ -138,6 +142,98 @@ function png(width: number, height: number, extraChunk?: string): Buffer {
     chunk('IDAT', Buffer.from([0])),
     chunk('IEND')
   ]);
+}
+
+async function createRetentionFixture(root: string) {
+  const retainedDirectory = join(root, 'retained');
+  await mkdir(retainedDirectory, { mode: 0o700 });
+
+  const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+  const bytes = png(1440, 960);
+  const imageSha256 = captureModule.sha256Hex(bytes);
+  const provenance = captureModule.getLiveScreenshotChromiumProvenance();
+  const repositoryRoot = resolve(process.cwd(), '../..');
+  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+  const clientCommit = execFileSync(
+    gitConfiguration.executable,
+    ['-C', repositoryRoot, 'rev-parse', 'HEAD'],
+    { encoding: 'utf8', env: gitConfiguration.environment }
+  ).trim();
+  const manifest = captureModule.createLiveScreenshotManifest({
+    browserName: 'chromium',
+    browserRevision: provenance.revision,
+    browserVersion: provenance.version,
+    browserExecutableSha256: provenance.executableSha256,
+    clientSha: clientCommit,
+    devicePixelRatio: 1,
+    imageSha256,
+    locale: 'en-US',
+    timezoneId: 'UTC',
+    reducedMotion: 'reduce',
+    theme: 'light',
+    uiState: 'ready',
+    zoom: 1
+  });
+  const review = {
+    schema: 'hermternal.independent-image-review.v1',
+    decision: 'approved',
+    review_kind: 'independent-human-visual',
+    image_sha256: imageSha256
+  };
+
+  return {
+    captureModule,
+    retainedDirectory,
+    bytes,
+    imageSha256,
+    provenance,
+    review,
+    capture: { bytes, manifest }
+  };
+}
+
+async function createReviewEvidence(reviewPath: string, reviewText: string) {
+  const parentPath = dirname(reviewPath);
+  const [fileStats, parentStats, canonical, parentCanonical] = await Promise.all([
+    lstat(reviewPath),
+    lstat(parentPath),
+    realpath(reviewPath),
+    realpath(parentPath)
+  ]);
+  return {
+    candidate: reviewPath,
+    dev: fileStats.dev,
+    ino: fileStats.ino,
+    size: fileStats.size,
+    sha256: createHash('sha256').update(reviewText, 'utf8').digest('hex'),
+    canonical,
+    parent: {
+      candidate: parentPath,
+      dev: parentStats.dev,
+      ino: parentStats.ino,
+      canonical: parentCanonical
+    }
+  };
+}
+
+async function expectMissing(path: string) {
+  await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+}
+
+async function mutateSameSizeFile(path: string) {
+  const beforeBytes = await readFile(path);
+  const beforeStats = await lstat(path);
+  if (beforeBytes.length === 0) throw new Error(`cannot mutate empty file: ${path}`);
+  const mutatedBytes = Buffer.from(beforeBytes);
+  const offset = Math.floor(mutatedBytes.length / 2);
+  mutatedBytes[offset] ^= 1;
+  await writeFile(path, mutatedBytes);
+  const afterStats = await lstat(path);
+  expect(afterStats.dev).toBe(beforeStats.dev);
+  expect(afterStats.ino).toBe(beforeStats.ino);
+  expect(afterStats.size).toBe(beforeStats.size);
+  expect(mutatedBytes.equals(beforeBytes)).toBe(false);
+  return beforeBytes;
 }
 
 describe('live screenshot contract', () => {
@@ -287,6 +383,7 @@ describe('live screenshot contract', () => {
     expect(gitConfiguration.environment).not.toHaveProperty('HTTP_PROXY');
     expect(gitConfiguration.environment.GIT_CONFIG_SYSTEM).toBe('/dev/null');
     expect(gitConfiguration.environment.GIT_CONFIG_GLOBAL).toBe('/dev/null');
+    expect(gitConfiguration.environment.GIT_NO_REPLACE_OBJECTS).toBe('1');
     expect(gitConfiguration.environment.PATH).toBe('/usr/bin:/bin:/usr/sbin:/sbin');
 
     const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
@@ -318,8 +415,11 @@ describe('live screenshot contract', () => {
     expect(captureSource).toContain('--git-dir');
     expect(captureSource).toContain('--work-tree');
     expect(captureSource).toContain('core.worktree=');
+    expect(captureSource).toContain('core.attributesFile=/dev/null');
     expect(captureSource).toContain('core.fsmonitor=false');
     expect(captureSource).toContain('core.hooksPath=/dev/null');
+    expect(captureSource).toContain('filterOverrides');
+    expect(captureSource).toContain('GIT_NO_REPLACE_OBJECTS');
     expect(captureSource).toContain('--path-format=absolute');
     expect(captureSource).toContain('readLiveScreenshotRepositoryState');
     expect(captureSource).not.toContain("execFileSync('git'");
@@ -350,6 +450,7 @@ describe('live screenshot contract', () => {
     const alternateWorktree = join(root, 'alternate-worktree');
     const helperMarker = join(root, 'fsmonitor-helper-ran');
     const helper = join(root, 'fsmonitor-helper.mjs');
+    const attributesFile = join(root, 'attributes');
     const hooks = join(root, 'hooks');
     await mkdir(repository, { mode: 0o700 });
     await mkdir(alternateWorktree, { mode: 0o700 });
@@ -360,6 +461,7 @@ describe('live screenshot contract', () => {
       'utf8'
     );
     await chmod(helper, 0o700);
+    await writeFile(attributesFile, '*.txt filter=evil\n', 'utf8');
 
     const gitConfiguration = getLiveScreenshotGitChildConfiguration();
     const runGit = (args: string[]) =>
@@ -388,12 +490,20 @@ describe('live screenshot contract', () => {
     runGit(['config', 'core.worktree', alternateWorktree]);
     runGit(['config', 'core.fsmonitor', helper]);
     runGit(['config', 'core.hooksPath', hooks]);
+    runGit(['config', 'core.attributesFile', attributesFile]);
+    runGit(['config', 'filter.evil.clean', helper]);
+    runGit(['config', 'filter.evil.process', helper]);
     await writeFile(join(repository, 'tracked.txt'), 'dirty actual worktree\n', 'utf8');
 
     // This is the vulnerable parent behavior: repository-local core.worktree
-    // redirects status to the clean alternate path, and core.fsmonitor runs a
-    // helper before the result is returned.
-    expect(runGit(['status', '--porcelain=v1', '--untracked-files=no'])).toBe('');
+    // redirects status to the clean alternate path, core.fsmonitor runs a
+    // helper, and the attributes/filter pair can run a clean/process helper.
+    try {
+      runGit(['status', '--porcelain=v1', '--untracked-files=no']);
+    } catch {
+      // A malicious filter is allowed to make the vulnerable parent command
+      // fail; helper execution is the non-vacuous part of this reproduction.
+    }
     expect(await readFile(helperMarker, 'utf8')).toBe('ran');
     await rm(helperMarker, { force: true });
 
@@ -404,6 +514,112 @@ describe('live screenshot contract', () => {
     expect(state.clientSha).toMatch(/^[a-f0-9]{40}$/u);
     expect(state.dirtyTrackedFiles).toContain('tracked.txt');
     await expect(readFile(helperMarker, 'utf8')).rejects.toThrow();
+  });
+
+  it('rejects repointed linked-worktree metadata even when skip-worktree hides dirtiness', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-linked-worktree-'));
+    temporaryDirectories.push(root);
+    const mainRepository = join(root, 'main');
+    const worktreeOne = join(root, 'wt1');
+    const worktreeTwo = join(root, 'wt2');
+    await mkdir(mainRepository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (cwd: string, args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    runGit(mainRepository, ['init', '--quiet']);
+    runGit(mainRepository, ['config', 'user.name', 'synthetic-live-proof']);
+    runGit(mainRepository, ['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(mainRepository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(mainRepository, ['add', 'tracked.txt']);
+    runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktreeOne, 'HEAD']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktreeTwo, 'HEAD']);
+    runGit(worktreeTwo, ['update-index', '--skip-worktree', 'tracked.txt']);
+    await writeFile(join(worktreeOne, 'tracked.txt'), 'dirty wt1\n', 'utf8');
+
+    const worktreeTwoPointer = await readFile(join(worktreeTwo, '.git'), 'utf8');
+    await writeFile(join(worktreeOne, '.git'), worktreeTwoPointer, 'utf8');
+    const worktreeTwoGitDirectory = resolve(mainRepository, '.git', 'worktrees', 'wt2');
+    const parentStatus = execFileSync(
+      gitConfiguration.executable,
+      [
+        '--git-dir',
+        worktreeTwoGitDirectory,
+        '--work-tree',
+        worktreeOne,
+        '-c',
+        `core.worktree=${worktreeOne}`,
+        'status',
+        '--porcelain=v1',
+        '--untracked-files=no'
+      ],
+      {
+        cwd: worktreeOne,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      }
+    );
+    // The old identity check accepted wt2 metadata for wt1, and wt2's
+    // skip-worktree bit made the dirty wt1 source appear clean.
+    expect(parentStatus).toBe('');
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    expect(() => captureModule.readLiveScreenshotRepositoryState(worktreeOne)).toThrow(
+      'live screenshot repository topology is unsafe or unsupported'
+    );
+  });
+
+  it('ignores Git replace refs while attesting the original commit tree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-replace-ref-'));
+    temporaryDirectories.push(root);
+    const repository = join(root, 'repository');
+    await mkdir(repository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (args: string[], environment: NodeJS.ProcessEnv = gitConfiguration.environment) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd: repository,
+        encoding: 'utf8',
+        env: environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    runGit(['init', '--quiet']);
+    runGit(['config', 'user.name', 'synthetic-live-proof']);
+    runGit(['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(repository, 'tracked.txt'), 'original\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit(['commit', '--quiet', '-m', 'original']);
+    const originalSha = runGit(['rev-parse', 'HEAD']).trim();
+    await writeFile(join(repository, 'tracked.txt'), 'replacement tree\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit(['commit', '--quiet', '-m', 'replacement']);
+    const replacementSha = runGit(['rev-parse', 'HEAD']).trim();
+    runGit(['reset', '--hard', originalSha]);
+    await writeFile(join(repository, 'tracked.txt'), 'replacement tree\n', 'utf8');
+    runGit(['add', 'tracked.txt']);
+    runGit(['replace', originalSha, replacementSha]);
+
+    const parentEnvironment: NodeJS.ProcessEnv = { ...gitConfiguration.environment };
+    delete parentEnvironment.GIT_NO_REPLACE_OBJECTS;
+    const replacedTree = runGit(['rev-parse', 'HEAD^{tree}'], parentEnvironment).trim();
+    const originalTree = runGit(['rev-parse', 'HEAD^{tree}']).trim();
+    expect(replacedTree).not.toBe(originalTree);
+    expect(runGit(['status', '--porcelain=v1', '--untracked-files=no'], parentEnvironment)).toBe('');
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const state = captureModule.readLiveScreenshotRepositoryState(repository);
+    expect(state.clientSha).toBe(originalSha);
+    expect(state.dirtyTrackedFiles).toContain('tracked.txt');
   });
 
   it('fails closed at the reconciliation history cap and keeps Node/page matching parity', async () => {
@@ -616,4 +832,105 @@ describe('live screenshot contract', () => {
       })
     ).rejects.toThrow('refuses to overwrite existing bundle');
   });
+
+  it('rejects same-inode same-size review evidence mutation without publishing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-review-digest-'));
+    temporaryDirectories.push(root);
+    const fixture = await createRetentionFixture(root);
+    // safeReviewRecordEvidence requires the lexical review path to already be
+    // canonical; macOS exposes the temporary directory through /tmp -> /private/tmp.
+    const reviewPath = join(await realpath(root), 'review.json');
+    const reviewText = `${JSON.stringify(fixture.review)}\n`;
+    await writeFile(reviewPath, reviewText, { encoding: 'utf8', mode: 0o600 });
+    const reviewEvidence = await createReviewEvidence(reviewPath, reviewText);
+
+    const replacementFirstByte = fixture.imageSha256[0] === '0' ? '1' : '0';
+    const mutatedReviewText = reviewText.replace(
+      fixture.imageSha256,
+      `${replacementFirstByte}${fixture.imageSha256.slice(1)}`
+    );
+    const beforeMutation = await lstat(reviewPath);
+    await writeFile(reviewPath, mutatedReviewText, 'utf8');
+    const afterMutation = await lstat(reviewPath);
+    expect(mutatedReviewText).not.toBe(reviewText);
+    expect(afterMutation.dev).toBe(beforeMutation.dev);
+    expect(afterMutation.ino).toBe(beforeMutation.ino);
+    expect(afterMutation.size).toBe(beforeMutation.size);
+
+    await expect(
+      fixture.captureModule.persistApprovedLiveScreenshot({
+        capture: fixture.capture,
+        destinationDirectory: fixture.retainedDirectory,
+        review: fixture.review,
+        reviewEvidence,
+        provenance: fixture.provenance
+      })
+    ).rejects.toThrow('live screenshot retention review record changed');
+    await expectMissing(join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle'));
+  });
+
+  it.each(['screenshot.png', 'manifest.json'] as const)(
+    'rejects a same-size staged %s mutation before atomic publish and leaves no public bundle',
+    async (entry) => {
+      const root = await mkdtemp(join(tmpdir(), 'hermternal-live-staged-digest-'));
+      temporaryDirectories.push(root);
+      const fixture = await createRetentionFixture(root);
+      const bundlePath = join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle');
+      let originalBytes: Buffer | undefined;
+      let mutationObserved = false;
+
+      await expect(
+        fixture.captureModule.persistApprovedLiveScreenshot({
+          capture: fixture.capture,
+          destinationDirectory: fixture.retainedDirectory,
+          review: fixture.review,
+          provenance: fixture.provenance,
+          beforeAtomicPublish: async (stagingDirectory) => {
+            await expectMissing(bundlePath);
+            originalBytes = await mutateSameSizeFile(join(stagingDirectory, entry));
+            mutationObserved = true;
+          },
+          beforeStagingCleanup: async (stagingDirectory) => {
+            if (!originalBytes) throw new Error('staged mutation did not capture original bytes');
+            await writeFile(join(stagingDirectory, entry), originalBytes);
+          }
+        })
+      ).rejects.toThrow('live screenshot retention bundle publication failed');
+
+      expect(mutationObserved).toBe(true);
+      await expectMissing(bundlePath);
+    }
+  );
+
+  it.each(['screenshot.png', 'manifest.json'] as const)(
+    'rejects a same-size published %s mutation and removes the tainted bundle',
+    async (entry) => {
+      const root = await mkdtemp(join(tmpdir(), 'hermternal-live-published-digest-'));
+      temporaryDirectories.push(root);
+      const fixture = await createRetentionFixture(root);
+      const bundlePath = join(fixture.retainedDirectory, 'hermternal-chat-proof.bundle');
+      let mutationObserved = false;
+
+      const expectedVerificationError = entry === 'screenshot.png'
+        ? 'live screenshot retention published PNG changed'
+        : 'live screenshot retention published manifest changed';
+      await expect(
+        fixture.captureModule.persistApprovedLiveScreenshot({
+          capture: fixture.capture,
+          destinationDirectory: fixture.retainedDirectory,
+          review: fixture.review,
+          provenance: fixture.provenance,
+          afterAtomicPublishBeforeVerify: async (publishedBundlePath) => {
+            const publishedStats = await lstat(publishedBundlePath);
+            expect(publishedStats.isDirectory()).toBe(true);
+            await mutateSameSizeFile(join(publishedBundlePath, entry));
+            mutationObserved = true;
+          }
+        })
+      ).rejects.toThrow(expectedVerificationError);
+
+      expect(mutationObserved).toBe(true);
+      await expectMissing(bundlePath);
+    }
+  );
 });
