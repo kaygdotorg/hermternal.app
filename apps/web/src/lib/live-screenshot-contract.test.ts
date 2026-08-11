@@ -241,6 +241,43 @@ function readOptionalGitConfigValue(
   }
 }
 
+type SyntheticGitConfigProbeResult = {
+  status: number | null;
+  stdout: Buffer | null;
+  stderr: Buffer | null;
+  error?: Error;
+};
+
+function syntheticGitConfigResult(
+  status: number | null,
+  stdout = '',
+  stderr = ''
+): SyntheticGitConfigProbeResult {
+  return {
+    status,
+    stdout: Buffer.from(stdout, 'utf8'),
+    stderr: Buffer.from(stderr, 'utf8')
+  };
+}
+
+async function createSyntheticGitConfigRepository(prefix: string) {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.push(root);
+  const repository = join(root, 'repository');
+  await mkdir(repository, { mode: 0o700 });
+  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+  const runGit = (args: string[]) =>
+    execFileSync(gitConfiguration.executable, args, {
+      cwd: repository,
+      encoding: 'utf8',
+      env: gitConfiguration.environment,
+      maxBuffer: 4 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+  runGit(['init', '--quiet']);
+  return { root, repository, gitConfiguration, runGit };
+}
+
 async function mutateSameSizeFile(path: string) {
   const beforeBytes = await readFile(path);
   const beforeStats = await lstat(path);
@@ -477,6 +514,147 @@ describe('live screenshot contract', () => {
       officialSpec.indexOf('const cookiesBeforeLogout = await context.cookies(proofOrigin);')
     );
     expect(officialSpec).toContain('sanitization is clone-only');
+  });
+
+  it.each([
+    ['stderr', '', 'warning from git config'],
+    ['stdout', 'unexpected no-match output', '']
+  ] as const)('rejects extension status 1 with nonempty %s', async (_stream, stdout, stderr) => {
+    const { repository } = await createSyntheticGitConfigRepository('hermternal-live-config-probe-extension-');
+    const calls: string[][] = [];
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const spawnSyncImplementation = (_executable: string, args: string[]) => {
+      calls.push([...args]);
+      return syntheticGitConfigResult(1, stdout, stderr);
+    };
+
+    expect(() =>
+      captureModule.readLiveScreenshotGitConfigForTest(repository, spawnSyncImplementation)
+    ).toThrow('live screenshot repository topology is unsafe or unsupported');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('--no-includes');
+    expect(calls[0]).toContain('extensions.worktreeConfig');
+  });
+
+  it('rejects filter discovery status 1 with stderr instead of treating it as no match', async () => {
+    const { repository } = await createSyntheticGitConfigRepository('hermternal-live-config-probe-filter-');
+    const calls: string[][] = [];
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const spawnSyncImplementation = (_executable: string, args: string[]) => {
+      calls.push([...args]);
+      if (args.includes('extensions.worktreeConfig')) return syntheticGitConfigResult(1);
+      if (args.includes('--local')) return syntheticGitConfigResult(1, '', 'warning from git config');
+      throw new Error(`unexpected synthetic config probe: ${args.join(' ')}`);
+    };
+
+    expect(() =>
+      captureModule.readLiveScreenshotGitConfigForTest(repository, spawnSyncImplementation)
+    ).toThrow('live screenshot repository topology is unsafe or unsupported');
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toContain('--local');
+    expect(calls.some((args) => args.includes('--worktree'))).toBe(false);
+  });
+
+  it('disables includes for the common extension probe before local include rejection', async () => {
+    const { root, repository, runGit } = await createSyntheticGitConfigRepository(
+      'hermternal-live-config-probe-common-includes-'
+    );
+    const includedConfig = join(root, 'included.config');
+    await writeFile(
+      includedConfig,
+      '[extensions]\n\tworktreeConfig = true\n',
+      'utf8'
+    );
+    runGit(['config', 'include.path', includedConfig]);
+
+    const calls: string[][] = [];
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const spawnSyncImplementation = (_executable: string, args: string[]) => {
+      calls.push([...args]);
+      if (args.includes('extensions.worktreeConfig')) {
+        // Model the included file enabling the extension only when the probe
+        // accidentally follows includes. The local probe deliberately returns
+        // a clean no-match so a later include rejection cannot mask this check.
+        return args.includes('--no-includes')
+          ? syntheticGitConfigResult(1)
+          : syntheticGitConfigResult(0, 'true\n');
+      }
+      if (args.includes('--local')) return syntheticGitConfigResult(1);
+      if (args.includes('--worktree')) {
+        return syntheticGitConfigResult(0, 'filter.included.clean\0');
+      }
+      throw new Error(`unexpected synthetic config probe: ${args.join(' ')}`);
+    };
+
+    const state = captureModule.readLiveScreenshotGitConfigForTest(repository, spawnSyncImplementation);
+    expect(state.filterOverrides).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toContain('--no-includes');
+    expect(calls[1]).toContain('--local');
+    expect(calls.some((args) => args.includes('--worktree'))).toBe(false);
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['false', 'false']
+  ] as const)('does not scan config.worktree when the common extension is %s', async (_mode, configuredValue) => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-config-probe-inapplicable-'));
+    temporaryDirectories.push(root);
+    const mainRepository = join(root, 'main');
+    const worktree = join(root, 'worktree');
+    await mkdir(mainRepository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (cwd: string, args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    runGit(mainRepository, ['init', '--quiet']);
+    runGit(mainRepository, ['config', 'user.name', 'synthetic-live-proof']);
+    runGit(mainRepository, ['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(mainRepository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(mainRepository, ['add', 'tracked.txt']);
+    runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktree, 'HEAD']);
+    if (configuredValue !== undefined) {
+      runGit(mainRepository, ['config', 'extensions.worktreeConfig', configuredValue]);
+    }
+
+    const worktreeGitDir = resolve(runGit(worktree, ['rev-parse', '--git-dir']).trim());
+    const configWorktree = join(worktreeGitDir, 'config.worktree');
+    await writeFile(
+      configWorktree,
+      '[filter "ignored-worktree"]\n\tclean = synthetic-malicious-helper\n',
+      'utf8'
+    );
+    expect(await readFile(configWorktree, 'utf8')).toContain('filter "ignored-worktree"');
+
+    const calls: string[][] = [];
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const spawnSyncImplementation = (_executable: string, args: string[]) => {
+      calls.push([...args]);
+      if (args.includes('extensions.worktreeConfig')) {
+        return configuredValue === 'false'
+          ? syntheticGitConfigResult(0, 'false\n')
+          : syntheticGitConfigResult(1);
+      }
+      if (args.includes('--local')) return syntheticGitConfigResult(1);
+      if (args.includes('--worktree')) {
+        // If the inapplicable scope is queried, expose its malicious key so the
+        // result proves that the scope was ignored rather than neutralized later.
+        return syntheticGitConfigResult(0, 'filter.ignored-worktree.clean\0');
+      }
+      throw new Error(`unexpected synthetic config probe: ${args.join(' ')}`);
+    };
+
+    const state = captureModule.readLiveScreenshotGitConfigForTest(worktree, spawnSyncImplementation);
+    expect(state.filterOverrides).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls.some((args) => args.includes('--worktree'))).toBe(false);
   });
 
   it('neutralizes distinct local and worktree helpers selected by tracked attributes', async () => {

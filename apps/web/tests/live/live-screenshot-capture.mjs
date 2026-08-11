@@ -1739,6 +1739,12 @@ const COMMONDIR_POINTER_PATTERN = /^([^\r\n]+)\n$/u;
 const FILTER_KEY_PATTERN = /^filter\.[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:clean|process)$/u;
 const GIT_CONFIG_OUTPUT_MAX_BYTES = 128 * 1024;
 
+/**
+ * @typedef {{ status: number | null, stdout: Buffer | null, stderr: Buffer | null, error?: Error }} GitConfigProbeProcessResult
+ * @typedef {(executable: string, args: string[], options: { cwd: string, encoding: 'buffer', env: NodeJS.ProcessEnv, maxBuffer: number, stdio: ['ignore', 'pipe', 'pipe'] }) => GitConfigProbeProcessResult} GitConfigSpawnSync
+ * @typedef {(childConfiguration: { executable: string, environment: NodeJS.ProcessEnv }, cwd: string, args: string[]) => Buffer | undefined} GitConfigProbe
+ */
+
 /** @returns {never} */
 function rejectRepositoryTopology() {
   throw new Error(REPOSITORY_TOPOLOGY_ERROR);
@@ -2080,10 +2086,11 @@ export function getLiveScreenshotRepositoryIdentity(
  * @param {{ executable: string, environment: NodeJS.ProcessEnv }} childConfiguration
  * @param {string} cwd
  * @param {string[]} args
+ * @param {GitConfigSpawnSync} [spawnSyncImplementation]
  * @returns {Buffer | undefined}
  */
-function runGitConfigProbe(childConfiguration, cwd, args) {
-  const result = spawnSync(childConfiguration.executable, args, {
+function runGitConfigProbe(childConfiguration, cwd, args, spawnSyncImplementation = spawnSync) {
+  const result = spawnSyncImplementation(childConfiguration.executable, args, {
     cwd,
     encoding: 'buffer',
     env: childConfiguration.environment,
@@ -2116,10 +2123,11 @@ function runGitConfigProbe(childConfiguration, cwd, args) {
  *
  * @param {LiveScreenshotRepositoryIdentity} identity
  * @param {{ executable: string, environment: NodeJS.ProcessEnv }} childConfiguration
+ * @param {GitConfigProbe} [configProbe]
  */
-function readCommonWorktreeConfigEnabled(identity, childConfiguration) {
+function readCommonWorktreeConfigEnabled(identity, childConfiguration, configProbe = runGitConfigProbe) {
   const commonConfigPath = readCanonicalRepositoryFile(join(identity.commonDir, 'config'));
-  const output = runGitConfigProbe(childConfiguration, identity.workTree, [
+  const output = configProbe(childConfiguration, identity.workTree, [
     '--git-dir',
     identity.gitDir,
     '--work-tree',
@@ -2170,15 +2178,20 @@ function readCommonWorktreeConfigEnabled(identity, childConfiguration) {
  * fails closed rather than constructing an ambiguous command-line override.
  *
  * @param {LiveScreenshotRepositoryIdentity} identity
+ * @param {{ executable: string, environment: NodeJS.ProcessEnv }} [childConfiguration]
+ * @param {GitConfigProbe} [configProbe]
  * @returns {string[]}
  */
-function readLocalFilterKeys(identity) {
-  const childConfiguration = getLiveScreenshotGitChildConfiguration();
+function readLocalFilterKeys(
+  identity,
+  childConfiguration = getLiveScreenshotGitChildConfiguration(),
+  configProbe = runGitConfigProbe
+) {
   const keys = new Set();
   const scopes = ['local'];
-  if (readCommonWorktreeConfigEnabled(identity, childConfiguration)) scopes.push('worktree');
+  if (readCommonWorktreeConfigEnabled(identity, childConfiguration, configProbe)) scopes.push('worktree');
   for (const scope of scopes) {
-    const output = runGitConfigProbe(childConfiguration, identity.workTree, [
+    const output = configProbe(childConfiguration, identity.workTree, [
       '--git-dir',
       identity.gitDir,
       '--work-tree',
@@ -2221,6 +2234,29 @@ function readLocalFilterKeys(identity) {
     }
   }
   return [...keys].sort();
+}
+
+/**
+ * Read the config-discovery path with a synthetic child result provider for
+ * offline contract tests. The trusted executable and scrubbed environment are
+ * still selected by production code; only the subprocess result is injected so
+ * tests can exercise fail-closed diagnostics and exact scope selection without
+ * starting a mutable Git child.
+ *
+ * @param {string} repositoryRoot
+ * @param {GitConfigSpawnSync} spawnSyncImplementation
+ */
+export function readLiveScreenshotGitConfigForTest(repositoryRoot, spawnSyncImplementation) {
+  if (typeof spawnSyncImplementation !== 'function') rejectRepositoryTopology();
+  const identity = readRepositoryIdentity(repositoryRoot);
+  const childConfiguration = getLiveScreenshotGitChildConfiguration();
+  /** @type {GitConfigProbe} */
+  const configProbe = (configuration, cwd, args) =>
+    runGitConfigProbe(configuration, cwd, args, spawnSyncImplementation);
+  return Object.freeze({
+    ...identity,
+    filterOverrides: readLocalFilterKeys(identity, childConfiguration, configProbe)
+  });
 }
 
 /**
