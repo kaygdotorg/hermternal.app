@@ -193,12 +193,23 @@ class _InvocationObjectBinding:
     snapshot: tuple[str, str, str]
 
 
-# These registries are intentionally separate. The first binds authority to the
-# adapter's exact raw result and is consumed by result validation. The second
-# binds a validated internal snapshot or compatibility view until exact-ID
-# inspection consumes it. A lock makes both transfers one-shot under races.
+@dataclass(frozen=True)
+class _InvocationReceiptState:
+    receipt: weakref.ReferenceType[InvocationReceipt]
+    owner_result: weakref.ReferenceType["CommandResult"]
+    invocation_token: object | None
+    consumed: bool
+
+
+# These registries are intentionally separate. The first two bind authority to
+# both the adapter's exact raw result and its exact receipt; the receipt remains
+# reserved after result validation so it cannot acquire a second result binding.
+# The latter registries bind a validated internal snapshot or compatibility view
+# until exact-ID inspection consumes it. A lock makes every transfer one-shot
+# under races.
 _INVOCATION_BINDING_LOCK = threading.RLock()
 _TRUSTED_INVOCATION_RESULTS: dict[int, _InvocationResultBinding] = {}
+_TRUSTED_INVOCATION_RECEIPTS: dict[int, _InvocationReceiptState] = {}
 _TRUSTED_INVOCATION_SNAPSHOTS: dict[int, _InvocationObjectBinding] = {}
 _TRUSTED_INVOCATION_VIEWS: dict[int, _InvocationObjectBinding] = {}
 
@@ -246,9 +257,11 @@ def _bind_invocation_result(result: CommandResult) -> CommandResult:
     The raw result remains an adapter-owned object. Validation consumes this
     entry before returning a ``ValidatedCommandResult`` snapshot, so a copied
     result or separately registered matching receipt cannot substitute for it.
-    When called inside ``invoke_runner``, the binding also carries that call's
-    private token; a result prepared by another runner call cannot cross the
-    direct-invocation boundary even when its fields match.
+    The first exact result/token pair owns the receipt; later result bindings may
+    be returned by an adapter but are poisoned before validation. When called
+    inside ``invoke_runner``, the binding also carries that call's private token;
+    a result prepared by another runner call cannot cross the direct-invocation
+    boundary even when its fields match.
     """
 
     if (
@@ -267,31 +280,63 @@ def _bind_invocation_result(result: CommandResult) -> CommandResult:
     if any(type(value) is not str for value in snapshot):
         raise LauncherError("container_invocation_unproven")
     invocation_token = _ACTIVE_INVOCATION_TOKEN.get()
-    key = id(result)
+    result_key = id(result)
+    receipt_key = id(receipt)
 
     def remove_dead_result(
         reference: weakref.ReferenceType[CommandResult],
         *,
-        key: int = key,
+        key: int = result_key,
     ) -> None:
         with _INVOCATION_BINDING_LOCK:
             current = _TRUSTED_INVOCATION_RESULTS.get(key)
             if current is not None and current.result is reference:
                 _TRUSTED_INVOCATION_RESULTS.pop(key, None)
 
+    def remove_dead_receipt(
+        reference: weakref.ReferenceType[InvocationReceipt],
+        *,
+        key: int = receipt_key,
+    ) -> None:
+        with _INVOCATION_BINDING_LOCK:
+            current = _TRUSTED_INVOCATION_RECEIPTS.get(key)
+            if current is not None and current.receipt is reference:
+                _TRUSTED_INVOCATION_RECEIPTS.pop(key, None)
+
+    result_reference = weakref.ref(result, remove_dead_result)
+    receipt_reference = weakref.ref(receipt, remove_dead_receipt)
     binding = _InvocationResultBinding(
-        result=weakref.ref(result, remove_dead_result),
+        result=result_reference,
         receipt=receipt,
         raw_fields=(result.returncode, result.stdout, result.stderr),
         snapshot=snapshot,
         invocation_token=invocation_token,
     )
-    # Install only one binding for this exact result. Replacing a binding would
-    # permit a second adapter result to inherit the first invocation's authority.
+    # Install both sides atomically. A second result carrying a live receipt is
+    # retained only as a poisoned binding so adapters can return it normally; the
+    # receipt registry still names the first exact result as its sole owner.
     with _INVOCATION_BINDING_LOCK:
-        if key in _TRUSTED_INVOCATION_RESULTS:
+        if result_key in _TRUSTED_INVOCATION_RESULTS:
             raise LauncherError("container_invocation_unproven")
-        _TRUSTED_INVOCATION_RESULTS[key] = binding
+        current_receipt = _TRUSTED_INVOCATION_RECEIPTS.get(receipt_key)
+        duplicate_receipt = False
+        if current_receipt is not None:
+            live_receipt = current_receipt.receipt()
+            if live_receipt is not None:
+                # A live receipt, consumed or pending, is already one-shot. An
+                # unexpected live object under a reused id is uncertainty too;
+                # leave the original state untouched and poison this result.
+                duplicate_receipt = True
+            else:
+                _TRUSTED_INVOCATION_RECEIPTS.pop(receipt_key, None)
+        _TRUSTED_INVOCATION_RESULTS[result_key] = binding
+        if not duplicate_receipt:
+            _TRUSTED_INVOCATION_RECEIPTS[receipt_key] = _InvocationReceiptState(
+                receipt_reference,
+                result_reference,
+                invocation_token,
+                False,
+            )
     if invocation_token is not None:
         _ACTIVE_INVOCATION_RESULTS.set(_ACTIVE_INVOCATION_RESULTS.get() + (result,))
     return result
@@ -325,16 +370,37 @@ def _register_invocation_object(
 
 
 def _claim_invocation_result(result: CommandResult) -> _InvocationResultBinding | None:
-    """Consume the exact raw result binding, including failed attempts."""
+    """Consume the exact result and its exact receipt, including failures."""
 
     key = id(result)
     with _INVOCATION_BINDING_LOCK:
         binding = _TRUSTED_INVOCATION_RESULTS.pop(key, None)
-    if binding is None:
-        return None
-    if binding.result() is not result:
-        raise LauncherError("container_invocation_unproven")
-    return binding
+        if binding is None:
+            return None
+        receipt_key = id(binding.receipt)
+        receipt_state = _TRUSTED_INVOCATION_RECEIPTS.get(receipt_key)
+        if (
+            receipt_state is None
+            or receipt_state.receipt() is not binding.receipt
+            or receipt_state.consumed
+            or receipt_state.owner_result() is not result
+            or receipt_state.invocation_token is not binding.invocation_token
+            or binding.result() is not result
+        ):
+            # A separately bound result may still carry the same receipt-shaped
+            # object, but only the first exact result/token pair owns it. Do not
+            # consume the owner's pending state when a poisoned result loses.
+            raise LauncherError("container_invocation_unproven")
+        # Keep the weak identity tombstone until the receipt itself dies. A
+        # failed or replayed result must not let that same receipt be rebound to
+        # another result after this claim.
+        _TRUSTED_INVOCATION_RECEIPTS[receipt_key] = _InvocationReceiptState(
+            receipt_state.receipt,
+            receipt_state.owner_result,
+            receipt_state.invocation_token,
+            True,
+        )
+        return binding
 
 
 def _discard_invocation_result(result: object) -> None:

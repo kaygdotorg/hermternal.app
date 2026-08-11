@@ -456,10 +456,12 @@ cleanup fails, the private marker and state are retained as a bounded
 removal, so the tombstone preserves the exact ID and stable data witness for a
 later retry after the original tree is restored; it never authorizes the
 replacement tree. The receipt is authorized only for the exact adapter-created `CommandResult`
-and is consumed once; validation returns a private immutable snapshot rather
-than the adapter-owned object. A receipt, copied result, separately registered
-matching receipt, dataclass replacement, reconstruction, copy/deepcopy,
-subclass, or field mutation therefore fails closed. The direct local subprocess
+and its exact `InvocationReceipt` object. Both are consumed once: the same
+receipt cannot grant authority to another result through rebinding across runner
+calls or concurrent adapters, and validation returns a private immutable snapshot rather than the
+adapter-owned object. A copied result, separately registered matching receipt,
+dataclass replacement, reconstruction, copy/deepcopy, subclass, or field
+mutation therefore fails closed. The direct local subprocess
 adapter parses the canonical detached-run ID inside its own call, while the
 offline FakePodman adapter creates an equivalent bound result from the synthetic
 engine object at run time. The ordinary subprocess result, stdout, cidfile,

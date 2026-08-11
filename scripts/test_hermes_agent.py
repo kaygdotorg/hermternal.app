@@ -207,7 +207,7 @@ class HermesAgentLauncherTests(unittest.TestCase):
         container_name: str,
         run_id: str,
     ) -> launcher.CommandResult:
-        """Build one synthetic adapter result with exact-result authority."""
+        """Build one synthetic adapter result with exact result/receipt authority."""
 
         return launcher._bind_invocation_result(
             launcher.CommandResult(
@@ -370,6 +370,80 @@ class HermesAgentLauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.LauncherError) as raised:
             launcher.invocation_receipt_from_run_result(original, spec=spec, run_id=run_id)
         self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+    def test_same_receipt_cannot_cross_runner_calls_or_concurrent_bindings(self) -> None:
+        spec = self.make_spec()
+        run_id = "e" * 64
+        receipt = launcher._make_invocation_receipt("f" * 64, spec.container, run_id)
+
+        def adapter(*_args):
+            return launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    0,
+                    "f" * 64 + "\n",
+                    invocation_receipt=receipt,
+                )
+            )
+
+        first = launcher.invoke_runner(
+            adapter,
+            ("synthetic", "run"),
+            {"PATH": "/usr/bin"},
+            1,
+            failure_code="container_start_failed",
+        )
+        self.assertIs(type(first.invocation_receipt), launcher.InvocationSnapshot)
+        with self.assertRaises(launcher.LauncherError) as raised:
+            launcher.invoke_runner(
+                adapter,
+                ("synthetic", "run"),
+                {"PATH": "/usr/bin"},
+                1,
+                failure_code="container_start_failed",
+            )
+        self.assertEqual(raised.exception.code, "container_invocation_unproven")
+
+        concurrent_receipt = launcher._make_invocation_receipt(
+            "1" * 64,
+            spec.container,
+            run_id,
+        )
+        barrier = threading.Barrier(2)
+        outcomes: list[bool] = []
+        outcomes_lock = threading.Lock()
+
+        def concurrent_adapter(*_args):
+            barrier.wait()
+            return launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    0,
+                    "1" * 64 + "\n",
+                    invocation_receipt=concurrent_receipt,
+                )
+            )
+
+        def invoke_concurrently() -> None:
+            try:
+                launcher.invoke_runner(
+                    concurrent_adapter,
+                    ("synthetic", "run"),
+                    {"PATH": "/usr/bin"},
+                    1,
+                    failure_code="container_start_failed",
+                )
+            except launcher.LauncherError:
+                outcome = False
+            else:
+                outcome = True
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        threads = [threading.Thread(target=invoke_concurrently) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sorted(outcomes), [False, True])
 
     def test_concurrent_consumers_have_one_successful_authorization(self) -> None:
         spec = self.make_spec()
@@ -2250,6 +2324,84 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertEqual((self.runs / "fixture.cidfile").read_text(encoding="ascii"), replacement_id + "\n")
         self.assertFalse(any(command[1] == "rm" for command, _ in self.fake.calls))
         self.assertFalse(any(command[1] in {"start", "stop"} for command, _ in self.fake.calls))
+
+    def test_same_receipt_reuse_cannot_false_ready_a_replacement_exact_id(self) -> None:
+        spec = self.make_spec()
+        self.start(spec)
+        state = self.load()
+        original_id = state.container_id
+        replacement_id = "e" * 64
+        original = self.fake.containers.pop(spec.container)
+        self.fake.containers["actual-invocation-a"] = original
+        replacement = json.loads(json.dumps(original))
+        replacement["Id"] = replacement_id
+        self.fake.containers[spec.container] = replacement
+        self.fake.calls.clear()
+
+        receipt = launcher._make_invocation_receipt(
+            original_id,
+            spec.container,
+            state.marker.run_id,
+        )
+
+        def first_adapter(*_args):
+            return launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    0,
+                    original_id + "\n",
+                    invocation_receipt=receipt,
+                )
+            )
+
+        first = launcher.invoke_runner(
+            first_adapter,
+            ("synthetic", "run"),
+            {"PATH": "/usr/bin"},
+            1,
+            failure_code="container_start_failed",
+        )
+        self.assertIs(type(first.invocation_receipt), launcher.InvocationSnapshot)
+        self.assertEqual(first.invocation_receipt.container_id, original_id)
+
+        # The receipt object is intentionally mutated before the hostile second
+        # result bind. A receipt one-shot must reject that bind rather than let B
+        # become a new exact-ID inspect or false-ready publication target.
+        object.__setattr__(receipt, "container_id", replacement_id)
+
+        def second_adapter(*_args):
+            return launcher._bind_invocation_result(
+                launcher.CommandResult(
+                    0,
+                    replacement_id + "\n",
+                    invocation_receipt=receipt,
+                )
+            )
+
+        with mock.patch.object(launcher, "inspect_container", wraps=launcher.inspect_container) as inspect:
+            with self.assertRaises(launcher.LauncherError) as raised:
+                second = launcher.invoke_runner(
+                    second_adapter,
+                    ("synthetic", "run"),
+                    {"PATH": "/usr/bin"},
+                    1,
+                    failure_code="container_start_failed",
+                )
+                self.assertIsNotNone(second.invocation_receipt)
+                launcher._inspect_invocation_container(
+                    spec,
+                    second.invocation_receipt,
+                    self.fake,
+                    {"PATH": "/usr/bin"},
+                    "/usr/bin/podman",
+                    private_path=spec.data_dir,
+                    private_identity=state.data_identity,
+                )
+            self.assertEqual(raised.exception.code, "container_invocation_unproven")
+            inspect.assert_not_called()
+
+        self.assertEqual(self.fake.containers["actual-invocation-a"]["Id"], original_id)
+        self.assertEqual(self.fake.containers[spec.container]["Id"], replacement_id)
+        self.assertEqual(self.fake.calls, [])
 
     def test_same_marker_reuses_one_running_instance_without_second_run_or_fresh_credential(self) -> None:
         spec = self.make_spec()

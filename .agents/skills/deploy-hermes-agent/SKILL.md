@@ -175,10 +175,13 @@ hook inside evidence cleanup and proves marker, state, credential, and cidfile
 absence before reporting removal. Launcher command vectors are validated before
 engine dispatch; the executable and each argument must be a non-empty NUL-free
 string. A new detached run must receive a trusted detached-run adapter receipt bound
-to the exact successful `CommandResult` before it can select any immutable
-container ID. Validation consumes that one-shot authority and returns a private
-immutable snapshot; the adapter-owned result is never returned to lifecycle
-callers. The direct local subprocess adapter parses the canonical full ID inside
+to the exact successful `CommandResult` and its exact `InvocationReceipt`
+object before it can select any immutable container ID. Both identities are
+one-shot: the same receipt cannot grant authority to another result through
+rebinding across runner calls or concurrent adapters. Validation consumes that
+authority and returns a
+private immutable snapshot; the adapter-owned result is never returned to
+lifecycle callers. The direct local subprocess adapter parses the canonical full ID inside
 its own successful `run` call; the offline FakePodman adapter creates an
 equivalent bound result from the synthetic engine object. An arbitrary runner
 result has no receipt capability. A receipt, copied result, separately
