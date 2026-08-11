@@ -14,6 +14,11 @@ const repositoryRoot = resolve(probeDirectory, '../../../..');
 const childLedgerPath = join(repositoryRoot, LEDGER_PATH);
 const childBridgePath = join(repositoryRoot, BRIDGE_PATH);
 const HMAC_TAG_PATTERN = /^h1:[0-9a-f]{64}$/u;
+const PROBE_NODE_ENVIRONMENT = Object.freeze({
+  PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+  LC_ALL: 'C',
+  LANG: 'C'
+});
 
 /**
  * Load the exact parent module from the local Git object database. A data URL
@@ -143,9 +148,13 @@ console.log(JSON.stringify({
   state: bridge.readLiveProofPageState()
 }));
 `;
+  // process.execPath is already an absolute interpreter selected by the
+  // current test runner; the explicit environment prevents a credential,
+  // preload hook, proxy, or arbitrary inherited setting from crossing here.
   const output = execFileSync(process.execPath, ['--input-type=module', '-', mode], {
     cwd: repositoryRoot,
     encoding: 'utf8',
+    env: PROBE_NODE_ENVIRONMENT,
     input: script,
     stdio: ['pipe', 'pipe', 'pipe']
   });

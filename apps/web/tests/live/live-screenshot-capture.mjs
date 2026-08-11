@@ -980,13 +980,21 @@ export function isLiveScreenshotCaptureEnabled(environment = process.env) {
  * @param {string[]} [sensitiveMarkers]
  */
 export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = []) {
-  const preview = document.querySelector('[data-testid="runtime-preview"]');
-  if (!(preview instanceof HTMLElement)) {
+  const sourcePreview = document.querySelector('[data-testid="runtime-preview"]');
+  if (!(sourcePreview instanceof HTMLElement)) {
     throw new Error('live screenshot capture workspace is unavailable');
   }
-  const sourceContainer = preview.parentElement;
+  const sourceContainer = sourcePreview.parentElement;
   if (!(sourceContainer instanceof HTMLElement)) {
     throw new Error('live screenshot capture workspace container is unavailable');
+  }
+  // Clone the entire capture surface before collecting or replacing any
+  // conversation, metadata, title, or composer content. The authenticated
+  // source tree remains untouched; only the detached clone is sanitized.
+  const captureClone = /** @type {HTMLElement} */ (sourceContainer.cloneNode(true));
+  const preview = captureClone.querySelector('[data-testid="runtime-preview"]');
+  if (!(preview instanceof HTMLElement)) {
+    throw new Error('live screenshot capture cloned workspace is unavailable');
   }
   const captureSelector = '[data-capture-root="live-chat"]';
   document.querySelectorAll(captureSelector).forEach((node) => node.remove());
@@ -1475,7 +1483,7 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     });
     return `${projection.textContent ?? ''}\n${projection.outerHTML}`;
   };
-  const serializedPage = serializeResidualSurface(document.documentElement);
+  const serializedPage = serializeResidualSurface(captureClone);
   /** @param {string} serialized @param {string} value */
   const valueAppears = (serialized, value) => {
     if (value.length <= 1) {
@@ -1526,7 +1534,6 @@ export async function sanitizeLiveChatCapturePresentation(sensitiveMarkers = [])
     .filter((color) => color && !/^transparent$/iu.test(color) && !/rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/iu.test(color));
   captureHost.style.backgroundColor = backgroundCandidates[0] ?? '#fff';
 
-  const captureClone = /** @type {HTMLElement} */ (sourceContainer.cloneNode(true));
   captureClone.setAttribute('data-capture-clone', 'true');
   captureClone.style.width = '100%';
   captureClone.style.height = '960px';
@@ -1819,6 +1826,7 @@ async function captureLiveChatScreenshot({
   const bytes = assertImageBytes(
     await captureLocator.screenshot({
       type: 'png',
+      fullPage: false,
       animations: 'disabled',
       caret: 'hide'
     })

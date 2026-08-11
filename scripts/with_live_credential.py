@@ -333,12 +333,7 @@ def read_credential_file(
 
 
 def _trusted_directory_chain(path: Path) -> None:
-    """Require fixed executable parents to be owner-controlled real directories.
-
-    Owner-controlled Homebrew parents may be group-writable, so this boundary
-    rejects world-writable directories while the final executable check below
-    rejects both group- and world-writable files.
-    """
+    """Require every fixed executable parent to be a private real directory."""
 
     if not path.is_absolute():
         raise LiveProofCredentialError("live_proof_command_invalid")
@@ -357,7 +352,7 @@ def _trusted_directory_chain(path: Path) -> None:
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or (info.st_mode & 0o002) != 0
+            or (info.st_mode & 0o022) != 0
             or (current_uid is not None and info.st_uid not in {0, current_uid})
         ):
             raise LiveProofCredentialError("live_proof_command_invalid")

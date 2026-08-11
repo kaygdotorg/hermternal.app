@@ -1,8 +1,4 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { getLiveScreenshotGitChildConfiguration } from './live-trusted-executables.mjs';
 
 export const OFFICIAL_HERMES_IMAGE =
   'docker.io/nousresearch/hermes-agent:v2026.8.3@sha256:16788311e2fa3035456bdc1bafb8ec2b1777db64ebf020af9bb7eb73c3712c9e';
@@ -17,7 +13,6 @@ export const LIVE_SCREENSHOT_VARIANTS = Object.freeze([
 ]);
 
 const MAX_PUBLIC_PNG_BYTES = 20 * 1024 * 1024;
-const MAX_REVIEW_RECORD_BYTES = 4096;
 
 export const LIVE_SCREENSHOT_PUBLIC_CONTRACT = Object.freeze({
   schema: 'hermternal.live-chat-screenshot-contract.v1',
@@ -136,167 +131,6 @@ export async function assertStableLiveCaptureState(page, expectedVariant) {
   });
 }
 
-/** @param {string} path @param {string} label */
-async function assertExecutableHook(path, label) {
-  if (typeof path !== 'string' || !path.startsWith('/')) throw new Error(`${label} hook must be an absolute path`);
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || (metadata.mode & 0o111) === 0) throw new Error(`${label} hook must be an executable file`);
-  return sha256(await readFile(path));
-}
-
-/** @param {string} path @param {string[]} args @param {string} label */
-function runSilentHook(path, args, label) {
-  try {
-    execFileSync(path, args, { stdio: 'ignore', timeout: 30_000, env: {} });
-  } catch {
-    throw new Error(`${label} hook rejected the screenshot`);
-  }
-}
-
-/** @param {string} path @param {string} label @param {number} maximumBytes */
-async function readBoundedRegularFile(path, label, maximumBytes) {
-  const metadata = await lstat(path);
-  if (!metadata.isFile() || metadata.size > maximumBytes) {
-    throw new Error(`${label} was not a bounded regular file`);
-  }
-  return readFile(path);
-}
-
-/**
- * The raw browser image never enters the repository. A separate scrubber must
- * create a new PNG, then an independent visual-review hook must approve that
- * exact byte hash before the helper publishes the complete set fail-closed.
- * @param {{
- *   page: import('@playwright/test').Page,
- *   outputRoot: string,
- *   retainedDirectory: string,
- *   repositoryRoot: string,
- *   clientCommit: string,
- *   scrubHook: string,
- *   reviewHook: string
- * }} options
- */
-export async function captureReviewedLiveScreenshots({
-  page,
-  outputRoot,
-  retainedDirectory,
-  repositoryRoot,
-  clientCommit,
-  scrubHook,
-  reviewHook
-}) {
-  if (!/^[0-9a-f]{40}$/.test(clientCommit)) throw new Error('client commit must be an exact SHA');
-  const gitConfiguration = getLiveScreenshotGitChildConfiguration();
-  const checkoutHead = execFileSync(gitConfiguration.executable, ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-    env: gitConfiguration.environment,
-    stdio: ['ignore', 'pipe', 'ignore']
-  }).trim();
-  if (checkoutHead !== clientCommit) throw new Error('client commit did not match the tested checkout');
-  const scrubHookSha256 = await assertExecutableHook(scrubHook, 'scrub');
-  const reviewHookSha256 = await assertExecutableHook(reviewHook, 'independent review');
-  const temporaryDirectory = resolve(outputRoot, 'explicit-screenshot-capture');
-  await mkdir(temporaryDirectory, { recursive: false, mode: 0o700 });
-  const images = [];
-  /** @type {Map<string, Buffer>} */
-  const approvedImageBytes = new Map();
-  try {
-    for (const variant of LIVE_SCREENSHOT_VARIANTS) {
-      await page.setViewportSize({ width: variant.width, height: variant.height });
-      await assertStableLiveCaptureState(page, variant);
-      const rawPath = resolve(temporaryDirectory, `${variant.name}.raw.png`);
-      const scrubbedPath = resolve(temporaryDirectory, `${variant.name}.scrubbed.png`);
-      const reviewPath = resolve(temporaryDirectory, `${variant.name}.review.json`);
-      await page.screenshot({ path: rawPath, fullPage: false, animations: 'disabled', caret: 'hide', scale: 'css' });
-      runSilentHook(scrubHook, [rawPath, scrubbedPath], 'scrub');
-      const image = inspectPublicPng(
-        await readBoundedRegularFile(scrubbedPath, 'scrubbed screenshot', MAX_PUBLIC_PNG_BYTES),
-        variant
-      );
-      runSilentHook(reviewHook, [scrubbedPath, reviewPath], 'independent review');
-      const review = JSON.parse(
-        (
-          await readBoundedRegularFile(
-            reviewPath,
-            'independent image review record',
-            MAX_REVIEW_RECORD_BYTES
-          )
-        ).toString('utf8')
-      );
-      const reviewedBytes = await readBoundedRegularFile(
-        scrubbedPath,
-        'reviewed screenshot',
-        MAX_PUBLIC_PNG_BYTES
-      );
-      const reviewedImage = inspectPublicPng(reviewedBytes, variant);
-      if (
-        review?.schema !== 'hermternal.independent-image-review.v1' ||
-        review?.decision !== 'approved' ||
-        review?.review_kind !== 'independent-human-visual' ||
-        review?.image_sha256 !== image.sha256 ||
-        reviewedImage.sha256 !== image.sha256
-      ) {
-        throw new Error('independent image review record was not a closed approval');
-      }
-      approvedImageBytes.set(variant.name, reviewedBytes);
-      images.push({
-        variant: variant.name,
-        file: `hermternal-chat-${clientCommit.slice(0, 7)}-${variant.name}.png`,
-        width: image.width,
-        height: image.height,
-        sha256: image.sha256,
-        review: { schema: review.schema, decision: review.decision, review_kind: review.review_kind }
-      });
-    }
-
-    if (
-      (await assertExecutableHook(scrubHook, 'scrub')) !== scrubHookSha256 ||
-      (await assertExecutableHook(reviewHook, 'independent review')) !== reviewHookSha256
-    ) {
-      throw new Error('screenshot review hook changed during capture');
-    }
-
-    const manifest = {
-      ...LIVE_SCREENSHOT_PUBLIC_CONTRACT,
-      status: 'complete',
-      client_commit: clientCommit,
-      official_hermes_image: OFFICIAL_HERMES_IMAGE,
-      command: LIVE_SCREENSHOT_COMMAND,
-      hooks: {
-        scrub_sha256: scrubHookSha256,
-        independent_review_sha256: reviewHookSha256
-      },
-      images
-    };
-    await mkdir(retainedDirectory, { recursive: true });
-    const publishedPaths = [];
-    try {
-      // Exclusive creation prevents a rerun from replacing previously reviewed
-      // evidence. If any publication step fails, remove only files created by
-      // this invocation so a partial image set cannot appear complete.
-      for (const image of images) {
-        const publishedPath = resolve(retainedDirectory, image.file);
-        const approvedBytes = approvedImageBytes.get(image.variant);
-        if (!approvedBytes) throw new Error('approved screenshot bytes were unavailable');
-        await writeFile(publishedPath, approvedBytes, { flag: 'wx', mode: 0o644 });
-        publishedPaths.push(publishedPath);
-      }
-      const manifestPath = resolve(retainedDirectory, 'capture-manifest.json');
-      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
-        flag: 'wx',
-        mode: 0o644
-      });
-      publishedPaths.push(manifestPath);
-      return manifest;
-    } catch (error) {
-      await Promise.all(publishedPaths.map((path) => rm(path, { force: true })));
-      throw error;
-    }
-  } finally {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  }
-}
-
 /**
  * @param {{
  *   clientCommit: string,
@@ -317,9 +151,4 @@ export function blockedLiveScreenshotManifest({ clientCommit, blocker }) {
     blocker,
     images: []
   };
-}
-
-/** @param {string} repositoryRoot */
-export function retainedScreenshotDirectory(repositoryRoot) {
-  return resolve(repositoryRoot, 'tests/integration/hermes-chat');
 }

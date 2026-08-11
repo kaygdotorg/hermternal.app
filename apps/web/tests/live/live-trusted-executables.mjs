@@ -33,9 +33,6 @@ function currentUid() {
 
 /** @param {string} path */
 function assertTrustedDirectoryChain(path) {
-  // Some owner-controlled Homebrew trees are group-writable; require the
-  // owner/root check and reject world-writable parents without rejecting that
-  // reviewed layout. The executable itself remains non-group-writable below.
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new Error('trusted executable path is not absolute');
   }
@@ -47,7 +44,7 @@ function assertTrustedDirectoryChain(path) {
     if (
       !stats.isDirectory() ||
       stats.isSymbolicLink() ||
-      (stats.mode & 0o002) !== 0 ||
+      (stats.mode & 0o022) !== 0 ||
       (currentUid() !== undefined && stats.uid !== 0 && stats.uid !== currentUid())
     ) {
       throw new Error('trusted executable parent is unsafe');

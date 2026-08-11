@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -8,7 +8,6 @@ import {
   LIVE_SCREENSHOT_COMMAND,
   LIVE_SCREENSHOT_PUBLIC_CONTRACT,
   blockedLiveScreenshotManifest,
-  captureReviewedLiveScreenshots,
   inspectPublicPng
 } from '../../tests/live/live-screenshot-contract.mjs';
 import {
@@ -193,10 +192,18 @@ describe('live screenshot contract', () => {
 
     for (const probe of COMPATIBILITY_PROBES) {
       // The probes are Node ESM compatibility checks. Bun's data-URL resolver
-      // cannot execute their isolated historical module fixtures reliably.
-      const output = execFileSync('node', [resolve(appRoot, probe)], {
+      // cannot execute their isolated historical module fixtures reliably. The
+      // test runner's absolute interpreter path avoids ambient PATH lookup;
+      // this scrubbed environment keeps credential-bearing parent settings out.
+      const nodeExecutable = resolve(process.execPath);
+      const output = execFileSync(nodeExecutable, [resolve(appRoot, probe)], {
         cwd: repositoryRoot,
         encoding: 'utf8',
+        env: {
+          PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+          LC_ALL: 'C',
+          LANG: 'C'
+        },
         stdio: ['ignore', 'pipe', 'pipe']
       });
       expect(output).toContain(probe.includes('proof-parent') ? 'live-proof-parent-compat:' : 'live-support-parent-compat:');
@@ -306,6 +313,17 @@ describe('live screenshot contract', () => {
     expect(captureSource).not.toContain("execFileSync('git'");
     expect(captureSource).not.toContain('pageContext.clearCookies');
     expect(captureSource).toContain('authenticatedContextPreserved: true');
+    expect(captureSource).toContain('const captureClone =');
+    expect(captureSource).toContain('const serializedPage = serializeResidualSurface(captureClone);');
+    const parentProbeSource = await readFile(resolve(appRoot, 'tests/live/live-proof-parent-compat.mjs'), 'utf8');
+    expect(parentProbeSource).toContain('env: PROBE_NODE_ENVIRONMENT');
+    expect(parentProbeSource).not.toContain('process.env');
+    const contractSource = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
+    expect(contractSource).not.toContain('captureReviewedLiveScreenshots');
+    expect(contractSource).not.toContain('page.screenshot');
+    const contractTestSource = await readFile(resolve(appRoot, 'src/lib/live-screenshot-contract.test.ts'), 'utf8');
+    // Keep this source-level guard from matching its own assertion literal.
+    expect(contractTestSource).not.toMatch(/execFileSync\(['"]node['"]/u);
     const officialSpec = await readFile(resolve(appRoot, 'tests/live/official-hermes.spec.ts'), 'utf8');
     expect(officialSpec.indexOf(OFFICIAL_SCREENSHOT_CAPTURE_CALL)).toBeLessThan(
       officialSpec.indexOf('const cookiesBeforeLogout = await context.cookies(proofOrigin);')
@@ -455,81 +473,72 @@ describe('live screenshot contract', () => {
     });
   });
 
-  it('publishes only scrubbed and independently approved exact-dimension images', async () => {
+  it('publishes only an exact-hash independently approved image bundle', async () => {
     const root = await mkdtemp(join(tmpdir(), 'hermternal-live-screenshot-contract-'));
     temporaryDirectories.push(root);
-    const outputRoot = join(root, 'output');
     const retainedDirectory = join(root, 'retained');
-    await mkdir(outputRoot);
-    const scrubHook = join(root, 'scrub.mjs');
-    const reviewHook = join(root, 'review.mjs');
-    await writeFile(
-      scrubHook,
-      `#!${process.execPath}\nimport { copyFile } from 'node:fs/promises';\nawait copyFile(process.argv[2], process.argv[3]);\n`
-    );
-    await writeFile(
-      reviewHook,
-      `#!${process.execPath}\nimport { createHash } from 'node:crypto';\nimport { readFile, writeFile } from 'node:fs/promises';\nconst bytes = await readFile(process.argv[2]);\nconst image_sha256 = createHash('sha256').update(bytes).digest('hex');\nawait writeFile(process.argv[3], JSON.stringify({ schema: 'hermternal.independent-image-review.v1', decision: 'approved', review_kind: 'independent-human-visual', image_sha256 }));\n`
-    );
-    await chmod(scrubHook, 0o700);
-    await chmod(reviewHook, 0o700);
+    await mkdir(retainedDirectory, { mode: 0o700 });
 
-    let viewport = { width: 1440, height: 960 };
-    let evaluateCount = 0;
-    const page = {
-      setViewportSize: async (next: typeof viewport) => { viewport = next; },
-      evaluate: async () => {
-        evaluateCount += 1;
-        if (evaluateCount % 2 === 0) return undefined;
-        return {
-          pathname: '/', search: '', hash: '',
-          width: viewport.width, height: viewport.height,
-          dpr: 1, zoom: 1, locale: 'en-US', themeDark: false,
-          reducedMotion: true, readyState: 'complete', workspaceState: 'ready', composerPresent: true
-        };
-      },
-      screenshot: async ({ path }: { path: string }) => writeFile(path, png(viewport.width, viewport.height))
-    };
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const bytes = png(1440, 960);
+    const imageSha256 = captureModule.sha256Hex(bytes);
+    const provenance = captureModule.getLiveScreenshotChromiumProvenance();
     const repositoryRoot = resolve(process.cwd(), '../..');
     const gitConfiguration = getLiveScreenshotGitChildConfiguration();
-    const clientCommit = execFileSync(gitConfiguration.executable, ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
-      encoding: 'utf8',
-      env: gitConfiguration.environment
-    }).trim();
-    const manifest = await captureReviewedLiveScreenshots({
-      page: page as unknown as import('@playwright/test').Page,
-      outputRoot,
-      retainedDirectory,
-      repositoryRoot,
-      clientCommit,
-      scrubHook,
-      reviewHook
+    const clientCommit = execFileSync(
+      gitConfiguration.executable,
+      ['-C', repositoryRoot, 'rev-parse', 'HEAD'],
+      { encoding: 'utf8', env: gitConfiguration.environment }
+    ).trim();
+    const manifest = captureModule.createLiveScreenshotManifest({
+      browserName: 'chromium',
+      browserRevision: provenance.revision,
+      browserVersion: provenance.version,
+      browserExecutableSha256: provenance.executableSha256,
+      clientSha: clientCommit,
+      devicePixelRatio: 1,
+      imageSha256,
+      locale: 'en-US',
+      timezoneId: 'UTC',
+      reducedMotion: 'reduce',
+      theme: 'light',
+      uiState: 'ready',
+      zoom: 1
     });
+    const review = {
+      schema: 'hermternal.independent-image-review.v1',
+      decision: 'approved',
+      review_kind: 'independent-human-visual',
+      image_sha256: imageSha256
+    };
+    const capture = { bytes, manifest };
 
-    expect(manifest.status).toBe('complete');
-    expect(manifest.images).toHaveLength(2);
-    expect(manifest.images.map((image: { width: number; height: number }) => [image.width, image.height])).toEqual([
-      [1440, 960],
-      [390, 844]
-    ]);
-    expect(JSON.parse(await readFile(join(retainedDirectory, 'capture-manifest.json'), 'utf8'))).toEqual(manifest);
-    const retainedDesktop = await readFile(join(retainedDirectory, manifest.images[0].file));
-    expect(retainedDesktop).toEqual(png(1440, 960));
-
-    // A rerun must not replace reviewed evidence or remove the prior files when
-    // exclusive publication detects the existing destination.
     await expect(
-      captureReviewedLiveScreenshots({
-        page: page as unknown as import('@playwright/test').Page,
-        outputRoot,
-        retainedDirectory,
-        repositoryRoot,
-        clientCommit,
-        scrubHook,
-        reviewHook
+      captureModule.persistApprovedLiveScreenshot({
+        capture,
+        destinationDirectory: retainedDirectory,
+        review: { ...review, image_sha256: 'b'.repeat(64) },
+        provenance
       })
-    ).rejects.toMatchObject({ code: 'EEXIST' });
-    expect(await readFile(join(retainedDirectory, manifest.images[0].file))).toEqual(retainedDesktop);
-    expect(JSON.parse(await readFile(join(retainedDirectory, 'capture-manifest.json'), 'utf8'))).toEqual(manifest);
+    ).rejects.toThrow('independent image review record was not a closed approval');
+
+    const persisted = await captureModule.persistApprovedLiveScreenshot({
+      capture,
+      destinationDirectory: retainedDirectory,
+      review,
+      provenance
+    });
+    expect(persisted.manifest.review).toBe('independent-approved');
+    expect(await readFile(persisted.imagePath)).toEqual(bytes);
+    expect(JSON.parse(await readFile(persisted.manifestPath, 'utf8')).imageSha256).toBe(imageSha256);
+
+    await expect(
+      captureModule.persistApprovedLiveScreenshot({
+        capture,
+        destinationDirectory: retainedDirectory,
+        review,
+        provenance
+      })
+    ).rejects.toThrow('refuses to overwrite existing bundle');
   });
 });

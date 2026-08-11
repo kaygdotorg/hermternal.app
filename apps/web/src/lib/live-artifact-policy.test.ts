@@ -1540,11 +1540,16 @@ test('sequential test sees the same root', async ({}, testInfo) => {
     expect(configFactory).toContain("ipcGuardFile: join(liveTestsDirectory, 'live-ipc-guard.cjs')");
     expect(config).toContain('assertLiveRunnerDebugDisabled');
     expect(config).toContain('NODE_OPTIONS');
-    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
-    expect(capture).toContain("route: '/'");
-    expect(capture).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
+    const captureContract = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
+    expect(captureContract).toContain("route: '/'");
+    expect(captureContract).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
+    // Screenshot options live in the proof-bound in-memory helper; the
+    // declarative contract must not reintroduce the removed raw-file path.
+    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-capture.mjs'), 'utf8');
+    expect(capture).toContain('captureLocator.screenshot({');
     expect(capture).toContain("fullPage: false");
     expect(capture).toContain("animations: 'disabled'");
     expect(capture).toContain("caret: 'hide'");
+    expect(capture).not.toContain('page.screenshot');
   });
 });
