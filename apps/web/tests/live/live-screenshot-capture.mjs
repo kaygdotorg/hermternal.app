@@ -2072,16 +2072,88 @@ export function getLiveScreenshotRepositoryIdentity(
 }
 
 /**
+ * Read the worktree-config extension from the validated common config file.
+ * Git rejects `config --worktree` for ordinary linked worktrees unless this
+ * extension is enabled, so treating that command failure as a topology error
+ * would reject valid standard worktrees. Includes are disabled for this probe;
+ * the normal local-scope scan below still rejects any include directive.
+ *
+ * @param {LiveScreenshotRepositoryIdentity} identity
+ * @param {{ executable: string, environment: NodeJS.ProcessEnv }} childConfiguration
+ */
+function readCommonWorktreeConfigEnabled(identity, childConfiguration) {
+  const commonConfigPath = readCanonicalRepositoryFile(join(identity.commonDir, 'config'));
+  let output;
+  try {
+    output = execFileSync(
+      childConfiguration.executable,
+      [
+        '--git-dir',
+        identity.gitDir,
+        '--work-tree',
+        identity.workTree,
+        '-c',
+        `core.worktree=${identity.workTree}`,
+        '-c',
+        'core.attributesFile=/dev/null',
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'diff.external=',
+        '-c',
+        'diff.trustExitCode=false',
+        '--no-replace-objects',
+        '--no-optional-locks',
+        'config',
+        '--no-includes',
+        '--file',
+        commonConfigPath,
+        '--bool',
+        '--get',
+        'extensions.worktreeConfig'
+      ],
+      {
+        cwd: identity.workTree,
+        encoding: 'buffer',
+        env: childConfiguration.environment,
+        maxBuffer: GIT_CONFIG_OUTPUT_MAX_BYTES,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }
+    );
+  } catch (error) {
+    const candidate = /** @type {{ status?: unknown, stdout?: unknown }} */ (error);
+    if (
+      candidate.status === 1 &&
+      Buffer.isBuffer(candidate.stdout) &&
+      candidate.stdout.length === 0
+    ) {
+      return false;
+    }
+    rejectRepositoryTopology();
+  }
+  if (!Buffer.isBuffer(output) || output.length === 0 || output.length > GIT_CONFIG_OUTPUT_MAX_BYTES) {
+    rejectRepositoryTopology();
+  }
+  const text = output.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(output)) rejectRepositoryTopology();
+  if (text === 'true\n') return true;
+  if (text === 'false\n') return false;
+  rejectRepositoryTopology();
+}
+
+/**
  * Read only the names of repository-local and applicable worktree
  * clean/process filters. `git config` does not inspect a worktree or invoke
  * filters, so this preflight can safely discover every dynamic key before a
  * status command. Querying both scopes matters when extensions.worktreeConfig
- * stores the selected worktree's filters in config.worktree. `include.path`
- * and `includeIf.*.path` directives are rejected rather than followed: an
- * included file would be another mutable helper source that this provenance
- * boundary has not independently bound.
- * Unsupported key syntax fails closed rather than constructing an ambiguous
- * command-line override.
+ * stores the selected worktree's filters in config.worktree. Ordinary linked
+ * worktrees without that extension have no applicable worktree scope.
+ * `include.path` and `includeIf.*.path` directives are rejected rather than
+ * followed: an included file would be another mutable helper source that this
+ * provenance boundary has not independently bound. Unsupported key syntax
+ * fails closed rather than constructing an ambiguous command-line override.
  *
  * @param {LiveScreenshotRepositoryIdentity} identity
  * @returns {string[]}
@@ -2089,7 +2161,9 @@ export function getLiveScreenshotRepositoryIdentity(
 function readLocalFilterKeys(identity) {
   const childConfiguration = getLiveScreenshotGitChildConfiguration();
   const keys = new Set();
-  for (const scope of ['local', 'worktree']) {
+  const scopes = ['local'];
+  if (readCommonWorktreeConfigEnabled(identity, childConfiguration)) scopes.push('worktree');
+  for (const scope of scopes) {
     let output;
     try {
       output = execFileSync(

@@ -100,6 +100,7 @@ const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
   'GIT_ATTR_NOSYSTEM',
   'GIT_NO_REPLACE_OBJECTS',
   '--no-replace-objects',
+  'extensions.worktreeConfig',
   'config.worktree',
   'include.path'
 ]);
@@ -574,9 +575,13 @@ if (mode === 'clean') {
     runGit(['add', '.gitattributes', 'clean.txt', 'process.txt']);
     runGit(['commit', '--quiet', '-m', 'initial']);
     runGit(['config', 'extensions.worktreeConfig', 'true']);
+    expect(runGit(['config', '--get', 'extensions.worktreeConfig']).trim()).toBe('true');
     runGit(['config', 'filter.local-clean.clean', cleanCommand]);
     runGit(['config', '--worktree', 'filter.worktree-process.process', processCommand]);
     runGit(['config', '--worktree', 'core.fsmonitor', fsmonitorCommand]);
+    expect(runGit(['config', '--worktree', '--get', 'filter.worktree-process.process'])).toContain(
+      processCommand
+    );
     runGit(['config', 'core.hooksPath', hooks]);
     runGit(['config', 'core.attributesFile', attributesFile]);
     expect(runGit(['check-attr', 'filter', '--', 'clean.txt'])).toContain('local-clean');
@@ -600,18 +605,18 @@ if (mode === 'clean') {
     }
 
     // The vulnerable parent path reaches all three independently marked
-    // helpers. The fsmonitor response is intentionally minimal, so a Git
+    // helpers. Explicit renormalization makes clean/process helper reachability
+    // deterministic; the fsmonitor response is intentionally minimal, so a Git
     // protocol error is not evidence that the helper was unreachable.
     try {
-      runGit(['-c', 'core.fsmonitor=false', 'status', '--porcelain=v1', '--untracked-files=no']);
+      runGit(['-c', 'core.fsmonitor=false', 'add', '--renormalize', 'clean.txt']);
     } catch {
-      // A deliberately simple clean/process fixture may make status fail after
-      // the helper request; the distinct markers are the non-vacuous proof.
+      // The clean fixture may fail after receiving the clean request.
     }
     try {
       runGit(['-c', 'core.fsmonitor=false', 'add', '--renormalize', 'process.txt']);
     } catch {
-      // The protocol fixture may fail after receiving the clean request.
+      // The process fixture may fail after receiving the clean request.
     }
     expect(await readFile(cleanMarker, 'utf8')).toBe('clean');
     expect(await readFile(processMarker, 'utf8')).toBe('process');
@@ -673,6 +678,38 @@ if (mode === 'clean') {
     expect(() => captureModule.readLiveScreenshotRepositoryState(repository)).toThrow(
       'live screenshot repository topology is unsafe or unsupported'
     );
+  });
+
+  it('attests an ordinary linked worktree without extensions.worktreeConfig', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'hermternal-live-linked-worktree-standard-'));
+    temporaryDirectories.push(root);
+    const mainRepository = join(root, 'main');
+    const worktree = join(root, 'worktree');
+    await mkdir(mainRepository, { mode: 0o700 });
+    const gitConfiguration = getLiveScreenshotGitChildConfiguration();
+    const runGit = (cwd: string, args: string[]) =>
+      execFileSync(gitConfiguration.executable, args, {
+        cwd,
+        encoding: 'utf8',
+        env: gitConfiguration.environment,
+        maxBuffer: 4 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+    runGit(mainRepository, ['init', '--quiet']);
+    runGit(mainRepository, ['config', 'user.name', 'synthetic-live-proof']);
+    runGit(mainRepository, ['config', 'user.email', 'synthetic-live-proof@example.invalid']);
+    await writeFile(join(mainRepository, 'tracked.txt'), 'clean\n', 'utf8');
+    runGit(mainRepository, ['add', 'tracked.txt']);
+    runGit(mainRepository, ['commit', '--quiet', '-m', 'initial']);
+    runGit(mainRepository, ['worktree', 'add', '--quiet', worktree, 'HEAD']);
+
+    const captureModule = await import('../../tests/live/live-screenshot-capture.mjs');
+    const state = captureModule.readLiveScreenshotRepositoryState(worktree);
+    expect(state.topology).toBe('linked-worktree');
+    expect(state.workTree).toBe(await realpath(worktree));
+    expect(state.clientSha).toMatch(/^[a-f0-9]{40}$/u);
+    expect(state.dirtyTrackedFiles).toBe('');
   });
 
   it('rejects repointed linked-worktree metadata even when skip-worktree hides dirtiness', async () => {
