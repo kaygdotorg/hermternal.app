@@ -56,6 +56,7 @@ async function runSyntheticPlaywright(
   specSource: string,
   options: {
     runnerDebug?: string;
+    pwDebug?: string;
     retries?: number;
     reportOutputRoot?: boolean;
   } = {}
@@ -145,6 +146,8 @@ export default defineConfig({
   };
   if (options.runnerDebug === undefined) delete childEnvironment.PW_RUNNER_DEBUG;
   else childEnvironment.PW_RUNNER_DEBUG = options.runnerDebug;
+  if (options.pwDebug === undefined) delete childEnvironment.PWDEBUG;
+  else childEnvironment.PWDEBUG = options.pwDebug;
   if (options.reportOutputRoot) childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT = '1';
   else delete childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT;
 
@@ -281,11 +284,31 @@ describe('live Playwright artifact policy', () => {
     expect(liveCredentialValues({})).toContain('hermternal-test');
   });
 
-  it('rejects Playwright debug mode before the live worker can start', () => {
+  it('rejects Playwright runner and UI debug modes before the live worker can start', () => {
     expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: '1' })).toThrow(
       'PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane'
     );
-    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined })).not.toThrow();
+    expect(() => assertLiveRunnerDebugDisabled({ PWDEBUG: '1' })).toThrow(
+      'PWDEBUG is incompatible with the deterministic headless live lane'
+    );
+    expect(() =>
+      assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined, PWDEBUG: undefined })
+    ).not.toThrow();
+  });
+
+  it('captures only explicitly credential-bearing inherited values', () => {
+    const values = liveCredentialValues({
+      HERMES_TEST_USERNAME: 'synthetic-user',
+      HERMES_TEST_PASSWORD: 'synthetic-password',
+      NODE_OPTIONS: '--require=/tmp/untrusted.cjs',
+      AWS_SECRET_ACCESS_KEY: 'unrelated-secret',
+      PW_RUNNER_DEBUG: '1',
+      PWDEBUG: '1'
+    });
+
+    expect(values).toEqual(['hermternal-test', 'synthetic-user', 'synthetic-password']);
+    expect(values).not.toContain('--require=/tmp/untrusted.cjs');
+    expect(values).not.toContain('unrelated-secret');
   });
 
   it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
@@ -1100,6 +1123,21 @@ test('debug mode must be rejected', async () => {
     expect(result.code).not.toBe(0);
     expect(output).not.toContain('synthetic-password');
     expect(output).toContain('PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane');
+    expect(output).not.toContain('TEST:');
+  }, 30_000);
+
+  it('rejects PWDEBUG before a live worker can start', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+const secret = 'synthetic-password';
+test('UI debug mode must be rejected', async () => {
+  throw new Error(secret);
+});
+`, { pwDebug: '1' });
+    const output = result.stdout + result.stderr;
+    expect(result.code).not.toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain('PWDEBUG is incompatible with the deterministic headless live lane');
     expect(output).not.toContain('TEST:');
   }, 30_000);
 

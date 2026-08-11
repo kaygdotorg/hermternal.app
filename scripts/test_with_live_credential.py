@@ -65,7 +65,15 @@ DOCUMENTED_PARSER_FIELDS = {
     ROOT / "apps" / "web" / "tests" / "live" / "README.md": README_PARSER_FIELDS,
     SKILL_DOC: README_PARSER_FIELDS,
 }
-EXPECTED_BUN_COMMAND = ["bun", "run", "--cwd", "apps/web", "test:e2e:live"]
+EXPECTED_BUN_COMMAND = [
+    "bun",
+    "run",
+    "--cwd",
+    "apps/web",
+    "test:e2e:live",
+    "--grep",
+    "browser UI reaches the official Hermes gateway through completion",
+]
 EXPECTED_SKILL_COMMAND = ["node", "/path/to/browser-smoke.mjs"]
 EXPECTED_SKILL_OPERATIONS = [
     "start",
@@ -580,27 +588,66 @@ class LiveProofCredentialTests(unittest.TestCase):
         self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
     def test_runner_debug_fails_before_loading_marker_or_starting_child(self) -> None:
-        stderr = io.StringIO()
-        with (
-            mock.patch.dict(helper.os.environ, {helper.LIVE_RUNNER_DEBUG_ENV: "1"}),
-            mock.patch.object(helper, "read_credential_file") as read_credential_file,
-            mock.patch.object(helper.os, "execvpe") as execvpe,
-            contextlib.redirect_stderr(stderr),
-        ):
-            status = helper.main(self.cli_args("synthetic-proof"))
+        for debug_name in helper.LIVE_RUNNER_DEBUG_ENVS:
+            with self.subTest(debug_name=debug_name):
+                stderr = io.StringIO()
+                with (
+                    mock.patch.dict(
+                        helper.os.environ,
+                        {
+                            helper.LIVE_RUNNER_DEBUG_ENV: "",
+                            helper.LIVE_RUNNER_UI_DEBUG_ENV: "",
+                            debug_name: "1",
+                        },
+                    ),
+                    mock.patch.object(helper, "read_credential_file") as read_credential_file,
+                    mock.patch.object(helper.live_run_marker, "open_runs_parent") as open_runs_parent,
+                    mock.patch.object(helper.os, "execvpe") as execvpe,
+                    contextlib.redirect_stderr(stderr),
+                ):
+                    status = helper.main(self.cli_args("synthetic-proof"))
 
-        self.assertEqual(status, 1)
-        self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
-        read_credential_file.assert_not_called()
-        self.assertFalse(execvpe.called)
-        self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
+                self.assertEqual(status, 1)
+                self.assertEqual(stderr.getvalue(), "live_runner_debug_incompatible\n")
+                read_credential_file.assert_not_called()
+                open_runs_parent.assert_not_called()
+                self.assertFalse(execvpe.called)
+                self.assertNotIn(self.value.decode("ascii"), stderr.getvalue())
 
     def test_valid_value_is_only_passed_to_child_environment(self) -> None:
         raw = self.value + b"\r\n"
         self._write_credential(raw)
+        safe_environment = {
+            "PATH": "/synthetic/bin",
+            "HERMES_LIVE_TARGET": "http://127.0.0.1:19119",
+            "HERMES_TEST_USERNAME": "synthetic-user",
+            "PLAYWRIGHT_LIVE_PORT": "4187",
+            "HERMTERNAL_LIVE_RECONCILIATION": "0",
+            "HERMTERNAL_LIVE_SCREENSHOT_CAPTURE": "1",
+            "HERMTERNAL_PAPER_PARITY_APPROVED": "1",
+            "HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA": "a" * 40,
+            "HERMTERNAL_LIVE_SCREENSHOT_RETAIN": "1",
+            "HERMTERNAL_LIVE_SCREENSHOT_REVIEW": "independent-approved",
+            "HERMTERNAL_LIVE_SCREENSHOT_DESTINATION": "/synthetic/destination",
+        }
+        inherited_secrets = {
+            "HERMES_TEST_PASSWORD": "inherited-password",
+            "NODE_OPTIONS": "--require=/tmp/untrusted.cjs",
+            "HTTP_PROXY": "http://proxy.invalid",
+            "HTTPS_PROXY": "https://proxy.invalid",
+            "ALL_PROXY": "socks5://proxy.invalid",
+            "LD_PRELOAD": "/tmp/untrusted.so",
+            "DYLD_INSERT_LIBRARIES": "/tmp/untrusted.dylib",
+            "AWS_SECRET_ACCESS_KEY": "unrelated-secret",
+            # Empty debug values keep this execution on the valid handoff path;
+            # the separate debug test proves truthy values stop before reading.
+            "PW_RUNNER_DEBUG": "",
+            "PWDEBUG": "",
+        }
         stdout = io.StringIO()
         stderr = io.StringIO()
         with (
+            mock.patch.dict(helper.os.environ, {**safe_environment, **inherited_secrets}, clear=True),
             mock.patch.object(helper.os, "execvpe", side_effect=OSError) as execvpe,
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
@@ -615,7 +662,10 @@ class LiveProofCredentialTests(unittest.TestCase):
         command, arguments, environment = call.args
         self.assertEqual(command, "synthetic-proof")
         self.assertEqual(arguments, ["synthetic-proof", "--flag"])
-        self.assertEqual(environment["HERMES_TEST_PASSWORD"], self.value.decode("ascii"))
+        self.assertEqual(
+            environment,
+            {**safe_environment, "HERMES_TEST_PASSWORD": self.value.decode("ascii")},
+        )
         self.assertNotEqual(environment["HERMES_TEST_PASSWORD"], raw.decode("ascii"))
         self.assertNotIn(self.value.decode("ascii"), " ".join(arguments))
         self.assertEqual(self.credential_path.read_bytes(), raw)
@@ -826,7 +876,7 @@ class LiveProofCredentialTests(unittest.TestCase):
             "import sys\n"
             "if os.environ.get('HERMES_TEST_PASSWORD') != 'a' * 48:\n"
             "    raise SystemExit(97)\n"
-            "Path(os.environ['HANDOFF_CAPTURE']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
+            "Path(os.environ['HERMTERNAL_LIVE_SCREENSHOT_DESTINATION']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
             encoding="utf-8",
         )
         fake_node.chmod(stat.S_IRWXU)
@@ -835,7 +885,7 @@ class LiveProofCredentialTests(unittest.TestCase):
         environment.update(
             {
                 "PATH": f"{bin_directory}{os.pathsep}{environment['PATH']}",
-                "HANDOFF_CAPTURE": str(capture),
+                "HERMTERNAL_LIVE_SCREENSHOT_DESTINATION": str(capture),
                 "endpoint": self.binding.endpoint,
                 "marker_path": str(self.marker_path),
                 "run_id": str(proof["run_id"]),
@@ -882,14 +932,14 @@ class LiveProofCredentialTests(unittest.TestCase):
             "import sys\n"
             "if not os.environ.get('HERMES_TEST_PASSWORD'):\n"
             "    raise SystemExit(97)\n"
-            "Path(os.environ['HANDOFF_CAPTURE']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
+            "Path(os.environ['HERMTERNAL_LIVE_SCREENSHOT_DESTINATION']).write_text('\\n'.join(sys.argv[1:]) + '\\n')\n",
             encoding="utf-8",
         )
         fake_bun.chmod(stat.S_IRWXU)
         self._write_credential(self.value + b"\n")
         environment = os.environ.copy()
         environment["PATH"] = f"{bin_directory}{os.pathsep}{environment['PATH']}"
-        environment["HANDOFF_CAPTURE"] = str(capture)
+        environment["HERMTERNAL_LIVE_SCREENSHOT_DESTINATION"] = str(capture)
         environment["HERMES_LIVE_TARGET"] = "http://127.0.0.1:19124"
         result = subprocess.run(
             [sys.executable, str(SCRIPT), *self.cli_args(*EXPECTED_BUN_COMMAND)],

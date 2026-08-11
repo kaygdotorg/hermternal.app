@@ -357,10 +357,15 @@ export async function requestLiveReconciliationProjection(page, request) {
         const returned = boundedInteger(pagination?.returned, 0, MAX_MESSAGES);
         const offset = boundedInteger(pagination?.offset, 0, MAX_MESSAGES);
         const limit = pagination?.limit;
+        // The endpoint exposes no independent total or continuation cursor. A
+        // page at the cap may be truncated, so preserve only empty and
+        // below-cap pages for reconciliation.
         if (
           returnedSessionId !== expectedSessionId ||
           !Array.isArray(messages) ||
-          messages.length > MAX_MESSAGES ||
+          messages.length >= MAX_MESSAGES ||
+          expectedMessageCount < 0 ||
+          expectedMessageCount >= MAX_MESSAGES ||
           messages.length !== expectedMessageCount ||
           returned !== messages.length ||
           offset !== 0 ||
@@ -393,19 +398,20 @@ export async function requestLiveReconciliationProjection(page, request) {
             if (message.role !== 'user' || message.content !== PROMPT) continue;
             promptCount = Math.min(promptCount + 1, 2);
             promptSessions.add(session.id);
-            let pair = false;
+            let segmentHasPair = false;
             for (let next = index + 1; next < messages.length; next += 1) {
               const candidate = messages[next];
+              // Any intervening user message fences the historical pair. A
+              // later assistant marker may belong to that unrelated turn.
               if (candidate.role === 'user') break;
               if (candidate.role === 'assistant' && candidate.content === ASSISTANT_MARKER) {
-                pair = true;
-                break;
+                // Scan past the first marker: duplicate exact markers in one
+                // user-delimited segment are multiple ambiguous matches.
+                segmentHasPair = true;
+                completedPairCount = Math.min(completedPairCount + 1, 2);
               }
             }
-            if (pair) {
-              completedPairCount = Math.min(completedPairCount + 1, 2);
-              completedPairSessions.add(session.id);
-            }
+            if (segmentHasPair) completedPairSessions.add(session.id);
           }
         }
         const multipleMatches =

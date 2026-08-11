@@ -391,7 +391,7 @@ HERMES_LIVE_TARGET="$endpoint" \
     --credential-file "$credential_file" \
     --credential-identity "$credential_identity" \
     -- \
-    bun run --cwd apps/web test:e2e:live
+    bun run --cwd apps/web test:e2e:live --grep "browser UI reaches the official Hermes gateway through completion"
 ```
 
 `with_live_credential.py` requires all four proof options before `--`: the
@@ -409,9 +409,16 @@ line endings fail closed. The value must contain exactly 48 lowercase
 hexadecimal characters. The helper then replaces itself with the child command
 and supplies `HERMES_TEST_PASSWORD` only in that child process environment. It
 never prints or writes the password; invalid, legacy identity-without-generation,
-or replaced input fails locally before the child starts. `PW_RUNNER_DEBUG` is
-also rejected before the marker or credential is read because Playwright's debug
-mode inherits worker stderr outside the redaction boundary. The
+or replaced input fails locally before the child starts. `PW_RUNNER_DEBUG` and
+`PWDEBUG` are both rejected before the marker or credential is read: the first
+can expose worker stderr outside the redaction boundary and the second changes
+the deterministic headless/UI boundary. The child receives an explicit
+allowlist only: `PATH`, `HERMES_LIVE_TARGET`, optional `HERMES_TEST_USERNAME`,
+`PLAYWRIGHT_LIVE_PORT`, `HERMTERNAL_LIVE_RECONCILIATION`, and the reviewed
+screenshot capture/parity/client/review/destination selectors. Inherited
+`HERMES_TEST_PASSWORD`, `NODE_OPTIONS`, preload controls, proxy variables,
+other `HERMES_*` values, and unrelated secrets are dropped. The validated
+password is injected after marker and credential checks. The
 launcher-generated `password\n` file format is unchanged.
 
 Marker publication is a copy/evidence protocol, not a race-free publication

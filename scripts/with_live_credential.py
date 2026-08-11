@@ -7,7 +7,9 @@ exact caller-selected marker path, loads it without selecting a candidate, and
 revalidates the pinned credential identity immediately before reading through a
 non-following file descriptor. The password is never printed or written by this
 helper; it exists only in the child process environment as
-``HERMES_TEST_PASSWORD``.
+``HERMES_TEST_PASSWORD``. The child environment is rebuilt from an explicit
+reviewed allowlist, so inherited passwords, preload hooks, proxy settings, and
+unrelated secrets do not cross the credential boundary.
 """
 
 from __future__ import annotations
@@ -43,6 +45,22 @@ MAX_PROOF_OPTIONS_BYTES = (
     + sum(len(key.encode("utf-8")) for key in _PROOF_OPTION_KEYS)
 )
 LIVE_RUNNER_DEBUG_ENV = "PW_RUNNER_DEBUG"
+LIVE_RUNNER_UI_DEBUG_ENV = "PWDEBUG"
+LIVE_RUNNER_DEBUG_ENVS = (LIVE_RUNNER_DEBUG_ENV, LIVE_RUNNER_UI_DEBUG_ENV)
+SAFE_CHILD_ENV_NAMES = (
+    "PATH",
+    "HERMES_LIVE_TARGET",
+    "HERMES_TEST_USERNAME",
+    "PLAYWRIGHT_LIVE_PORT",
+    "HERMTERNAL_LIVE_RECONCILIATION",
+    # Screenshot capture reads these proof-bound gates in the child process.
+    "HERMTERNAL_LIVE_SCREENSHOT_CAPTURE",
+    "HERMTERNAL_PAPER_PARITY_APPROVED",
+    "HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA",
+    "HERMTERNAL_LIVE_SCREENSHOT_RETAIN",
+    "HERMTERNAL_LIVE_SCREENSHOT_REVIEW",
+    "HERMTERNAL_LIVE_SCREENSHOT_DESTINATION",
+)
 
 
 class LiveProofCredentialError(Exception):
@@ -305,7 +323,9 @@ def run_with_credential(
 
     if not command:
         raise LiveProofCredentialError("command_missing")
-    if os.environ.get(LIVE_RUNNER_DEBUG_ENV):
+    # Both Playwright debug modes bypass the detached, redacted live-proof
+    # boundary; reject them before marker access or child startup.
+    if any(os.environ.get(name) for name in LIVE_RUNNER_DEBUG_ENVS):
         raise LiveProofCredentialError("live_runner_debug_incompatible")
     password = read_credential_file(
         marker_path,
@@ -313,7 +333,13 @@ def run_with_credential(
         credential_file=credential_file,
         credential_identity=credential_identity,
     )
-    environment = os.environ.copy()
+    # Do not inherit ambient credentials, preload hooks, proxy settings, or
+    # unrelated secrets. The validated password is the only newly injected key.
+    environment = {
+        name: os.environ[name]
+        for name in SAFE_CHILD_ENV_NAMES
+        if name in os.environ
+    }
     environment["HERMES_TEST_PASSWORD"] = password
     try:
         os.execvpe(command[0], list(command), environment)

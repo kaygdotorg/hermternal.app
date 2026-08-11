@@ -54,7 +54,10 @@ export function parseReconciliationSessionList(value) {
 }
 
 /**
- * Parse one complete bounded message history. A returned alias or an omitted
+ * Parse one complete bounded message history. Empty and below-cap pages can be
+ * complete when their returned count matches the session projection, but an
+ * exactly-cap page cannot prove the history ended: this endpoint exposes no
+ * independent total or continuation cursor. A returned alias or an omitted
  * page boundary is not safe evidence for this read-only reconciliation.
  *
  * @param {unknown} value
@@ -72,12 +75,14 @@ export function parseReconciliationSessionMessages(value, expectedSessionId, exp
   const limit = pagination.limit;
   const offset = boundedInteger(pagination.offset, 0, LIVE_RECONCILIATION_MAX_MESSAGES);
   const returned = boundedInteger(pagination.returned, 0, LIVE_RECONCILIATION_MAX_MESSAGES);
+  // The endpoint exposes no independent total or continuation cursor. A page
+  // at the cap may be truncated, so preserve only empty and below-cap pages.
   if (
     sessionId !== expectedSessionId ||
     !Array.isArray(messages) ||
-    messages.length > LIVE_RECONCILIATION_MAX_MESSAGES ||
+    messages.length >= LIVE_RECONCILIATION_MAX_MESSAGES ||
     expectedMessageCount < 0 ||
-    expectedMessageCount > LIVE_RECONCILIATION_MAX_MESSAGES ||
+    expectedMessageCount >= LIVE_RECONCILIATION_MAX_MESSAGES ||
     messages.length !== expectedMessageCount ||
     returned !== messages.length ||
     offset !== 0 ||
@@ -134,6 +139,12 @@ export async function reconcileLiveHistory({
     if (seen.has(sessionId)) throw new Error('live reconciliation session identity is duplicated');
     seen.add(sessionId);
     const messageCount = boundedInteger(session.messageCount, 0, LIVE_RECONCILIATION_MAX_MESSAGES);
+    // The history endpoint has no independent total or continuation cursor. A
+    // page at the exact cap may be truncated, so the generic scanner must also
+    // reject it instead of trusting a caller that bypassed the response parser.
+    if (messageCount >= LIVE_RECONCILIATION_MAX_MESSAGES) {
+      throw new Error('live reconciliation message pagination is not complete');
+    }
     const messages = await getMessages(sessionId, messageCount);
     if (!Array.isArray(messages) || messages.length !== messageCount) {
       throw new Error('live reconciliation message projection is incomplete');
@@ -145,7 +156,7 @@ export async function reconcileLiveHistory({
       if (message.role !== 'user' || message.content !== prompt) continue;
       promptCount = Math.min(promptCount + 1, 2);
       promptSessions.add(sessionId);
-      let pair = false;
+      let segmentHasPair = false;
       for (let next = index + 1; next < messages.length; next += 1) {
         const candidate = messages[next];
         // Any intervening user message fences the historical pair. A later
@@ -155,14 +166,13 @@ export async function reconcileLiveHistory({
           candidate.role === 'assistant' &&
           candidate.content === assistantMarker
         ) {
-          pair = true;
-          break;
+          // Scan past the first marker: duplicate exact markers in one
+          // user-delimited segment are multiple ambiguous matches.
+          segmentHasPair = true;
+          completedPairCount = Math.min(completedPairCount + 1, 2);
         }
       }
-      if (pair) {
-        completedPairCount = Math.min(completedPairCount + 1, 2);
-        completedPairSessions.add(sessionId);
-      }
+      if (segmentHasPair) completedPairSessions.add(sessionId);
     }
   }
 

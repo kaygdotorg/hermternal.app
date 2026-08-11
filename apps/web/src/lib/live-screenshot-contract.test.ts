@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LIVE_SCREENSHOT_COMMAND,
   LIVE_SCREENSHOT_PUBLIC_CONTRACT,
@@ -19,8 +19,21 @@ import {
   getLivePlaywrightPaths,
   isLiveReconciliationEnabled
 } from '../../tests/live/live-playwright-config.mjs';
+import {
+  LIVE_PROOF_ASSISTANT_MARKER,
+  LIVE_PROOF_PROMPT
+} from '../../tests/live/live-proof-ledger.mjs';
+import {
+  parseReconciliationSessionMessages,
+  reconcileLiveHistory
+} from '../../tests/live/live-reconciliation.mjs';
+import { requestLiveReconciliationProjection } from '../../tests/live/live-reconciliation-transport.mjs';
 
 const temporaryDirectories: string[] = [];
+type SyntheticHistoryMessage = {
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string | null;
+};
 
 const MARKER_AUTHORITY_ANCHORS = Object.freeze([
   'synthetic and mock-only when run offline',
@@ -61,11 +74,20 @@ const SCREENSHOT_SUPPORT_ANCHORS = Object.freeze([
   'Task #422 adds only the support surfaces required by the approved correction suite',
   'compatible e5-lineage support ports',
   'live-support-parent-compat.mjs',
+  'captureLiveChatScreenshotIfEnabled',
   'browser-resolved `timezoneId` `UTC`',
-  '`capture-manifest.json` pins the closed fields',
+  'raw PNG bytes in memory',
+  'manifest pins the closed fields',
   'exact client commit',
   'official Hermes image digest',
   LIVE_SCREENSHOT_COMMAND
+]);
+const SECURITY_BOUNDARY_ANCHORS = Object.freeze([
+  'PW_RUNNER_DEBUG` and `PWDEBUG`',
+  'explicit allowlist',
+  'inherited `HERMES_TEST_PASSWORD`',
+  'exactly 500 messages',
+  'duplicate exact assistant markers'
 ]);
 
 const STALE_LAUNCHER_OR_PROOF_TEXT = Object.freeze([
@@ -82,6 +104,8 @@ const COMPATIBILITY_PROBES = Object.freeze([
   'tests/live/live-proof-parent-compat.mjs',
   'tests/live/live-support-parent-compat.mjs'
 ]);
+const OFFICIAL_SCREENSHOT_CAPTURE_CALL =
+  'await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState, proof });';
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -141,6 +165,7 @@ describe('live screenshot contract', () => {
     for (const anchor of MARKER_AUTHORITY_ANCHORS) expect(readme).toContain(anchor);
     for (const anchor of WATERMARK_ANCHORS) expect(readme).toContain(anchor);
     for (const anchor of SCREENSHOT_SUPPORT_ANCHORS) expect(readme).toContain(anchor);
+    for (const anchor of SECURITY_BOUNDARY_ANCHORS) expect(readme).toContain(anchor);
 
     expect(readme.split('The host is test-only.').length - 1).toBe(1);
     expect(readme.split('This lane serves the production static build').length - 1).toBe(1);
@@ -163,7 +188,9 @@ describe('live screenshot contract', () => {
     const repositoryRoot = resolve(appRoot, '../..');
 
     for (const probe of COMPATIBILITY_PROBES) {
-      const output = execFileSync(process.execPath, [resolve(appRoot, probe)], {
+      // The probes are Node ESM compatibility checks. Bun's data-URL resolver
+      // cannot execute their isolated historical module fixtures reliably.
+      const output = execFileSync('node', [resolve(appRoot, probe)], {
         cwd: repositoryRoot,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe']
@@ -207,6 +234,177 @@ describe('live screenshot contract', () => {
 
     const officialSpec = await readFile(resolve(appRoot, 'tests/live/official-hermes.spec.ts'), 'utf8');
     expect(officialSpec).toContain(OFFICIAL_RECONCILIATION_SKIP);
+  });
+
+  it('binds the official proof spec to the in-memory screenshot helper', async () => {
+    const appRoot = process.cwd();
+    const officialSpec = await readFile(resolve(appRoot, 'tests/live/official-hermes.spec.ts'), 'utf8');
+    expect(officialSpec).toContain(
+      "import { captureLiveChatScreenshotIfEnabled } from './live-screenshot-capture.mjs';"
+    );
+    expect(officialSpec).toContain(OFFICIAL_SCREENSHOT_CAPTURE_CALL);
+    expect(officialSpec).not.toContain('captureReviewedLiveScreenshots');
+    expect(officialSpec).not.toContain('retainedScreenshotDirectory');
+    expect(officialSpec).not.toContain('page.screenshot');
+
+    const { captureLiveChatScreenshotIfEnabled } = await import(
+      '../../tests/live/live-screenshot-capture.mjs'
+    );
+    const page = new Proxy({}, {
+      get() {
+        throw new Error('default-off screenshot capture touched the page');
+      }
+    });
+    await expect(
+      captureLiveChatScreenshotIfEnabled({
+        page,
+        uiState: 'ready',
+        proof: {},
+        environment: {}
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it('fails closed at the reconciliation history cap and keeps Node/page matching parity', async () => {
+    const sessionId = 'synthetic-session';
+    const jsonResponse = (value: unknown) => {
+      // Rewrap the encoder output in the page-realm constructor used by the
+      // synthetic evaluate callback; Node's encoder may return another realm's
+      // Uint8Array, which the page transport must not mistake for a stream chunk.
+      const bytes = Uint8Array.from(new TextEncoder().encode(JSON.stringify(value)));
+      let consumed = false;
+      return {
+        status: 200,
+        headers: {
+          get(name: string) {
+            return name.toLowerCase() === 'content-type' ? 'application/json' : null;
+          }
+        },
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (consumed) return { done: true, value: undefined };
+                consumed = true;
+                return { done: false, value: bytes };
+              },
+              async cancel() {
+                consumed = true;
+              }
+            };
+          }
+        }
+      };
+    };
+    const runPageHistory = async (messages: SyntheticHistoryMessage[]) => {
+      vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        if (url.includes('/messages?')) {
+          return jsonResponse({
+            session_id: sessionId,
+            messages,
+            pagination: { limit: 500, offset: 0, returned: messages.length }
+          });
+        }
+        return jsonResponse({
+          sessions: [{ id: sessionId, message_count: messages.length }],
+          total: 1,
+          limit: 100,
+          offset: 0
+        });
+      }));
+      try {
+        return await requestLiveReconciliationProjection(
+          {
+            evaluate: async (callback: (args: unknown) => Promise<unknown>, args: unknown) =>
+              callback(args)
+          },
+          { baseURL: 'http://127.0.0.1:4187/', kind: 'history' }
+        );
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    };
+
+    const cappedMessages: SyntheticHistoryMessage[] = Array.from({ length: 500 }, () => ({
+      role: 'assistant',
+      content: null
+    }));
+    expect(() =>
+      parseReconciliationSessionMessages(
+        {
+          session_id: sessionId,
+          messages: cappedMessages,
+          pagination: { limit: 500, offset: 0, returned: 500 }
+        },
+        sessionId,
+        500
+      )
+    ).toThrow('live reconciliation message pagination is not complete');
+    await expect(runPageHistory(cappedMessages)).rejects.toThrow(
+      'live reconciliation message pagination is not complete'
+    );
+    await expect(
+      reconcileLiveHistory({
+        sessions: [{ id: sessionId, messageCount: cappedMessages.length }],
+        getMessages: async () => cappedMessages
+      })
+    ).rejects.toThrow('live reconciliation message pagination is not complete');
+
+    const belowCapMessages: SyntheticHistoryMessage[] = Array.from({ length: 499 }, () => ({
+      role: 'assistant',
+      content: null
+    }));
+    expect(
+      parseReconciliationSessionMessages(
+        {
+          session_id: sessionId,
+          messages: belowCapMessages,
+          pagination: { limit: 500, offset: 0, returned: 499 }
+        },
+        sessionId,
+        499
+      )
+    ).toHaveLength(499);
+    await expect(runPageHistory(belowCapMessages)).resolves.toEqual({
+      promptMatches: 'zero',
+      completedPairs: 'zero',
+      status: 'no-match-uncertain'
+    });
+
+    const duplicateMarkers: SyntheticHistoryMessage[] = [
+      { role: 'user', content: LIVE_PROOF_PROMPT },
+      { role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER },
+      { role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+    ];
+    const nodeDuplicateResult = await reconcileLiveHistory({
+      sessions: [{ id: sessionId, messageCount: duplicateMarkers.length }],
+      getMessages: async () => duplicateMarkers
+    });
+    const pageDuplicateResult = await runPageHistory(duplicateMarkers);
+    expect(pageDuplicateResult).toEqual(nodeDuplicateResult);
+    expect(nodeDuplicateResult).toEqual({
+      promptMatches: 'one',
+      completedPairs: 'multiple',
+      status: 'multiple-matches-ambiguous'
+    });
+
+    const fencedMarker: SyntheticHistoryMessage[] = [
+      { role: 'user', content: LIVE_PROOF_PROMPT },
+      { role: 'user', content: 'unrelated later turn' },
+      { role: 'assistant', content: LIVE_PROOF_ASSISTANT_MARKER }
+    ];
+    const nodeFencedResult = await reconcileLiveHistory({
+      sessions: [{ id: sessionId, messageCount: fencedMarker.length }],
+      getMessages: async () => fencedMarker
+    });
+    const pageFencedResult = await runPageHistory(fencedMarker);
+    expect(pageFencedResult).toEqual(nodeFencedResult);
+    expect(nodeFencedResult).toEqual({
+      promptMatches: 'one',
+      completedPairs: 'zero',
+      status: 'match-unattributed'
+    });
   });
 
   it('publishes only scrubbed and independently approved exact-dimension images', async () => {

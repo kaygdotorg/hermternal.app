@@ -1,10 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
 import { expect, test } from './live-test-fixtures';
-import {
-  captureReviewedLiveScreenshots,
-  retainedScreenshotDirectory
-} from './live-screenshot-contract.mjs';
+import { captureLiveChatScreenshotIfEnabled } from './live-screenshot-capture.mjs';
 import {
   LIVE_PROOF_ASSISTANT_MARKER,
   LIVE_PROOF_PROMPT,
@@ -326,20 +321,7 @@ test('browser UI reaches the official Hermes gateway through completion', async 
     completionCount: 1
   });
   setLiveProofStatus(testInfo, { phase: 'reconciled', delivery: 'reconciled' });
-  const repositoryRoot = resolve(process.cwd(), '../..');
-  const clientCommit = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore']
-  }).trim();
-  await captureReviewedLiveScreenshots({
-    page,
-    outputRoot: requiredEnvironment('PLAYWRIGHT_LIVE_OUTPUT_DIR'),
-    retainedDirectory: retainedScreenshotDirectory(repositoryRoot),
-    repositoryRoot,
-    clientCommit,
-    scrubHook: requiredEnvironment('HERMES_SCREENSHOT_SCRUB_HOOK'),
-    reviewHook: requiredEnvironment('HERMES_SCREENSHOT_REVIEW_HOOK')
-  });
+  await captureLiveChatScreenshotIfEnabled({ page, uiState: captureState, proof });
 
   const loginSequence = findEventSequence(
     eventsBeforeLogout,
@@ -445,12 +427,6 @@ test('browser UI reaches the official Hermes gateway through completion', async 
     storageCleared: true
   });
 });
-
-function requiredEnvironment(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required for reviewed screenshot retention`);
-  return value;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
