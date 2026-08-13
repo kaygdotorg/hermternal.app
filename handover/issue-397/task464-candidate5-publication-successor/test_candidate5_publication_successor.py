@@ -57,6 +57,30 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "residue"):
             MODULE.publish(self.targets, self.payloads, validate=replace_then_fail)
         self.assertEqual(self.targets[0].read_bytes(), b"foreign")
+    def test_validator_successful_foreign_swap_never_returns_success(self):
+        for index, role in enumerate(MODULE.ROLES):
+            with self.subTest(role=role):
+                foreign = self.root / f"foreign-{role}"; foreign.write_bytes(b"foreign"); foreign.chmod(0o600)
+                moved = self.root / f"owned-moved-{role}"
+                def replace_and_return(paths, _payloads):
+                    os.rename(paths[index], moved); os.rename(foreign, paths[index]); return "must-not-return"
+                with self.assertRaisesRegex(MODULE.Reject, "residue"):
+                    MODULE.publish(self.targets, self.payloads, validate=replace_and_return)
+                self.assertEqual(self.targets[index].read_bytes(), b"foreign")
+                os.unlink(self.targets[index]); os.unlink(moved)
+    def test_post_link_reconciliation_observation_failure_cleans_owned_target(self):
+        original_stat = MODULE.os.stat; injected = False
+        def fail_once_after_link(path, *args, **kwargs):
+            nonlocal injected
+            if path == self.targets[0].name and kwargs.get("dir_fd") is not None and not injected:
+                try: original_stat(path, *args, **kwargs)
+                except FileNotFoundError: return original_stat(path, *args, **kwargs)
+                injected = True; raise OSError("reconciliation observation failure")
+            return original_stat(path, *args, **kwargs)
+        with patch.object(MODULE.os, "stat", side_effect=fail_once_after_link):
+            with self.assertRaisesRegex(MODULE.Reject, "rolled back"):
+                MODULE.publish(self.targets, self.payloads)
+        self.assertTrue(injected); self.assert_absent()
     def test_parent_rename_or_symlink_substitution_rejects(self):
         parent = self.root.parent; moved = parent / (self.root.name + "-moved"); replacement = parent / (self.root.name + "-replacement"); replacement.mkdir(mode=0o700)
         original = os.link; calls = 0

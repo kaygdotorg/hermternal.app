@@ -3,7 +3,9 @@
 This speculative checkpoint publishes exactly three fixed candidate-five role
 names into one canonical private directory. It uses a private stage, retained
 descriptors, create-only hard links, reconciliation, data and directory fsync,
-and exact public-byte validation while the directory lock is held. Rollback
+and exact public-byte validation before and after the final callback while the
+directory lock is held. Rollback unconditionally reconciles every public and
+stage name from its recorded transaction-owned inode. Rollback
 removes only transaction-owned inodes and reports any residue.
 
 POSIX does not provide crash-atomic publication for three names. Process death

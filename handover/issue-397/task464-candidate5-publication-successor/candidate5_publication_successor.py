@@ -56,7 +56,7 @@ def _current_parent(root: Path, expected: tuple[int, ...]) -> None:
 
 
 def _owned_unlink(dir_fd: int, name: str, inode: tuple[int, int]) -> bool:
-    """Remove a name only when it still names the transaction-owned inode."""
+    """Remove only an owned inode and confirm that the name stays absent."""
     try:
         current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -64,7 +64,27 @@ def _owned_unlink(dir_fd: int, name: str, inode: tuple[int, int]) -> bool:
     if _inode(current) != inode:
         return False
     os.unlink(name, dir_fd=dir_fd)
-    return True
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _validate_public(entry: dict, public_fd: int) -> None:
+    """Bind a public name to its owned inode and exact retained payload."""
+    fd = os.open(entry["path"].name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=public_fd)
+    try:
+        before = os.fstat(fd)
+        require(_inode(before) == entry["inode"], f"{entry['role']} public inode differs")
+        require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600, f"{entry['role']} public mode differs")
+        raw = _read_fd(fd, len(entry["payload"]))
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    final = os.stat(entry["path"].name, dir_fd=public_fd, follow_symlinks=False)
+    require(_inode(before) == _inode(after) == _inode(final) == entry["inode"], f"{entry['role']} public identity changed")
+    require(raw == entry["payload"] and hashlib.sha256(raw).digest() == hashlib.sha256(entry["payload"]).digest(), f"{entry['role']} public bytes differ")
 
 
 def publish(
@@ -139,13 +159,14 @@ def publish(
         fsync_impl(public_fd)
         for entry in entries:
             _current_parent(parent, parent_identity)
-            fd = os.open(entry["path"].name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=public_fd)
-            try:
-                st = os.fstat(fd)
-                require(_inode(st) == entry["inode"] and stat.S_IMODE(st.st_mode) == 0o600, f"{entry['role']} public identity differs")
-                require(_read_fd(fd, len(entry["payload"])) == entry["payload"], f"{entry['role']} public bytes differ")
-            finally: os.close(fd)
+            _validate_public(entry, public_fd)
         result = validate(paths, tuple(payloads)) if validate is not None else paths
+        # The callback receives exact retained payload bytes, but it can observe
+        # pathnames. Rebind every public name after it returns before success.
+        _current_parent(parent, parent_identity)
+        for entry in entries:
+            _validate_public(entry, public_fd)
+        _current_parent(parent, parent_identity)
         for entry in entries:
             require(_owned_unlink(stage_fd, entry["leaf"], entry["inode"]), f"{entry['role']} stage ownership changed")
             os.close(entry["fd"]); entry["fd"] = -1
@@ -157,8 +178,18 @@ def publish(
         primary = exc
         residue = []
         for entry in reversed(entries):
-            if entry.get("published") and not _owned_unlink(public_fd, entry["path"].name, entry["inode"]): residue.append(str(entry["path"]))
-            if stage_fd >= 0 and not _owned_unlink(stage_fd, entry["leaf"], entry["inode"]): residue.append(stage_name + "/" + entry["leaf"])
+            # Reconcile every name from its recorded inode. A cached published
+            # flag is not authority because the link can succeed before an
+            # observation failure.
+            try:
+                if not _owned_unlink(public_fd, entry["path"].name, entry["inode"]): residue.append(str(entry["path"]))
+            except OSError as cleanup_error:
+                residue.append(f"{entry['path']} (unobserved: {cleanup_error})")
+            if stage_fd >= 0:
+                try:
+                    if not _owned_unlink(stage_fd, entry["leaf"], entry["inode"]): residue.append(stage_name + "/" + entry["leaf"])
+                except OSError as cleanup_error:
+                    residue.append(f"{stage_name}/{entry['leaf']} (unobserved: {cleanup_error})")
             if entry.get("fd", -1) >= 0:
                 try: os.close(entry["fd"])
                 except OSError: pass
