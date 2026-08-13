@@ -26,8 +26,19 @@ class Tests(unittest.TestCase):
         self.shell = b"#!/bin/bash\nprintf 'offline only\\n'\n"
         self.paths = {role: self.root / name for role, name in MODULE.ROLE_NAMES.items()}
         token = "0" * 64
+        template_path = HERE.parent / "task409-matrix" / "hermternal-task409-final-execution-matrix.json"
+        template = json.loads(template_path.read_bytes())
         while True:
-            doc = {"artifact_paths": {"markdown": str(self.paths["markdown"]), "json": str(self.paths["json"])}, "execution_driver": {"source_of_truth": "/execution_driver/shell", "shell": self.shell.decode(), "shell_sha256": hashlib.sha256(self.shell).hexdigest(), "driver_shell_sha256": hashlib.sha256(self.shell).hexdigest(), "expected_body_sha256": hashlib.sha256(self.shell).hexdigest(), "matrix_identity": {"expected_normalized_sha256": token}, "non_authoritative_standalone_scripts": [{"path": "/obsolete/stale.sh"}]}}
+            doc = copy.deepcopy(template)
+            doc["artifact_paths"] = {"markdown": str(self.paths["markdown"]), "json": str(self.paths["json"])}
+            execution = doc["execution_driver"]
+            execution["source_of_truth"] = "/execution_driver/shell"
+            execution["shell"] = self.shell.decode()
+            execution["shell_sha256"] = hashlib.sha256(self.shell).hexdigest()
+            execution["matrix_identity"]["expected_normalized_sha256"] = token
+            execution["argv"] = list(MODULE.ARGV)
+            execution["strict_git_environment"] = copy.deepcopy(MODULE.STRICT_ENV)
+            execution["non_authoritative_standalone_scripts"] = [{"path": "/obsolete/stale.sh"}]
             raw = (json.dumps(doc, sort_keys=True, indent=2) + "\n").encode()
             nxt = MODULE.normalized_json_sha256(raw, token)
             if nxt == token: break
@@ -48,8 +59,51 @@ class Tests(unittest.TestCase):
 
     def validate(self): return MODULE.validate(self.descriptor, self.root, self.descriptor_sha)
 
+    def rewrite_json(self, mutation):
+        document = json.loads(self.json_raw)
+        mutation(document)
+        token = document["execution_driver"]["matrix_identity"]["expected_normalized_sha256"]
+        while True:
+            raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode()
+            next_token = MODULE.normalized_json_sha256(raw, token)
+            if next_token == token:
+                break
+            token = next_token
+            document["execution_driver"]["matrix_identity"]["expected_normalized_sha256"] = token
+        self.paths["json"].write_bytes(raw)
+        self.normalized = token
+        self.write_descriptor()
+
     def test_baseline_fresh_cli_uses_only_validated_shell(self):
         result = self.validate(); self.assertEqual(result.stdin, self.shell); self.assertEqual(result.argv, MODULE.ARGV); self.assertNotIn(str(self.paths["shell"]), result.argv)
+
+    def test_closed_cli_and_environment_reject(self):
+        mutations = (
+            lambda doc: doc["execution_driver"].__setitem__("extra", True),
+            lambda doc: doc["execution_driver"].pop("argv"),
+            lambda doc: doc["execution_driver"]["argv"].reverse(),
+            lambda doc: doc["execution_driver"]["argv"].__setitem__(-1, "-c"),
+            lambda doc: doc["execution_driver"]["argv"].__setitem__(2, "PATH=/tmp"),
+            lambda doc: doc["execution_driver"].__setitem__("source_of_truth", "/tmp/stale.sh"),
+            lambda doc: doc["execution_driver"]["strict_git_environment"]["set"].__setitem__("GIT_CONFIG_GLOBAL", "/tmp/config"),
+            lambda doc: doc["execution_driver"]["strict_git_environment"]["allowlist"].append("GIT_CONFIG_PARAMETERS"),
+            lambda doc: doc["execution_driver"]["strict_git_environment"].__setitem__("extra", True),
+            lambda doc: doc.__setitem__("extra", True),
+        )
+        for mutation in mutations:
+            self.paths["json"].write_bytes(self.json_raw)
+            self.normalized = self.descriptor_value()["normalized_json_sha256"]
+            self.rewrite_json(mutation)
+            with self.assertRaises(MODULE.Reject): self.validate()
+
+        self.paths["json"].write_bytes(self.json_raw)
+        duplicate = self.json_raw.replace(
+            b'    "argv":', b'    "argv": ["/bin/false"],\n    "argv":', 1
+        )
+        self.paths["json"].write_bytes(duplicate)
+        self.write_descriptor()
+        with self.assertRaises(MODULE.Reject):
+            self.validate()
 
     def test_duplicate_key_role_order_extra_and_path_swap_reject(self):
         raw = self.descriptor.read_text().replace('"schema":', '"schema": "duplicate",\n  "schema":', 1).encode(); self.descriptor.write_bytes(raw); self.descriptor_sha = hashlib.sha256(raw).hexdigest()
