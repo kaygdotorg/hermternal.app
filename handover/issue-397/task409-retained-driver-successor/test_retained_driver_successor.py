@@ -100,6 +100,7 @@ class RetainedDriverTests(unittest.TestCase):
             "file_identity",
             "read_descriptor",
             "unlink_bound_alternate",
+            "validate_pack_roots",
         }
         parsed = ast.parse(self._self_contained_body())
         definitions = [
@@ -113,6 +114,7 @@ class RetainedDriverTests(unittest.TestCase):
         namespace = {
             "hashlib": hashlib,
             "os": os,
+            "OID": MODULE.OID,
             "stat": stat,
             "MAX_PACK": 1024 * 1024 * 1024,
         }
@@ -138,6 +140,8 @@ class RetainedDriverTests(unittest.TestCase):
 
     def test_pack_contract_is_non_thin_local_and_rechecks_without_alternates(self) -> None:
         body = self._self_contained_body()
+        self.assertIn('repo, clean_objects, final_head = sys.argv[1:]', body)
+        self.assertIn("run(['rev-parse', '--verify', 'HEAD^{commit}'])", body)
         self.assertIn("run(['pack-objects', pack_prefix]", body)
         self.assertNotIn("'--thin'", body)
         self.assertNotIn("'--local'", body)
@@ -149,6 +153,41 @@ class RetainedDriverTests(unittest.TestCase):
         self.assertLess(fsck, roots)
         self.assertLess(roots, final_pack)
         self.assertIn("if os.path.lexists(alternates):", body[unlink:])
+
+    def test_final_head_is_an_explicit_pack_root_and_omission_rejects(self) -> None:
+        validate = self._isolated_helper_functions()["validate_pack_roots"]
+        authority_roots = tuple(sorted(MODULE._proof_commit_roots(self.authority)))
+        final_head = "f" * 40
+        roots = tuple(sorted(set(authority_roots).union([final_head])))
+        self.assertEqual(
+            validate(roots, authority_roots, final_head, final_head), roots
+        )
+        with self.assertRaisesRegex(SystemExit, "omits a required root"):
+            validate(authority_roots, authority_roots, final_head, final_head)
+        with self.assertRaisesRegex(SystemExit, "final HEAD"):
+            validate(roots, authority_roots, final_head, "e" * 40)
+
+    def test_post_conversion_object_binding_has_a_success_path(self) -> None:
+        text = self.derived.decode()
+        self.assertIn('make_retained_repository_self_contained "$CURRENT_HEAD"', text)
+        state = text.index("REPLAY_SELF_CONTAINED=1")
+        later_guard = text.index("before_mutation", state)
+        self.assertLess(state, later_guard)
+        binding = next(
+            body
+            for body in MODULE.extract_python_heredocs(self.derived)
+            if "replay self-contained state differs" in body
+        )
+        self.assertIn("if self_contained == '0':", binding)
+        self.assertIn("if os.path.lexists(alternate):\n        raise SystemExit('self-contained replay alternate exists')", binding)
+        self.assertIn("self-contained replay pack set differs", binding)
+        self.assertIn("limit=1024 * 1024 * 1024", binding)
+        self.assertGreaterEqual(binding.count("stat.S_IMODE"), 3)
+        self.assertGreaterEqual(binding.count("!= 0o700"), 3)
+        self.assertNotIn(
+            "alternate = os.path.join(objects, 'info', 'alternates')\nst = os.lstat(alternate)",
+            binding,
+        )
 
     def test_pack_and_index_mutation_are_detected(self) -> None:
         helpers = self._isolated_helper_functions()
@@ -168,6 +207,31 @@ class RetainedDriverTests(unittest.TestCase):
                     os.fsync(stream.fileno())
                 with self.assertRaisesRegex(SystemExit, "changed"):
                     assert_snapshot(str(path), expected, name)
+
+    def test_pack_modes_are_exact_private_and_non_executable(self) -> None:
+        helpers = self._isolated_helper_functions()
+        snapshot = helpers["snapshot"]
+        require_empty = helpers["require_empty_pack_directory"]
+        with tempfile.TemporaryDirectory(prefix="issue397-pack-mode-") as temporary:
+            root = Path(temporary).resolve()
+            root.chmod(0o700)
+            pack_dir = root / "pack"
+            pack_dir.mkdir(mode=0o700)
+            require_empty(str(pack_dir))
+            pack_dir.chmod(0o755)
+            with self.assertRaisesRegex(SystemExit, "pack directory differs"):
+                require_empty(str(pack_dir))
+            accepted = root / "accepted.pack"
+            accepted.write_bytes(b"pack bytes\n")
+            for mode in (0o400, 0o600):
+                with self.subTest(accepted=oct(mode)):
+                    accepted.chmod(mode)
+                    self.assertEqual(snapshot(str(accepted), "pack")[0][3], mode)
+            for mode in (0o644, 0o444, 0o500, 0o700):
+                with self.subTest(rejected=oct(mode)):
+                    accepted.chmod(mode)
+                    with self.assertRaisesRegex(SystemExit, "identity is unsafe"):
+                        snapshot(str(accepted), "pack")
 
     def _alternate_fixture(self, root: Path, raw: bytes = b"/bound/objects\n") -> Path:
         info = root / "objects" / "info"
