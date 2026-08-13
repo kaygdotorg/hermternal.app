@@ -43,6 +43,7 @@ class OfflineGateTests(unittest.TestCase):
             calls.append((tuple(argv), kwargs)); return self.runner(argv, **kwargs)
         report = MOD.run_gates(self.authority, run)
         self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["final_tree"], self.authority.final_tree)
         self.assertEqual(len(report["gates"]), len(MOD.GATES))
         self.assertEqual(len(calls), len(MOD.GATES) - 1)
         self.assertTrue(all(call[1]["env"] == MOD.SAFE_ENV for call in calls))
