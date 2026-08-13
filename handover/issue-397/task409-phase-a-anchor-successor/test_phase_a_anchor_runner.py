@@ -267,7 +267,35 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             stream.write(b" \n")
             stream.flush()
             os.fsync(stream.fileno())
-        with self.assertRaisesRegex(RUNNER.Reject, "owner marker observation"):
+        with self.assertRaisesRegex(RUNNER.Reject, "owner marker"):
+            self._anchor(expected_phase_a_sha256=digest)
+
+    def test_anchor_rejects_same_length_owner_marker_substitution(self) -> None:
+        self._phase_a()
+        digest = self._phase_sha()
+        marker = self.external_root / "phase-a" / ".owner"
+        raw = marker.read_bytes()
+        offset = raw.index(b"not-implemented")
+        replacement = b"x" * len(b"not-implemented")
+        with marker.open("r+b") as stream:
+            stream.seek(offset)
+            stream.write(replacement)
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.assertEqual(marker.stat().st_size, len(raw))
+        with self.assertRaisesRegex(RUNNER.Reject, "canonical bytes changed"):
+            self._anchor(expected_phase_a_sha256=digest)
+
+    def test_anchor_rejects_identical_owner_marker_inode_replacement(self) -> None:
+        self._phase_a()
+        digest = self._phase_sha()
+        marker = self.external_root / "phase-a" / ".owner"
+        original = RUNNER.stable_read(marker, "original owner marker")
+        marker.unlink()
+        replacement = RUNNER._publish_bytes(marker, original.raw, "replacement owner marker")
+        self.assertEqual(replacement.sha256, original.sha256)
+        self.assertNotEqual(replacement.identity["st_ino"], original.identity["st_ino"])
+        with self.assertRaisesRegex(RUNNER.Reject, "owner marker observation changed"):
             self._anchor(expected_phase_a_sha256=digest)
 
     def test_exact_pins_and_verified_module_objects_are_installed(self) -> None:
