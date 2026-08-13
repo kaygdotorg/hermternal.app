@@ -74,6 +74,15 @@ converted to closed primitive path, hash, byte-count, identity, and directory
 records. The wrapper never compares dataclass instances from separate verified
 module loads.
 
+The v2 records contain prior full identities for the manifest, owner marker,
+and approval anchor. The wrapper requires those identities on its first load.
+The Phase A evidence and anchor evidence cannot record their own final inode
+identities. Their first load therefore uses only the fixed canonical v2 paths,
+the closed hash chain, and the independently supplied audited anchor-evidence
+hash. The wrapper records their full first-load identities and rejects a
+same-byte replacement after the process or during final verification. It does
+not invent an identity that the approved v2 schema does not contain.
+
 ## Final publication
 
 Only a successful complete validation can create:

@@ -555,7 +555,9 @@ class WrapperTests(unittest.TestCase):
             MODULE.PHASE_A_RUNNER_SHA256,
             "issue397_wrapper_test_phase_a_runner",
         )
-        external_root = self.root / "phase-a-v2"
+        identity_scenario = getattr(self, "_identity_scenario", None)
+        suffix = identity_scenario.replace(" ", "-") if identity_scenario else "base"
+        external_root = self.root / f"phase-a-v2-{suffix}"
         modules = runner.load_modules(HERE.parents[2])
 
         def guarded_observation():
@@ -632,6 +634,37 @@ class WrapperTests(unittest.TestCase):
                     return runner
                 return genuine_verified_module(path, digest, name)
 
+            live_paths = {
+                "phase evidence": external_root / "evidence" / runner.PHASE_A_RECORD,
+                "anchor evidence": anchor_path,
+                "manifest": external_root / "phase-a" / "input-manifest.json",
+                "approval anchor": external_root / "external-review" / runner.ANCHOR_NAME,
+                "owner marker": external_root / "phase-a" / ".owner",
+            }
+
+            def replace_same_bytes(path):
+                replacement = path.with_name(f"{path.name}.replacement")
+                replacement.write_bytes(path.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, path)
+
+            if identity_scenario and identity_scenario.startswith("first:"):
+                label = identity_scenario.removeprefix("first:")
+                replace_same_bytes(live_paths[label])
+                expected = None if label in ("phase evidence", "anchor evidence") else "identity differs"
+                with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
+                    if expected is None:
+                        first = MODULE.load_phase_a_evidence(
+                            anchor_path, anchor_snapshot.sha256
+                        )
+                        self.assertEqual(first.snapshot.sha256, anchor_snapshot.sha256)
+                    else:
+                        with self.assertRaisesRegex(MODULE.Reject, expected):
+                            MODULE.load_phase_a_evidence(
+                                anchor_path, anchor_snapshot.sha256
+                            )
+                return
+
             with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
                 evidence = MODULE.load_phase_a_evidence(
                     anchor_path, anchor_snapshot.sha256
@@ -665,12 +698,21 @@ class WrapperTests(unittest.TestCase):
                 "tree": OIDS["tree"],
             }
 
+            active_pid = self.pid + (
+                sum(identity_scenario.encode("utf-8")) if identity_scenario else 0
+            )
+            late_label = (
+                identity_scenario.removeprefix("late:")
+                if identity_scenario and identity_scenario.startswith("late:")
+                else None
+            )
+
             def boundary(argv, stdin, environment):
                 self.assertEqual(
                     (argv, stdin, dict(environment)),
                     (real_authority.argv, real_authority.stdin, {}),
                 )
-                run_root = self.run_parent / f"{MODULE.RUN_PREFIX}{self.pid}"
+                run_root = self.run_parent / f"{MODULE.RUN_PREFIX}{active_pid}"
                 run_root.mkdir(mode=0o700)
                 replay_root = run_root / "replay-root"
                 repository = run_root / "repository"
@@ -693,32 +735,38 @@ class WrapperTests(unittest.TestCase):
                 pending = replay_root / MODULE.PENDING_NAME
                 pending.write_bytes(MODULE._canonical_json(value))
                 pending.chmod(0o600)
-                return MODULE.ProcessResult(self.pid, 0, MODULE.SUCCESS_OUTPUT, b"")
+                if late_label is not None:
+                    replace_same_bytes(live_paths[late_label])
+                return MODULE.ProcessResult(active_pid, 0, MODULE.SUCCESS_OUTPUT, b"")
 
             with mock.patch.object(MODULE, "_verified_module", side_effect=verified), mock.patch.object(
                 MODULE, "RUN_PARENT", self.run_parent
-            ), mock.patch.object(
-                MODULE, "reobserve_repository", return_value=observed
-            ):
-                publication = MODULE.execute_and_publish(
-                    anchor_path,
-                    anchor_snapshot.sha256,
-                    process_boundary=boundary,
-                )
+            ), mock.patch.object(MODULE, "reobserve_repository", return_value=observed):
+                if late_label is None:
+                    publication = MODULE.execute_and_publish(
+                        anchor_path, anchor_snapshot.sha256, process_boundary=boundary
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        MODULE.Reject,
+                        "(Phase A live file set changed|live Phase A .* identity differs)",
+                    ):
+                        MODULE.execute_and_publish(
+                            anchor_path, anchor_snapshot.sha256, process_boundary=boundary
+                        )
+                    return
             self.assertTrue(publication.result.path.exists())
             self.assertTrue(publication.completion.path.exists())
 
-            owner = external_root / "phase-a" / ".owner"
-            replacement = owner.with_name("owner-replacement")
-            with replacement.open("xb") as stream:
-                stream.write(owner.read_bytes())
-                stream.flush()
-                os.fsync(stream.fileno())
-            replacement.chmod(0o600)
-            os.replace(replacement, owner)
-            with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
-                with self.assertRaisesRegex(MODULE.Reject, "owner marker identity"):
-                    MODULE.load_phase_a_evidence(anchor_path, anchor_snapshot.sha256)
+            if identity_scenario is None:
+                for boundary_name in ("first", "late"):
+                    for label in live_paths:
+                        with self.subTest(boundary=boundary_name, file=label):
+                            self._identity_scenario = f"{boundary_name}:{label}"
+                            try:
+                                self.test_genuine_disposable_v2_anchor_evidence_is_accepted()
+                            finally:
+                                del self._identity_scenario
 
     def test_parser_requires_both_phase_a_arguments(self) -> None:
         with self.assertRaises(SystemExit):
