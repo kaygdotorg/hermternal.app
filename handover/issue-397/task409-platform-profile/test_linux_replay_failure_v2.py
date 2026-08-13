@@ -83,7 +83,7 @@ class EarlyFailureTests(unittest.TestCase):
 
     def test_write_and_fsync_failures_leave_no_completion_claim(self):
         wrapper = self.wrapper()
-        original_write = wrapper._write_new
+        original_write = V2._write_at
         calls = 0
         def failed_write(*args, **kwargs):
             nonlocal calls
@@ -91,11 +91,25 @@ class EarlyFailureTests(unittest.TestCase):
             if calls == 2:
                 raise OSError("simulated failure write")
             return original_write(*args, **kwargs)
-        with mock.patch.object(wrapper, "_write_new", side_effect=failed_write):
+        with mock.patch.object(V2, "_write_at", side_effect=failed_write):
             with self.assertRaisesRegex(wrapper.Reject, "filesystem failure"):
                 wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: wrapper.ProcessResult(22102, 1, b"", b"failed\n"))
         self.assertTrue((self.failure_root / V2.OWNER_NAME).exists())
         self.assertFalse((self.failure_root / V2.FAILURE_NAME).exists())
+
+    def test_root_swap_during_owner_write_rejects_before_child(self):
+        wrapper = self.wrapper()
+        original_write = V2._write_at
+        displaced = self.failure_root.with_name(self.failure_root.name + ".displaced")
+        def swap_then_write(*args, **kwargs):
+            self.failure_root.rename(displaced)
+            self.failure_root.mkdir(mode=0o700)
+            return original_write(*args, **kwargs)
+        with mock.patch.object(V2, "_write_at", side_effect=swap_then_write):
+            with self.assertRaisesRegex(wrapper.Reject, "replaced before child"):
+                wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: self.fail("child started"))
+        self.assertFalse((self.failure_root / V2.OWNER_NAME).exists())
+        self.assertTrue((displaced / V2.OWNER_NAME).exists())
 
     def test_prepare_fsync_failure_prevents_child_start(self):
         wrapper = self.wrapper()

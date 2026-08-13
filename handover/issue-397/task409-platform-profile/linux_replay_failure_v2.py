@@ -62,6 +62,8 @@ class Transaction:
     root: Path
     root_inode: tuple[int, int]
     owner_inode: tuple[int, int]
+    parent_fd: int
+    root_fd: int
 
 
 def _failure_root(profile: platform_profile.PlatformProfile) -> Path:
@@ -73,12 +75,50 @@ def _owner_bytes(profile, anchor_sha: str) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _write_at(root_fd: int, name: str, raw: bytes, label: str) -> tuple[int, int]:
+    """Create, fsync, and reread one file through a held root descriptor."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, 0o600, dir_fd=root_fd)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or stat.S_IMODE(opened.st_mode) != 0o600 or opened.st_nlink != 1:
+            raise RuntimeError(f"{label} identity differs")
+        offset = 0
+        while offset < len(raw):
+            written = os.write(descriptor, raw[offset:])
+            if written <= 0:
+                raise RuntimeError(f"{label} write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        identity = (opened.st_dev, opened.st_ino)
+    finally:
+        os.close(descriptor)
+    os.fsync(root_fd)
+    for _ in range(3):
+        read_fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+        try:
+            before = os.fstat(read_fd)
+            observed = b""
+            while len(observed) < before.st_size:
+                block = os.read(read_fd, before.st_size - len(observed))
+                if not block:
+                    raise RuntimeError(f"{label} reread ended early")
+                observed += block
+            after = os.fstat(read_fd)
+        finally:
+            os.close(read_fd)
+        if (before.st_dev, before.st_ino) != identity or before != after or observed != raw:
+            raise RuntimeError(f"{label} changed during stable reread")
+    return identity
+
+
 def _prepare(wrapper, profile, anchor_sha: str) -> Transaction:
     """Create and durably bind the fixed private directory before process start."""
     root = _failure_root(profile)
     if not root.is_absolute() or os.path.realpath(root) != os.fspath(root):
         raise wrapper.Reject("failure root is not canonical absolute")
     parent_fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    root_fd = -1
     try:
         parent_inode = (os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino)
         if os.path.lexists(root):
@@ -92,15 +132,20 @@ def _prepare(wrapper, profile, anchor_sha: str) -> Transaction:
         current_parent = os.stat(root.parent, follow_symlinks=False)
         if (current_parent.st_dev, current_parent.st_ino) != parent_inode:
             raise wrapper.Reject("failure root parent was replaced")
-    finally:
+        root_fd = os.open(root.name, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        opened_root = os.fstat(root_fd)
+        if (opened_root.st_dev, opened_root.st_ino) != root_inode:
+            raise wrapper.Reject("failure root was replaced before binding")
+        owner_inode = _write_at(root_fd, OWNER_NAME, _owner_bytes(profile, anchor_sha), "failure owner")
+        current = os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != root_inode:
+            raise wrapper.Reject("failure root was replaced before child start")
+        return Transaction(root, root_inode, owner_inode, parent_fd, root_fd)
+    except BaseException:
+        if root_fd >= 0:
+            os.close(root_fd)
         os.close(parent_fd)
-    owner = wrapper._write_new(root / OWNER_NAME, _owner_bytes(profile, anchor_sha), "failure owner", lambda _path, _inode: None)
-    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        os.fsync(root_fd)
-    finally:
-        os.close(root_fd)
-    return Transaction(root, root_inode, (owner.identity[0], owner.identity[1]))
+        raise
 
 
 def _residue(wrapper, pid: int) -> dict[str, Any]:
@@ -115,38 +160,30 @@ def _publish_failure(wrapper, v1, adapter, authority, profile, transaction: Tran
     record["schema"] = SCHEMA
     record["expected_ephemeral_residue"] = _residue(wrapper, result.pid)
     raw = wrapper._canonical_json(record)
-    path = transaction.root / FAILURE_NAME
-    wrapper._write_new(path, raw, "early replay failure", lambda _path, _inode: None)
-    root_fd = os.open(transaction.root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        os.fsync(root_fd)
-    finally:
-        os.close(root_fd)
-    snapshot = wrapper.stable_read(path, "early replay failure")
-    wrapper.require(snapshot.raw == raw, "early replay failure changed after publication")
+    current = os.stat(transaction.root.name, dir_fd=transaction.parent_fd, follow_symlinks=False)
+    wrapper.require((current.st_dev, current.st_ino) == transaction.root_inode, "failure root was replaced after child")
+    _write_at(transaction.root_fd, FAILURE_NAME, raw, "early replay failure")
+    current = os.stat(transaction.root.name, dir_fd=transaction.parent_fd, follow_symlinks=False)
+    wrapper.require((current.st_dev, current.st_ino) == transaction.root_inode, "failure root was replaced after publication")
 
 
 def _remove_empty_owned(wrapper, transaction: Transaction) -> None:
     """Remove only this call's marker and empty directory after child success."""
-    root_stat = os.lstat(transaction.root)
-    wrapper.require((root_stat.st_dev, root_stat.st_ino) == transaction.root_inode and stat.S_ISDIR(root_stat.st_mode), "failure root was replaced")
-    root_fd = os.open(transaction.root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
-        wrapper.require(set(os.listdir(root_fd)) == {OWNER_NAME}, "failure root is not transaction-owned empty")
-        owner = os.stat(OWNER_NAME, dir_fd=root_fd, follow_symlinks=False)
+        root_stat = os.stat(transaction.root.name, dir_fd=transaction.parent_fd, follow_symlinks=False)
+        wrapper.require((root_stat.st_dev, root_stat.st_ino) == transaction.root_inode and stat.S_ISDIR(root_stat.st_mode), "failure root was replaced")
+        wrapper.require(set(os.listdir(transaction.root_fd)) == {OWNER_NAME}, "failure root is not transaction-owned empty")
+        owner = os.stat(OWNER_NAME, dir_fd=transaction.root_fd, follow_symlinks=False)
         wrapper.require((owner.st_dev, owner.st_ino) == transaction.owner_inode and stat.S_ISREG(owner.st_mode), "failure owner was replaced")
-        os.unlink(OWNER_NAME, dir_fd=root_fd)
-        os.fsync(root_fd)
-    finally:
-        os.close(root_fd)
-    parent_fd = os.open(transaction.root.parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        current = os.stat(transaction.root.name, dir_fd=parent_fd, follow_symlinks=False)
+        os.unlink(OWNER_NAME, dir_fd=transaction.root_fd)
+        os.fsync(transaction.root_fd)
+        current = os.stat(transaction.root.name, dir_fd=transaction.parent_fd, follow_symlinks=False)
         wrapper.require((current.st_dev, current.st_ino) == transaction.root_inode, "failure root changed before cleanup")
-        os.rmdir(transaction.root.name, dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        os.rmdir(transaction.root.name, dir_fd=transaction.parent_fd)
+        os.fsync(transaction.parent_fd)
     finally:
-        os.close(parent_fd)
+        os.close(transaction.root_fd)
+        os.close(transaction.parent_fd)
 
 
 def load_approved_wrapper(expected_anchor_sha256: str):
@@ -164,7 +201,11 @@ def load_approved_wrapper(expected_anchor_sha256: str):
             result = process_boundary(argv, stdin, environment)
             failed = result.returncode != 0 or result.stdout != wrapper.SUCCESS_OUTPUT or bool(result.stderr)
             if failed:
-                _publish_failure(wrapper, v1, adapter, authority, profile, transaction, Path(phase_a_evidence), v1._sha(expected_phase_a_evidence_sha256, "Phase A evidence SHA-256"), anchor_sha, result)
+                try:
+                    _publish_failure(wrapper, v1, adapter, authority, profile, transaction, Path(phase_a_evidence), v1._sha(expected_phase_a_evidence_sha256, "Phase A evidence SHA-256"), anchor_sha, result)
+                finally:
+                    os.close(transaction.root_fd)
+                    os.close(transaction.parent_fd)
             else:
                 _remove_empty_owned(wrapper, transaction)
             return result
