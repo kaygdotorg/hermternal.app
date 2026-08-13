@@ -1,0 +1,345 @@
+#!/bin/bash
+# Bash 3.2-compatible candidate-3 preflight runbook.
+#
+# This wrapper accepts the approved absolute artifact paths, exact byte hashes,
+# exact regular-file identities, shell body metadata, and exact future lane
+# inputs. It writes only a 0600 input manifest inside a new 0700 /private/tmp
+# run root, marks that root with an owner record, and delegates all reads to the
+# Python preflight. It never invokes Git, the embedded shell, replay, or a
+# cleanup/mutation command. --execute is rejected by this wrapper before any
+# run-root allocation because no executor exists yet.
+
+set -eu
+set -o pipefail
+umask 077
+
+# Resolve the helper from the approved fixed bundle location, not from the
+# caller's working directory or wrapper pathname.
+PREFLIGHT_PY=/private/tmp/task409-execution-preflight/task409_execution_preflight.py
+
+usage() {
+    printf '%s\n' \
+        "Usage: run_task409_execution_preflight.sh [--execute] \\" \
+        '  --markdown ABSOLUTE_PATH --json ABSOLUTE_PATH --shell ABSOLUTE_PATH \' \
+        '  --markdown-sha256 SHA256 --json-sha256 SHA256 --shell-sha256 SHA256 \' \
+        '  --normalized-json-sha256 SHA256 \' \
+        '  --markdown-identity DEV,INO,UID,GID,MODE,SIZE,NLINK \' \
+        '  --json-identity DEV,INO,UID,GID,MODE,SIZE,NLINK \' \
+        '  --shell-identity DEV,INO,UID,GID,MODE,SIZE,NLINK \' \
+        '  --shell-body-bytes INTEGER --shell-body-lines INTEGER \' \
+        '  --shell-terminal-byte-hex HEXBYTE \' \
+        '  --lane candidate-3 --object-format sha1 \' \
+        '  --base-ref refs/remotes/origin/dev \' \
+        '  --base-commit OID --base-tree OID \' \
+        '  --main-ref refs/remotes/origin/main --main-commit OID \' \
+        '  --ref refs/heads/CANDIDATE --ref-target OID \' \
+        '  --candidate-commit OID --candidate-parent OID --candidate-tree OID' \
+        '' \
+        'The default mode is read-only/dry-run. Add --execute only to receive the' \
+        'explicit blocker; no executor exists and no run root or manifest is created.' >&2
+}
+
+fail() {
+    printf '%s\n' "REJECT: $1" >&2
+    exit 2
+}
+
+need_value() {
+    if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        fail "missing value for $1"
+    fi
+}
+
+markdown=''
+json_path=''
+shell_path=''
+markdown_sha256=''
+json_sha256=''
+shell_sha256=''
+normalized_json_sha256=''
+markdown_identity=''
+json_identity=''
+shell_identity=''
+shell_body_bytes=''
+shell_body_lines=''
+shell_terminal_byte_hex=''
+lane=''
+object_format=''
+base_ref=''
+base_commit=''
+base_tree=''
+main_ref=''
+main_commit=''
+execution_ref=''
+ref_target=''
+candidate_commit=''
+candidate_parent=''
+candidate_tree=''
+execute=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --execute)
+            printf '%s\n' "BLOCKER: --execute requested, but no executor exists; refusing before creating the run root, owner marker, or input manifest" >&2
+            exit 3
+            ;;
+        --markdown)
+            need_value "$@"; markdown=$2; shift 2
+            ;;
+        --json)
+            need_value "$@"; json_path=$2; shift 2
+            ;;
+        --shell)
+            need_value "$@"; shell_path=$2; shift 2
+            ;;
+        --markdown-sha256)
+            need_value "$@"; markdown_sha256=$2; shift 2
+            ;;
+        --json-sha256)
+            need_value "$@"; json_sha256=$2; shift 2
+            ;;
+        --shell-sha256)
+            need_value "$@"; shell_sha256=$2; shift 2
+            ;;
+        --normalized-json-sha256)
+            need_value "$@"; normalized_json_sha256=$2; shift 2
+            ;;
+        --markdown-identity)
+            need_value "$@"; markdown_identity=$2; shift 2
+            ;;
+        --json-identity)
+            need_value "$@"; json_identity=$2; shift 2
+            ;;
+        --shell-identity)
+            need_value "$@"; shell_identity=$2; shift 2
+            ;;
+        --shell-body-bytes)
+            need_value "$@"; shell_body_bytes=$2; shift 2
+            ;;
+        --shell-body-lines)
+            need_value "$@"; shell_body_lines=$2; shift 2
+            ;;
+        --shell-terminal-byte-hex)
+            need_value "$@"; shell_terminal_byte_hex=$2; shift 2
+            ;;
+        --lane)
+            need_value "$@"; lane=$2; shift 2
+            ;;
+        --object-format)
+            need_value "$@"; object_format=$2; shift 2
+            ;;
+        --base-ref)
+            need_value "$@"; base_ref=$2; shift 2
+            ;;
+        --base-commit)
+            need_value "$@"; base_commit=$2; shift 2
+            ;;
+        --base-tree)
+            need_value "$@"; base_tree=$2; shift 2
+            ;;
+        --main-ref)
+            need_value "$@"; main_ref=$2; shift 2
+            ;;
+        --main-commit)
+            need_value "$@"; main_commit=$2; shift 2
+            ;;
+        --ref)
+            need_value "$@"; execution_ref=$2; shift 2
+            ;;
+        --ref-target)
+            need_value "$@"; ref_target=$2; shift 2
+            ;;
+        --candidate-commit)
+            need_value "$@"; candidate_commit=$2; shift 2
+            ;;
+        --candidate-parent)
+            need_value "$@"; candidate_parent=$2; shift 2
+            ;;
+        --candidate-tree)
+            need_value "$@"; candidate_tree=$2; shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            fail "unknown option: $1"
+            ;;
+    esac
+done
+
+require_value() {
+    [ -n "$2" ] || fail "missing required option for $1"
+}
+
+require_value markdown "$markdown"
+require_value json_path "$json_path"
+require_value shell_path "$shell_path"
+require_value markdown_sha256 "$markdown_sha256"
+require_value json_sha256 "$json_sha256"
+require_value shell_sha256 "$shell_sha256"
+require_value normalized_json_sha256 "$normalized_json_sha256"
+require_value markdown_identity "$markdown_identity"
+require_value json_identity "$json_identity"
+require_value shell_identity "$shell_identity"
+require_value shell_body_bytes "$shell_body_bytes"
+require_value shell_body_lines "$shell_body_lines"
+require_value shell_terminal_byte_hex "$shell_terminal_byte_hex"
+require_value lane "$lane"
+require_value object_format "$object_format"
+require_value base_ref "$base_ref"
+require_value base_commit "$base_commit"
+require_value base_tree "$base_tree"
+require_value main_ref "$main_ref"
+require_value main_commit "$main_commit"
+require_value execution_ref "$execution_ref"
+require_value ref_target "$ref_target"
+require_value candidate_commit "$candidate_commit"
+require_value candidate_parent "$candidate_parent"
+require_value candidate_tree "$candidate_tree"
+unset -f require_value
+
+case "$markdown" in /*) ;; *) fail "--markdown must be absolute" ;; esac
+case "$json_path" in /*) ;; *) fail "--json must be absolute" ;; esac
+case "$shell_path" in /*) ;; *) fail "--shell must be absolute" ;; esac
+
+# Allocate a fresh, private run root below the fixed preflight bundle. The
+# process umask makes mktemp's directory private at creation, so no pathname
+# A mode change after creation is not needed. Never reuse or delete one: preserving a failed root
+# prevents a later invocation from silently consuming stale input.
+run_root=$(/usr/bin/mktemp -d /private/tmp/task409-execution-preflight/run.XXXXXX) || fail "cannot create private run root"
+
+/usr/bin/python3 - "$run_root/.owner" <<'PY'
+from __future__ import print_function
+import json
+import os
+import stat
+import sys
+
+target = sys.argv[1]
+payload = {
+    "kind": "task409-execution-preflight-owner",
+    "schema": "task409-execution-preflight/v1",
+    "uid": os.getuid(),
+    "gid": os.getgid(),
+    "pid": os.getpid(),
+    "read_only": True,
+    "executor": "not implemented",
+}
+raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+flags |= getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(target, flags, 0o600)
+try:
+    offset = 0
+    while offset < len(raw):
+        offset += os.write(fd, raw[offset:])
+    os.fsync(fd)
+finally:
+    os.close(fd)
+st = os.lstat(target)
+if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1:
+    raise SystemExit("owner marker identity is invalid")
+PY
+
+manifest="$run_root/input-manifest.json"
+
+# Build the manifest from caller-supplied values without reading or normalizing
+# any artifact. The Python preflight later compares these exact claims to
+# descriptor-stable bytes and metadata, which catches a changed path or hash.
+/usr/bin/python3 - "$manifest" "$markdown" "$json_path" "$shell_path" "$markdown_sha256" "$json_sha256" "$shell_sha256" "$normalized_json_sha256" "$markdown_identity" "$json_identity" "$shell_identity" "$shell_body_bytes" "$shell_body_lines" "$shell_terminal_byte_hex" "$lane" "$object_format" "$base_ref" "$base_commit" "$base_tree" "$main_ref" "$main_commit" "$execution_ref" "$ref_target" "$candidate_commit" "$candidate_parent" "$candidate_tree" <<'PY'
+from __future__ import print_function
+import json
+import os
+import sys
+
+if len(sys.argv) != 27:
+    raise SystemExit("runbook manifest argument count mismatch")
+(
+    output, markdown, json_path, shell, markdown_sha, json_sha, shell_sha,
+    normalized_sha, markdown_identity, json_identity, shell_identity,
+    body_bytes, body_lines, terminal, lane, object_format, base_ref,
+    base_commit, base_tree, main_ref, main_commit, execution_ref, ref_target,
+    candidate_commit, candidate_parent, candidate_tree,
+) = sys.argv[1:]
+
+identity_names = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_size", "st_nlink")
+def identity(raw):
+    parts = raw.split(",")
+    if len(parts) != len(identity_names):
+        raise SystemExit("identity must contain DEV,INO,UID,GID,MODE,SIZE,NLINK")
+    values = []
+    for part in parts:
+        if not part.isdigit():
+            raise SystemExit("identity fields must be decimal nonnegative integers")
+        values.append(int(part, 10))
+    return dict(zip(identity_names, values))
+
+def artifact(path, sha, identity_text):
+    return {"path": path, "sha256": sha, "identity": identity(identity_text)}
+
+document = {
+    "schema": "task409-execution-preflight/v1",
+    "artifacts": {
+        "markdown": artifact(markdown, markdown_sha, markdown_identity),
+        "json": artifact(json_path, json_sha, json_identity),
+        "shell": artifact(shell, shell_sha, shell_identity),
+    },
+    "shell_metadata": {
+        "body_bytes": int(body_bytes, 10),
+        "body_lines": int(body_lines, 10),
+        "terminal_byte_hex": terminal,
+    },
+    "normalized_json_sha256": normalized_sha,
+    "inputs": {
+        "lane": lane,
+        "object_format": object_format,
+        "base_ref": base_ref,
+        "base_commit": base_commit,
+        "base_tree": base_tree,
+        "main_ref": main_ref,
+        "main_commit": main_commit,
+        "ref": execution_ref,
+        "ref_target": ref_target,
+        "candidate_commit": candidate_commit,
+        "candidate_parent": candidate_parent,
+        "candidate_tree": candidate_tree,
+    },
+    "stale": {
+        "paths": [
+            "/private/tmp/hermternal-task409-approved-driver.sh",
+            "/tmp/hermternal-task409-final-execution-matrix.md",
+            "/tmp/hermternal-task409-final-execution-matrix.json",
+        ],
+        "hashes": [
+            "0be7d21cfcb06cbf4ee65509dae974290eca70fa849530643f69f89c3119e97e",
+        ],
+    },
+}
+raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+flags |= getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(output, flags, 0o600)
+try:
+    offset = 0
+    while offset < len(raw):
+        offset += os.write(fd, raw[offset:])
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+
+preflight_root="$run_root/preflight-root"
+if [ "$execute" -eq 1 ]; then
+    /usr/bin/python3 "$PREFLIGHT_PY" --manifest "$manifest" --preflight-root "$preflight_root" --execute
+else
+    /usr/bin/python3 "$PREFLIGHT_PY" --manifest "$manifest" --preflight-root "$preflight_root" --dry-run
+fi
+
+printf 'run_root=%s\n' "$run_root"
+printf 'input_manifest=%s\n' "$manifest"
+printf 'owner_marker=%s/.owner\n' "$run_root"
+printf 'execution=not-run\n'
+printf 'mutation=not-run\n'
+printf 'network=not-used\n'

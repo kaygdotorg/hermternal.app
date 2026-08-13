@@ -1,0 +1,266 @@
+{
+  "schema": "hermternal.issue-397.guarded-replay-preservation.v1",
+  "issue": 397,
+  "branch": "handover/397-guarded-replay-artifacts",
+  "base": {
+    "ref": "origin/dev",
+    "commit": "729f2613af2b78d58b07918478e9102d5716f367",
+    "tree": "43f86b645fc9f89d5d4aa1e6978b1f61f0b5c69f"
+  },
+  "protected_release": {
+    "ref": "origin/main",
+    "commit": "3ebf8b3fe4767442490ab3053c0c1ccf84e8019f"
+  },
+  "preservation_root": "handover/issue-397",
+  "hash_manifest": "handover/issue-397/SHA256SUMS",
+  "source_policy": {
+    "primary_checkout_written": false,
+    "source_bytes_rewritten": false,
+    "copied_caches_logs_transcripts_credentials": false,
+    "live_hermes_or_network_used": false,
+    "replay_or_merge_performed": false,
+    "candidate_five_final_triad_present": false,
+    "candidate_five_provenance_manifest_present": false
+  },
+  "matrix_identity": {
+    "normalized_json_sha256": "94774470b8cd9a6a7ec8e6b480883762d432b845355fa5520b398d9b60fdb6d8",
+    "algorithm": "SHA-256 of exact JSON bytes after replacing the expected_normalized_sha256 token and shell_sha256, driver_shell_sha256, and expected_body_sha256 fields with zeroes; no whitespace normalization and no JSON reserialization",
+    "embedded_shell_sha256": "1599b4a0155c5963f5272ca18377cbfbee170ce6e92372ec643dfac3b256ab26",
+    "embedded_shell_bytes": 184832,
+    "embedded_shell_lf_lines": 3880,
+    "embedded_shell_terminal_byte_hex": "0a"
+  },
+  "artifacts": [
+    {
+      "path": "historical/candidate-four",
+      "role": "immutable historical candidate-four evidence; not candidate-five approval or replay input"
+    },
+    {
+      "path": "historical/candidate-three-rejected",
+      "role": "rejected historical evidence; not approval or replay input"
+    },
+    {
+      "path": "task409-execution-preflight",
+      "role": "Phase A/Phase B sources, tests, reviewers, anchor provisioner, and wrapper; Phase A remains candidate-four-specific"
+    },
+    {
+      "path": "task409-matrix/hermternal-task409-final-execution-matrix.json",
+      "role": "exact execution matrix JSON"
+    },
+    {
+      "path": "task409-matrix/hermternal-task409-final-execution-matrix.md",
+      "role": "exact execution matrix Markdown"
+    },
+    {
+      "path": "task409-postreplay-gates",
+      "role": "offline post-replay gate source and self-test"
+    },
+    {
+      "path": "task464-candidate5",
+      "role": "candidate-five generator and tests; final triad absent"
+    },
+    {
+      "path": "task464-inputs",
+      "role": "candidate-five working Markdown, JSON, and source shell inputs"
+    }
+  ],
+  "secret_scan": {
+    "tool": "gitleaks",
+    "scope": "handover/issue-397",
+    "finding_count": 38,
+    "result": "classified false positives",
+    "classification": "All findings are lowercase hexadecimal Git commit, tree, or blob object IDs embedded in offline fixtures, matrix data, or rejected historical evidence; no credential-shaped secret was identified. Values are intentionally omitted from this manifest."
+  },
+  "resume_mapping": {
+    "/private/tmp/f932bc703a5e-task464-candidate5/f932bc703a5e-task464-candidate5-generator.py": "handover/issue-397/task464-candidate5/f932bc703a5e-task464-candidate5-generator.py",
+    "/private/tmp/f932bc703a5e-task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py": "handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py",
+    "/private/tmp/f932bc703a5e-task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py": "handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py",
+    "/private/tmp/f932bc703a5e-task464-candidate5/test_stable_reader_f932bc703a5e-task464-candidate5.py": "handover/issue-397/task464-candidate5/test_stable_reader_f932bc703a5e-task464-candidate5.py",
+    "/private/tmp/task464-working-input.md": "handover/issue-397/task464-inputs/task464-working-input.md",
+    "/private/tmp/task464-working-input.json": "handover/issue-397/task464-inputs/task464-working-input.json",
+    "/private/tmp/task464-source-shell-current.txt": "handover/issue-397/task464-inputs/task464-source-shell-current.txt",
+    "/private/tmp/hermternal-task409-final-execution-matrix.md": "handover/issue-397/task409-matrix/hermternal-task409-final-execution-matrix.md",
+    "/private/tmp/hermternal-task409-final-execution-matrix.json": "handover/issue-397/task409-matrix/hermternal-task409-final-execution-matrix.json",
+    "/private/tmp/task464-test32-json.json": "historical/candidate-four/task464-test32-json.json",
+    "/private/tmp/task464-test32-md.md": "historical/candidate-four/task464-test32-md.md",
+    "/private/tmp/task464-test32-shell.sh": "historical/candidate-four/task464-test32-shell.sh"
+  },
+  "known_limitations": [
+    "The final candidate-five Markdown/JSON/shell triad is absent and must be generated and independently approved before replay.",
+    "The candidate-five provenance manifest is absent.",
+    "Phase A source and tests retain candidate-four-specific policy placeholders and are preserved as handover inputs only.",
+    "The unchanged stable-reader test stops at its old generator hash pin: expected 600f4e9f4b75a5a4ded039fb6ae0e8f5778854147f15ec8190fef87fab1a7102, actual cc73c1743c4059cc995be4a9e097cd16007c8095bc87a7c572418134c4d434dc.",
+    "The Phase B lifecycle E2E harness is rejected because it mocks Phase A, accepts arbitrary or duplicate triad paths and unverified normalized identity, and does not assert validator call count.",
+    "Guarded replay, Hermes execution, network access, merges, pushes, live proof, and post-replay production gates were not performed."
+  ],
+  "files": [
+    {
+      "path": "historical/candidate-four/provenance-manifest.json",
+      "bytes": 2040,
+      "mode": "0444",
+      "sha256": "34d4e9e00af03eced1b5756f3cf36e67d7f2fca1083c2aa44ffd1e8cb1f8d591"
+    },
+    {
+      "path": "historical/candidate-four/task464-candidate4-generator-safe.py",
+      "bytes": 160660,
+      "mode": "0444",
+      "sha256": "62a7bb37dbf7da3f84a48d104b8856ca57abf98c6c9d2113cefc2b2fe629aeaf"
+    },
+    {
+      "path": "historical/candidate-four/task464-test32-json.json",
+      "bytes": 513614,
+      "mode": "0444",
+      "sha256": "996828ed479781fa21e0d243ad9a9d9647785798cf96fa066bd3cbad4db21e9b"
+    },
+    {
+      "path": "historical/candidate-four/task464-test32-md.md",
+      "bytes": 399520,
+      "mode": "0444",
+      "sha256": "86d67d4dc5d5a840ec4cc3c20a30423108944e1b636b444cd1724a8b852c35b5"
+    },
+    {
+      "path": "historical/candidate-four/task464-test32-shell.sh",
+      "bytes": 199434,
+      "mode": "0444",
+      "sha256": "d3896b3fe23e66b8fe4480c10f8dd91602c2a5364e5806ea2a8c840c803f8119"
+    },
+    {
+      "path": "historical/candidate-three-rejected/review_frozen_pair.py.candidate3-rejected",
+      "bytes": 31444,
+      "mode": "0644",
+      "sha256": "9190c18378ad80c2d2845d72be4bfeddea117775056364598d4e303256382a41"
+    },
+    {
+      "path": "historical/candidate-three-rejected/run_task409_execution_preflight.sh.candidate3-rejected",
+      "bytes": 12201,
+      "mode": "0700",
+      "sha256": "52d00ae3bc6757a20b11f51595a733872caf20f3685889a27b80409bb6ac6914"
+    },
+    {
+      "path": "historical/candidate-three-rejected/task409_execution_preflight.py.candidate3-rejected",
+      "bytes": 39398,
+      "mode": "0700",
+      "sha256": "36ecbe87c92f60f27fac95f6e42b63204fa9e84e2e198f2ff4ed2d07257b0bfb"
+    },
+    {
+      "path": "task409-execution-preflight/provision_task409_phase_a_anchor_v3.py",
+      "bytes": 29509,
+      "mode": "0644",
+      "sha256": "738530abecd61f38a3c9c6fe23d227b28bfd9f9093aa427796063692bb424ea8"
+    },
+    {
+      "path": "task409-execution-preflight/review_frozen_pair.py",
+      "bytes": 31444,
+      "mode": "0644",
+      "sha256": "9190c18378ad80c2d2845d72be4bfeddea117775056364598d4e303256382a41"
+    },
+    {
+      "path": "task409-execution-preflight/review_task464_git_v3.py",
+      "bytes": 36649,
+      "mode": "0644",
+      "sha256": "dc4e95cc055947673702048222fe963cbce1ac9673e35d072ecd2214e252ab7c"
+    },
+    {
+      "path": "task409-execution-preflight/run_task409_execution_preflight_v3.sh",
+      "bytes": 6912,
+      "mode": "0700",
+      "sha256": "88656caaeae5f69cef3d40140f580379fbba97b320806a974ec835344939efd0"
+    },
+    {
+      "path": "task409-execution-preflight/task409_execution_preflight_v3.py",
+      "bytes": 65903,
+      "mode": "0644",
+      "sha256": "54cb41fb3b3602404ff056befb0bd584f6d1b28ee7e0a079da0793619457aa31"
+    },
+    {
+      "path": "task409-execution-preflight/task409_post_replay_identity_v3.py",
+      "bytes": 23943,
+      "mode": "0644",
+      "sha256": "4163d2b05ad40bb07dad2ccd2b59c16751541e32acb4fa6c1c7a526053faaaf9"
+    },
+    {
+      "path": "task409-execution-preflight/test_task409_anchor_parent_binding_v3.py",
+      "bytes": 10879,
+      "mode": "0644",
+      "sha256": "69d28be1a754b2077fe6f30d1968a24e1626946f584e6d161d46c06ead3cad02"
+    },
+    {
+      "path": "task409-execution-preflight/test_task409_post_replay_identity_v3_e2e.py",
+      "bytes": 25658,
+      "mode": "0644",
+      "sha256": "4e0e7ca49512b59b45e8847890b8c6d413bcc97d7ed7469a09813c59529d3bf6"
+    },
+    {
+      "path": "task409-execution-preflight/test_task409_preflight_v3.py",
+      "bytes": 15753,
+      "mode": "0644",
+      "sha256": "8dedd5ea0d3872bb2f099c94d6041fb908856d0706ca80b0dd1f0bd5b06048e6"
+    },
+    {
+      "path": "task409-matrix/hermternal-task409-final-execution-matrix.json",
+      "bytes": 497969,
+      "mode": "0644",
+      "sha256": "62bcbaf6132c289a9f96db98ce3d24f66b5cd8f8dc7a67113a6d338ca1a7dcd2"
+    },
+    {
+      "path": "task409-matrix/hermternal-task409-final-execution-matrix.md",
+      "bytes": 385003,
+      "mode": "0644",
+      "sha256": "8dd65c46924e0b0eb1e11e537009a83d0959a133991ec09661bf784235dcedd2"
+    },
+    {
+      "path": "task409-postreplay-gates/post_replay_gates.py",
+      "bytes": 40314,
+      "mode": "0644",
+      "sha256": "2dbe1aaa886252872fc79a052cbf5ae66b14523f9b8f54299ab78e65fab6e69c"
+    },
+    {
+      "path": "task409-postreplay-gates/test_post_replay_gates.py",
+      "bytes": 6422,
+      "mode": "0644",
+      "sha256": "05da585e4f098c1424e761d610af3cda3bef0f2df897f1b496757c2f83d8f556"
+    },
+    {
+      "path": "task464-candidate5/f932bc703a5e-task464-candidate5-generator.py",
+      "bytes": 173155,
+      "mode": "0600",
+      "sha256": "cc73c1743c4059cc995be4a9e097cd16007c8095bc87a7c572418134c4d434dc"
+    },
+    {
+      "path": "task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py",
+      "bytes": 2125,
+      "mode": "0644",
+      "sha256": "e87e504a6bf146b669743520c30335776eb2a9febfacb0cba3f4f61f97b3e689"
+    },
+    {
+      "path": "task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py",
+      "bytes": 4021,
+      "mode": "0644",
+      "sha256": "c106b824254fab494fe0e6761bfc5fccd2ded1e91d73b9e33a99cdd37262ca4c"
+    },
+    {
+      "path": "task464-candidate5/test_stable_reader_f932bc703a5e-task464-candidate5.py",
+      "bytes": 13594,
+      "mode": "0644",
+      "sha256": "11c09beaf250e0dc6d2b59193ddcda7b320cd83771283c82d4c5f4c594e65e9c"
+    },
+    {
+      "path": "task464-inputs/task464-source-shell-current.txt",
+      "bytes": 106051,
+      "mode": "0644",
+      "sha256": "1168e369d9b1f2116ae871e890ff6ab3b0489ac0c6c0f0925279083c7e2240dd"
+    },
+    {
+      "path": "task464-inputs/task464-working-input.json",
+      "bytes": 333381,
+      "mode": "0644",
+      "sha256": "82f5f9b1f099304723d6e74220488011a46e785eab4a26e9aec1babeef95251c"
+    },
+    {
+      "path": "task464-inputs/task464-working-input.md",
+      "bytes": 306210,
+      "mode": "0644",
+      "sha256": "4cc01babd55f9092aeb461dd0c9b5d918819564fec2d6ac4067e324e4c3e9adf"
+    }
+  ]
+}

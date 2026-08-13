@@ -1,0 +1,755 @@
+#!/usr/bin/env python3
+"""Read-only Task #409 candidate-3 execution preflight.
+
+The preflight checks three explicitly supplied, already-approved artifact paths.
+It never opens a repository, invokes Git, executes the embedded shell, replays a
+patch, changes a ref, or contacts a service.  A future ``--execute`` switch is
+recognized only as a deliberate boundary and is rejected because no executor is
+implemented in this planning-only tool.
+
+All artifact reads use the copied frozen-pair helper.  Its held parent and child
+O_NOFOLLOW descriptors, repeated identity checks, and canonical-path checks are
+used because a hash of bytes is not sufficient if a pathname can be swapped
+while the review is running.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+import time
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+
+HERE = Path(__file__).resolve().parent
+PARITY_PATH = HERE / "review_frozen_pair.py"
+PARITY_SPEC = importlib.util.spec_from_file_location("task409_frozen_pair", PARITY_PATH)
+if PARITY_SPEC is None or PARITY_SPEC.loader is None:  # pragma: no cover - installation failure
+    raise RuntimeError(f"cannot load copied safe helper: {PARITY_PATH}")
+PARITY = importlib.util.module_from_spec(PARITY_SPEC)
+PARITY_SPEC.loader.exec_module(PARITY)
+
+
+SCHEMA = "task409-execution-preflight/v1"
+LANE = "candidate-3"
+MATRIX_SCHEMA = "hermternal.task409.final-execution-matrix.v1"
+MATRIX_BASE_REF = "origin/dev"
+MATRIX_MAIN_REF = "origin/main"
+REQUIRED_HEADING = b"## Canonical machine-readable ordered execution driver\n"
+BASH_OPEN = b"```bash\n"
+FENCE_CLOSE = b"```"
+BASE_REF = "refs/remotes/origin/dev"
+MAIN_REF = "refs/remotes/origin/main"
+# These pins come from the copied read-only candidate identity gate.  They make
+# the lane's base explicit instead of allowing a caller to silently substitute a
+# nearby checkout or branch.
+BASE_COMMIT = "729f2613af2b78d58b07918478e9102d5716f367"
+BASE_TREE = "43f86b645fc9f89d5d4aa1e6978b1f61f0b5c69f"
+MAIN_COMMIT = "3ebf8b3fe4767442490ab3053c0c1ccf84e8019f"
+EXPECTED_LANE_IDS = (
+    "renderer-lifecycle",
+    "static-manifest-chain",
+    "authentication-design-token-manifest",
+    "authentication-semantic-delta",
+    "fixture-registry-authority",
+    "apple-benchmark-range",
+    "proxy-deployment-proof",
+    "launcher-semantic-projection",
+    "dependency-audit-correction",
+    "swift-parity-correction",
+    "live-proof-semantic-projection",
+)
+# Historical paths and the old binding are forbidden in executable/JSON content.
+# Markdown may mention them only as rejected, stale, non-authoritative history.
+MANDATORY_STALE_PATHS = (
+    "/private/tmp/hermternal-task409-approved-driver.sh",
+    "/tmp/hermternal-task409-final-execution-matrix.md",
+    "/tmp/hermternal-task409-final-execution-matrix.json",
+)
+MANDATORY_STALE_HASHES = ("0be7d21cfcb06cbf4ee65509dae974290eca70fa849530643f69f89c3119e97e",)
+
+OID_RE = re.compile(r"[0-9a-f]+\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+REF_RE = re.compile(r"^refs/heads/[A-Za-z0-9._/-]+\Z")
+IDENTITY_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_uid",
+    "st_gid",
+    "st_mode",
+    "st_size",
+    "st_nlink",
+)
+
+
+class Reject(Exception):
+    """A deliberate, fail-closed input or artifact rejection."""
+
+
+def reject(message: str) -> None:
+    raise Reject(message)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        reject(message)
+
+
+def require_equal(left: Any, right: Any, label: str) -> None:
+    if left != right:
+        reject(f"{label} differs")
+
+
+def _identity(st: os.stat_result) -> dict[str, int]:
+    """Capture fields that identify the approved regular file, not its timestamp.
+
+    Timestamps can change as a filesystem records access or metadata activity.
+    Device, inode, owner, mode, size, and link count are the stable fields needed
+    to detect replacement or sharing while preserving the supplied approval data.
+    """
+    return {
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_uid": int(st.st_uid),
+        "st_gid": int(st.st_gid),
+        "st_mode": int(stat.S_IMODE(st.st_mode)),
+        "st_size": int(st.st_size),
+        "st_nlink": int(st.st_nlink),
+    }
+
+
+def _safe_read(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    try:
+        return PARITY.read_stable(path)
+    except SystemExit as exc:
+        reject(f"{label}: {exc}")
+    raise AssertionError("unreachable")
+
+
+def read_twice(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    """Read exact bytes twice and require the descriptor identity to be stable."""
+    first, first_stat = _safe_read(path, label)
+    second, second_stat = _safe_read(path, label)
+    require(first == second, f"{label} bytes changed during preflight")
+    require(_identity(first_stat) == _identity(second_stat), f"{label} identity changed during preflight")
+    return first, first_stat
+
+
+def canonical_absolute(value: Any, label: str) -> Path:
+    require(isinstance(value, str) and value, f"{label} must be a nonempty string")
+    path = Path(value)
+    require(path.is_absolute(), f"{label} must be an absolute path")
+    require(str(path) == os.path.realpath(str(path)), f"{label} must already be canonical")
+    return path
+
+
+def parse_json(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        reject(f"{label} JSON parse failed: {exc}")
+    require(isinstance(value, dict), f"{label} JSON root must be an object")
+    return value
+
+
+def obj(document: Mapping[str, Any], *keys: str, label: str | None = None) -> Any:
+    value: Any = document
+    for key in keys:
+        require(isinstance(value, dict) and key in value, label or f"missing JSON path /{'/'.join(keys)}")
+        value = value[key]
+    return value
+
+
+def exact_sha(value: Any, label: str) -> str:
+    require(isinstance(value, str) and SHA256_RE.fullmatch(value) is not None, f"{label} must be 64 lowercase hexadecimal characters")
+    return value
+
+
+def exact_oid(value: Any, label: str, width: int) -> str:
+    require(isinstance(value, str) and len(value) == width and OID_RE.fullmatch(value) is not None, f"{label} must be exactly {width} lowercase hexadecimal characters")
+    return value
+
+
+def validate_ref(value: Any, label: str) -> str:
+    require(isinstance(value, str) and REF_RE.fullmatch(value) is not None, f"{label} must be a direct refs/heads name")
+    require(".." not in value and "@{" not in value, f"{label} contains traversal or reflog syntax")
+    require(not value.endswith((".", "/")), f"{label} has an invalid suffix")
+    require(not any(part in {"", ".", ".."} for part in value[len("refs/heads/") :].split("/")), f"{label} has an empty or traversal component")
+    require(not any(part.endswith(".lock") for part in value.split("/")), f"{label} contains a lock-suffixed component")
+    return value
+
+
+def validate_identity(value: Any, expected: dict[str, int], label: str) -> None:
+    require(isinstance(value, dict), f"{label} identity must be an object")
+    require(set(value) == set(IDENTITY_FIELDS), f"{label} identity fields differ")
+    for field in IDENTITY_FIELDS:
+        item = value[field]
+        require(isinstance(item, int) and not isinstance(item, bool) and item >= 0, f"{label} identity field {field} must be a nonnegative integer")
+    require(value == expected, f"{label} identity does not match the freshly read file")
+    require(value["st_nlink"] == 1, f"{label} must have exactly one hard link")
+
+
+def require_literal(raw: bytes, literal: str, label: str) -> None:
+    require(literal.encode("utf-8") in raw, f"Markdown is missing {label}: {literal}")
+
+
+def _context_has_nonexecution(text: str, token: str) -> bool:
+    """Allow stale history only when prose explicitly forbids using it."""
+    lowered = text.lower()
+    for match in re.finditer(re.escape(token.lower()), lowered):
+        context = lowered[max(0, match.start() - 220) : match.end() + 280]
+        if any(word in context for word in ("stale", "non-authoritative", "do not execute", "never reuse", "ignore", "rejected")):
+            continue
+        return False
+    return True
+
+
+def check_stale_references(md_raw: bytes, json_raw: bytes, shell: bytes, stale_paths: Sequence[str], stale_hashes: Sequence[str]) -> None:
+    """Reject old executable bindings while permitting explicit historical notes."""
+    paths = list(stale_paths)
+    hashes = list(stale_hashes)
+    require(len(paths) == len(set(paths)), "stale path list contains duplicates")
+    require(len(hashes) == len(set(hashes)), "stale hash list contains duplicates")
+    for required in MANDATORY_STALE_PATHS:
+        require(required in paths, f"manifest omits mandatory stale path: {required}")
+    for required in MANDATORY_STALE_HASHES:
+        require(required in hashes, f"manifest omits mandatory stale hash: {required}")
+
+    md_text = md_raw.decode("utf-8", "strict")
+    json_text = json_raw.decode("utf-8", "strict")
+    shell_text = shell.decode("utf-8", "strict")
+    for token in [*paths, *hashes]:
+        require(token not in shell_text, f"stale token appears in executable shell: {token}")
+        # A stale standalone path may be retained in JSON only as an explicit
+        # rejection record. Superseded matrix paths and old binding hashes must
+        # not survive in machine-readable data at all.
+        if token in MANDATORY_STALE_PATHS[1:] or token in MANDATORY_STALE_HASHES:
+            require(token not in json_text, f"superseded token appears in JSON metadata: {token}")
+        elif token in json_text:
+            require(any(word in json_text.lower() for word in ("stale", "non-authoritative", "do not execute", "never reuse", "rejected")), f"stale JSON path lacks explicit non-execution context: {token}")
+        require(_context_has_nonexecution(md_text, token), f"stale token appears in Markdown without explicit non-execution context: {token}")
+
+    # These phrases catch a stale source-of-truth declaration even when the old
+    # path was not copied into the manifest's historical list.
+    for phrase in (
+        '"source_of_truth": "/private/tmp/hermternal-task409-approved-driver.sh"',
+        "execute /private/tmp/hermternal-task409-approved-driver.sh",
+        "reuse /private/tmp/hermternal-task409-approved-driver.sh",
+    ):
+        require(phrase not in md_text and phrase not in json_text and phrase not in shell_text, f"stale active reference found: {phrase}")
+
+
+def check_identity_declarations(md_raw: bytes, normalized_sha: str) -> None:
+    declarations = PARITY.markdown_identity_declarations(md_raw)
+    require(all(token == normalized_sha for _kind, token, _line in declarations), "Markdown normalized identity declaration differs from supplied JSON identity")
+
+
+def check_artifact_paths(document: dict[str, Any], markdown: Path, json_path: Path, shell: Path) -> None:
+    paths = obj(document, "artifact_paths")
+    require(isinstance(paths, dict), "artifact_paths must be an object")
+    require(paths.get("markdown") == str(markdown), "JSON Markdown artifact path differs from supplied path")
+    require(paths.get("json") == str(json_path), "JSON matrix artifact path differs from supplied path")
+    if "shell" in paths:
+        require(paths["shell"] == str(shell), "JSON shell artifact path differs from supplied path")
+
+
+def check_candidate_matrix_schema(
+    document: dict[str, Any],
+    md_raw: bytes,
+    expected: dict[str, Any],
+    object_width: int,
+) -> None:
+    """Validate the candidate-3 matrix contract without inventing Git inputs.
+
+    The matrix is a replay plan, not the supplied candidate identity manifest. Its
+    base and ordered lanes are the authoritative matrix fields; candidate commit,
+    parent, tree, and ref remain strict manifest-only inputs when the matrix does
+    not duplicate them.
+    """
+    require(document.get("schema") == MATRIX_SCHEMA, "candidate JSON schema is not the candidate-3 execution matrix")
+    require(document.get("task") == 409, "candidate JSON task number differs")
+    require(document.get("artifact_task") == 464, "candidate JSON artifact task differs")
+
+    base = obj(document, "base", label="candidate JSON base is missing")
+    require(isinstance(base, dict), "candidate JSON base must be an object")
+    required_base = {"ref", "commit", "tree", "protected_main_ref", "protected_main_commit"}
+    require(required_base.issubset(base), "candidate JSON base omits a required base or protected-main field")
+    require(base["ref"] == MATRIX_BASE_REF, "candidate JSON base ref differs")
+    require(base["protected_main_ref"] == MATRIX_MAIN_REF, "candidate JSON protected-main ref differs")
+    exact_oid(base["commit"], "candidate JSON base.commit", object_width)
+    exact_oid(base["tree"], "candidate JSON base.tree", object_width)
+    exact_oid(base["protected_main_commit"], "candidate JSON base.protected_main_commit", object_width)
+    require(base["commit"] == expected["base_commit"], "candidate JSON base commit differs from manifest")
+    require(base["tree"] == expected["base_tree"], "candidate JSON base tree differs from manifest")
+    require(base["protected_main_commit"] == expected["main_commit"], "candidate JSON protected-main commit differs from manifest")
+
+    lanes = document.get("ordered_lanes")
+    require(isinstance(lanes, list), "candidate JSON ordered_lanes must be an array")
+    require(len(lanes) == len(EXPECTED_LANE_IDS), "candidate JSON ordered_lanes cardinality differs")
+    for index, expected_id in enumerate(EXPECTED_LANE_IDS, 1):
+        lane = lanes[index - 1]
+        require(isinstance(lane, dict), f"candidate JSON ordered_lanes[{index - 1}] must be an object")
+        require(lane.get("id") == expected_id, f"candidate JSON ordered_lanes[{index - 1}] ID differs")
+        require(lane.get("order") == index, f"candidate JSON ordered_lanes[{index - 1}] order differs")
+        require(isinstance(lane.get("kind"), str) and lane["kind"].strip(), f"candidate JSON ordered_lanes[{index - 1}] kind is not ready")
+        path_field = "owned_paths" if "owned_paths" in lane else "projection_paths"
+        lane_paths = lane.get(path_field)
+        require(isinstance(lane_paths, list) and lane_paths, f"candidate JSON ordered_lanes[{index - 1}] has no ready path declaration")
+        require(all(isinstance(path, str) and path for path in lane_paths), f"candidate JSON ordered_lanes[{index - 1}] {path_field} are invalid")
+
+    authority = obj(document, "authority", label="candidate JSON authority is missing")
+    require(isinstance(authority, dict), "candidate JSON authority must be an object")
+    # The historical runbook is no longer an authority input.  Reject the key
+    # and every Markdown Authority row independently so JSON-only, Markdown-only,
+    # matching, mismatched, and duplicate legacy declarations all fail closed.
+    require("old_runbook" not in authority, "candidate JSON authority.old_runbook must be absent")
+    md_text = md_raw.decode("utf-8", "strict")
+    authority_rows = re.findall(r"^\|\s*Authority\s*\|.*$", md_text, flags=re.MULTILINE)
+    require(not authority_rows, "Markdown Authority rows must be absent")
+
+
+def check_exact_inputs(document: dict[str, Any], expected: dict[str, Any], object_width: int) -> None:
+    """Cross-check the declared candidate lane without opening or resolving Git."""
+    identity = document.get("candidate_identity")
+    if identity is None:
+        identity = document.get("preflight_inputs")
+    # Existing candidate-3 JSON may carry these exact inputs only in the
+    # approved manifest. Do not invent a required JSON schema: when a copy is
+    # present, cross-check it; when absent, the manifest remains authoritative.
+    if identity is None:
+        return
+    require(isinstance(identity, dict), "candidate_identity/preflight_inputs must be an object when present")
+    required = {
+        "lane",
+        "object_format",
+        "base_ref",
+        "base_commit",
+        "base_tree",
+        "main_ref",
+        "main_commit",
+        "ref",
+        "ref_target",
+        "candidate_commit",
+        "candidate_parent",
+        "candidate_tree",
+    }
+    require(required.issubset(identity), "candidate identity omits a required base/ref/object/lane field")
+    for field in ("base_commit", "base_tree", "main_commit", "ref_target", "candidate_commit", "candidate_parent", "candidate_tree"):
+        exact_oid(identity[field], f"candidate_identity.{field}", object_width)
+    validate_ref(identity["ref"], "candidate_identity.ref")
+    require(identity["object_format"] in {"sha1", "sha256"}, "candidate_identity.object_format must be sha1 or sha256")
+    require(identity["lane"] == LANE, "candidate_identity.lane must be candidate-3")
+    require(identity["base_ref"] == BASE_REF, "candidate_identity.base_ref is not the required origin/dev input")
+    require(identity["main_ref"] == MAIN_REF, "candidate_identity.main_ref is not the required origin/main input")
+    # Only the candidate/base/ref/object/lane inputs belong in this cross-copy
+    # comparison.  Artifact hashes and stale-path policy are manifest metadata,
+    # not fields that the candidate JSON is required to duplicate.
+    input_fields = (
+        "lane", "object_format", "base_ref", "base_commit", "base_tree",
+        "main_ref", "main_commit", "ref", "ref_target", "candidate_commit",
+        "candidate_parent", "candidate_tree",
+    )
+    for field in input_fields:
+        require(identity.get(field) == expected[field], f"candidate identity {field} differs from manifest")
+    require(identity["ref_target"] == identity["candidate_commit"], "candidate ref target must equal candidate commit")
+    require(identity["candidate_commit"] != identity["candidate_parent"], "candidate commit and parent must differ")
+
+
+def check_shell_metadata(
+    document: dict[str, Any],
+    shell: bytes,
+    supplied_shell_sha: str,
+    supplied_body_bytes: int,
+    supplied_body_lines: int,
+    supplied_terminal: str,
+) -> None:
+    """Require every duplicated contract copy to describe the same shell bytes."""
+    actual = {
+        "body_bytes": len(shell),
+        "body_lines": shell.count(b"\n"),
+        "terminal_byte_hex": shell[-1:].hex(),
+    }
+    require(shell.endswith(b"\n"), "shell must terminate with LF")
+    require_equal(hashlib.sha256(shell).hexdigest(), supplied_shell_sha, "supplied shell SHA-256")
+    require_equal(actual["body_bytes"], supplied_body_bytes, "supplied shell body byte count")
+    require_equal(actual["body_lines"], supplied_body_lines, "supplied shell body line count")
+    require_equal(actual["terminal_byte_hex"], supplied_terminal, "supplied shell terminal byte")
+
+    ed = obj(document, "execution_driver")
+    vc = obj(document, "validation_contract")
+    require(isinstance(ed, dict) and isinstance(vc, dict), "execution_driver and validation_contract must be objects")
+    require(ed.get("shell") == shell.decode("utf-8", "strict"), "JSON execution_driver.shell bytes differ from supplied shell")
+    require_equal(ed.get("shell_sha256"), supplied_shell_sha, "JSON execution_driver.shell_sha256")
+    require_equal(vc.get("driver_shell_sha256"), supplied_shell_sha, "JSON validation driver_shell_sha256")
+    require_equal(ed.get("shell_size_metadata"), actual, "JSON execution shell size metadata")
+    if "shell_size_metadata" in vc:
+        require_equal(vc["shell_size_metadata"], actual, "JSON validation shell size metadata")
+    require_equal(vc.get("driver_shell_body_bytes"), len(shell), "JSON validation shell byte duplicate")
+    require_equal(vc.get("driver_shell_body_lines"), shell.count(b"\n"), "JSON validation shell line duplicate")
+
+    for label, fence in (("execution", ed.get("markdown_fence_extraction")), ("validation", vc.get("markdown_fence_extraction"))):
+        require(isinstance(fence, dict), f"{label} Markdown fence metadata is missing")
+        require_equal(fence.get("section_heading"), REQUIRED_HEADING.decode("utf-8"), f"{label} fence heading")
+        require_equal(fence.get("opening_fence"), BASH_OPEN.decode("utf-8"), f"{label} fence opening")
+        require_equal(fence.get("closing_fence"), FENCE_CLOSE.decode("utf-8"), f"{label} fence closing")
+        require_equal(fence.get("expected_body_bytes"), len(shell), f"{label} fence byte count")
+        require_equal(fence.get("expected_body_lines"), shell.count(b"\n"), f"{label} fence line count")
+        require_equal(fence.get("expected_terminal_byte_hex"), shell[-1:].hex(), f"{label} fence terminal byte")
+        require_equal(fence.get("expected_body_sha256"), supplied_shell_sha, f"{label} fence shell SHA-256")
+
+
+def check_normalized_json(document: dict[str, Any], json_raw: bytes, expected_sha: str) -> None:
+    exact_sha(expected_sha, "normalized JSON SHA-256")
+    require(json_raw.count(expected_sha.encode("ascii")) >= 1, "normalized JSON identity token is absent from exact JSON bytes")
+    ed_identity = obj(document, "execution_driver", "matrix_identity", label="execution_driver.matrix_identity is missing")
+    vc_identity = obj(document, "validation_contract", "matrix_identity", label="validation_contract.matrix_identity is missing")
+    require_equal(ed_identity.get("expected_normalized_sha256"), expected_sha, "execution normalized JSON identity")
+    require_equal(vc_identity.get("expected_normalized_sha256"), expected_sha, "validation normalized JSON identity")
+    try:
+        actual = PARITY.normalized_json_sha256(json_raw, expected_sha)
+    except SystemExit as exc:
+        reject(f"normalized JSON SHA-256 normalization failed: {exc}")
+    require_equal(actual, expected_sha, "normalized JSON SHA-256")
+
+
+def check_markdown_metadata(
+    md_raw: bytes,
+    document: dict[str, Any],
+    markdown: Path,
+    json_path: Path,
+    shell_sha: str,
+    normalized_sha: str,
+    shell_bytes: int,
+    shell_lines: int,
+    terminal: str,
+    expected: dict[str, Any],
+) -> None:
+    """Keep visible Markdown claims tied to the exact machine-readable inputs."""
+    text = md_raw.decode("utf-8", "strict")
+    require_literal(md_raw, f"Driver shell SHA-256: `{shell_sha}`", "driver shell SHA")
+    require_literal(md_raw, f"normalized JSON identity `{normalized_sha}`", "normalized JSON identity")
+    require_literal(md_raw, f"Shell body bytes | `{shell_bytes}`", "shell byte count")
+    require_literal(md_raw, f"Shell body lines | `{shell_lines}`", "shell line count")
+    require_literal(md_raw, f"terminal byte `{terminal}`", "shell terminal byte")
+    require_literal(md_raw, f"body and JSON shell are `{shell_bytes}` bytes, SHA-256 `{shell_sha}`, terminal byte `{terminal}`", "combined shell metadata")
+
+    # The manifest is authoritative for exact base/ref/object/lane inputs. If a
+    # Markdown artifact repeats one of those values, verify the repeated claim;
+    # do not invent a prose schema that would reject an otherwise valid frozen
+    # candidate-3 pair whose JSON/Markdown uses different headings.
+    optional_literals = (
+        (f"Candidate lane: `{expected['lane']}`", "candidate lane"),
+        (f"Object format: `{expected['object_format']}`", "object format"),
+        (f"Base ref: `{expected['base_ref']}`", "base ref"),
+        (f"Base commit: `{expected['base_commit']}`", "base commit"),
+        (f"Base tree: `{expected['base_tree']}`", "base tree"),
+        (f"Execution ref: `{expected['ref']}`", "execution ref"),
+        (f"Ref target: `{expected['ref_target']}`", "ref target"),
+        (f"Artifact Markdown: `{markdown}`", "Markdown artifact path"),
+        (f"Artifact JSON: `{json_path}`", "JSON artifact path"),
+    )
+    for literal, label in optional_literals:
+        prefix = literal.split("`", 1)[0].encode("utf-8")
+        if prefix in md_raw:
+            require_literal(md_raw, literal, label)
+    # Keep the text variable intentionally used: decoding above is also a
+    # structural UTF-8 check before any human-readable claim is trusted.
+    require(bool(text), "Markdown must not be empty")
+
+
+def validate_manifest(manifest: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    require(manifest.get("schema") == SCHEMA, f"manifest schema must be {SCHEMA}")
+    artifacts = manifest.get("artifacts")
+    require(isinstance(artifacts, dict), "manifest artifacts must be an object")
+    required_artifacts = {"markdown", "json", "shell"}
+    require(required_artifacts.issubset(artifacts), "manifest artifacts must include Markdown, JSON, and shell")
+    for name in required_artifacts:
+        item = artifacts[name]
+        require(isinstance(item, dict), f"manifest artifact {name} must be an object")
+        canonical_absolute(item.get("path"), f"manifest {name} path")
+        exact_sha(item.get("sha256"), f"manifest {name} SHA-256")
+        validate_identity(item.get("identity"), item.get("identity"), f"manifest {name}")
+
+    shell_meta = manifest.get("shell_metadata")
+    require(isinstance(shell_meta, dict), "manifest shell_metadata must be an object")
+    require(isinstance(shell_meta.get("body_bytes"), int) and shell_meta["body_bytes"] > 0, "manifest shell body_bytes must be a positive integer")
+    require(isinstance(shell_meta.get("body_lines"), int) and shell_meta["body_lines"] > 0, "manifest shell body_lines must be a positive integer")
+    require(isinstance(shell_meta.get("terminal_byte_hex"), str) and re.fullmatch(r"[0-9a-f]{2}", shell_meta["terminal_byte_hex"]) is not None, "manifest shell terminal_byte_hex must be two lowercase hexadecimal characters")
+    normalized = exact_sha(obj(manifest, "normalized_json_sha256"), "manifest normalized JSON SHA-256")
+
+    inputs = manifest.get("inputs")
+    require(isinstance(inputs, dict), "manifest inputs must be an object")
+    required_inputs = {
+        "lane", "object_format", "base_ref", "base_commit", "base_tree",
+        "main_ref", "main_commit", "ref", "ref_target", "candidate_commit",
+        "candidate_parent", "candidate_tree",
+    }
+    require(required_inputs.issubset(inputs), "manifest inputs omit a base/ref/object/lane field")
+    require(inputs["lane"] == LANE, "manifest lane must be candidate-3")
+    require(inputs["object_format"] in {"sha1", "sha256"}, "manifest object_format must be sha1 or sha256")
+    width = 40 if inputs["object_format"] == "sha1" else 64
+    for field in ("base_commit", "base_tree", "main_commit", "ref_target", "candidate_commit", "candidate_parent", "candidate_tree"):
+        exact_oid(inputs[field], f"manifest inputs.{field}", width)
+    validate_ref(inputs["ref"], "manifest inputs.ref")
+    require(inputs["base_ref"] == BASE_REF, "manifest base_ref differs from required origin/dev")
+    require(inputs["main_ref"] == MAIN_REF, "manifest main_ref differs from required origin/main")
+    require(inputs["base_commit"] == BASE_COMMIT, "manifest base_commit differs from pinned base")
+    require(inputs["base_tree"] == BASE_TREE, "manifest base_tree differs from pinned base tree")
+    require(inputs["main_commit"] == MAIN_COMMIT, "manifest main_commit differs from pinned origin/main")
+    require(inputs["ref_target"] == inputs["candidate_commit"], "manifest ref_target must equal candidate_commit")
+    require(inputs["candidate_commit"] != inputs["candidate_parent"], "manifest candidate commit and parent must differ")
+
+    stale = manifest.get("stale")
+    require(isinstance(stale, dict), "manifest stale must be an object")
+    stale_paths = stale.get("paths")
+    stale_hashes = stale.get("hashes")
+    require(isinstance(stale_paths, list) and all(isinstance(item, str) for item in stale_paths), "manifest stale.paths must be a string list")
+    require(isinstance(stale_hashes, list) and all(isinstance(item, str) for item in stale_hashes), "manifest stale.hashes must be a string list")
+    for item in stale_paths:
+        require(item.startswith("/") and "\x00" not in item, "manifest stale path must be an absolute non-NUL string")
+    for item in stale_hashes:
+        exact_sha(item, "manifest stale hash")
+
+    expected = dict(inputs)
+    expected["normalized_json_sha256"] = normalized
+    expected["shell_sha256"] = artifacts["shell"]["sha256"]
+    expected["markdown_sha256"] = artifacts["markdown"]["sha256"]
+    expected["json_sha256"] = artifacts["json"]["sha256"]
+    expected["stale_paths"] = stale_paths
+    expected["stale_hashes"] = stale_hashes
+    return expected, shell_meta
+
+
+def validate_artifacts(manifest: dict[str, Any]) -> dict[str, Any]:
+    expected, shell_meta = validate_manifest(manifest)
+    artifacts = manifest["artifacts"]
+    paths = {name: canonical_absolute(artifacts[name]["path"], f"manifest {name} path") for name in ("markdown", "json", "shell")}
+    require(len(set(paths.values())) == 3, "Markdown, JSON, and shell paths must be distinct")
+
+    reads: dict[str, tuple[bytes, os.stat_result]] = {}
+    for name in ("markdown", "json", "shell"):
+        reads[name] = read_twice(paths[name], name)
+        raw, st = reads[name]
+        require_equal(hashlib.sha256(raw).hexdigest(), artifacts[name]["sha256"], f"{name} SHA-256")
+        validate_identity(artifacts[name]["identity"], _identity(st), f"manifest {name}")
+
+    md_raw = reads["markdown"][0]
+    json_raw = reads["json"][0]
+    shell_raw = reads["shell"][0]
+    document = parse_json(json_raw, "candidate JSON")
+    check_artifact_paths(document, paths["markdown"], paths["json"], paths["shell"])
+    object_width = 40 if expected["object_format"] == "sha1" else 64
+    # Reject matrix-schema and provenance drift before trusting any execution
+    # metadata or extracting the embedded shell body.
+    check_candidate_matrix_schema(document, md_raw, expected, object_width)
+    require(obj(document, "authority").get("no_repository_files_changed") is True, "JSON repository-change boundary is not true")
+    require(obj(document, "execution_driver").get("immutable") is True, "JSON execution driver is not immutable")
+    require(obj(document, "execution_driver").get("source_of_truth") == "/execution_driver/shell", "JSON execution source_of_truth is not canonical")
+    require(obj(document, "execution_driver").get("matrix_path") == str(paths["json"]), "JSON execution matrix_path differs from supplied JSON path")
+
+    # The required exact fence is extracted from fresh Markdown bytes, not from
+    # a copied path or a JSON claim, so a stale standalone script cannot win.
+    try:
+        extracted = PARITY.extract_fenced(md_raw, REQUIRED_HEADING, BASH_OPEN)
+    except SystemExit as exc:
+        reject(f"fresh Markdown Bash-fence extraction failed: {exc}")
+    require(extracted == shell_raw, "freshly extracted Markdown shell differs from supplied shell path")
+    json_shell = obj(document, "execution_driver", "shell")
+    require(isinstance(json_shell, str), "JSON execution_driver.shell must be a string")
+    require(json_shell.encode("utf-8") == extracted, "JSON shell bytes differ from fresh Markdown fence")
+
+    shell_sha = artifacts["shell"]["sha256"]
+    check_shell_metadata(
+        document,
+        shell_raw,
+        shell_sha,
+        shell_meta["body_bytes"],
+        shell_meta["body_lines"],
+        shell_meta["terminal_byte_hex"],
+    )
+    check_normalized_json(document, json_raw, expected["normalized_json_sha256"])
+    check_exact_inputs(document, expected, object_width)
+    check_identity_declarations(md_raw, expected["normalized_json_sha256"])
+    check_stale_references(md_raw, json_raw, shell_raw, expected["stale_paths"], expected["stale_hashes"])
+    check_markdown_metadata(
+        md_raw,
+        document,
+        paths["markdown"],
+        paths["json"],
+        shell_sha,
+        expected["normalized_json_sha256"],
+        shell_meta["body_bytes"],
+        shell_meta["body_lines"],
+        shell_meta["terminal_byte_hex"],
+        expected,
+    )
+
+    return {
+        "paths": {name: str(path) for name, path in paths.items()},
+        "hashes": {
+            "markdown_sha256": artifacts["markdown"]["sha256"],
+            "json_sha256": artifacts["json"]["sha256"],
+            "shell_sha256": shell_sha,
+            "normalized_json_sha256": expected["normalized_json_sha256"],
+        },
+        "identities": {name: _identity(reads[name][1]) for name in reads},
+        "inputs": {key: expected[key] for key in (
+            "lane", "object_format", "base_ref", "base_commit", "base_tree",
+            "main_ref", "main_commit", "ref", "ref_target", "candidate_commit",
+            "candidate_parent", "candidate_tree",
+        )},
+        "shell_metadata": dict(shell_meta),
+    }
+
+
+def _check_private_parent(parent: Path) -> None:
+    require(parent.is_absolute(), "preflight root parent must be absolute")
+    require(str(parent) == os.path.realpath(str(parent)), "preflight root parent must be canonical")
+    try:
+        st = os.lstat(parent)
+    except OSError as exc:
+        reject(f"preflight root parent cannot be inspected: {exc}")
+    require(stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode), "preflight root parent must be a directory")
+    mode = stat.S_IMODE(st.st_mode)
+    # /private/tmp is intentionally sticky and shared by the OS. O_EXCL leaf
+    # creation plus the owner marker prevents another user from substituting the
+    # requested root; every non-sticky parent must remain private.
+    if mode & 0o022:
+        require(mode & stat.S_ISVTX and str(parent) == "/private/tmp", "preflight root parent must be private or the sticky /private/tmp directory")
+
+
+def create_owner_marked_root(requested: str | None) -> Path:
+    """Create only a private leaf and an owner marker; never touch a checkout."""
+    if requested is None:
+        parent = HERE / "runs"
+        if not parent.exists():
+            os.mkdir(parent, 0o700)
+        _check_private_parent(parent)
+        for _attempt in range(32):
+            leaf = parent / ("candidate-3-" + secrets.token_hex(10))
+            try:
+                os.mkdir(leaf, 0o700)
+                break
+            except FileExistsError:
+                continue
+        else:
+            reject("could not allocate a unique private preflight root")
+    else:
+        leaf = canonical_absolute(requested, "preflight root")
+        try:
+            common = os.path.commonpath([str(leaf), "/private/tmp"])
+        except ValueError:
+            common = ""
+        require(common == "/private/tmp", "preflight root must be under /private/tmp")
+        _check_private_parent(leaf.parent)
+        try:
+            os.mkdir(leaf, 0o700)
+        except FileExistsError:
+            reject("preflight root already exists; refusing to reuse or clean it")
+        except OSError as exc:
+            reject(f"cannot create private preflight root: {exc}")
+
+    try:
+        root_stat = os.lstat(leaf)
+    except OSError as exc:
+        reject(f"created preflight root cannot be inspected: {exc}")
+    require(stat.S_ISDIR(root_stat.st_mode) and not stat.S_ISLNK(root_stat.st_mode), "created preflight root is not a directory")
+    require(root_stat.st_uid == os.getuid(), "created preflight root owner differs from current uid")
+    require(stat.S_IMODE(root_stat.st_mode) == 0o700, "created preflight root mode is not 0700")
+
+    marker = leaf / ".owner"
+    payload = {
+        "kind": "task409-execution-preflight-owner",
+        "schema": SCHEMA,
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "pid": os.getpid(),
+        "created_unix": int(time.time()),
+        "read_only": True,
+        "executor": "not implemented",
+    }
+    encoded = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    fd = -1
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(marker, flags, 0o600)
+        os.write(fd, encoded)
+    except OSError as exc:
+        reject(f"cannot create owner marker: {exc}")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    marker_stat = os.lstat(marker)
+    require(stat.S_ISREG(marker_stat.st_mode) and marker_stat.st_uid == os.getuid(), "owner marker identity is invalid")
+    require(stat.S_IMODE(marker_stat.st_mode) == 0o600 and marker_stat.st_nlink == 1, "owner marker must be a private single-link file")
+    return leaf
+
+
+def load_manifest(path: Path) -> tuple[dict[str, Any], str]:
+    raw, _st = read_twice(path, "input manifest")
+    return parse_json(raw, "input manifest"), hashlib.sha256(raw).hexdigest()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Task #409 candidate-3 read-only artifact preflight; never executes replay or Git mutation"
+    )
+    parser.add_argument("--manifest", required=True, help="absolute JSON input manifest with explicit paths, hashes, identities, and lane inputs")
+    parser.add_argument("--preflight-root", help="new absolute private /private/tmp leaf; omitted means a fresh leaf under this tool's runs directory")
+    parser.add_argument("--dry-run", action="store_true", help="explicitly select the default read-only mode")
+    parser.add_argument("--execute", action="store_true", help="future executor boundary; currently rejected and never performs execution")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.execute and args.dry_run:
+        print("REJECT: --execute and --dry-run are mutually exclusive", file=sys.stderr)
+        return 2
+    try:
+        manifest_path = canonical_absolute(args.manifest, "manifest")
+        manifest, manifest_sha = load_manifest(manifest_path)
+        # Validate every supplied artifact before allocating a run root. A failed
+        # preflight must not leave an owner marker that could be mistaken for a
+        # usable or approved run. The future executor is also rejected before
+        # allocation, even when its read-only validation succeeds.
+        result = validate_artifacts(manifest)
+        if args.execute:
+            print("BLOCKER: future --execute was requested, but no executor is implemented; stopping before replay/mutation", file=sys.stderr)
+            return 3
+        root = create_owner_marked_root(args.preflight_root)
+        print("PASS: candidate-3 read-only execution preflight checks passed")
+        print(f"preflight_root={root}")
+        print(f"owner_marker={root / '.owner'}")
+        print(f"manifest={manifest_path}")
+        print(f"manifest_sha256={manifest_sha}")
+        for name, path in result["paths"].items():
+            print(f"{name}_path={path}")
+        for name, value in result["hashes"].items():
+            print(f"{name}={value}")
+        for name, identity in result["identities"].items():
+            print(f"{name}_identity=" + json.dumps(identity, sort_keys=True, separators=(",", ":")))
+        print("execution=not-run")
+        print("mutation=not-run")
+        print("network=not-used")
+        print("mode=read-only/dry-run")
+        print("approval=not-claimed")
+        return 0
+    except Reject as exc:
+        print(f"REJECT: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError, AssertionError) as exc:
+        print(f"REJECT: unexpected structural preflight failure: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,59 @@
+{
+  "bundle": "task464-frozen-review-bundle-candidate4-20260813T003947238Z-8e292091fe7a49ba92750f79e1514c04",
+  "candidate": "candidate4",
+  "candidate3": {
+    "note": "candidate3 remains frozen/rejected",
+    "status": "frozen/rejected"
+  },
+  "files": [
+    {
+      "bytes_copied": 160660,
+      "name": "task464-candidate4-generator-safe.py",
+      "sha256": "62a7bb37dbf7da3f84a48d104b8856ca57abf98c6c9d2113cefc2b2fe629aeaf",
+      "source": "/private/tmp/task464-candidate4-generator-safe.py"
+    },
+    {
+      "bytes_copied": 513614,
+      "name": "task464-test32-json.json",
+      "sha256": "996828ed479781fa21e0d243ad9a9d9647785798cf96fa066bd3cbad4db21e9b",
+      "source": "/private/tmp/task464-test32-json.json"
+    },
+    {
+      "bytes_copied": 399520,
+      "name": "task464-test32-md.md",
+      "sha256": "86d67d4dc5d5a840ec4cc3c20a30423108944e1b636b444cd1724a8b852c35b5",
+      "source": "/private/tmp/task464-test32-md.md"
+    },
+    {
+      "bytes_copied": 199434,
+      "name": "task464-test32-shell.sh",
+      "sha256": "d3896b3fe23e66b8fe4480c10f8dd91602c2a5364e5806ea2a8c840c803f8119",
+      "source": "/private/tmp/task464-test32-shell.sh"
+    }
+  ],
+  "provenance": {
+    "exact_two_byte_edit": {
+      "description": "Old ed8d snapshot had literal backslashes before n at the two reconstructed sites; the backslash at each site was removed.",
+      "edit_timestamp": "2026-08-13T00:39:47.238Z",
+      "removed_byte": "0x5c (literal backslash)",
+      "sites": [
+        {
+          "current_offset": 143911,
+          "line": 2995,
+          "old_context": "literal backslash before n",
+          "reconstructed_offset": 143911
+        },
+        {
+          "current_offset": 143948,
+          "line": 2996,
+          "old_context": "literal backslash before n",
+          "reconstructed_offset": 143948
+        }
+      ],
+      "total_bytes_removed": 2
+    },
+    "old_snapshot": "ed8d",
+    "outputs_regenerated_at": "2026-08-13T00:39:52.513Z",
+    "source_validation": "Current source was py_compile'd."
+  }
+}
