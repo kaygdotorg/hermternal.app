@@ -26,10 +26,15 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 SCHEMA = "hermternal.issue-397.phase-a-anchor-runner.v1"
 EVIDENCE_SCHEMA = "hermternal.issue-397.phase-a-anchor-evidence.v1"
-FROZEN_COMMIT = "28553997d43fd20291513c8524871e31b0ba8181"
-FROZEN_TREE = "0ce8703a6d278c8a8e630950a01d9b319b6288fa"
-REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal")
+FROZEN_COMMIT = "4b37a839b75bf2cdd23e6b506a6a8dff7c085859"
+FROZEN_TREE = "4ea137e89906e936eabcd248a5049f498f13db27"
+REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal-397-guarded")
+# The already frozen #401 descriptor contains these approved canonical paths.
+# A clean execution checkout does not change the published authority location.
+AUTHORITY_REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal")
 EXTERNAL_ROOT = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")
+GUARDED_BRANCH = "refs/heads/codex/397-guarded-replay"
+GUARDED_REMOTE = "refs/remotes/origin/codex/397-guarded-replay"
 AUTHORITY_REL = Path("handover/issue-397/task464-candidate5-final")
 PHASE_A_REL = Path("handover/issue-397/task409-execution-preflight/task409_execution_preflight_v3.py")
 ANCHOR_REL = Path("handover/issue-397/task409-execution-preflight/provision_task409_phase_a_anchor_v3.py")
@@ -238,16 +243,37 @@ def _git(root: Path, binding: Any, *args: str) -> bytes:
     return result.stdout.rstrip(b"\n")
 
 
-def verify_frozen_repository(binding: Any, root: Path = REPOSITORY_ROOT) -> None:
-    """Bind the frozen tree, source blobs, and a clean local checkout."""
+def verify_frozen_repository(binding: Any, root: Path = REPOSITORY_ROOT) -> dict[str, Any]:
+    """Bind the exact registered, clean guarded worktree and tracked branch."""
     root = Path(root)
-    _directory_identity(root, "repository root")
+    require(root == REPOSITORY_ROOT, "guarded worktree path differs")
+    root_identity = _directory_identity(root, "guarded worktree root")
+    parent_identity = _directory_identity(root.parent, "guarded worktree parent")
+    require(REPOSITORY_ROOT not in EXTERNAL_ROOT.parents and EXTERNAL_ROOT not in REPOSITORY_ROOT.parents, "guarded worktree overlaps external root")
     require(_git(root, binding, "rev-parse", "--show-toplevel") == os.fspath(root).encode(), "repository top level differs")
-    require(_git(root, binding, "rev-parse", f"{FROZEN_COMMIT}^{{tree}}").decode() == FROZEN_TREE, "frozen tree differs")
-    require(_git(root, binding, "status", "--porcelain=v1", "--untracked-files=all") == b"", "repository checkout is not clean")
+    require(_git(root, binding, "rev-parse", "HEAD").decode() == FROZEN_COMMIT, "guarded worktree HEAD differs")
+    require(_git(root, binding, "rev-parse", "HEAD^{tree}").decode() == FROZEN_TREE, "guarded worktree tree differs")
+    require(_git(root, binding, "symbolic-ref", "-q", "HEAD").decode() == GUARDED_BRANCH, "guarded worktree branch differs")
+    require(_git(root, binding, "rev-parse", "--symbolic-full-name", "@{upstream}").decode() == GUARDED_REMOTE, "guarded upstream differs")
+    require(_git(root, binding, "rev-parse", GUARDED_REMOTE).decode() == FROZEN_COMMIT, "guarded origin tracking tip differs")
+    require(_git(root, binding, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching") == b"", "guarded worktree is not clean including ignored files")
+    raw_worktrees = _git(root, binding, "worktree", "list", "--porcelain", "-z")
+    records = [item for item in raw_worktrees.split(b"\0\0") if item]
+    matches = []
+    for record in records:
+        fields = record.split(b"\0")
+        path_fields = [field[9:] for field in fields if field.startswith(b"worktree ")]
+        if path_fields == [os.fspath(root).encode()]:
+            matches.append(fields)
+    require(len(matches) == 1, "guarded path is not one registered Git worktree")
+    fields = matches[0]
+    require(b"HEAD " + FROZEN_COMMIT.encode() in fields and b"branch " + GUARDED_BRANCH.encode() in fields, "registered guarded worktree identity differs")
     for relative, (_, blob) in SOURCE_PINS.items():
         observed = _git(root, binding, "rev-parse", f"{FROZEN_COMMIT}:{relative}").decode()
         require(observed == blob, f"frozen Git blob differs: {relative}")
+    require(_directory_identity(root, "guarded worktree root") == root_identity, "guarded worktree root changed")
+    require(_directory_identity(root.parent, "guarded worktree parent") == parent_identity, "guarded worktree parent changed")
+    return {"path": os.fspath(root), "identity": root_identity, "parent_identity": parent_identity, "head": FROZEN_COMMIT, "tree": FROZEN_TREE, "branch": GUARDED_BRANCH, "upstream": GUARDED_REMOTE}
 
 
 @dataclass(frozen=True)
@@ -285,7 +311,7 @@ def _authority_state(modules: Modules) -> tuple[dict[str, Snapshot], Any, dict[s
     # The descriptor contains the frozen canonical absolute role paths. Tests
     # may load source from an isolated checkout, but they never redirect this
     # authority to fixture bytes or a temporary path.
-    authority_root = REPOSITORY_ROOT / AUTHORITY_REL
+    authority_root = AUTHORITY_REPOSITORY_ROOT / AUTHORITY_REL
     root_identity = _directory_identity(authority_root, "final authority root")
     parent_identity = _directory_identity(authority_root.parent, "final authority parent")
     snapshots = {name: stable_read(authority_root / name, f"final {name}") for name in FINAL_NAMES}
@@ -393,7 +419,7 @@ def _validate_identity(value: Any, label: str) -> None:
     require(all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in value.values()), f"{label} identity values differ")
 
 
-def _validate_evidence(value: Mapping[str, Any], stage: str) -> None:
+def _validate_evidence(value: Mapping[str, Any], stage: str, external_root: Path = EXTERNAL_ROOT) -> None:
     """Validate the exact nested schema before publication or resume."""
     require(set(value) == {"schema", "stage", "prior_sha256", "inputs", "observations", "safety"}, f"{stage} evidence fields differ")
     require(value["schema"] == EVIDENCE_SCHEMA and value["stage"] == stage, f"{stage} evidence identity differs")
@@ -405,20 +431,25 @@ def _validate_evidence(value: Mapping[str, Any], stage: str) -> None:
     if stage == "phase-a":
         require(value["prior_sha256"] == "0" * 64, "Phase A prior SHA-256 is not zero")
         require(set(inputs) == {"frozen_commit", "frozen_tree", "repository_root", "external_root"}, "Phase A input fields differ")
-        require(inputs == {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(REPOSITORY_ROOT), "external_root": os.fspath(EXTERNAL_ROOT)} or os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT") == inputs.get("external_root"), "Phase A canonical inputs differ")
-        require(set(observations) == {"anchor_provisioner_calls", "authority_files", "authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity", "manifest", "owner_marker", "phase_a_approval_digest", "phase_a_validator_calls", "policy_sha256"}, "Phase A observation fields differ")
+        require(inputs == {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(REPOSITORY_ROOT), "external_root": os.fspath(external_root)}, "Phase A canonical inputs differ")
+        require(set(observations) == {"anchor_provisioner_calls", "authority_files", "authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity", "guarded_worktree", "manifest", "owner_marker", "phase_a_approval_digest", "phase_a_validator_calls", "policy_sha256"}, "Phase A observation fields differ")
         require(observations["phase_a_validator_calls"] == 1 and observations["anchor_provisioner_calls"] == 0, "Phase A call counts differ")
         require(set(observations["authority_files"]) == set(FINAL_NAMES), "Phase A authority file set differs")
         for name, record in observations["authority_files"].items():
             require(set(record) == {"path", "sha256", "identity", "bytes", "lf_count", "terminal_byte_hex"}, f"Phase A {name} fields differ")
             require(_is_sha256(record["sha256"]) and record["sha256"] == FINAL_PINS[name], f"Phase A {name} digest differs")
-            require(record["path"] == os.fspath(REPOSITORY_ROOT / AUTHORITY_REL / name), f"Phase A {name} path differs")
+            require(record["path"] == os.fspath(AUTHORITY_REPOSITORY_ROOT / AUTHORITY_REL / name), f"Phase A {name} path differs")
             require(all(isinstance(record[field], int) and not isinstance(record[field], bool) and record[field] >= 0 for field in ("bytes", "lf_count")), f"Phase A {name} scalar type differs")
             require(record["terminal_byte_hex"] == "0a", f"Phase A {name} terminal byte differs")
             _validate_identity(record["identity"], f"Phase A {name}")
             require(record["identity"]["st_uid"] == os.getuid() and record["identity"]["st_nlink"] == 1 and not record["identity"]["st_mode"] & 0o022, f"Phase A {name} file contract differs")
         for name in ("authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity"):
             _validate_identity(observations[name], name)
+        worktree = observations["guarded_worktree"]
+        require(isinstance(worktree, dict) and set(worktree) == {"path", "identity", "parent_identity", "head", "tree", "branch", "upstream"}, "guarded worktree fields differ")
+        require(worktree["path"] == os.fspath(REPOSITORY_ROOT) and worktree["head"] == FROZEN_COMMIT and worktree["tree"] == FROZEN_TREE and worktree["branch"] == GUARDED_BRANCH and worktree["upstream"] == GUARDED_REMOTE, "guarded worktree values differ")
+        _validate_identity(worktree["identity"], "guarded worktree")
+        _validate_identity(worktree["parent_identity"], "guarded worktree parent")
         require(set(observations["manifest"]) == {"path", "sha256", "identity", "bytes"}, "Phase A manifest fields differ")
         require(_is_sha256(observations["manifest"]["sha256"]), "Phase A manifest digest differs")
         require(observations["manifest"]["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / "input-manifest.json"), "Phase A manifest path differs")
@@ -446,7 +477,7 @@ def _validate_evidence(value: Mapping[str, Any], stage: str) -> None:
         _validate_identity(anchor_record["identity"], "anchor file")
         require(set(anchor_record["fields"]) == {"schema", "phase", "manifest_sha256", "phase_a_approval_digest", "policy_sha256", "decision", "provisioning_boundary"}, "anchor content fields differ")
         require(anchor_record["fields"] == {"schema": "task409-execution-preflight/phase-a-approval-anchor/v1", "phase": "external-review-of-phase-a-consistency", "manifest_sha256": inputs["phase_a_manifest_sha256"], "phase_a_approval_digest": inputs["phase_a_approval_digest"], "policy_sha256": inputs["policy_sha256"], "decision": "approve-consistency-only", "provisioning_boundary": "external-review-input"}, "anchor content values differ")
-        expected_root = Path(os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT", os.fspath(EXTERNAL_ROOT)))
+        expected_root = Path(external_root)
         require(anchor_record["path"] == os.fspath(expected_root / "external-review" / ANCHOR_NAME), "anchor canonical path differs")
         expected_anchor_raw = _canonical_json(anchor_record["fields"])
         require(anchor_record["sha256"] == hashlib.sha256(expected_anchor_raw).hexdigest() and anchor_record["bytes"] == len(expected_anchor_raw), "anchor byte binding differs")
@@ -461,12 +492,12 @@ def _validate_evidence(value: Mapping[str, Any], stage: str) -> None:
         raise Reject(f"unknown evidence stage: {stage}")
 
 
-def _publish_evidence(path: Path, value: Mapping[str, Any], stage: str) -> Snapshot:
-    _validate_evidence(value, stage)
+def _publish_evidence(path: Path, value: Mapping[str, Any], stage: str, external_root: Path = EXTERNAL_ROOT) -> Snapshot:
+    _validate_evidence(value, stage, external_root)
     return _publish_record(path, value)
 
 
-def _parse_closed_record(snapshot: Snapshot, stage: str) -> dict[str, Any]:
+def _parse_closed_record(snapshot: Snapshot, stage: str, external_root: Path = EXTERNAL_ROOT) -> dict[str, Any]:
     try:
         value = json.loads(snapshot.raw.decode("utf-8"), object_pairs_hook=lambda pairs: _unique_object(pairs, snapshot.path.name))
     except Reject:
@@ -474,7 +505,7 @@ def _parse_closed_record(snapshot: Snapshot, stage: str) -> dict[str, Any]:
     except Exception as exc:
         raise Reject(f"{snapshot.path.name} is not strict JSON: {exc}") from exc
     require(isinstance(value, dict), f"{snapshot.path.name} root differs")
-    _validate_evidence(value, stage)
+    _validate_evidence(value, stage, external_root)
     return value
 
 
@@ -495,14 +526,16 @@ def phase_a(
     *,
     repository_root: Path = REPOSITORY_ROOT,
     external_root: Path = EXTERNAL_ROOT,
+    worktree_verifier: Callable[[], dict[str, Any]] | None = None,
     validator_wrapper: Callable[[Callable[[dict[str, Any]], dict[str, Any]]], Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Validate genuine Phase A once, then create its root, manifest, and evidence."""
     repository_root = Path(repository_root)
     external_root = Path(external_root)
-    require(external_root == EXTERNAL_ROOT or os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT") == os.fspath(external_root), "external root differs from fixed authority")
+    require(external_root == EXTERNAL_ROOT, "external root differs from fixed authority")
     require(external_root.is_absolute() and not os.path.lexists(external_root), "external root must be absent and absolute")
     require(repository_root not in external_root.parents and external_root not in repository_root.parents, "external root overlaps repository")
+    guarded_worktree = worktree_verifier() if worktree_verifier else verify_frozen_repository(modules.git_reviewer.CANDIDATE5_GIT_BINDING, repository_root)
     parent_identity = _directory_identity(external_root.parent, "external root parent")
     before, authority, authority_root_identity, authority_parent_identity = _authority_state(modules)
     manifest = _manifest(modules, authority)
@@ -545,6 +578,7 @@ def phase_a(
         "authority_root_identity": authority_root_identity,
         "external_parent_identity": _directory_identity(external_root.parent, "external root parent"),
         "external_root_identity": _directory_identity(external_root, "external root", exact_mode=0o700),
+        "guarded_worktree": guarded_worktree,
         "manifest": {"path": os.fspath(manifest_path), "sha256": manifest_sha256, "identity": dict(manifest_snapshot.identity), "bytes": len(manifest_snapshot.raw)},
         "owner_marker": {"path": os.fspath(owner_marker), "identity": dict(stable_read(owner_marker, "owner marker").identity)},
         "phase_a_approval_digest": approval_digest,
@@ -553,7 +587,7 @@ def phase_a(
     }
     record = {"schema": EVIDENCE_SCHEMA, "stage": "phase-a", "prior_sha256": "0" * 64, "inputs": {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(repository_root), "external_root": os.fspath(external_root)}, "observations": observations, "safety": _safety()}
     evidence_path = external_root / "evidence" / PHASE_A_RECORD
-    evidence_snapshot = _publish_evidence(evidence_path, record, "phase-a")
+    evidence_snapshot = _publish_evidence(evidence_path, record, "phase-a", external_root)
     final_authority, _, final_root_identity, final_parent_identity = _authority_state(modules)
     require(after == final_authority and authority_root_identity == final_root_identity and authority_parent_identity == final_parent_identity, "final authority changed after Phase A evidence")
     require(stable_read(manifest_path, "final Phase A manifest") == manifest_snapshot, "Phase A manifest changed before PASS")
@@ -568,20 +602,23 @@ def anchor(
     repository_root: Path = REPOSITORY_ROOT,
     external_root: Path = EXTERNAL_ROOT,
     expected_phase_a_sha256: str,
+    worktree_verifier: Callable[[], dict[str, Any]] | None = None,
     provisioner_wrapper: Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Resume exact Phase-A evidence and call the genuine anchor once."""
     repository_root = Path(repository_root)
     external_root = Path(external_root)
-    require(external_root == EXTERNAL_ROOT or os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT") == os.fspath(external_root), "external root differs from fixed authority")
+    require(external_root == EXTERNAL_ROOT, "external root differs from fixed authority")
     root_identity = _directory_identity(external_root, "external root", exact_mode=0o700)
+    guarded_worktree = worktree_verifier() if worktree_verifier else verify_frozen_repository(modules.git_reviewer.CANDIDATE5_GIT_BINDING, repository_root)
     phase_snapshot = stable_read(external_root / "evidence" / PHASE_A_RECORD, "Phase A evidence")
     require(_is_sha256(expected_phase_a_sha256), "expected Phase A SHA-256 is invalid")
     require(phase_snapshot.sha256 == expected_phase_a_sha256, "Phase A evidence SHA-256 differs from reviewed handoff")
-    phase_record = _parse_closed_record(phase_snapshot, "phase-a")
+    phase_record = _parse_closed_record(phase_snapshot, "phase-a", external_root)
     require(phase_record["inputs"] == {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(repository_root), "external_root": os.fspath(external_root)}, "Phase A evidence inputs differ")
     observations = phase_record["observations"]
     require(isinstance(observations, dict) and observations.get("phase_a_validator_calls") == 1 and observations.get("anchor_provisioner_calls") == 0, "Phase A evidence call counts differ")
+    require(observations.get("guarded_worktree") == guarded_worktree, "Phase A guarded worktree observation changed")
     before, _, authority_root_identity, authority_parent_identity = _authority_state(modules)
     require(observations.get("authority_root_identity") == authority_root_identity and observations.get("authority_parent_identity") == authority_parent_identity, "Phase A authority binding differs")
     observed_authority = observations.get("authority_files")
@@ -640,7 +677,7 @@ def anchor(
     require(_directory_identity(external_root, "external root", exact_mode=0o700) == root_identity, "external root changed")
     record = {"schema": EVIDENCE_SCHEMA, "stage": "anchor", "prior_sha256": expected_phase_a_sha256, "inputs": {"expected_phase_a_sha256": expected_phase_a_sha256, "phase_a_manifest_sha256": manifest_snapshot.sha256, "phase_a_approval_digest": approval_digest, "policy_sha256": policy_sha256}, "observations": {"anchor": {"path": os.fspath(anchor_path), "sha256": anchor_snapshot.sha256, "identity": dict(anchor_snapshot.identity), "bytes": len(anchor_snapshot.raw), "lf_count": anchor_snapshot.raw.count(b"\n"), "terminal_byte_hex": anchor_snapshot.raw[-1:].hex(), "fields": anchor_value}, "anchor_genuine_phase_a_validator_calls": validation_calls, "anchor_provisioner_calls": calls, "authority_files": {name: {"sha256": item.sha256, "identity": dict(item.identity)} for name, item in after.items()}, "external_root_identity": root_identity, "phase_a_manifest_identity": dict(manifest_snapshot.identity)}, "safety": _safety()}
     evidence_path = external_root / "evidence" / ANCHOR_RECORD
-    evidence_snapshot = _publish_evidence(evidence_path, record, "anchor")
+    evidence_snapshot = _publish_evidence(evidence_path, record, "anchor", external_root)
     final_authority, _, final_root_identity, final_parent_identity = _authority_state(modules)
     require(after == final_authority and authority_root_identity == final_root_identity and authority_parent_identity == final_parent_identity, "final authority changed after anchor evidence")
     require(stable_read(phase_snapshot.path, "final Phase A evidence") == phase_snapshot, "Phase A evidence changed before anchor PASS")
@@ -664,7 +701,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = build_parser().parse_args(list(sys.argv[1:] if argv is None else argv))
         modules = load_modules()
-        verify_frozen_repository(modules.git_reviewer.CANDIDATE5_GIT_BINDING)
         record = phase_a(modules) if args.stage == "phase-a" else anchor(modules, expected_phase_a_sha256=args.expected_phase_a_sha256)
         print(f"PASS: genuine {args.stage} checkpoint completed")
         print(json.dumps(record, sort_keys=True, separators=(",", ":")))

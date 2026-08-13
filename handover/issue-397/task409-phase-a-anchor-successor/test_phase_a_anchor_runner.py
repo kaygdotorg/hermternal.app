@@ -43,8 +43,11 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             clear=False,
         )
         self.environment.start()
+        self.external_constant = mock.patch.object(RUNNER, "EXTERNAL_ROOT", self.external_root)
+        self.external_constant.start()
 
     def tearDown(self) -> None:
+        self.external_constant.stop()
         self.environment.stop()
         self.temporary.cleanup()
 
@@ -53,6 +56,7 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             self.modules,
             repository_root=RUNNER.REPOSITORY_ROOT,
             external_root=self.external_root,
+            worktree_verifier=self._guarded_observation,
             **kwargs,
         )
 
@@ -68,8 +72,14 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             repository_root=RUNNER.REPOSITORY_ROOT,
             external_root=self.external_root,
             expected_phase_a_sha256=expected_phase_a_sha256 or self._phase_sha(),
+            worktree_verifier=self._guarded_observation,
             **kwargs,
         )
+
+    @staticmethod
+    def _guarded_observation():
+        identity = {"st_dev": 1, "st_ino": 2, "st_uid": os.getuid(), "st_gid": os.getgid(), "st_mode": 0o700, "st_size": 4096, "st_nlink": 2, "st_mtime_ns": 3, "st_ctime_ns": 4}
+        return {"path": os.fspath(RUNNER.REPOSITORY_ROOT), "identity": identity, "parent_identity": {**identity, "st_ino": 5}, "head": RUNNER.FROZEN_COMMIT, "tree": RUNNER.FROZEN_TREE, "branch": RUNNER.GUARDED_BRANCH, "upstream": RUNNER.GUARDED_REMOTE}
 
     def _rewrite_phase_record(self, change) -> str:
         path = self.external_root / "evidence" / RUNNER.PHASE_A_RECORD
@@ -240,8 +250,8 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
     def test_source_has_no_legacy_temporary_authority_or_live_operation(self) -> None:
         source = RUNNER_PATH.read_text(encoding="utf-8")
         self.assertNotIn("/private/" + "tmp", source)
-        self.assertEqual(RUNNER.EXTERNAL_ROOT, Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor"))
-        self.assertFalse(os.path.lexists(RUNNER.EXTERNAL_ROOT))
+        self.assertIn('EXTERNAL_ROOT = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")', source)
+        self.assertFalse(os.path.lexists(Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")))
         for forbidden in ("--execute", "socket.", "hermes_agent", "git push"):
             self.assertNotIn(forbidden, source.lower())
 
@@ -275,6 +285,74 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "injected file fsync failure"):
                 RUNNER._publish_record(target, {"test": True})
         self.assertFalse(os.path.lexists(target))
+
+    def _verify_guarded_with(self, *, head=None, status=b"", worktrees=None):
+        identity = self._guarded_observation()["identity"]
+        parent_identity = self._guarded_observation()["parent_identity"]
+        valid_worktrees = (
+            b"worktree " + os.fspath(RUNNER.REPOSITORY_ROOT).encode() + b"\0"
+            b"HEAD " + RUNNER.FROZEN_COMMIT.encode() + b"\0"
+            b"branch " + RUNNER.GUARDED_BRANCH.encode() + b"\0\0"
+        )
+
+        def git(_root, _binding, *args):
+            if args == ("rev-parse", "--show-toplevel"):
+                return os.fspath(RUNNER.REPOSITORY_ROOT).encode()
+            if args == ("rev-parse", "HEAD"):
+                return (head or RUNNER.FROZEN_COMMIT).encode()
+            if args == ("rev-parse", "HEAD^{tree}"):
+                return RUNNER.FROZEN_TREE.encode()
+            if args == ("symbolic-ref", "-q", "HEAD"):
+                return RUNNER.GUARDED_BRANCH.encode()
+            if args == ("rev-parse", "--symbolic-full-name", "@{upstream}"):
+                return RUNNER.GUARDED_REMOTE.encode()
+            if args == ("rev-parse", RUNNER.GUARDED_REMOTE):
+                return RUNNER.FROZEN_COMMIT.encode()
+            if args == ("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"):
+                return status
+            if args == ("worktree", "list", "--porcelain", "-z"):
+                return valid_worktrees if worktrees is None else worktrees
+            if len(args) == 2 and args[0] == "rev-parse" and ":" in args[1]:
+                relative = Path(args[1].split(":", 1)[1])
+                return RUNNER.SOURCE_PINS[relative][1].encode()
+            raise AssertionError(args)
+
+        def directory(path, _label, exact_mode=None):
+            self.assertIn(Path(path), {RUNNER.REPOSITORY_ROOT, RUNNER.REPOSITORY_ROOT.parent})
+            return identity if Path(path) == RUNNER.REPOSITORY_ROOT else parent_identity
+
+        with mock.patch.object(RUNNER, "_git", side_effect=git), mock.patch.object(
+            RUNNER, "_directory_identity", side_effect=directory
+        ):
+            return RUNNER.verify_frozen_repository(object())
+
+    def test_guarded_worktree_contract_accepts_exact_observation(self) -> None:
+        self.assertEqual(self._verify_guarded_with()["head"], RUNNER.FROZEN_COMMIT)
+
+    def test_guarded_worktree_rejects_primary_and_alternate_paths(self) -> None:
+        with self.assertRaisesRegex(RUNNER.Reject, "path differs"):
+            RUNNER.verify_frozen_repository(object(), RUNNER.AUTHORITY_REPOSITORY_ROOT)
+        with self.assertRaisesRegex(RUNNER.Reject, "path differs"):
+            RUNNER.verify_frozen_repository(object(), Path("/home/kayg/Developer/alternate"))
+
+    def test_guarded_worktree_rejects_dirty_wrong_head_and_unregistered(self) -> None:
+        with self.assertRaisesRegex(RUNNER.Reject, "not clean including ignored"):
+            self._verify_guarded_with(status=b"!! ignored-cache\0")
+        with self.assertRaisesRegex(RUNNER.Reject, "HEAD differs"):
+            self._verify_guarded_with(head="f" * 40)
+        with self.assertRaisesRegex(RUNNER.Reject, "not one registered"):
+            self._verify_guarded_with(worktrees=b"worktree /home/kayg/Developer/other\0\0")
+
+    def test_guarded_worktree_rejects_symlink_and_external_overlap(self) -> None:
+        target = Path(self.temporary.name) / "directory"
+        target.mkdir(mode=0o700)
+        link = Path(self.temporary.name) / "link"
+        link.symlink_to(target)
+        with self.assertRaisesRegex(RUNNER.Reject, "canonical"):
+            RUNNER._directory_identity(link, "symlink guarded worktree")
+        with mock.patch.object(RUNNER, "EXTERNAL_ROOT", RUNNER.REPOSITORY_ROOT / "external"):
+            with self.assertRaisesRegex(RUNNER.Reject, "overlaps"):
+                self._verify_guarded_with()
 
 
 if __name__ == "__main__":

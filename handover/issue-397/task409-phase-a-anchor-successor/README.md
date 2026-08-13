@@ -7,9 +7,9 @@ sockets, or Hermes.
 
 ## Frozen authority
 
-The runner binds frozen commit
-`28553997d43fd20291513c8524871e31b0ba8181` and tree
-`0ce8703a6d278c8a8e630950a01d9b319b6288fa`. It checks the exact SHA-256
+The runner binds guarded integration commit
+`4b37a839b75bf2cdd23e6b506a6a8dff7c085859` and tree
+`4ea137e89906e936eabcd248a5049f498f13db27`. It checks the exact SHA-256
 and Git blob ID for these sources:
 
 - the durable Phase A validator;
@@ -31,6 +31,24 @@ The runner stable-reads the exact five-file final set. It checks the approved
 descriptor and provenance SHA-256 values and calls the genuine #403
 `inspect_complete` function. The approved #401 module then checks the exact
 JSON, Markdown, shell, normalized identity, argv, and stdin authority.
+
+## Clean guarded worktree
+
+Execution source is fixed at the separate durable registered Git worktree
+`/home/kayg/Developer/hermternal-397-guarded`. The runner rejects the primary
+worktree and every alternate path. It requires a canonical, owned, private
+directory and binds its parent identity. It also requires:
+
+- exact HEAD `4b37a839b75bf2cdd23e6b506a6a8dff7c085859` and its exact tree;
+- branch `refs/heads/codex/397-guarded-replay`;
+- upstream `refs/remotes/origin/codex/397-guarded-replay` at that exact commit;
+- one exact entry in `git worktree list --porcelain -z`;
+- no tracked, untracked, or ignored status entry;
+- no overlap with the external anchor root.
+
+The guarded worktree check is read-only. This checkpoint does not create the
+worktree. The final authority remains at its separately frozen canonical path
+because the approved #401 descriptor binds that path.
 
 ## Durable external layout
 
