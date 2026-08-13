@@ -22,8 +22,10 @@ import platform_profile
 HERE = Path(__file__).resolve().parent
 V1_PATH = HERE / "linux_replay_failure_v1.py"
 V1_SHA256 = "a98d32b3dc5c2d8beeba0f8fb59963872e1d471f3af3a59e8eebd377bdd70efe"
+PHASE_A_V4_PATH = HERE / "linux_phase_a_v4.py"
+PHASE_A_V4_SHA256 = "f89ec8bdf2e77f45307b5d30a96aa6c4a2da7f576bcecf3ec102ed120283640f"
 SCHEMA = "hermternal.issue-397.replay-failure.v2"
-DIRECTORY_NAME = "hermternal-issue397-replay-failure-v1"
+DIRECTORY_NAME = "hermternal-issue397-replay-failure-v2"
 OWNER_NAME = ".owner"
 FAILURE_NAME = "replay-failure.json"
 
@@ -52,6 +54,10 @@ def _load_v1() -> types.ModuleType:
     module.__file__ = os.fspath(V1_PATH)
     sys.modules[module.__name__] = module
     exec(compile(raw, module.__file__, "exec", dont_inherit=True), module.__dict__)
+    # Keep failure-v1 bytes frozen. Its loader reads these module globals, so
+    # the v2 successor can bind the new v4 approval root without copying it.
+    module.PHASE_A_ADAPTER_PATH = PHASE_A_V4_PATH
+    module.PHASE_A_ADAPTER_SHA256 = PHASE_A_V4_SHA256
     return module
 
 

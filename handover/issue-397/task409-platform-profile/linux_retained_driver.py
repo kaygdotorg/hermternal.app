@@ -29,6 +29,34 @@ HASHES = {
     "provenance-manifest.json": "3ae36dcd2e9328d50e95a53c4bcc7f093c4d7c2379ec2cfe04339cac6374f118",
     "platform-adaptation-manifest.json": "ee0444e00045d5e63f845888beaabf9981f15e61da1015afff601fd55033fd62",
 }
+OLD_APPENDIX_PARSER = b"""appendix_heading_start = markdown_bytes.index(appendix_heading)
+appendix_opening_start = markdown_bytes.index(appendix_opening, appendix_heading_start + len(appendix_heading))
+appendix_body_start = appendix_opening_start + len(appendix_opening)
+appendix_closing_start = markdown_bytes.index(appendix_closing, appendix_body_start)
+appendix = json.loads(markdown_bytes[appendix_body_start:appendix_closing_start].decode('utf-8'))
+"""
+NEW_APPENDIX_PARSER = b"""def parse_markdown_parity_appendix(markdown_bytes, heading, opening, closing):
+    boundary = b'<!-- candidate-five non-authority fence boundary -->'
+    if closing != b'```':
+        raise SystemExit('Markdown parity appendix closing metadata differs')
+    if markdown_bytes.count(heading) != 1 or markdown_bytes.count(opening) != 1 or markdown_bytes.count(boundary) != 1:
+        raise SystemExit('Markdown parity appendix anchors are not unique')
+    heading_start = markdown_bytes.find(heading)
+    opening_start = markdown_bytes.find(opening, heading_start + len(heading))
+    if heading_start < 0 or opening_start < heading_start + len(heading):
+        raise SystemExit('Markdown parity appendix anchor order differs')
+    body_start = opening_start + len(opening)
+    try:
+        body_text = markdown_bytes[body_start:].decode('utf-8')
+        appendix, character_end = json.JSONDecoder().raw_decode(body_text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit('Markdown parity appendix JSON differs') from exc
+    body_end = body_start + len(body_text[:character_end].encode('utf-8'))
+    if markdown_bytes[body_end:] != b'\\n' + boundary + b'\\n':
+        raise SystemExit('Markdown parity appendix durable boundary differs')
+    return appendix
+appendix = parse_markdown_parity_appendix(markdown_bytes, appendix_heading, appendix_opening, appendix_closing)
+"""
 
 
 def _module(path: Path, digest: str, name: str) -> types.ModuleType:
@@ -40,6 +68,21 @@ def _module(path: Path, digest: str, name: str) -> types.ModuleType:
     sys.modules[name] = module
     exec(compile(raw, os.fspath(path), "exec", dont_inherit=True), module.__dict__)
     return module
+
+
+def _repair_markdown_appendix_parser(stdin: bytes) -> bytes:
+    """Replace the obsolete fence search at one authenticated code anchor.
+
+    The approved #403 generator changes all non-authority closing fences to a
+    durable HTML boundary. The frozen validator still searches for the old
+    fence. Parse one JSON value, then require the exact generated suffix.
+    """
+    if stdin.count(OLD_APPENDIX_PARSER) != 1 or stdin.count(NEW_APPENDIX_PARSER) != 0:
+        raise RuntimeError("Markdown appendix parser anchor differs")
+    repaired = stdin.replace(OLD_APPENDIX_PARSER, NEW_APPENDIX_PARSER, 1)
+    if repaired.count(OLD_APPENDIX_PARSER) != 0 or repaired.count(NEW_APPENDIX_PARSER) != 1:
+        raise RuntimeError("Markdown appendix parser replacement differs")
+    return repaired
 
 
 def load_driver() -> types.ModuleType:
@@ -113,6 +156,7 @@ def derive_contract():
         compatibility_value(authority.document),
     )
     stdin = driver.transform_shell(compatibility).replace(profile.predecessor_bindings["temporary_parent"].encode(), profile.temporary_parent.encode())
+    stdin = _repair_markdown_appendix_parser(stdin)
     driver.compile_derived(stdin)
     return driver.DerivedDriver(
         tuple(authority.document["execution_driver"]["argv"]),

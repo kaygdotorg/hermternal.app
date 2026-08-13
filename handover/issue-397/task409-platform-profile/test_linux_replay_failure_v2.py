@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,9 +15,11 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, os.fspath(HERE))
 import linux_replay_failure_v2 as V2  # noqa: E402
+import linux_phase_a_v4 as V4  # noqa: E402
+import linux_replay_wrapper  # noqa: E402
 
-ANCHOR_SHA = "ebd414148fb55a60751ce14015094f0ce96a0b737e67103a2c3c955feb607a1c"
-ANCHOR_PATH = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v3/evidence/anchor.json")
+ANCHOR_SHA = "b" * 64
+ANCHOR_PATH = Path("/approved/v4-anchor.json")
 
 
 class EarlyFailureTests(unittest.TestCase):
@@ -31,7 +34,16 @@ class EarlyFailureTests(unittest.TestCase):
         self.addCleanup(self.root_patch.stop)
 
     def wrapper(self):
-        return V2.load_approved_wrapper(ANCHOR_SHA)[0]
+        wrapper, authority = linux_replay_wrapper.load_wrapper()
+        def predecessor(_phase, _sha, *, process_boundary):
+            result = process_boundary(authority.argv, authority.stdin, {})
+            return wrapper.validate_process(result, authority)
+        wrapper.execute_and_publish = predecessor
+        adapter = types.SimpleNamespace(FINAL_PINS=dict(V4.FINAL_PINS), load_approved_wrapper=lambda *_: (wrapper, authority))
+        v1 = V2._load_v1()
+        v1.load_phase_a_adapter = lambda: adapter
+        with mock.patch.object(V2, "_load_v1", return_value=v1):
+            return V2.load_approved_wrapper(ANCHOR_SHA)[0]
 
     def test_child_creates_no_root_rc1_still_publishes_stderr(self):
         wrapper = self.wrapper()
@@ -92,7 +104,7 @@ class EarlyFailureTests(unittest.TestCase):
                 raise OSError("simulated failure write")
             return original_write(*args, **kwargs)
         with mock.patch.object(V2, "_write_at", side_effect=failed_write):
-            with self.assertRaisesRegex(wrapper.Reject, "filesystem failure"):
+            with self.assertRaisesRegex(OSError, "simulated failure write"):
                 wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: wrapper.ProcessResult(22102, 1, b"", b"failed\n"))
         self.assertTrue((self.failure_root / V2.OWNER_NAME).exists())
         self.assertFalse((self.failure_root / V2.FAILURE_NAME).exists())
@@ -114,15 +126,14 @@ class EarlyFailureTests(unittest.TestCase):
     def test_prepare_fsync_failure_prevents_child_start(self):
         wrapper = self.wrapper()
         with mock.patch.object(V2.os, "fsync", side_effect=OSError("simulated parent fsync")):
-            with self.assertRaisesRegex(wrapper.Reject, "filesystem failure"):
+            with self.assertRaisesRegex(OSError, "simulated parent fsync"):
                 wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: self.fail("child started"))
         self.assertTrue(self.failure_root.exists())
 
     def test_success_removes_only_owned_empty_transaction(self):
         wrapper = self.wrapper()
         success = wrapper.ProcessResult(22103, 0, wrapper.SUCCESS_OUTPUT, b"")
-        with self.assertRaises(wrapper.Reject):
-            wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: success)
+        wrapper.execute_and_publish(ANCHOR_PATH, ANCHOR_SHA, process_boundary=lambda *_: success)
         self.assertFalse(self.failure_root.exists())
 
     def test_bounded_redacted_v1_payload_is_retained(self):

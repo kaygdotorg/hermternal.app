@@ -20,8 +20,8 @@ BASE = Path(__file__).resolve().parents[1]
 WRAPPER_PATH = BASE / "task409-replay-result-successor" / "replay_result_successor.py"
 WRAPPER_SHA256 = "a8a00bab2d221c5231ddc1f03eba1e0113ed252eecce43df1f8493df0160be60"
 DRIVER_ADAPTER_PATH = Path(linux_retained_driver.__file__).resolve()
-DRIVER_ADAPTER_SHA256 = "00bf439d02e98753df0b49570145974f3307261e62763aab5937db13735fcd9b"
-DERIVED_STDIN_SHA256 = "6d50bb3f2432c9416d904f010727f969f4c367882f2355223af1ab7087e0ef77"
+DRIVER_ADAPTER_SHA256 = "add9d9faad650f971a3f6c0dd00fda8188c849eb647dcdd8ff4df7cfca09b783"
+DERIVED_STDIN_SHA256 = "ff28ec082218888503555d1a346e10f1a351e66181c932fc8a337bdea3c74496"
 
 
 def _verified(path: Path, digest: str, name: str) -> types.ModuleType:

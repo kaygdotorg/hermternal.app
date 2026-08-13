@@ -149,6 +149,30 @@ class PlatformProfileTests(unittest.TestCase):
         driver = linux_retained_driver.load_driver()
         driver.compile_derived(contract.stdin)
 
+    def test_linux_markdown_appendix_uses_durable_boundary(self) -> None:
+        driver = linux_retained_driver.load_driver()
+        authority = driver.load_frozen_authority()
+        metadata = authority.document["validation_contract"]["markdown_parity_appendix"]
+        scope = {
+            "json": json,
+            "markdown_bytes": authority.markdown.raw,
+            "appendix_heading": metadata["section_heading"].encode("utf-8"),
+            "appendix_opening": metadata["opening_fence"].encode("ascii"),
+            "appendix_closing": metadata["closing_fence"].encode("ascii"),
+        }
+        # This is the exact old block at failure line 330. The current Linux
+        # Markdown proves that its closing-fence assumption cannot succeed.
+        with self.assertRaisesRegex(ValueError, "subsection not found"):
+            exec(compile(linux_retained_driver.OLD_APPENDIX_PARSER, "<old-appendix-parser>", "exec"), dict(scope))
+        corrected = dict(scope)
+        exec(compile(linux_retained_driver.NEW_APPENDIX_PARSER, "<new-appendix-parser>", "exec"), corrected)
+        self.assertEqual(corrected["appendix"], json.loads(authority.markdown.raw.split(scope["appendix_opening"], 1)[1].split(b"\n<!-- candidate-five non-authority fence boundary -->\n", 1)[0]))
+        contract = linux_retained_driver.derive_contract()
+        self.assertEqual(contract.stdin.count(linux_retained_driver.OLD_APPENDIX_PARSER), 0)
+        self.assertEqual(contract.stdin.count(linux_retained_driver.NEW_APPENDIX_PARSER), 1)
+        with self.assertRaisesRegex(RuntimeError, "anchor differs"):
+            linux_retained_driver._repair_markdown_appendix_parser(contract.stdin)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
