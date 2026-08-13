@@ -77,7 +77,7 @@ def _excerpt(raw: bytes) -> dict[str, Any]:
     patterns = (
         r"(?i)(authorization\s*:\s*(?:bearer|basic)\s+)[^\s]+",
         r"(?i)((?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s]+",
-        r"\b(?:ghp|github_pat|sk)-[A-Za-z0-9_-]{8,}\b",
+        r"\b(?:ghp_|github_pat_|sk-)[A-Za-z0-9_-]{8,}\b",
     )
     for pattern in patterns:
         value = re.sub(pattern, lambda match: match.group(1) + "[REDACTED]" if match.lastindex else "[REDACTED]", value)
@@ -112,6 +112,11 @@ def _install(wrapper, authority, adapter, profile, anchor_sha: str) -> None:
                 record = _record(adapter, authority, profile, Path(phase_a_evidence), _sha(expected_phase_a_evidence_sha256, "Phase A evidence SHA-256"), anchor_sha, result)
                 expected = wrapper._canonical_json(record)
                 wrapper._write_new(failure_path, expected, "replay failure", lambda _path, _inode: None)
+                parent_fd = os.open(failure_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    os.fsync(parent_fd)
+                finally:
+                    os.close(parent_fd)
                 snapshot = wrapper.stable_read(failure_path, "replay failure")
                 wrapper.require(snapshot.raw == expected, "replay failure changed after publication")
             else:
@@ -130,4 +135,3 @@ def load_approved_wrapper(expected_anchor_sha256: str):
     wrapper, authority = adapter.load_approved_wrapper(anchor_sha, PHASE_A_ADAPTER_SHA256)
     _install(wrapper, authority, adapter, platform_profile.load(), anchor_sha)
     return wrapper, authority
-

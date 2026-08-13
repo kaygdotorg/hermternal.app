@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 import types
@@ -65,6 +66,32 @@ class ReplayFailureTests(unittest.TestCase):
         self.assertTrue(value["process"]["stderr"]["truncated"])
         self.assertEqual(value["process"]["stderr"]["bytes"], len(stderr))
         self.assertEqual(value["process"]["stderr"]["sha256"], hashlib.sha256(stderr).hexdigest())
+        for token in (b"ghp_123456789abcdef", b"github_pat_123456789abcdef"):
+            excerpt = FAILURE._excerpt(token)["excerpt"]
+            self.assertEqual(excerpt, "[REDACTED]")
+
+    def test_failure_publication_fsyncs_parent_before_stable_read(self):
+        wrapper, _, pid, _ = self.boundary()
+        events = []
+        original_write = wrapper._write_new
+        original_read = wrapper.stable_read
+
+        def observed_write(*args, **kwargs):
+            events.append("file")
+            return original_write(*args, **kwargs)
+
+        def observed_fsync(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                events.append("parent")
+
+        def observed_read(*args, **kwargs):
+            events.append("stable")
+            return original_read(*args, **kwargs)
+
+        with mock.patch.object(wrapper, "_write_new", side_effect=observed_write), mock.patch.object(FAILURE.os, "fsync", side_effect=observed_fsync), mock.patch.object(wrapper, "stable_read", side_effect=observed_read):
+            with self.assertRaises(wrapper.Reject):
+                wrapper.execute_and_publish(Path("/approved/phase.json"), "b" * 64, process_boundary=lambda *_: wrapper.ProcessResult(pid, 1, b"", b"failed\n"))
+        self.assertEqual(events, ["file", "stable", "parent", "stable"])
 
     def test_marker_mismatch_publishes_failure(self):
         wrapper, _, pid, root = self.boundary()
