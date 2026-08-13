@@ -91,11 +91,15 @@ class LifecycleTests(unittest.TestCase):
         return head, parent, tree
 
     @contextmanager
-    def _git_boundary(self):
+    def _git_boundary(self, on_inspect=None):
         identity = SimpleNamespace(root=self.repository)
         guard = Guard(identity)
         repo_identity = self._dir_identity(self.repository)
-        with patch.object(LIFECYCLE.PHASE_B.REVIEW, "inspect_metadata", return_value=identity), patch.object(
+        def inspect(*_args, **_kwargs):
+            if on_inspect is not None:
+                on_inspect()
+            return identity
+        with patch.object(LIFECYCLE.PHASE_B.REVIEW, "inspect_metadata", side_effect=inspect), patch.object(
             LIFECYCLE.PHASE_B.REVIEW, "RepoGuard", return_value=guard
         ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "directory_identity", return_value=repo_identity), patch.object(
             LIFECYCLE.PHASE_B.REVIEW, "_check_repo_shape"
@@ -197,6 +201,64 @@ class LifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(LIFECYCLE.Reject, "phase B genuine validator sentinel"):
                 self._phase_b()
         self.assertFalse(git_called)
+
+    def test_post_auth_markdown_json_and_same_size_shell_swaps_reject_without_third_call(self) -> None:
+        self._anchor()
+        self._write_result()
+        original_validator = LIFECYCLE.PHASE_B.PHASE_A.validate_artifacts
+        for role in ("markdown", "json", "shell"):
+            with self.subTest(role=role):
+                calls = 0
+                path = self.paths[role]
+                moved = self.base / f"verified-{role}"
+                replacement = self.base / f"replacement-{role}"
+                original_raw = path.read_bytes()
+                replacement_raw = bytes([original_raw[0] ^ 1]) + original_raw[1:]
+                self.assertEqual(len(replacement_raw), len(original_raw))
+
+                def counted(manifest):
+                    nonlocal calls
+                    calls += 1
+                    return original_validator(manifest)
+
+                def swap():
+                    replacement.write_bytes(replacement_raw)
+                    replacement.chmod(0o600)
+                    os.rename(path, moved)
+                    os.rename(replacement, path)
+
+                with patch.object(LIFECYCLE.PHASE_B.PHASE_A, "validate_artifacts", side_effect=counted):
+                    with self._git_boundary(on_inspect=swap):
+                        with self.assertRaisesRegex(LIFECYCLE.Reject, f"{role} (hash|identity) changed"):
+                            self._phase_b()
+                self.assertEqual(calls, 1)
+                os.unlink(path)
+                os.rename(moved, path)
+
+    def test_post_auth_authority_root_substitution_rejects_without_third_call(self) -> None:
+        self._anchor()
+        self._write_result()
+        original_validator = LIFECYCLE.PHASE_B.PHASE_A.validate_artifacts
+        calls = 0
+        moved_root = self.base / "verified-authority-root"
+
+        def counted(manifest):
+            nonlocal calls
+            calls += 1
+            return original_validator(manifest)
+
+        def swap_root():
+            os.rename(self.authority_root, moved_root)
+            self.authority_root.mkdir(mode=0o700)
+            for role, name in LIFECYCLE.ROLE_NAMES.items():
+                shutil.copyfile(moved_root / name, self.authority_root / name)
+                (self.authority_root / name).chmod(0o600)
+
+        with patch.object(LIFECYCLE.PHASE_B.PHASE_A, "validate_artifacts", side_effect=counted):
+            with self._git_boundary(on_inspect=swap_root):
+                with self.assertRaisesRegex(LIFECYCLE.Reject, "authority root changed"):
+                    self._phase_b()
+        self.assertEqual(calls, 1)
 
 
 if __name__ == "__main__":

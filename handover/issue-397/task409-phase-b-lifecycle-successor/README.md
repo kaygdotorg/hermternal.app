@@ -13,6 +13,12 @@ cannot select another root or filename. The preserved validator then checks the
 full manifest, file identities, SHA-256 values, normalized JSON identity, JSON
 internal paths, shell authority, and Markdown parity.
 
+Phase B captures the result of its one genuine validator call. Before it returns
+success, it verifies that the independent authority root and its parent retain
+their bound directory identities. It then uses the durable stable reader to
+reread Markdown, JSON, and shell. Each digest and inode identity must equal the
+captured genuine Phase A result. This does not make a third validator call.
+
 The candidate-five fixture is local mock data. Only final Git observations are
 synthetic. The checkpoint does not execute Git, replay, the candidate shell, a
 network operation, credentials, sockets, or Hermes. The final candidate-five
