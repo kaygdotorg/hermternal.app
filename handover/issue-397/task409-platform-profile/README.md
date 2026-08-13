@@ -70,6 +70,21 @@ create-only `hermternal-issue397-phase-a-anchor-v5` evidence root.
 or failure-v2 evidence. The new tests use only disposable evidence roots and
 local temporary Git repositories. They do not run replay.
 
+`forbidden_proof.py` is the shared successor policy for the 22 forbidden
+ancestry IDs. A present ID must be a commit and must return exact non-ancestor
+status. An absent ID is accepted only after strict repository, indirection,
+`fsck`, all-ref closure, and base/main/source closure checks. The current
+profile proves that 17 IDs are present non-ancestors and that five IDs are
+absent. It handles all five as one canonical classification.
+
+`linux_retained_driver_v3.py` and `linux_replay_wrapper_v3.py` use that one
+classification in preflight and in the three generated predicates that depend
+on forbidden-object availability. They do not change the frozen authority.
+`linux_phase_a_v6.py` binds the complete proof record and its SHA-256 in a new
+owner marker and evidence root. A classification change makes the later anchor
+fail. `linux_replay_failure_v4.py` gives any later, separately approved replay
+attempt a new failure root. The v5 and failure-v3 evidence stays frozen.
+
 Run:
 
 ```sh
@@ -90,6 +105,13 @@ Run:
 /usr/bin/python3 -O -B test_linux_phase_a_v5.py
 /usr/bin/python3 -B test_linux_replay_failure_v3.py
 /usr/bin/python3 -O -B test_linux_replay_failure_v3.py
+/usr/bin/python3 -B test_forbidden_proof.py
+/usr/bin/python3 -O -B test_forbidden_proof.py
+/usr/bin/python3 -B linux_replay_wrapper_v3.py
+/usr/bin/python3 -B test_linux_phase_a_v6.py
+/usr/bin/python3 -O -B test_linux_phase_a_v6.py
+/usr/bin/python3 -B test_linux_replay_failure_v4.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v4.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
