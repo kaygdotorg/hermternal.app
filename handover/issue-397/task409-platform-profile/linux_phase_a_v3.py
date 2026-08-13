@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import types
 from pathlib import Path
@@ -49,6 +50,33 @@ def _verified_module(path: Path, digest: str, name: str) -> types.ModuleType:
     sys.modules[name] = module
     exec(compile(raw, os.fspath(path), "exec", dont_inherit=True), module.__dict__)
     return module
+
+
+def _stable_reviewed_bytes(path: Path, digest: str, label: str) -> bytes:
+    """Read one regular file once and bind the compiled buffer to its identity."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise RuntimeError(f"{label} is not a single-link regular file")
+        raw = b""
+        while len(raw) < before.st_size:
+            block = os.read(descriptor, before.st_size - len(raw))
+            if not block:
+                raise RuntimeError(f"{label} read ended early")
+            raw += block
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew during read")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode, value.st_size, value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+    if identity(before) != identity(after) or identity(before) != identity(current):
+        raise RuntimeError(f"{label} changed during read")
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise RuntimeError(f"{label} SHA-256 differs")
+    return raw
 
 
 def _adapter_sha256() -> str:
@@ -90,8 +118,7 @@ def load_runner() -> types.ModuleType:
     profile = platform_profile.load()
     if profile.sha256 != PROFILE_SHA256:
         raise RuntimeError("Linux profile SHA-256 differs")
-    if hashlib.sha256(Path(linux_replay_wrapper.__file__).read_bytes()).hexdigest() != LINUX_WRAPPER_ADAPTER_SHA256:
-        raise RuntimeError("Linux wrapper adapter SHA-256 differs")
+    _stable_reviewed_bytes(Path(linux_replay_wrapper.__file__), LINUX_WRAPPER_ADAPTER_SHA256, "Linux wrapper adapter")
     driver_path = HERE / "linux_retained_driver.py"
     if hashlib.sha256(driver_path.read_bytes()).hexdigest() != LINUX_DRIVER_ADAPTER_SHA256:
         raise RuntimeError("Linux driver adapter SHA-256 differs")
@@ -159,7 +186,11 @@ def load_approved_wrapper(expected_anchor_sha256: str, expected_adapter_sha256: 
         raise RuntimeError("Phase A v3 anchor evidence SHA-256 differs")
     runner._parse_closed_record(anchor_snapshot, "anchor", runner.EXTERNAL_ROOT)
 
-    source = Path(linux_replay_wrapper.__file__).read_bytes()
+    source = _stable_reviewed_bytes(
+        Path(linux_replay_wrapper.__file__),
+        LINUX_WRAPPER_ADAPTER_SHA256,
+        "Linux wrapper adapter",
+    )
     disabled = b'    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Phase A v3 authority is not installed"))\n'
     preserved = b"    wrapper._phase_a_v3_predecessor_execute_and_publish = wrapper.execute_and_publish\n"
     if source.count(disabled) != 1:

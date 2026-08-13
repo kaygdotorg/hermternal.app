@@ -117,6 +117,28 @@ class LinuxPhaseAV3Tests(unittest.TestCase):
         self.assertEqual(wrapper.PHASE_A_RUNNER_SHA256, V3._adapter_sha256())
         self.assertEqual(authority.derived_stdin_sha256, V3.linux_replay_wrapper.DERIVED_STDIN_SHA256)
 
+    def test_wrapper_path_swap_after_stable_read_cannot_execute(self):
+        runner, _, _, _, anchor_snapshot = self.lifecycle()
+        descriptor, name = tempfile.mkstemp(prefix=".linux-wrapper-swap-", suffix=".py", dir=HERE)
+        os.close(descriptor)
+        path = Path(name)
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        path.write_bytes(Path(V3.linux_replay_wrapper.__file__).read_bytes())
+        original_read = V3._stable_reviewed_bytes
+        marker = HERE / ".wrapper-swap-executed"
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+
+        def swap_after_read(target, digest, label):
+            raw = original_read(target, digest, label)
+            target.unlink()
+            target.write_text(f"from pathlib import Path\nPath({os.fspath(marker)!r}).write_text('executed')\n")
+            return raw
+
+        with mock.patch.object(V3, "load_runner", return_value=runner), mock.patch.object(V3.linux_replay_wrapper, "__file__", os.fspath(path)), mock.patch.object(V3, "_stable_reviewed_bytes", side_effect=swap_after_read):
+            wrapper, _ = V3.load_approved_wrapper(anchor_snapshot.sha256, V3._adapter_sha256())
+        self.assertIs(wrapper.execute_and_publish, wrapper._phase_a_v3_predecessor_execute_and_publish)
+        self.assertFalse(marker.exists(), "replacement wrapper path executed")
+
     def test_durable_commands_and_replay_are_not_run(self):
         self.assertFalse((DEVELOPER_ROOT / V3.V3_ROOT_NAME).exists())
         with self.assertRaises((RuntimeError, FileNotFoundError)):
