@@ -24,6 +24,14 @@ this adapter. `load_approved_wrapper` removes the deliberate disabled boundary
 only after it authenticates an independently supplied anchor digest. Loading
 or testing the adapter does not run replay.
 
+`linux_replay_failure_v1.py` is a successor over the exact approved Phase A
+adapter bytes. It adds one create-only, private, fsynced
+`replay-failure.json` to the replay result root for a nonzero child result or
+an invalid success marker. The timestamp-free record keeps exact output hashes
+and counts with bounded credential-redacted excerpts. It does not claim
+completion, delete the record, or retry replay. Success rejects a preexisting
+failure record.
+
 Run:
 
 ```sh
@@ -33,6 +41,8 @@ Run:
 /usr/bin/python3 -B linux_replay_wrapper.py
 /usr/bin/python3 -B test_linux_phase_a_v3.py
 /usr/bin/python3 -O -B test_linux_phase_a_v3.py
+/usr/bin/python3 -B test_linux_replay_failure_v1.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v1.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
