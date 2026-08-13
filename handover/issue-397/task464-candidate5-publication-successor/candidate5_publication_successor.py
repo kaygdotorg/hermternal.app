@@ -208,6 +208,15 @@ def publish(
                 except OSError as cleanup_error:
                     residue.append(f"{stage_name}/{entry['leaf']} (unobserved: {cleanup_error})")
             if entry.get("fd", -1) >= 0:
+                # A callback can move an owned public inode to an untracked
+                # name. Fixed-name absence proves rollback only when the
+                # retained inode itself has no remaining directory links.
+                try:
+                    retained = os.fstat(entry["fd"])
+                    if _inode(retained) != entry["inode"] or retained.st_nlink != 0:
+                        residue.append(f"{entry['role']} owned inode has {retained.st_nlink} untracked link(s)")
+                except OSError as cleanup_error:
+                    residue.append(f"{entry['role']} owned inode is unobserved: {cleanup_error}")
                 try: os.close(entry["fd"])
                 except OSError: pass
         if stage_fd >= 0:

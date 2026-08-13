@@ -8,7 +8,9 @@ directory lock is held. It removes the owned staging links before authority
 validation, so each public artifact has one link. Complete reads through EOF
 bind the exact size and bytes. Rollback unconditionally reconciles every public
 and stage name from its recorded transaction-owned inode. Rollback
-removes only transaction-owned inodes and reports any residue.
+removes only transaction-owned inodes. Before it closes each retained
+descriptor, it requires the owned inode to have zero links. It reports a moved
+or otherwise untracked owned link as residue and does not claim full rollback.
 
 POSIX does not provide crash-atomic publication for three names. Process death
 can leave a partial set. Consumers must reject an incomplete set. This helper

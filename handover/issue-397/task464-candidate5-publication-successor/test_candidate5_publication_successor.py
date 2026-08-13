@@ -82,6 +82,18 @@ class Tests(unittest.TestCase):
                 with self.assertRaisesRegex(MODULE.Reject, "rolled back"):
                     MODULE.publish(self.targets, self.payloads, validate=append_and_return)
                 self.assert_absent()
+    def test_validator_move_only_reports_untracked_owned_residue(self):
+        for index, role in enumerate(MODULE.ROLES):
+            with self.subTest(role=role):
+                moved = self.root / f"owned-moved-{role}"
+                def move_and_return(paths, _payloads):
+                    os.rename(paths[index], moved)
+                    return "must-not-return"
+                with self.assertRaisesRegex(MODULE.Reject, "owned inode has 1 untracked link"):
+                    MODULE.publish(self.targets, self.payloads, validate=move_and_return)
+                self.assertEqual(moved.read_bytes(), self.payloads[index])
+                self.assertTrue(all(not path.exists() for path in self.targets))
+                os.unlink(moved)
     def test_post_link_reconciliation_observation_failure_cleans_owned_target(self):
         original_stat = MODULE.os.stat; injected = False
         def fail_once_after_link(path, *args, **kwargs):
