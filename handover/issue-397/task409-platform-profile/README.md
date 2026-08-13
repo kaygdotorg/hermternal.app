@@ -32,6 +32,13 @@ and counts with bounded credential-redacted excerpts. It does not claim
 completion, delete the record, or retry replay. Success rejects a preexisting
 failure record.
 
+`linux_replay_failure_v2.py` handles failure before the child can create its
+ephemeral replay root. Before process launch it creates and fsyncs one fixed
+profile-derived directory with mode 0700 and a create-only owner marker. A
+process or marker failure publishes the mode-0600 record there and adds exact
+ephemeral residue observations. Success removes only the transaction-owned
+marker and empty directory before final validation.
+
 Run:
 
 ```sh
@@ -43,6 +50,8 @@ Run:
 /usr/bin/python3 -O -B test_linux_phase_a_v3.py
 /usr/bin/python3 -B test_linux_replay_failure_v1.py
 /usr/bin/python3 -O -B test_linux_replay_failure_v1.py
+/usr/bin/python3 -B test_linux_replay_failure_v2.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v2.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
