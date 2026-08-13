@@ -69,13 +69,13 @@ The preserved source and tests also contain stale `/private/tmp` names as policy
 Verify bytes before running any preserved test.
 
 ```sh
-cd /path/to/checkout
-shasum -a 256 -c handover/issue-397/SHA256SUMS
-python3 -B handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py
-python3 -B handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py
-python3 -O -B handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py
-python3 -O -B handover/issue-397/task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py
-python3 -B handover/issue-397/task409-postreplay-gates/test_post_replay_gates.py
+cd /path/to/checkout/handover/issue-397
+shasum -a 256 -c SHA256SUMS
+python3 -B task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py
+python3 -B task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py
+python3 -O -B task464-candidate5/test_f932bc703a5e-task464-candidate5-framing-range.py
+python3 -O -B task464-candidate5/test_f932bc703a5e-task464-candidate5-generator.py
+python3 -B task409-postreplay-gates/test_post_replay_gates.py
 ```
 
 The unchanged stable-reader test is intentionally retained. It stops immediately at its old frozen generator hash pin: expected `600f4e9f4b75a5a4ded039fb6ae0e8f5778854147f15ec8190fef87fab1a7102`, actual candidate-five generator `cc73c1743c4059cc995be4a9e097cd16007c8095bc87a7c572418134c4d434dc`. This is a frozen-test incompatibility, not a stable-reader behavioral approval or failure. Do not edit the frozen test in place.
