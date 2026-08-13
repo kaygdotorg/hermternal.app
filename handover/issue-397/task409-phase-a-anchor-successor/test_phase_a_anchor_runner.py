@@ -79,7 +79,7 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
     @staticmethod
     def _guarded_observation():
         identity = {"st_dev": 1, "st_ino": 2, "st_uid": os.getuid(), "st_gid": os.getgid(), "st_mode": 0o700, "st_size": 4096, "st_nlink": 2, "st_mtime_ns": 3, "st_ctime_ns": 4}
-        return {"path": os.fspath(RUNNER.REPOSITORY_ROOT), "identity": identity, "parent_identity": {**identity, "st_ino": 5}, "head": RUNNER.FROZEN_COMMIT, "tree": RUNNER.FROZEN_TREE, "branch": RUNNER.GUARDED_BRANCH, "upstream": RUNNER.GUARDED_REMOTE}
+        return {"path": os.fspath(RUNNER.REPOSITORY_ROOT), "identity": identity, "parent_identity": {**identity, "st_ino": 5}, "head": RUNNER.FROZEN_COMMIT, "tree": RUNNER.FROZEN_TREE, "detached": True, "source_repository": {"path": os.fspath(RUNNER.SOURCE_REPOSITORY_ROOT), "identity": {**identity, "st_ino": 6}}, "git_common_dir": {"path": os.fspath(RUNNER.GIT_COMMON_DIR), "identity": {**identity, "st_ino": 7}}, "git_object_dir": {"path": os.fspath(RUNNER.GIT_OBJECT_DIR), "identity": {**identity, "st_ino": 8}}, "git_worktree_dir": {"path": os.fspath(RUNNER.GIT_WORKTREE_DIR), "identity": {**identity, "st_ino": 9}}}
 
     def _rewrite_phase_record(self, change) -> str:
         path = self.external_root / "evidence" / RUNNER.PHASE_A_RECORD
@@ -286,14 +286,27 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
                 RUNNER._publish_record(target, {"test": True})
         self.assertFalse(os.path.lexists(target))
 
-    def _verify_guarded_with(self, *, head=None, status=b"", worktrees=None):
-        identity = self._guarded_observation()["identity"]
-        parent_identity = self._guarded_observation()["parent_identity"]
+    def _verify_guarded_with(self, *, head=None, tree=None, status=b"", worktrees=None, git_paths=None):
+        observation = self._guarded_observation()
+        identities = {
+            RUNNER.REPOSITORY_ROOT: observation["identity"],
+            RUNNER.REPOSITORY_ROOT.parent: observation["parent_identity"],
+            RUNNER.SOURCE_REPOSITORY_ROOT: observation["source_repository"]["identity"],
+            RUNNER.GIT_COMMON_DIR: observation["git_common_dir"]["identity"],
+            RUNNER.GIT_OBJECT_DIR: observation["git_object_dir"]["identity"],
+            RUNNER.GIT_WORKTREE_DIR: observation["git_worktree_dir"]["identity"],
+        }
         valid_worktrees = (
             b"worktree " + os.fspath(RUNNER.REPOSITORY_ROOT).encode() + b"\0"
             b"HEAD " + RUNNER.FROZEN_COMMIT.encode() + b"\0"
-            b"branch " + RUNNER.GUARDED_BRANCH.encode() + b"\0\0"
+            b"detached\0\0"
         )
+        paths = {
+            "git_dir": RUNNER.GIT_WORKTREE_DIR,
+            "common": RUNNER.GIT_COMMON_DIR,
+            "objects": RUNNER.GIT_OBJECT_DIR,
+            **(git_paths or {}),
+        }
 
         def git(_root, _binding, *args):
             if args == ("rev-parse", "--show-toplevel"):
@@ -301,13 +314,13 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             if args == ("rev-parse", "HEAD"):
                 return (head or RUNNER.FROZEN_COMMIT).encode()
             if args == ("rev-parse", "HEAD^{tree}"):
-                return RUNNER.FROZEN_TREE.encode()
-            if args == ("symbolic-ref", "-q", "HEAD"):
-                return RUNNER.GUARDED_BRANCH.encode()
-            if args == ("rev-parse", "--symbolic-full-name", "@{upstream}"):
-                return RUNNER.GUARDED_REMOTE.encode()
-            if args == ("rev-parse", RUNNER.GUARDED_REMOTE):
-                return RUNNER.FROZEN_COMMIT.encode()
+                return (tree or RUNNER.FROZEN_TREE).encode()
+            if args == ("rev-parse", "--git-dir"):
+                return os.fspath(paths["git_dir"]).encode()
+            if args == ("rev-parse", "--git-common-dir"):
+                return os.fspath(paths["common"]).encode()
+            if args == ("rev-parse", "--git-path", "objects"):
+                return os.fspath(paths["objects"]).encode()
             if args == ("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"):
                 return status
             if args == ("worktree", "list", "--porcelain", "-z"):
@@ -318,8 +331,8 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             raise AssertionError(args)
 
         def directory(path, _label, exact_mode=None):
-            self.assertIn(Path(path), {RUNNER.REPOSITORY_ROOT, RUNNER.REPOSITORY_ROOT.parent})
-            return identity if Path(path) == RUNNER.REPOSITORY_ROOT else parent_identity
+            self.assertIn(Path(path), identities)
+            return identities[Path(path)]
 
         with mock.patch.object(RUNNER, "_git", side_effect=git), mock.patch.object(
             RUNNER, "_directory_identity", side_effect=directory
@@ -335,13 +348,29 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.Reject, "path differs"):
             RUNNER.verify_frozen_repository(object(), Path("/home/kayg/Developer/alternate"))
 
-    def test_guarded_worktree_rejects_dirty_wrong_head_and_unregistered(self) -> None:
+    def test_guarded_worktree_rejects_dirty_wrong_input_and_unregistered(self) -> None:
         with self.assertRaisesRegex(RUNNER.Reject, "not clean including ignored"):
             self._verify_guarded_with(status=b"!! ignored-cache\0")
         with self.assertRaisesRegex(RUNNER.Reject, "HEAD differs"):
             self._verify_guarded_with(head="f" * 40)
+        with self.assertRaisesRegex(RUNNER.Reject, "tree differs"):
+            self._verify_guarded_with(tree="e" * 40)
         with self.assertRaisesRegex(RUNNER.Reject, "not one registered"):
             self._verify_guarded_with(worktrees=b"worktree /home/kayg/Developer/other\0\0")
+
+    def test_guarded_worktree_rejects_branch_attachment(self) -> None:
+        attached = (
+            b"worktree " + os.fspath(RUNNER.REPOSITORY_ROOT).encode() + b"\0"
+            b"HEAD " + RUNNER.FROZEN_COMMIT.encode() + b"\0"
+            b"branch refs/heads/codex/397-guarded-replay\0\0"
+        )
+        with self.assertRaisesRegex(RUNNER.Reject, "not exact detached"):
+            self._verify_guarded_with(worktrees=attached)
+
+    def test_guarded_worktree_rejects_different_git_storage(self) -> None:
+        for field, message in (("git_dir", "Git directory"), ("common", "common directory"), ("objects", "object directory")):
+            with self.subTest(field=field), self.assertRaisesRegex(RUNNER.Reject, message):
+                self._verify_guarded_with(git_paths={field: Path("/home/kayg/Developer/different")})
 
     def test_guarded_worktree_rejects_symlink_and_external_overlap(self) -> None:
         target = Path(self.temporary.name) / "directory"

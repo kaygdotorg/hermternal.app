@@ -26,15 +26,17 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 SCHEMA = "hermternal.issue-397.phase-a-anchor-runner.v1"
 EVIDENCE_SCHEMA = "hermternal.issue-397.phase-a-anchor-evidence.v1"
-FROZEN_COMMIT = "4b37a839b75bf2cdd23e6b506a6a8dff7c085859"
-FROZEN_TREE = "4ea137e89906e936eabcd248a5049f498f13db27"
+FROZEN_COMMIT = "c6b9a185500a1928055b9b3a475c14b0add38f05"
+FROZEN_TREE = "ecf9c8e5712249ded71120d62e29981c4a59219b"
 REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal-397-guarded")
 # The already frozen #401 descriptor contains these approved canonical paths.
 # A clean execution checkout does not change the published authority location.
 AUTHORITY_REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal")
 EXTERNAL_ROOT = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")
-GUARDED_BRANCH = "refs/heads/codex/397-guarded-replay"
-GUARDED_REMOTE = "refs/remotes/origin/codex/397-guarded-replay"
+SOURCE_REPOSITORY_ROOT = Path("/home/kayg/Developer/hermternal")
+GIT_COMMON_DIR = SOURCE_REPOSITORY_ROOT / ".git"
+GIT_OBJECT_DIR = GIT_COMMON_DIR / "objects"
+GIT_WORKTREE_DIR = GIT_COMMON_DIR / "worktrees" / "hermternal-397-guarded"
 AUTHORITY_REL = Path("handover/issue-397/task464-candidate5-final")
 PHASE_A_REL = Path("handover/issue-397/task409-execution-preflight/task409_execution_preflight_v3.py")
 ANCHOR_REL = Path("handover/issue-397/task409-execution-preflight/provision_task409_phase_a_anchor_v3.py")
@@ -244,18 +246,22 @@ def _git(root: Path, binding: Any, *args: str) -> bytes:
 
 
 def verify_frozen_repository(binding: Any, root: Path = REPOSITORY_ROOT) -> dict[str, Any]:
-    """Bind the exact registered, clean guarded worktree and tracked branch."""
+    """Bind the exact registered, clean, detached guarded worktree."""
     root = Path(root)
     require(root == REPOSITORY_ROOT, "guarded worktree path differs")
     root_identity = _directory_identity(root, "guarded worktree root")
     parent_identity = _directory_identity(root.parent, "guarded worktree parent")
+    source_identity = _directory_identity(SOURCE_REPOSITORY_ROOT, "source repository root")
+    common_identity = _directory_identity(GIT_COMMON_DIR, "Git common directory")
+    object_identity = _directory_identity(GIT_OBJECT_DIR, "Git object directory")
+    git_worktree_identity = _directory_identity(GIT_WORKTREE_DIR, "Git worktree directory")
     require(REPOSITORY_ROOT not in EXTERNAL_ROOT.parents and EXTERNAL_ROOT not in REPOSITORY_ROOT.parents, "guarded worktree overlaps external root")
     require(_git(root, binding, "rev-parse", "--show-toplevel") == os.fspath(root).encode(), "repository top level differs")
     require(_git(root, binding, "rev-parse", "HEAD").decode() == FROZEN_COMMIT, "guarded worktree HEAD differs")
     require(_git(root, binding, "rev-parse", "HEAD^{tree}").decode() == FROZEN_TREE, "guarded worktree tree differs")
-    require(_git(root, binding, "symbolic-ref", "-q", "HEAD").decode() == GUARDED_BRANCH, "guarded worktree branch differs")
-    require(_git(root, binding, "rev-parse", "--symbolic-full-name", "@{upstream}").decode() == GUARDED_REMOTE, "guarded upstream differs")
-    require(_git(root, binding, "rev-parse", GUARDED_REMOTE).decode() == FROZEN_COMMIT, "guarded origin tracking tip differs")
+    require(_git(root, binding, "rev-parse", "--git-dir") == os.fspath(GIT_WORKTREE_DIR).encode(), "guarded Git directory differs")
+    require(_git(root, binding, "rev-parse", "--git-common-dir") == os.fspath(GIT_COMMON_DIR).encode(), "guarded Git common directory differs")
+    require(_git(root, binding, "rev-parse", "--git-path", "objects") == os.fspath(GIT_OBJECT_DIR).encode(), "guarded Git object directory differs")
     require(_git(root, binding, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching") == b"", "guarded worktree is not clean including ignored files")
     raw_worktrees = _git(root, binding, "worktree", "list", "--porcelain", "-z")
     records = [item for item in raw_worktrees.split(b"\0\0") if item]
@@ -267,13 +273,18 @@ def verify_frozen_repository(binding: Any, root: Path = REPOSITORY_ROOT) -> dict
             matches.append(fields)
     require(len(matches) == 1, "guarded path is not one registered Git worktree")
     fields = matches[0]
-    require(b"HEAD " + FROZEN_COMMIT.encode() in fields and b"branch " + GUARDED_BRANCH.encode() in fields, "registered guarded worktree identity differs")
+    require(b"HEAD " + FROZEN_COMMIT.encode() in fields and b"detached" in fields, "registered guarded worktree is not exact detached input")
+    require(not any(field.startswith(b"branch ") for field in fields), "registered guarded worktree is branch attached")
     for relative, (_, blob) in SOURCE_PINS.items():
         observed = _git(root, binding, "rev-parse", f"{FROZEN_COMMIT}:{relative}").decode()
         require(observed == blob, f"frozen Git blob differs: {relative}")
     require(_directory_identity(root, "guarded worktree root") == root_identity, "guarded worktree root changed")
     require(_directory_identity(root.parent, "guarded worktree parent") == parent_identity, "guarded worktree parent changed")
-    return {"path": os.fspath(root), "identity": root_identity, "parent_identity": parent_identity, "head": FROZEN_COMMIT, "tree": FROZEN_TREE, "branch": GUARDED_BRANCH, "upstream": GUARDED_REMOTE}
+    require(_directory_identity(SOURCE_REPOSITORY_ROOT, "source repository root") == source_identity, "source repository root changed")
+    require(_directory_identity(GIT_COMMON_DIR, "Git common directory") == common_identity, "Git common directory changed")
+    require(_directory_identity(GIT_OBJECT_DIR, "Git object directory") == object_identity, "Git object directory changed")
+    require(_directory_identity(GIT_WORKTREE_DIR, "Git worktree directory") == git_worktree_identity, "Git worktree directory changed")
+    return {"path": os.fspath(root), "identity": root_identity, "parent_identity": parent_identity, "head": FROZEN_COMMIT, "tree": FROZEN_TREE, "detached": True, "source_repository": {"path": os.fspath(SOURCE_REPOSITORY_ROOT), "identity": source_identity}, "git_common_dir": {"path": os.fspath(GIT_COMMON_DIR), "identity": common_identity}, "git_object_dir": {"path": os.fspath(GIT_OBJECT_DIR), "identity": object_identity}, "git_worktree_dir": {"path": os.fspath(GIT_WORKTREE_DIR), "identity": git_worktree_identity}}
 
 
 @dataclass(frozen=True)
@@ -446,10 +457,13 @@ def _validate_evidence(value: Mapping[str, Any], stage: str, external_root: Path
         for name in ("authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity"):
             _validate_identity(observations[name], name)
         worktree = observations["guarded_worktree"]
-        require(isinstance(worktree, dict) and set(worktree) == {"path", "identity", "parent_identity", "head", "tree", "branch", "upstream"}, "guarded worktree fields differ")
-        require(worktree["path"] == os.fspath(REPOSITORY_ROOT) and worktree["head"] == FROZEN_COMMIT and worktree["tree"] == FROZEN_TREE and worktree["branch"] == GUARDED_BRANCH and worktree["upstream"] == GUARDED_REMOTE, "guarded worktree values differ")
+        require(isinstance(worktree, dict) and set(worktree) == {"path", "identity", "parent_identity", "head", "tree", "detached", "source_repository", "git_common_dir", "git_object_dir", "git_worktree_dir"}, "guarded worktree fields differ")
+        require(worktree["path"] == os.fspath(REPOSITORY_ROOT) and worktree["head"] == FROZEN_COMMIT and worktree["tree"] == FROZEN_TREE and worktree["detached"] is True, "guarded worktree values differ")
         _validate_identity(worktree["identity"], "guarded worktree")
         _validate_identity(worktree["parent_identity"], "guarded worktree parent")
+        for name, expected in (("source_repository", SOURCE_REPOSITORY_ROOT), ("git_common_dir", GIT_COMMON_DIR), ("git_object_dir", GIT_OBJECT_DIR), ("git_worktree_dir", GIT_WORKTREE_DIR)):
+            require(isinstance(worktree[name], dict) and set(worktree[name]) == {"path", "identity"} and worktree[name]["path"] == os.fspath(expected), f"guarded {name} binding differs")
+            _validate_identity(worktree[name]["identity"], f"guarded {name}")
         require(set(observations["manifest"]) == {"path", "sha256", "identity", "bytes"}, "Phase A manifest fields differ")
         require(_is_sha256(observations["manifest"]["sha256"]), "Phase A manifest digest differs")
         require(observations["manifest"]["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / "input-manifest.json"), "Phase A manifest path differs")
