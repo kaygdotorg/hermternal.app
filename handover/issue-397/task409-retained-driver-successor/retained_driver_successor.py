@@ -466,7 +466,7 @@ def _self_contained_heredoc(authority: FrozenAuthority) -> str:
     encoded_roots = json.dumps(roots, separators=(",", ":"))
     unlink_source = _alternate_unlink_python()
     return f'''make_retained_repository_self_contained() {{
-  "$PYTHON" - "$REPLAY" "$CLEAN_PRIMARY_OBJECTS" <<'PY'
+  "$PYTHON" - "$REPLAY" "$CLEAN_PRIMARY_OBJECTS" "$1" <<'PY'
 import hashlib
 import json
 import os
@@ -475,8 +475,8 @@ import stat
 import subprocess
 import sys
 
-repo, clean_objects = sys.argv[1:]
-ROOTS = tuple(json.loads({encoded_roots!r}))
+repo, clean_objects, final_head = sys.argv[1:]
+AUTHORITY_ROOTS = tuple(json.loads({encoded_roots!r}))
 OID = re.compile(r'[0-9a-f]{{40}}\\Z')
 ENV = {{
     'PATH': '/usr/bin:/bin', 'HOME': '/dev/null', 'LANG': 'C', 'LC_ALL': 'C',
@@ -511,6 +511,15 @@ def require_success(process, label, stderr_empty=True):
     if stderr_empty and process.stderr:
         reject(label + ' wrote stderr')
 
+def validate_pack_roots(roots, authority_roots, required_final, observed_head):
+    if (not OID.fullmatch(required_final) or required_final != observed_head
+            or not roots or roots != tuple(sorted(set(roots)))
+            or not all(OID.fullmatch(root) for root in roots)):
+        reject('self-contained final HEAD or pack-root inventory differs')
+    if not set(authority_roots).union([required_final]).issubset(roots):
+        reject('self-contained pack-root inventory omits a required root')
+    return roots
+
 def snapshot(path, label):
     if not os.path.isabs(path) or os.path.realpath(path) != path:
         reject(label + ' path is not canonical absolute')
@@ -520,7 +529,8 @@ def snapshot(path, label):
         try:
             before = os.fstat(fd)
             if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
-                    or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o022
+                    or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) not in (0o400, 0o600)
                     or before.st_size <= 0 or before.st_size > MAX_PACK):
                 reject(label + ' file identity is unsafe')
             digest = hashlib.sha256()
@@ -550,8 +560,11 @@ def assert_snapshot(path, expected, label):
         reject(label + ' changed after alternate removal')
 
 def require_empty_pack_directory(path):
+    directory = os.lstat(path)
     if (not os.path.isabs(path) or os.path.realpath(path) != path
-            or not os.path.isdir(path) or os.path.islink(path)):
+            or not stat.S_ISDIR(directory.st_mode) or stat.S_ISLNK(directory.st_mode)
+            or directory.st_uid != os.getuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700):
         reject('retained pack directory differs')
     if os.listdir(path):
         reject('retained pack directory has a pre-existing entry')
@@ -560,8 +573,20 @@ def require_empty_pack_directory(path):
 if (not os.path.isabs(repo) or os.path.realpath(repo) != repo
         or not os.path.isabs(clean_objects) or os.path.realpath(clean_objects) != clean_objects):
     reject('self-contained input path differs')
-if not ROOTS or len(ROOTS) != len(set(ROOTS)) or not all(OID.fullmatch(root) for root in ROOTS):
+if (not AUTHORITY_ROOTS or AUTHORITY_ROOTS != tuple(sorted(set(AUTHORITY_ROOTS)))
+        or not all(OID.fullmatch(root) for root in AUTHORITY_ROOTS)):
     reject('self-contained proof root inventory differs')
+observed = run(['rev-parse', '--verify', 'HEAD^{{commit}}'])
+require_success(observed, 'self-contained final HEAD observation')
+if not re.fullmatch(rb'[0-9a-f]{{40}}\\n', observed.stdout):
+    reject('self-contained final HEAD output differs')
+observed_head = observed.stdout[:-1].decode('ascii')
+ROOTS = validate_pack_roots(
+    tuple(sorted(set(AUTHORITY_ROOTS).union([final_head]))),
+    AUTHORITY_ROOTS,
+    final_head,
+    observed_head,
+)
 git_dir = os.path.join(repo, '.git')
 objects = os.path.join(git_dir, 'objects')
 pack_dir = os.path.join(objects, 'pack')
@@ -628,7 +653,8 @@ def transform_shell(authority: FrozenAuthority) -> bytes:
         'readonly REPLAY_ROOT="/private/tmp/hermternal-task409-final-replay.$$"\nreadonly REPLAY="$REPLAY_ROOT/replay"\n',
         'readonly REPLAY_ROOT="/private/tmp/hermternal-task409-final-replay.$$"\n'
         'readonly RESULT_ROOT="$REPLAY_ROOT/replay-root"\n'
-        'readonly REPLAY="$REPLAY_ROOT/repository"\n',
+        'readonly REPLAY="$REPLAY_ROOT/repository"\n'
+        'REPLAY_SELF_CONTAINED=0\n',
         "retained sibling layout",
     )
     shell = _replace_exact(
@@ -719,6 +745,110 @@ if os.path.lexists(alternate):
         new_alternate_check,
         "optional bootstrap alternate closure",
     )
+    shell = _replace_exact(
+        shell,
+        'assert_replay_object_binding() {\n'
+        '  "$PYTHON" - "$REPLAY" "$CLEAN_PRIMARY_OBJECTS" "$SOURCE_OBJECTS" <<\'PY\'\n',
+        'assert_replay_object_binding() {\n'
+        '  "$PYTHON" - "$REPLAY" "$CLEAN_PRIMARY_OBJECTS" "$SOURCE_OBJECTS" '
+        '"$REPLAY_SELF_CONTAINED" <<\'PY\'\n',
+        "object-binding state input",
+    )
+    shell = _replace_exact(
+        shell,
+        "repo, clean_objects, source_objects = sys.argv[1:]\n",
+        "repo, clean_objects, source_objects, self_contained = sys.argv[1:]\n"
+        "if self_contained not in ('0', '1'):\n"
+        "    raise SystemExit('replay self-contained state differs')\n",
+        "object-binding state parse",
+    )
+    shell = _replace_exact(
+        shell,
+        "if (stat.S_ISLNK(objects_st.st_mode) or not stat.S_ISDIR(objects_st.st_mode)\n"
+        "        or os.path.realpath(objects) != objects):\n",
+        "if (stat.S_ISLNK(objects_st.st_mode) or not stat.S_ISDIR(objects_st.st_mode)\n"
+        "        or objects_st.st_uid != os.getuid()\n"
+        "        or stat.S_IMODE(objects_st.st_mode) != 0o700\n"
+        "        or os.path.realpath(objects) != objects):\n",
+        "private replay object directory",
+    )
+    shell = _replace_exact(
+        shell,
+        "if (stat.S_ISLNK(info_st.st_mode) or not stat.S_ISDIR(info_st.st_mode)\n"
+        "        or os.path.realpath(info_dir) != info_dir):\n",
+        "if (stat.S_ISLNK(info_st.st_mode) or not stat.S_ISDIR(info_st.st_mode)\n"
+        "        or info_st.st_uid != os.getuid()\n"
+        "        or stat.S_IMODE(info_st.st_mode) != 0o700\n"
+        "        or os.path.realpath(info_dir) != info_dir):\n",
+        "private replay object-info directory",
+    )
+    shell = _replace_exact(
+        shell,
+        "if os.path.lexists(pack_dir) and (os.path.islink(pack_dir) or not os.path.isdir(pack_dir)\n"
+        "        or os.path.realpath(pack_dir) != pack_dir):\n"
+        "    raise SystemExit('replay pack directory is not canonical')\n"
+        "if os.path.isdir(pack_dir):\n",
+        "if os.path.lexists(pack_dir):\n"
+        "    pack_dir_st = os.lstat(pack_dir)\n"
+        "    if (stat.S_ISLNK(pack_dir_st.st_mode) or not stat.S_ISDIR(pack_dir_st.st_mode)\n"
+        "            or pack_dir_st.st_uid != os.getuid()\n"
+        "            or stat.S_IMODE(pack_dir_st.st_mode) != 0o700\n"
+        "            or os.path.realpath(pack_dir) != pack_dir):\n"
+        "        raise SystemExit('replay pack directory is not canonical and private')\n"
+        "if os.path.isdir(pack_dir):\n",
+        "private replay pack directory",
+    )
+    old_object_binding = '''alternate = os.path.join(objects, 'info', 'alternates')
+st = os.lstat(alternate)
+if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or os.path.realpath(alternate) != alternate:
+    raise SystemExit('replay alternate is not a regular canonical file')
+raw_alternate, _alternate_stat = read_stable_file(alternate, 'replay alternates')
+if raw_alternate != (os.path.realpath(clean_objects) + '\\n').encode():
+    raise SystemExit('replay alternate is not clean-primary object store')
+if os.path.samefile(objects, source_objects) or os.path.samefile(objects, clean_objects):
+    raise SystemExit('replay object store is shared')
+'''
+    new_object_binding = '''alternate = os.path.join(objects, 'info', 'alternates')
+if self_contained == '0':
+    if not os.path.lexists(alternate):
+        raise SystemExit('bootstrap replay alternate is absent')
+    st = os.lstat(alternate)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or os.path.realpath(alternate) != alternate:
+        raise SystemExit('replay alternate is not a regular canonical file')
+    raw_alternate, _alternate_stat = read_stable_file(alternate, 'replay alternates')
+    if raw_alternate != (os.path.realpath(clean_objects) + '\\n').encode():
+        raise SystemExit('replay alternate is not clean-primary object store')
+else:
+    if os.path.lexists(alternate):
+        raise SystemExit('self-contained replay alternate exists')
+    pack_names = sorted(os.listdir(pack_dir)) if os.path.isdir(pack_dir) else []
+    pack_files = [name for name in pack_names if name.endswith('.pack')]
+    index_files = [name for name in pack_names if name.endswith('.idx')]
+    digest = pack_files[0][5:-5] if len(pack_files) == 1 else ''
+    if (len(pack_names) != 2 or len(index_files) != 1 or len(digest) != 40
+            or any(character not in '0123456789abcdef' for character in digest)
+            or index_files[0] != 'pack-' + digest + '.idx'):
+        raise SystemExit('self-contained replay pack set differs')
+    for pack_name in pack_names:
+        pack_path = os.path.join(pack_dir, pack_name)
+        pack_st = os.lstat(pack_path)
+        if (not stat.S_ISREG(pack_st.st_mode) or stat.S_ISLNK(pack_st.st_mode)
+                or pack_st.st_uid != os.getuid() or pack_st.st_nlink != 1
+                or stat.S_IMODE(pack_st.st_mode) not in (0o400, 0o600)
+                or os.path.realpath(pack_path) != pack_path):
+            raise SystemExit('self-contained replay pack identity is unsafe')
+        read_stable_file(
+            pack_path, 'self-contained replay pack', limit=1024 * 1024 * 1024
+        )
+if os.path.samefile(objects, source_objects) or os.path.samefile(objects, clean_objects):
+    raise SystemExit('replay object store is shared')
+'''
+    shell = _replace_exact(
+        shell,
+        old_object_binding,
+        new_object_binding,
+        "post-conversion object binding",
+    )
     cleanup_start = shell.index("cleanup_success_only() {\n")
     cleanup_end = shell.index("\n\n# Static manifest validation is read-only.", cleanup_start)
     cleanup_stubs = '''cleanup_success_only() {
@@ -747,7 +877,8 @@ printf 'TASK409_FINAL_REPLAY_OK=1\\nCLEAN_PRIMARY_REMOVED=1\\n'
 '''
     new_tail = '''assert_replay_closure
 before_mutation
-make_retained_repository_self_contained
+make_retained_repository_self_contained "$CURRENT_HEAD"
+REPLAY_SELF_CONTAINED=1
 test ! -e "$REPLAY/.git/objects/info/alternates" && test ! -L "$REPLAY/.git/objects/info/alternates" || fail "retained alternates remains after conversion"
 before_mutation
 assert_forbidden_ancestry

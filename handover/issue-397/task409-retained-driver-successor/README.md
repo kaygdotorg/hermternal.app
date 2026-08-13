@@ -50,15 +50,17 @@ approval, stdout delivery, or stderr state. The derived driver never creates
 The derived driver builds a closed, sorted commit-root inventory from the
 authenticated candidate JSON. It requires the fixed base, protected main,
 every source commit, both rejected-authentication endpoints, and every
-forbidden ancestry commit. It enumerates the complete object closure for all
-of these roots.
+forbidden ancestry commit. The driver also receives the exact final head,
+proves that it is the repository head, and adds it to the sorted roots. It
+enumerates the complete object closure for all of these roots.
 
 It then runs exact `git pack-objects` without `--thin` and without `--local`.
 The object IDs are supplied on stdin. Git output is captured, bounded, and not
 written to driver stdout. The output must be one exact lowercase pack hash.
 The previously empty pack directory must then contain only the matching `.pack`
-and `.idx` files. Both files must be owned, private, single-link files. The
-driver hashes and binds both files through stable descriptor reads.
+and `.idx` files. Both files must be owned, single-link files with exact mode
+`0400` or `0600`; group, other, and executable bits are forbidden. The driver
+hashes and binds both files through stable descriptor reads.
 
 Only after the pack is complete, the driver opens the exact private
 `repository/.git/objects/info/alternates` file through a held parent directory.
@@ -69,9 +71,12 @@ the parent directory, and proves that the path is absent.
 With no alternate present, it runs strict `git fsck`, all-ref missing-object
 closure, and exact commit-type checks for every proof root. It stable-rereads
 the pack and index. The shell then repeats forbidden-ancestry and full replay
-closure checks. It proves again that the alternates path is absent before it
-creates pending evidence. The retained clean-primary remains available for
-diagnosis, but it is not an object dependency of the retained repository.
+closure checks. Its inherited object-binding check uses an explicit lifecycle
+state: bootstrap requires the exact alternate, and the post-conversion state
+requires no alternate and the exact private self-contained pack pair. It proves
+again that the alternates path is absent before it creates pending evidence.
+The retained clean-primary remains available for diagnosis, but it is not an
+object dependency of the retained repository.
 
 `derive_contract()` supplies the trusted outer wrapper with the exact
 authenticated argv, exact derived stdin bytes, frozen source SHA-256, and
@@ -99,8 +104,10 @@ temporary directories. They supply observed object IDs and do not execute the
 shell or Git. They verify create-only pending output, proof-root completeness,
 non-thin and non-local packing, pack and index mutation, alternates content,
 hardlink and swap rejection, exact unlink and parent sync, unlink-sync failure,
-pre-existing pack collision, post-unlink proof ordering, output capture, the
-sole marker, anchor drift, argv, and the derived-versus-source hash boundary.
+pre-existing pack collision, final-head root inclusion and omission, private
+pack modes, post-conversion success reachability, post-unlink proof ordering,
+output capture, the sole marker, anchor drift, argv, and the
+derived-versus-source hash boundary.
 
 Run the offline checks with:
 
