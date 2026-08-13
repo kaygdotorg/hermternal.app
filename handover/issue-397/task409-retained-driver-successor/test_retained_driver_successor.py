@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline retained-driver tests with mocked process and Git observations."""
+"""Offline retained-driver tests with isolated repository observations."""
 from __future__ import annotations
 
 import hashlib
@@ -27,14 +27,6 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def write_private(path: Path, value: object) -> bytes:
-    """Create one isolated private fixture file."""
-    raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    path.write_bytes(raw)
-    path.chmod(0o600)
-    return raw
-
-
 class RetainedDriverTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -47,7 +39,16 @@ class RetainedDriverTests(unittest.TestCase):
         self.assertEqual(self.authority.document["execution_driver"]["shell"].encode(), self.authority.shell.raw)
         self.assertEqual(MODULE.derive(), self.derived)
 
-    def test_structured_transform_changes_only_lifecycle_anchors(self) -> None:
+    def test_derived_contract_binds_argv_and_changed_stdin_hash(self) -> None:
+        contract = MODULE.derive_contract()
+        self.assertEqual(contract.argv, tuple(self.authority.document["execution_driver"]["argv"]))
+        self.assertEqual(contract.stdin, self.derived)
+        self.assertEqual(contract.source_sha256, self.authority.shell.sha256)
+        self.assertEqual(contract.derived_sha256, hashlib.sha256(self.derived).hexdigest())
+        self.assertNotEqual(contract.derived_sha256, contract.source_sha256)
+        self.assertEqual(MODULE.SUCCESS_OUTPUT, b"TASK409_RETAINED_REPLAY_OK=1\n")
+
+    def test_structured_transform_has_pending_only_terminal_contract(self) -> None:
         text = self.derived.decode()
         self.assertIn('readonly RESULT_ROOT="$REPLAY_ROOT/replay-root"', text)
         self.assertIn('readonly REPLAY="$REPLAY_ROOT/repository"', text)
@@ -55,19 +56,20 @@ class RetainedDriverTests(unittest.TestCase):
         self.assertIn('cleanup_clean_primary_success_only() {\n  fail "retained driver forbids clean-primary cleanup"', text)
         self.assertNotIn('cleanup_success_only "$REPLAY"', text)
         self.assertNotIn("CLEAN_PRIMARY_REMOVED=1", text)
-        self.assertEqual(text.count(MODULE.RESULT_SCHEMA), 1)
-        self.assertEqual(text.count(MODULE.COMPLETION_SCHEMA), 1)
-        self.assertEqual(text.count(MODULE.SUCCESS_MARKER), 3)
+        self.assertEqual(text.count(MODULE.PENDING_SCHEMA), 1)
+        self.assertEqual(text.count("replay-result.pending.json"), 1)
+        self.assertNotIn("replay-result.json", text)
+        self.assertNotIn("replay-completion.json", text)
+        self.assertTrue(text.endswith(f"printf '{MODULE.SUCCESS_MARKER}\\n'\n"))
+        tail = text.rsplit("publish_retained_replay_pending", 1)[1]
+        self.assertEqual(tail, f' "$RETAINED_PARENT"\nprintf \'{MODULE.SUCCESS_MARKER}\\n\'\n')
 
     def test_anchor_count_drift_rejects(self) -> None:
         document = json.loads(json.dumps(self.authority.document))
         document["execution_driver"]["shell"] = document["execution_driver"]["shell"].replace(
             'readonly REPLAY="$REPLAY_ROOT/replay"\n', "", 1
         )
-        changed = replace(
-            self.authority,
-            document=document,
-        )
+        changed = replace(self.authority, document=document)
         with self.assertRaisesRegex(MODULE.Reject, "anchor count differs"):
             MODULE.transform_shell(changed)
 
@@ -75,7 +77,7 @@ class RetainedDriverTests(unittest.TestCase):
         bodies = MODULE.extract_python_heredocs(self.derived)
         self.assertEqual(len(bodies), 41)
         MODULE.compile_derived(self.derived)
-        writer = next(body for body in bodies if MODULE.COMPLETION_SCHEMA in body)
+        writer = next(body for body in bodies if MODULE.PENDING_SCHEMA in body)
         self.assertNotIn("subprocess", writer)
         self.assertNotIn("os.system", writer)
         self.assertNotIn("os.popen", writer)
@@ -90,86 +92,17 @@ class RetainedDriverTests(unittest.TestCase):
             with self.assertRaisesRegex(MODULE.Reject, "already exists"):
                 MODULE.main(["--output", str(output)])
 
-    def _phase_a_fixture(self, root: Path) -> tuple[Path, Path]:
-        base = self.authority.document["base"]
-        forbidden = self.authority.document["forbidden_ancestry"]
-        policy = {
-            "base_ref": "origin/dev",
-            "base_commit": base["commit"],
-            "base_tree": base["tree"],
-            "main_ref": "origin/main",
-            "main_commit": base["protected_main_commit"],
-            "required_ancestors": [base["commit"]],
-            "forbidden_ancestors": list(
-                dict.fromkeys(
-                    [*forbidden["commits"], *forbidden["raw_semantic_source_commits"]]
-                )
-            ),
-            "lane_chain": [],
-        }
-        manifest = {
-            "schema": "task409-execution-preflight/v3",
-            "phase": "A-consistency-only-no-git-no-replay",
-            "artifacts": {},
-            "shell_metadata": {},
-            "normalized_json_sha256": "0" * 64,
-            "inputs": {},
-            "stale": {},
-            "policy": policy,
-            "approval": {
-                "status": "consistency-only",
-                "manifest_sha256": "not-bound-in-phase-a",
-                "policy_sha256": "0" * 64,
-            },
-        }
-        manifest_path = root / "phase-a-manifest.json"
-        manifest_raw = write_private(manifest_path, manifest)
-        approval_payload = {
-            key: manifest[key]
-            for key in (
-                "schema", "phase", "artifacts", "shell_metadata",
-                "normalized_json_sha256", "inputs", "stale", "policy",
-            )
-        }
-        approval = hashlib.sha256(
-            json.dumps(
-                approval_payload,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            ).encode()
-        ).hexdigest()
-        policy_sha = hashlib.sha256(
-            json.dumps(policy, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        ).hexdigest()
-        anchor = {
-            "schema": "task409-execution-preflight/phase-a-approval-anchor/v1",
-            "phase": "external-review-of-phase-a-consistency",
-            "manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
-            "phase_a_approval_digest": approval,
-            "policy_sha256": policy_sha,
-            "decision": "approve-consistency-only",
-            "provisioning_boundary": "external-review-input",
-        }
-        anchor_path = root / "phase-a-anchor.json"
-        write_private(anchor_path, anchor)
-        return manifest_path, anchor_path
-
     def _execute_writer(
         self,
         run_parent: Path,
-        manifest_path: Path,
-        anchor_path: Path,
         *,
         parent: str = "1" * 40,
+        fsync: object | None = None,
     ) -> None:
-        """Execute only the isolated Python writer with mocked Git values."""
-        writer_shell = MODULE._result_writer_heredoc(
-            self.authority,
-            phase_a_manifest_path=str(manifest_path),
-            phase_a_anchor_path=str(anchor_path),
-        ).encode()
-        body = MODULE.extract_python_heredocs(writer_shell)[0]
+        """Execute only the isolated pending writer with supplied observations."""
+        body = MODULE.extract_python_heredocs(
+            MODULE._result_writer_heredoc(self.authority).encode()
+        )[0]
         arguments = [
             "retained-writer",
             str(run_parent / "replay-root"),
@@ -177,67 +110,78 @@ class RetainedDriverTests(unittest.TestCase):
             "2" * 40,
             "3" * 40,
             parent,
-            str(manifest_path),
-            str(anchor_path),
         ]
-        with mock.patch.object(sys, "argv", arguments):
-            exec(compile(body, "isolated-retained-writer.py", "exec"), {"__name__": "__main__"})
+        patches = [mock.patch.object(sys, "argv", arguments)]
+        if fsync is not None:
+            patches.append(mock.patch.object(os, "fsync", fsync))
+        with patches[0]:
+            if len(patches) == 1:
+                exec(compile(body, "isolated-retained-writer.py", "exec"), {"__name__": "__main__"})
+            else:
+                with patches[1]:
+                    exec(compile(body, "isolated-retained-writer.py", "exec"), {"__name__": "__main__"})
 
-    def test_isolated_writer_emits_exact_create_only_evidence(self) -> None:
+    def _run_parent(self, root: Path) -> Path:
+        run_parent = root / "run-parent"
+        run_parent.mkdir(mode=0o700)
+        (run_parent / "repository").mkdir(mode=0o700)
+        return run_parent
+
+    def test_isolated_writer_emits_exact_create_only_pending_observations(self) -> None:
         with tempfile.TemporaryDirectory(prefix="issue397-retained-test-") as temporary:
             root = Path(temporary).resolve()
             root.chmod(0o700)
-            run_parent = root / "run-parent"
-            run_parent.mkdir(mode=0o700)
+            run_parent = self._run_parent(root)
             repository = run_parent / "repository"
-            repository.mkdir(mode=0o700)
-            manifest_path, anchor_path = self._phase_a_fixture(root)
-            self._execute_writer(run_parent, manifest_path, anchor_path)
+            self._execute_writer(run_parent)
             replay_root = run_parent / "replay-root"
-            result_path = replay_root / "replay-result.json"
-            completion_path = replay_root / "replay-completion.json"
-            result = json.loads(result_path.read_bytes())
-            completion = json.loads(completion_path.read_bytes())
-            self.assertEqual(set(result), MODULE.RESULT_KEYS)
-            self.assertEqual(result["schema"], MODULE.RESULT_SCHEMA)
-            self.assertEqual(result["repository"], str(repository))
-            self.assertEqual(result["replay_root"], str(replay_root))
-            self.assertEqual(result["final_head"], "2" * 40)
-            self.assertEqual(result["parent"], "1" * 40)
-            self.assertEqual(result["tree"], "3" * 40)
-            self.assertEqual(set(completion), MODULE.COMPLETION_KEYS)
-            self.assertEqual(completion["completion_marker"], MODULE.COMPLETION_MARKER)
-            self.assertEqual(completion["source_commit"], "d3c40687659ee645a5f03bc80cbf61ec8c49979a")
-            self.assertEqual(completion["result_sha256"], hashlib.sha256(result_path.read_bytes()).hexdigest())
-            expected_stdout = (
-                f'FINAL_HEAD={"2" * 40}\n'
-                f'REMOTE_DEV={self.authority.document["base"]["commit"]}\n'
-                'INDEPENDENT_APPROVAL_REQUIRED=1\nNO_PUSH_PERFORMED=1\n'
-            ).encode() + MODULE.SUCCESS_OUTPUT
-            self.assertEqual(completion["stdout_sha256"], hashlib.sha256(expected_stdout).hexdigest())
-            self.assertEqual(completion["stdout_bytes"], len(expected_stdout))
-            self.assertEqual(completion["stderr_sha256"], hashlib.sha256(b"").hexdigest())
-            self.assertEqual(completion["stderr_bytes"], 0)
+            pending_path = replay_root / "replay-result.pending.json"
+            pending = json.loads(pending_path.read_bytes())
+            self.assertEqual(set(pending), MODULE.PENDING_KEYS)
+            self.assertEqual(pending["schema"], MODULE.PENDING_SCHEMA)
+            self.assertEqual(pending["repository"], str(repository))
+            self.assertEqual(pending["replay_root"], str(replay_root))
+            self.assertEqual(pending["final_head"], "2" * 40)
+            self.assertEqual(pending["parent"], "1" * 40)
+            self.assertEqual(pending["tree"], "3" * 40)
             self.assertTrue(repository.is_dir())
             self.assertEqual(stat.S_IMODE(replay_root.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(completion_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(pending_path.stat().st_mode), 0o600)
+            self.assertFalse((replay_root / "replay-result.json").exists())
+            self.assertFalse((replay_root / "replay-completion.json").exists())
             with self.assertRaises(SystemExit):
-                self._execute_writer(run_parent, manifest_path, anchor_path)
+                self._execute_writer(run_parent)
 
-    def test_isolated_writer_rejects_bad_phase_a_before_output(self) -> None:
+    def test_late_fsync_failure_leaves_pending_residue_without_final_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="issue397-retained-late-failure-") as temporary:
+            root = Path(temporary).resolve()
+            root.chmod(0o700)
+            run_parent = self._run_parent(root)
+            real_fsync = os.fsync
+            calls = 0
+
+            def fail_late(descriptor: int) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise OSError("mock late directory fsync failure")
+                real_fsync(descriptor)
+
+            with self.assertRaisesRegex(OSError, "mock late"):
+                self._execute_writer(run_parent, fsync=fail_late)
+            replay_root = run_parent / "replay-root"
+            self.assertTrue((replay_root / "replay-result.pending.json").exists())
+            self.assertTrue((run_parent / "repository").is_dir())
+            self.assertFalse((replay_root / "replay-result.json").exists())
+            self.assertFalse((replay_root / "replay-completion.json").exists())
+
+    def test_invalid_observation_rejects_before_pending_publication(self) -> None:
         with tempfile.TemporaryDirectory(prefix="issue397-retained-reject-") as temporary:
             root = Path(temporary).resolve()
             root.chmod(0o700)
-            run_parent = root / "run-parent"
-            run_parent.mkdir(mode=0o700)
-            (run_parent / "repository").mkdir(mode=0o700)
-            manifest_path, anchor_path = self._phase_a_fixture(root)
-            manifest = json.loads(manifest_path.read_bytes())
-            manifest["policy"]["base_commit"] = "9" * 40
-            write_private(manifest_path, manifest)
+            run_parent = self._run_parent(root)
             with self.assertRaises(SystemExit):
-                self._execute_writer(run_parent, manifest_path, anchor_path)
+                self._execute_writer(run_parent, parent="not-an-object-id")
             self.assertFalse((run_parent / "replay-root").exists())
 
 

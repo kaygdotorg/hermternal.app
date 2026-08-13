@@ -12,7 +12,6 @@ import ast
 import hashlib
 import json
 import os
-import re
 import stat
 import sys
 import types
@@ -49,40 +48,17 @@ PINNED_SHA256 = {
     FINAL_FREEZE: "714f6ef3fd780acccd1520a090428c3d4c20c1be8178e84114015b1c07f87316",
 }
 
-RESULT_SCHEMA = "task409-execution-preflight/replay-result/v2"
-RESULT_PHASE = "B-post-replay-detached-final-head"
-RESULT_LANE = "candidate-4"
-COMPLETION_SCHEMA = "hermternal.issue-397.replay-completion.v1"
-COMPLETION_MARKER = "replay-complete-retained"
+PENDING_SCHEMA = "hermternal.issue-397.replay-result.pending/v1"
 SUCCESS_MARKER = "TASK409_RETAINED_REPLAY_OK=1"
-SUCCESS_OUTPUT = (
-    b"TASK409_FINAL_REPLAY_OK=1\n"
-    b"TASK409_RETAINED_REPLAY_OK=1\n"
-    b"REPOSITORY_RETAINED=1\n"
-    b"CLEAN_PRIMARY_RETAINED=1\n"
-)
-PHASE_A_MANIFEST_PATH = "/private/tmp/hermternal-task409-phase-a/input-manifest.json"
-PHASE_A_ANCHOR_PATH = "/private/tmp/hermternal-task409-phase-a-approval/phase-a-approval-anchor.json"
-RESULT_KEYS = frozenset(
+SUCCESS_OUTPUT = b"TASK409_RETAINED_REPLAY_OK=1\n"
+PENDING_KEYS = frozenset(
     {
-        "schema", "phase", "lane", "phase_a_manifest_sha256",
-        "phase_a_approval_digest", "replay_root", "replay_root_identity",
-        "repository", "repository_identity", "head_state", "final_head",
-        "parent", "tree", "base_commit", "base_tree",
-        "protected_main_commit", "required_ancestors", "forbidden_ancestors",
+        "schema", "replay_root", "replay_root_identity", "repository",
+        "repository_identity", "head_state", "final_head", "parent", "tree",
+        "base_commit", "base_tree", "protected_main_commit",
+        "required_ancestors", "forbidden_ancestors",
     }
 )
-COMPLETION_KEYS = frozenset(
-    {
-        "schema", "completion_marker", "result_path", "result_sha256",
-        "result_identity", "driver_sha256", "markdown_sha256", "json_sha256",
-        "shell_sha256", "provenance_sha256", "source_commit", "argv_sha256",
-        "stdin_sha256", "stdout_sha256", "stderr_sha256", "stdout_bytes",
-        "stderr_bytes",
-    }
-)
-OID_RE = re.compile(r"[0-9a-f]{40}\Z")
-SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILE_BYTES = 8 * 1024 * 1024
 
 
@@ -115,6 +91,16 @@ class FrozenAuthority:
     markdown: Snapshot
     shell: Snapshot
     document: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class DerivedDriver:
+    """Exact stdin and invocation contract for the trusted outer wrapper."""
+
+    argv: tuple[str, ...]
+    stdin: bytes
+    source_sha256: str
+    derived_sha256: str
 
 
 def _identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
@@ -234,52 +220,32 @@ def _replace_exact(text: str, old: str, new: str, label: str, expected: int = 1)
 
 def _result_writer_heredoc(
     authority: FrozenAuthority,
-    *,
-    phase_a_manifest_path: str = PHASE_A_MANIFEST_PATH,
-    phase_a_anchor_path: str = PHASE_A_ANCHOR_PATH,
 ) -> str:
     base = authority.document["base"]
     forbidden = authority.document["forbidden_ancestry"]
     required = [base["commit"]]
     forbidden_values = list(dict.fromkeys([*forbidden["commits"], *forbidden["raw_semantic_source_commits"]]))
-    source = next(
-        lane["source_commit"]["commit"]
-        for lane in authority.document["ordered_lanes"]
-        if lane.get("source_commit")
-    )
-    argv = tuple(authority.document["execution_driver"]["argv"])
-    argv_sha = hashlib.sha256(("\0".join(argv) + "\0").encode("utf-8")).hexdigest()
     values = {
         "base": base["commit"],
         "base_tree": base["tree"],
         "main": base["protected_main_commit"],
         "required": required,
         "forbidden": forbidden_values,
-        "source": source,
-        "descriptor": authority.descriptor.sha256,
-        "provenance": authority.provenance.sha256,
-        "json": authority.json.sha256,
-        "markdown": authority.markdown.sha256,
-        "shell": authority.shell.sha256,
-        "argv": argv_sha,
     }
     encoded = json.dumps(values, sort_keys=True, separators=(",", ":"))
-    return f'''publish_retained_replay_evidence() {{
+    return f'''publish_retained_replay_pending() {{
   local parent="$1"
-  "$PYTHON" - "$RESULT_ROOT" "$REPLAY" "$CURRENT_HEAD" "$CURRENT_TREE" "$parent" {phase_a_manifest_path!r} {phase_a_anchor_path!r} <<'PY'
-import hashlib
+  "$PYTHON" - "$RESULT_ROOT" "$REPLAY" "$CURRENT_HEAD" "$CURRENT_TREE" "$parent" <<'PY'
 import json
 import os
 import re
 import stat
 import sys
 
-replay_root, repository, final_head, tree, parent, manifest_path, anchor_path = sys.argv[1:]
+replay_root, repository, final_head, tree, parent = sys.argv[1:]
 authority = json.loads({encoded!r})
 OID = re.compile(r'[0-9a-f]{{40}}\\Z')
-SHA = re.compile(r'[0-9a-f]{{64}}\\Z')
-RESULT_KEYS = {sorted(RESULT_KEYS)!r}
-COMPLETION_KEYS = {sorted(COMPLETION_KEYS)!r}
+PENDING_KEYS = {sorted(PENDING_KEYS)!r}
 
 def reject(message):
     raise SystemExit(message)
@@ -294,51 +260,6 @@ def dir_identity(path, label):
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
         reject(label + ' is not an owned mode-0700 directory')
     return {{'st_dev': int(st.st_dev), 'st_ino': int(st.st_ino), 'st_uid': int(st.st_uid), 'st_mode': 0o700, 'st_nlink': int(st.st_nlink)}}
-
-def read_private(path, label, limit=2 * 1024 * 1024):
-    canonical(path, label)
-    samples = []
-    for _ in range(3):
-        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        try:
-            before = os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o077:
-                reject(label + ' is not private and single-link')
-            raw = bytearray()
-            while True:
-                block = os.read(fd, min(131072, limit + 1 - len(raw)))
-                if not block:
-                    break
-                raw.extend(block)
-                if len(raw) > limit:
-                    reject(label + ' exceeds its byte limit')
-            after = os.fstat(fd)
-        finally:
-            os.close(fd)
-        final = os.lstat(path)
-        identity = (before.st_dev, before.st_ino, before.st_uid, stat.S_IMODE(before.st_mode), before.st_size, before.st_nlink)
-        if identity != (after.st_dev, after.st_ino, after.st_uid, stat.S_IMODE(after.st_mode), after.st_size, after.st_nlink) or identity != (final.st_dev, final.st_ino, final.st_uid, stat.S_IMODE(final.st_mode), final.st_size, final.st_nlink):
-            reject(label + ' changed during read')
-        samples.append((bytes(raw), identity))
-    if samples[0] != samples[1] or samples[0] != samples[2]:
-        reject(label + ' changed across reads')
-    return samples[0]
-
-def strict_json(raw, label):
-    def pairs(items):
-        value = {{}}
-        for key, item in items:
-            if key in value:
-                reject(label + ' contains a duplicate key')
-            value[key] = item
-        return value
-    try:
-        value = json.loads(raw.decode('utf-8'), object_pairs_hook=pairs)
-    except Exception as error:
-        reject(label + ' JSON failed: ' + str(error))
-    if not isinstance(value, dict):
-        reject(label + ' root differs')
-    return value
 
 def create_once(path, value, label):
     raw = (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\\n').encode('utf-8')
@@ -358,10 +279,7 @@ def create_once(path, value, label):
         os.fsync(parent_fd)
     finally:
         os.close(parent_fd)
-    observed, identity = read_private(path, label)
-    if observed != raw:
-        reject(label + ' bytes differ after creation')
-    return observed, identity
+    return raw
 
 canonical(replay_root, 'replay root')
 canonical(repository, 'repository')
@@ -374,28 +292,8 @@ if os.path.lexists(replay_root):
 repository_identity = dir_identity(repository, 'repository')
 if not OID.fullmatch(final_head) or not OID.fullmatch(parent) or not OID.fullmatch(tree):
     reject('final Git identity differs')
-manifest_raw, _ = read_private(canonical(manifest_path, 'Phase A manifest'), 'Phase A manifest')
-manifest_sha = hashlib.sha256(manifest_raw).hexdigest()
-manifest = strict_json(manifest_raw, 'Phase A manifest')
-policy = manifest.get('policy')
-if not isinstance(policy, dict):
-    reject('Phase A policy is absent')
-if policy.get('base_commit') != authority['base'] or policy.get('base_tree') != authority['base_tree'] or policy.get('main_commit') != authority['main']:
-    reject('Phase A base policy differs from frozen authority')
-if policy.get('required_ancestors') != authority['required'] or policy.get('forbidden_ancestors') != authority['forbidden']:
-    reject('Phase A ancestry policy differs from frozen authority')
-approval_payload = {{key: manifest[key] for key in ('schema', 'phase', 'artifacts', 'shell_metadata', 'normalized_json_sha256', 'inputs', 'stale', 'policy')}}
-approval = hashlib.sha256(json.dumps(approval_payload, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('utf-8')).hexdigest()
-anchor_raw, _ = read_private(canonical(anchor_path, 'Phase A approval anchor'), 'Phase A approval anchor', 4096)
-anchor = strict_json(anchor_raw, 'Phase A approval anchor')
-anchor_keys = {{'schema', 'phase', 'manifest_sha256', 'phase_a_approval_digest', 'policy_sha256', 'decision', 'provisioning_boundary'}}
-policy_sha = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode('utf-8')).hexdigest()
-if set(anchor) != anchor_keys or anchor.get('schema') != 'task409-execution-preflight/phase-a-approval-anchor/v1' or anchor.get('phase') != 'external-review-of-phase-a-consistency':
-    reject('Phase A approval anchor schema differs')
-if anchor.get('manifest_sha256') != manifest_sha or anchor.get('phase_a_approval_digest') != approval or anchor.get('policy_sha256') != policy_sha or anchor.get('decision') != 'approve-consistency-only' or anchor.get('provisioning_boundary') != 'external-review-input':
-    reject('Phase A approval anchor differs')
 
-# Create the result root only after all external evidence is authenticated.
+# All Git and closure observations are complete before this create-only output.
 parent_fd = os.open(run_parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0))
 try:
     os.mkdir('replay-root', 0o700, dir_fd=parent_fd)
@@ -407,9 +305,8 @@ if any(parent_final[key] != parent_identity[key] for key in ('st_dev', 'st_ino',
     reject('run parent identity changed during replay-root creation')
 replay_identity = dir_identity(replay_root, 'replay root')
 
-result = {{
-    'schema': {RESULT_SCHEMA!r}, 'phase': {RESULT_PHASE!r}, 'lane': {RESULT_LANE!r},
-    'phase_a_manifest_sha256': manifest_sha, 'phase_a_approval_digest': approval,
+pending = {{
+    'schema': {PENDING_SCHEMA!r},
     'replay_root': replay_root, 'replay_root_identity': replay_identity,
     'repository': repository, 'repository_identity': repository_identity,
     'head_state': 'detached', 'final_head': final_head, 'parent': parent, 'tree': tree,
@@ -417,30 +314,9 @@ result = {{
     'protected_main_commit': authority['main'], 'required_ancestors': authority['required'],
     'forbidden_ancestors': authority['forbidden'],
 }}
-if set(result) != set(RESULT_KEYS):
-    reject('replay result fields differ')
-result_path = os.path.join(replay_root, 'replay-result.json')
-result_raw, result_identity = create_once(result_path, result, 'replay result')
-completion = {{
-    'schema': {COMPLETION_SCHEMA!r}, 'completion_marker': {COMPLETION_MARKER!r},
-    'result_path': result_path, 'result_sha256': hashlib.sha256(result_raw).hexdigest(),
-    'result_identity': {{'st_dev': result_identity[0], 'st_ino': result_identity[1], 'st_uid': result_identity[2], 'st_mode': result_identity[3], 'st_size': result_identity[4], 'st_nlink': result_identity[5]}},
-    'driver_sha256': authority['shell'], 'markdown_sha256': authority['markdown'],
-    'json_sha256': authority['json'], 'shell_sha256': authority['shell'],
-    'provenance_sha256': authority['provenance'], 'source_commit': authority['source'],
-    'argv_sha256': authority['argv'], 'stdin_sha256': authority['shell'],
-    'stdout_sha256': hashlib.sha256((f'FINAL_HEAD={{final_head}}\\nREMOTE_DEV={{authority["base"]}}\\nINDEPENDENT_APPROVAL_REQUIRED=1\\nNO_PUSH_PERFORMED=1\\n').encode('ascii') + {SUCCESS_OUTPUT!r}).hexdigest(),
-    'stderr_sha256': hashlib.sha256(b'').hexdigest(),
-    'stdout_bytes': len((f'FINAL_HEAD={{final_head}}\\nREMOTE_DEV={{authority["base"]}}\\nINDEPENDENT_APPROVAL_REQUIRED=1\\nNO_PUSH_PERFORMED=1\\n').encode('ascii') + {SUCCESS_OUTPUT!r}), 'stderr_bytes': 0,
-}}
-if set(completion) != set(COMPLETION_KEYS):
-    reject('replay completion fields differ')
-completion_path = os.path.join(replay_root, 'replay-completion.json')
-create_once(completion_path, completion, 'replay completion')
-read_private(result_path, 'replay result final')
-read_private(completion_path, 'replay completion final')
-dir_identity(replay_root, 'replay root final')
-dir_identity(repository, 'repository final')
+if set(pending) != set(PENDING_KEYS):
+    reject('pending replay result fields differ')
+create_once(os.path.join(replay_root, 'replay-result.pending.json'), pending, 'pending replay result')
 PY
 }}
 '''
@@ -507,13 +383,11 @@ REPLAY_GIT_BOUND=0
 cleanup_clean_primary_success_only
 printf 'TASK409_FINAL_REPLAY_OK=1\\nCLEAN_PRIMARY_REMOVED=1\\n'
 '''
-    new_tail = '''printf 'FINAL_HEAD=%s\\nREMOTE_DEV=%s\\nINDEPENDENT_APPROVAL_REQUIRED=1\\nNO_PUSH_PERFORMED=1\\n' "$CURRENT_HEAD" "$(git_primary rev-parse origin/dev)"
-assert_replay_closure
+    new_tail = '''assert_replay_closure
 test ! -e "$RESULT_ROOT" && test ! -L "$RESULT_ROOT" || fail "replay evidence root appeared before publication"
 RETAINED_PARENT="$(git_replay rev-parse "$CURRENT_HEAD^")"
-publish_retained_replay_evidence "$RETAINED_PARENT"
-assert_replay_closure
-printf 'TASK409_FINAL_REPLAY_OK=1\\nTASK409_RETAINED_REPLAY_OK=1\\nREPOSITORY_RETAINED=1\\nCLEAN_PRIMARY_RETAINED=1\\n'
+publish_retained_replay_pending "$RETAINED_PARENT"
+printf 'TASK409_RETAINED_REPLAY_OK=1\\n'
 '''
     shell = _replace_exact(shell, old_tail, new_tail, "retained success tail")
     forbidden = (
@@ -525,11 +399,12 @@ printf 'TASK409_FINAL_REPLAY_OK=1\\nTASK409_RETAINED_REPLAY_OK=1\\nREPOSITORY_RE
         "os.popen(",
     )
     require(not any(token in shell for token in forbidden), "retained success path still deletes retained data")
-    require(shell.count("publish_retained_replay_evidence") == 2, "retained evidence writer count differs")
-    require(shell.count(RESULT_SCHEMA) == 1 and shell.count(COMPLETION_SCHEMA) == 1, "retained schema count differs")
-    require(shell.count(COMPLETION_MARKER) == 1, "completion marker count differs")
+    require(shell.count("publish_retained_replay_pending") == 2, "pending writer count differs")
+    require(shell.count(PENDING_SCHEMA) == 1, "pending schema count differs")
+    require("replay-result.json" not in shell and "replay-completion.json" not in shell, "driver publishes final evidence")
     success_markers = shell.count(SUCCESS_MARKER)
-    require(success_markers == 3, f"success marker count differs: {success_markers}")
+    require(success_markers == 1, f"success marker count differs: {success_markers}")
+    require(shell.endswith(f"printf '{SUCCESS_MARKER}\\n'\n"), "terminal marker is not the final shell built-in")
     return shell.encode("utf-8")
 
 
@@ -568,6 +443,20 @@ def derive() -> bytes:
     result = transform_shell(authority)
     compile_derived(result)
     return result
+
+
+def derive_contract() -> DerivedDriver:
+    """Return the exact argv and stdin bytes that an outer wrapper must use."""
+    authority = load_frozen_authority()
+    stdin = transform_shell(authority)
+    compile_derived(stdin)
+    argv = tuple(authority.document["execution_driver"]["argv"])
+    return DerivedDriver(
+        argv=argv,
+        stdin=stdin,
+        source_sha256=authority.shell.sha256,
+        derived_sha256=hashlib.sha256(stdin).hexdigest(),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
