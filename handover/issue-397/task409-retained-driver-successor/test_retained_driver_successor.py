@@ -2,6 +2,7 @@
 """Offline retained-driver tests with isolated repository observations."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -75,12 +76,199 @@ class RetainedDriverTests(unittest.TestCase):
 
     def test_all_python_heredocs_compile_without_shell_execution(self) -> None:
         bodies = MODULE.extract_python_heredocs(self.derived)
-        self.assertEqual(len(bodies), 41)
+        self.assertEqual(len(bodies), 42)
         MODULE.compile_derived(self.derived)
         writer = next(body for body in bodies if MODULE.PENDING_SCHEMA in body)
         self.assertNotIn("subprocess", writer)
         self.assertNotIn("os.system", writer)
         self.assertNotIn("os.popen", writer)
+
+    def _self_contained_body(self) -> str:
+        return next(
+            body
+            for body in MODULE.extract_python_heredocs(self.derived)
+            if "non-thin self-contained object pack" in body
+        )
+
+    def _isolated_helper_functions(self) -> dict[str, object]:
+        """Load helper definitions only. Do not run the generated script body."""
+        wanted = {
+            "reject",
+            "snapshot",
+            "assert_snapshot",
+            "require_empty_pack_directory",
+            "file_identity",
+            "read_descriptor",
+            "unlink_bound_alternate",
+        }
+        parsed = ast.parse(self._self_contained_body())
+        definitions = [
+            node
+            for node in parsed.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in wanted
+        ]
+        module = ast.Module(body=definitions, type_ignores=[])
+        ast.fix_missing_locations(module)
+        namespace = {
+            "hashlib": hashlib,
+            "os": os,
+            "stat": stat,
+            "MAX_PACK": 1024 * 1024 * 1024,
+        }
+        exec(compile(module, "isolated-self-contained-helpers.py", "exec"), namespace)
+        self.assertEqual(wanted, set(namespace).intersection(wanted))
+        return namespace
+
+    def test_proof_roots_are_complete_and_missing_source_or_forbidden_rejects(self) -> None:
+        roots = MODULE._proof_commit_roots(self.authority)
+        required = MODULE._required_proof_commit_roots(self.authority)
+        self.assertTrue(required <= set(roots))
+        source = next(
+            lane["source_commit"]["commit"]
+            for lane in self.authority.document["ordered_lanes"]
+            if isinstance(lane.get("source_commit"), dict)
+        )
+        forbidden = self.authority.document["forbidden_ancestry"]["commits"][0]
+        for missing in (source, forbidden):
+            with self.subTest(missing=missing):
+                changed = tuple(value for value in roots if value != missing)
+                with self.assertRaisesRegex(MODULE.Reject, "inventory is incomplete"):
+                    MODULE._validate_proof_commit_roots(self.authority, changed)
+
+    def test_pack_contract_is_non_thin_local_and_rechecks_without_alternates(self) -> None:
+        body = self._self_contained_body()
+        self.assertIn("run(['pack-objects', pack_prefix]", body)
+        self.assertNotIn("'--thin'", body)
+        self.assertNotIn("'--local'", body)
+        unlink = body.index("unlink_bound_alternate(alternates")
+        fsck = body.index("run(['fsck', '--strict'", unlink)
+        roots = body.index("for root in ROOTS:", fsck)
+        final_pack = body.index("assert_snapshot(pack_path", roots)
+        self.assertLess(unlink, fsck)
+        self.assertLess(fsck, roots)
+        self.assertLess(roots, final_pack)
+        self.assertIn("if os.path.lexists(alternates):", body[unlink:])
+
+    def test_pack_and_index_mutation_are_detected(self) -> None:
+        helpers = self._isolated_helper_functions()
+        snapshot = helpers["snapshot"]
+        assert_snapshot = helpers["assert_snapshot"]
+        with tempfile.TemporaryDirectory(prefix="issue397-pack-snapshot-") as temporary:
+            root = Path(temporary).resolve()
+            root.chmod(0o700)
+            for name in ("pack-a.pack", "pack-a.idx"):
+                path = root / name
+                path.write_bytes(b"bound bytes\n")
+                path.chmod(0o600)
+                expected = snapshot(str(path), name)
+                with path.open("ab") as stream:
+                    stream.write(b"changed")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                with self.assertRaisesRegex(SystemExit, "changed"):
+                    assert_snapshot(str(path), expected, name)
+
+    def _alternate_fixture(self, root: Path, raw: bytes = b"/bound/objects\n") -> Path:
+        info = root / "objects" / "info"
+        info.mkdir(parents=True, mode=0o700)
+        info.parent.chmod(0o700)
+        path = info / "alternates"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+
+    def test_alternates_content_hardlink_and_swap_reject(self) -> None:
+        unlink = self._isolated_helper_functions()["unlink_bound_alternate"]
+        expected = b"/bound/objects\n"
+        with tempfile.TemporaryDirectory(prefix="issue397-alternate-content-") as temporary:
+            root = Path(temporary).resolve(); root.chmod(0o700)
+            path = self._alternate_fixture(root, b"/wrong/objects\n")
+            with self.assertRaisesRegex(RuntimeError, "bytes differ"):
+                unlink(str(path), expected)
+            self.assertTrue(path.exists())
+        with tempfile.TemporaryDirectory(prefix="issue397-alternate-hardlink-") as temporary:
+            root = Path(temporary).resolve(); root.chmod(0o700)
+            path = self._alternate_fixture(root, expected)
+            os.link(path, path.with_name("second-link"))
+            with self.assertRaisesRegex(RuntimeError, "single-link"):
+                unlink(str(path), expected)
+            self.assertTrue(path.exists())
+        with tempfile.TemporaryDirectory(prefix="issue397-alternate-swap-") as temporary:
+            root = Path(temporary).resolve(); root.chmod(0o700)
+            path = self._alternate_fixture(root, expected)
+            replacement = path.with_name("replacement")
+            replacement.write_bytes(expected); replacement.chmod(0o600)
+            real_read = os.read
+            swapped = False
+
+            def swap_after_read(descriptor: int, count: int) -> bytes:
+                nonlocal swapped
+                block = real_read(descriptor, count)
+                if block and not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return block
+
+            with mock.patch.object(os, "read", side_effect=swap_after_read):
+                with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                    unlink(str(path), expected)
+            self.assertEqual(path.read_bytes(), expected)
+
+    def test_alternates_unlink_fsync_failure_fails_after_exact_unlink(self) -> None:
+        unlink = self._isolated_helper_functions()["unlink_bound_alternate"]
+        expected = b"/bound/objects\n"
+        with tempfile.TemporaryDirectory(prefix="issue397-alternate-fsync-") as temporary:
+            root = Path(temporary).resolve(); root.chmod(0o700)
+            path = self._alternate_fixture(root, expected)
+            with mock.patch.object(os, "fsync", side_effect=OSError("injected fsync failure")):
+                with self.assertRaisesRegex(OSError, "injected fsync failure"):
+                    unlink(str(path), expected)
+            self.assertFalse(os.path.lexists(path))
+
+    def test_exact_alternates_inode_is_unlinked_and_parent_is_synced(self) -> None:
+        unlink = self._isolated_helper_functions()["unlink_bound_alternate"]
+        expected = b"/bound/objects\n"
+        with tempfile.TemporaryDirectory(prefix="issue397-alternate-success-") as temporary:
+            root = Path(temporary).resolve(); root.chmod(0o700)
+            path = self._alternate_fixture(root, expected)
+            observed = os.lstat(path)
+            calls = 0
+            real_fsync = os.fsync
+
+            def count_fsync(descriptor: int) -> None:
+                nonlocal calls
+                calls += 1
+                real_fsync(descriptor)
+
+            with mock.patch.object(os, "fsync", side_effect=count_fsync):
+                unlink(str(path), expected)
+            self.assertEqual(calls, 1)
+            self.assertFalse(os.path.lexists(path))
+            self.assertEqual(observed.st_nlink, 1)
+
+    def test_preexisting_pack_collision_rejects(self) -> None:
+        require_empty = self._isolated_helper_functions()["require_empty_pack_directory"]
+        with tempfile.TemporaryDirectory(prefix="issue397-pack-collision-") as temporary:
+            pack = Path(temporary).resolve() / "pack"
+            pack.mkdir(mode=0o700)
+            collision = pack / "pack-foreign.pack"
+            collision.write_bytes(b"foreign\n"); collision.chmod(0o600)
+            with self.assertRaisesRegex(SystemExit, "pre-existing"):
+                require_empty(str(pack))
+            self.assertEqual(collision.read_bytes(), b"foreign\n")
+
+    def test_self_contained_helper_captures_output_without_stdout_leakage(self) -> None:
+        body = self._self_contained_body()
+        self.assertIn("stdout=subprocess.PIPE, stderr=subprocess.PIPE", body)
+        self.assertIn("packed.stdout", body)
+        self.assertNotIn("print(", body)
+        text = self.derived.decode()
+        self.assertIn(
+            'git_replay merge-base --is-ancestor "$BASE" "$CURRENT_HEAD"', text
+        )
+        self.assertEqual(text.count(MODULE.SUCCESS_MARKER), 1)
+        self.assertTrue(text.endswith(f"printf '{MODULE.SUCCESS_MARKER}\\n'\n"))
 
     def test_optional_derived_output_is_create_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="issue397-derived-output-") as temporary:
