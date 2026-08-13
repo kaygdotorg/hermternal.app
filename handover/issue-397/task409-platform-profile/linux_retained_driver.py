@@ -21,14 +21,13 @@ DRIVER_PATH = BASE / "task409-retained-driver-successor" / "retained_driver_succ
 DRIVER_SHA256 = "3e3dc1444879b416fa7e8e884a3523566ba9f4a9a96f2857380d8c4869917e20"
 AUTHORITY_PATH = BASE / "task464-candidate5-authority-successor" / "candidate5_authority.py"
 AUTHORITY_SHA256 = "1eec1b59f608a3c64d4abb532fe6dbe031c4ba8008b46775db3ee6a75c9bb9a8"
-FINAL_ROOT = BASE / "task464-candidate5-linux-v1-final"
 HASHES = {
     "authority-descriptor.json": "f7cf533c43fa76165872c72ca256a65c6a8aad55bc3aef52a308ea5d4a356458",
     "candidate-five.json": "d04a7567c03b3dd7d129a224592a77ca06e0790460406fa2172232e00bfce035",
     "candidate-five.md": "d43061e62886e50465ca73fa69b7e21994ed1cad3f186162583b47aeef3e8a3a",
     "candidate-five.sh": "9995382f83d26bb22a8c7641c1dc2f5a7157b7530f9eaadd0b73e329ecf2e75f",
-    "provenance-manifest.json": "e9ad48500c69b8c9a61fbb32cf03f59faf37422387586a00d45e7345e1fba0e4",
-    "platform-adaptation-manifest.json": "cde271d6096578adb55901cb4f610788f314b4263fd42fb33b6cb563b0a74611",
+    "provenance-manifest.json": "3ae36dcd2e9328d50e95a53c4bcc7f093c4d7c2379ec2cfe04339cac6374f118",
+    "platform-adaptation-manifest.json": "ee0444e00045d5e63f845888beaabf9981f15e61da1015afff601fd55033fd62",
 }
 
 
@@ -46,18 +45,26 @@ def _module(path: Path, digest: str, name: str) -> types.ModuleType:
 def load_driver() -> types.ModuleType:
     """Install the Linux authority callback into exact reviewed driver code."""
     profile = platform_profile.load()
+    final_root = Path(profile.authority_root)
     driver = _module(DRIVER_PATH, DRIVER_SHA256, "issue397_linux_retained_driver_base")
     authority = _module(AUTHORITY_PATH, AUTHORITY_SHA256, "issue397_linux_retained_driver_authority")
 
     def load_linux_authority():
-        descriptor = driver.stable_read(FINAL_ROOT / "authority-descriptor.json", "Linux authority descriptor", mode=0o600)
-        provenance = driver.stable_read(FINAL_ROOT / "provenance-manifest.json", "Linux provenance manifest", mode=0o600)
-        json_snapshot = driver.stable_read(FINAL_ROOT / "candidate-five.json", "Linux candidate JSON", mode=0o600)
-        markdown = driver.stable_read(FINAL_ROOT / "candidate-five.md", "Linux candidate Markdown", mode=0o600)
-        shell = driver.stable_read(FINAL_ROOT / "candidate-five.sh", "Linux candidate shell", mode=0o600)
+        descriptor = driver.stable_read(final_root / "authority-descriptor.json", "Linux authority descriptor", mode=0o600)
+        provenance = driver.stable_read(final_root / "provenance-manifest.json", "Linux provenance manifest", mode=0o600)
+        adaptation = driver.stable_read(final_root / "platform-adaptation-manifest.json", "Linux platform adaptation", mode=0o600)
+        json_snapshot = driver.stable_read(final_root / "candidate-five.json", "Linux candidate JSON", mode=0o600)
+        markdown = driver.stable_read(final_root / "candidate-five.md", "Linux candidate Markdown", mode=0o600)
+        shell = driver.stable_read(final_root / "candidate-five.sh", "Linux candidate shell", mode=0o600)
         for name, snapshot in (("authority-descriptor.json", descriptor), ("provenance-manifest.json", provenance), ("candidate-five.json", json_snapshot), ("candidate-five.md", markdown), ("candidate-five.sh", shell)):
             driver.require(snapshot.sha256 == HASHES[name], f"Linux {name} SHA-256 differs")
-        validated = authority.validate(descriptor.path, FINAL_ROOT, descriptor.sha256)
+        driver.require(adaptation.sha256 == HASHES["platform-adaptation-manifest.json"], "Linux adaptation SHA-256 differs")
+        adaptation_value = driver._strict_json(adaptation.raw, "Linux platform adaptation")
+        driver.require(adaptation_value["schema"] == "hermternal.issue-397.platform-adaptation/v1", "Linux adaptation schema differs")
+        driver.require(adaptation_value["profile"] == {"path": os.fspath(platform_profile.PROFILE_PATH), "sha256": profile.sha256, "profile_id": profile.profile_id}, "Linux adaptation profile binding differs")
+        driver.require([item["from"] for item in adaptation_value["semantic_changes"]] == [profile.predecessor_bindings["python3"], profile.predecessor_bindings["source_repository"]], "Linux adaptation predecessor changes differ")
+        driver.require([item["to"] for item in adaptation_value["semantic_changes"]] == [profile.tools["python3"].path, profile.source_repository], "Linux adaptation successor changes differ")
+        validated = authority.validate(descriptor.path, final_root, descriptor.sha256)
         driver.require(validated.artifacts["json"].raw == json_snapshot.raw and validated.artifacts["markdown"].raw == markdown.raw and validated.artifacts["shell"].raw == shell.raw, "Linux #401 bytes differ")
         document = driver._strict_json(json_snapshot.raw, "Linux candidate JSON")
         driver.require(document["execution_driver"]["shell"].encode() == shell.raw, "Linux JSON shell differs")
@@ -65,7 +72,7 @@ def load_driver() -> types.ModuleType:
         driver.require(document["execution_driver"]["trusted_executables"]["python3"] == profile.tools["python3"].path, "Linux Python profile binding differs")
         driver.require(document["execution_driver"]["primary_repository"] == profile.source_repository, "Linux source profile binding differs")
         provenance_value = driver._strict_json(provenance.raw, "Linux provenance")
-        driver.require(provenance_value["repository_boundary"] == {"output_root": os.fspath(FINAL_ROOT)}, "Linux provenance root differs")
+        driver.require(provenance_value["repository_boundary"] == {"output_root": os.fspath(final_root)}, "Linux provenance root differs")
         return driver.FrozenAuthority(descriptor, provenance, json_snapshot, markdown, shell, document)
 
     driver.load_frozen_authority = load_linux_authority

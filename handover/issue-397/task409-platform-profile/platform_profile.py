@@ -54,6 +54,7 @@ class PlatformProfile:
     source_repository: str
     source_detached_head: str
     temporary_parent: str
+    authority_root: str
     predecessor_bindings: Mapping[str, str]
     tools: Mapping[str, Tool]
     raw: bytes
@@ -129,15 +130,17 @@ def load(path: Path = PROFILE_PATH, *, verify_host: bool = True) -> PlatformProf
     tools_value = value.get("tools")
     predecessor = value.get("predecessor_bindings")
     require(isinstance(source, dict) and set(source) == {"repository", "detached_head"}, "source profile fields differ")
-    require(isinstance(runtime, dict) and set(runtime) == {"temporary_parent"}, "runtime profile fields differ")
+    require(isinstance(runtime, dict) and set(runtime) == {"temporary_parent", "authority_root"}, "runtime profile fields differ")
     require(isinstance(tools_value, dict) and tuple(sorted(tools_value)) == tuple(sorted(TOOLS)), "tool profile fields differ")
     require(isinstance(predecessor, dict) and set(predecessor) == {"python3", "source_repository", "temporary_parent"} and all(isinstance(item, str) and item.startswith("/") for item in predecessor.values()), "predecessor bindings differ")
     repository = source.get("repository")
     detached_head = source.get("detached_head")
     temporary_parent = runtime.get("temporary_parent")
+    authority_root = runtime.get("authority_root")
     require(isinstance(repository, str) and repository.startswith("/") and os.path.realpath(repository) == repository, "source repository is not canonical")
     require(isinstance(detached_head, str) and OID.fullmatch(detached_head) is not None, "source detached head differs")
     require(isinstance(temporary_parent, str) and temporary_parent.startswith("/") and os.path.realpath(temporary_parent) == temporary_parent, "temporary parent differs")
+    require(isinstance(authority_root, str) and authority_root.startswith("/") and os.path.realpath(authority_root) == authority_root, "authority root differs")
     parsed_tools: dict[str, Tool] = {}
     for name in TOOLS:
         record = tools_value.get(name)
@@ -160,7 +163,7 @@ def load(path: Path = PROFILE_PATH, *, verify_host: bool = True) -> PlatformProf
         head = subprocess.run([*command, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment).stdout.decode("ascii").strip()
         symbolic = subprocess.run([*command, "symbolic-ref", "-q", "HEAD"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
         require(head == detached_head and symbolic.returncode == 1 and not symbolic.stdout, "source is not at the reviewed detached head")
-    return PlatformProfile("linux-host-v1", repository, detached_head, temporary_parent, MappingProxyType(dict(predecessor)), MappingProxyType(parsed_tools), raw, hashlib.sha256(raw).hexdigest())
+    return PlatformProfile("linux-host-v1", repository, detached_head, temporary_parent, authority_root, MappingProxyType(dict(predecessor)), MappingProxyType(parsed_tools), raw, hashlib.sha256(raw).hexdigest())
 
 
 if __name__ == "__main__":

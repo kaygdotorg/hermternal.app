@@ -24,7 +24,6 @@ import platform_profile
 
 BASE = Path(__file__).resolve().parents[1]
 PREDECESSOR_ROOT = BASE / "task464-candidate5-final"
-FINAL_ROOT = BASE / "task464-candidate5-linux-v1-final"
 ORCHESTRATOR = BASE / "task464-candidate5-final-triad" / "generator_orchestrator.py"
 PUBLICATION = BASE / "task464-candidate5-publication-successor" / "candidate5_publication_successor.py"
 AUTHORITY = BASE / "task464-candidate5-authority-successor" / "candidate5_authority.py"
@@ -164,12 +163,15 @@ def generate(root: Path) -> Generated:
     original = orchestrator.generate_in_memory(root)
     document = json.loads(original.payloads["json"].decode("utf-8"))
     counts = {old_python: 0, old_source: 0, old_temp: 0}
+    root_counts = {os.fspath(root): 0}
     replacements = ((old_python, profile.tools["python3"].path), (old_source, profile.source_repository), (old_temp, profile.temporary_parent))
     document = _replace_values(document, replacements, counts)
+    document = _replace_values(document, ((os.fspath(root), profile.authority_root),), root_counts)
     require(counts[old_python] == 2 and counts[old_source] == 3 and counts[old_temp] == 35, f"structured translation counts differ: {counts}")
     json_raw = _update_fixed_point(document, authority)
     shell = document["execution_driver"]["shell"].encode("utf-8")
-    markdown = _markdown(original.payloads["markdown"], shell, document, tuple((old.encode(), new.encode()) for old, new in replacements))
+    markdown_replacements = (*replacements, (os.fspath(root), profile.authority_root))
+    markdown = _markdown(original.payloads["markdown"], shell, document, tuple((old.encode(), new.encode()) for old, new in markdown_replacements))
     require(authority.extract_shell(markdown) == shell, "Markdown shell parity differs")
     require(json.loads(json_raw)["execution_driver"]["shell"].encode() == shell, "JSON shell parity differs")
     for forbidden in (old_python, old_source, old_temp):
@@ -215,11 +217,12 @@ def _create(root: Path, name: str, raw: bytes) -> None:
 def freeze(root: Path) -> dict[str, str]:
     """Create the complete successor once through approved #402 publication."""
     root = root.resolve()
+    profile = platform_profile.load()
+    require(root == Path(profile.authority_root), "publication root differs from platform profile")
     require(root.is_absolute() and os.path.realpath(root) == os.fspath(root), "output root differs")
     if not root.exists():
         root.mkdir(mode=0o700)
     require(stat.S_IMODE(root.stat().st_mode) == 0o700 and not any(root.iterdir()), "output root is not empty mode 0700")
-    profile = platform_profile.load()
     orchestrator, publication, authority = load_approved()
     generated = generate(root)
     adapted = types.SimpleNamespace(root=root, payloads=generated.payloads)
@@ -251,9 +254,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.prepare:
         with tempfile.TemporaryDirectory(prefix="issue397-linux-profile-") as parent:
-            result = freeze(Path(parent) / "final")
+            root = Path(parent) / "final"
+            root.mkdir(mode=0o700)
+            generated = generate(root)
+            result = {role: _sha(generated.payloads[role]) for role in ROLES}
     else:
-        result = freeze(FINAL_ROOT)
+        result = freeze(Path(platform_profile.load().authority_root))
     print(json.dumps(result, sort_keys=True))
     return 0
 
