@@ -9,10 +9,16 @@ The strict #401 authority descriptor and the closed provenance manifest are
 different documents. A consumer accepts only the complete triad, descriptor,
 and provenance set. It rejects every partial set.
 
-Final publication is disabled because the current #401 and #402 contracts do
-not compose. #401 requires each artifact to have one hard link. #402 calls its
-validator before it removes the private stage link, when each artifact has two
-hard links. A reviewed dependency correction is required before final output
-generation and publication.
+Final publication stays disabled until #402 has an independently approved exact
+hash. Compatibility is tested by running a test-provided publication module in
+a private temporary root and using genuine #401 as its callback. The callback
+must see single-link artifacts and exact JSON, Markdown, shell, argv, and stdin
+authority. Source formatting and source-text searches do not decide approval.
+
+The durable Markdown has later prose closing fences, which #401 treats as an
+ambiguous second shell-fence close. The successor makes one explicit final-only
+adaptation: it keeps the authority closing fence and replaces each later exact
+closing-fence record with a fixed HTML comment. It does not change the shell
+body, JSON shell, or any opening-fence record.
 
 Run `python3 -B test_generator_orchestrator.py` and repeat with `python3 -O -B`.
