@@ -9,8 +9,9 @@ The strict #401 authority descriptor and the closed provenance manifest are
 different documents. A consumer accepts only the complete triad, descriptor,
 and provenance set. It rejects every partial set.
 
-Final publication stays disabled until #402 has an independently approved exact
-hash. Compatibility is tested by running a test-provided publication module in
+Final publication stays disabled until the approved #402 commit
+`bad52e81aac1e29639847339e789915eb0e9039c` is integrated. Its exact approved
+source SHA-256 is pinned in the orchestrator. Compatibility is tested by running a test-provided publication module in
 a private temporary root and using genuine #401 as its callback. The callback
 must see single-link artifacts and exact JSON, Markdown, shell, argv, and stdin
 authority. Source formatting and source-text searches do not decide approval.

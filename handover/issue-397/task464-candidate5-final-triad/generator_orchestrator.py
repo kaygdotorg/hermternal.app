@@ -34,6 +34,8 @@ GIT_AUTHORITY = BASE / "task464-candidate5-git-config-successor" / "candidate5_g
 #402 is not approved yet. Its path and exact SHA-256 are explicit inputs to the
 #behavioral compatibility gate. No speculative branch tip is called approved.
 PUBLICATION = BASE / "task464-candidate5-publication-successor" / "candidate5_publication_successor.py"
+APPROVED_PUBLICATION_COMMIT = "bad52e81aac1e29639847339e789915eb0e9039c"
+APPROVED_PUBLICATION_SHA256 = "09c7a0e514f64ed89b475ff1f7e0c24a4b28477837b7a575aa0952377ea22c28"
 INPUT_JSON = BASE / "task464-inputs" / "task464-working-input.json"
 INPUT_MARKDOWN = BASE / "task464-inputs" / "task464-working-input.md"
 EXPECTED = {
@@ -302,6 +304,12 @@ def publication_module(path: Path, approved_sha256: str) -> types.ModuleType:
     """Load #402 only from an explicit approved path and exact digest."""
     require(SHA_RE.fullmatch(approved_sha256) is not None, "approved #402 SHA-256 is invalid")
     return verified_module(Path(path), approved_sha256, "candidate5_final_publication")
+
+
+def approved_publication_module() -> types.ModuleType:
+    """Load the exact independently approved #402 implementation."""
+    require(len(APPROVED_PUBLICATION_COMMIT) == 40, "approved #402 commit is invalid")
+    return publication_module(PUBLICATION, APPROVED_PUBLICATION_SHA256)
 
 
 def behavioral_publication_check(

@@ -32,6 +32,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertIn("task464-inputs/task464-working-input.json", snapshots)
         module = ORCH.install_git_authority()
         self.assertEqual(module.CANONICAL_RECORDS[-1], ("protocol.allow", "never"))
+        self.assertEqual(ORCH.APPROVED_PUBLICATION_COMMIT, "bad52e81aac1e29639847339e789915eb0e9039c")
+        self.assertEqual(ORCH.APPROVED_PUBLICATION_SHA256, "09c7a0e514f64ed89b475ff1f7e0c24a4b28477837b7a575aa0952377ea22c28")
 
     def test_generation_is_deterministic_and_does_not_publish(self) -> None:
         with tempfile.TemporaryDirectory() as left_parent, tempfile.TemporaryDirectory() as right_parent:
