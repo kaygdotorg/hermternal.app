@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import stat
 import subprocess
 import sys
@@ -407,14 +408,45 @@ def load_authority() -> Authority:
 
 @dataclass(frozen=True)
 class PhaseAEvidence:
-    """The approved #404 anchor evidence and its two Phase A digests."""
+    """Closed primitive bindings for the complete live #404 v2 file set."""
 
-    snapshot: Any
+    snapshot: Snapshot
     manifest_sha256: str
     approval_digest: str
+    live_record: Mapping[str, Any]
 
 
-def load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
+def _snapshot_record(snapshot: Snapshot) -> dict[str, Any]:
+    """Convert one stable snapshot to a cross-module primitive record."""
+    return {
+        "path": os.fspath(snapshot.path),
+        "sha256": snapshot.sha256,
+        "bytes": len(snapshot.raw),
+        "identity": list(snapshot.identity),
+    }
+
+
+def _authority_record(authority: Authority) -> dict[str, Any]:
+    """Return the exact primitive authority values used across rereads."""
+    return {
+        "argv": list(authority.argv),
+        "stdin_sha256": authority.derived_stdin_sha256,
+        "stdin_bytes": len(authority.stdin),
+        "driver_source_sha256": authority.driver_source_sha256,
+        "markdown_sha256": authority.markdown_sha256,
+        "json_sha256": authority.json_sha256,
+        "shell_sha256": authority.shell_sha256,
+        "provenance_sha256": authority.provenance_sha256,
+        "base_commit": authority.base_commit,
+        "base_tree": authority.base_tree,
+        "protected_main_commit": authority.protected_main_commit,
+        "source_commit": authority.source_commit,
+        "required_ancestors": list(authority.required_ancestors),
+        "forbidden_ancestors": list(authority.forbidden_ancestors),
+    }
+
+
+def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
     """Load only the exact durable #404 v2 anchor evidence interface."""
     _sha(expected_sha256, "expected Phase A evidence SHA-256")
     runner = _verified_module(
@@ -431,17 +463,115 @@ def load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
         runner.EVIDENCE_SCHEMA == "hermternal.issue-397.phase-a-anchor-evidence.v2",
         "Phase A evidence schema differs from approved v2",
     )
-    snapshot = runner.stable_read(supplied_path, "Phase A evidence")
-    require(snapshot.sha256 == expected_sha256, "Phase A evidence SHA-256 differs")
+    anchor_evidence = stable_read(supplied_path, "Phase A anchor evidence")
+    require(anchor_evidence.sha256 == expected_sha256, "Phase A evidence SHA-256 differs")
+    runner_anchor_evidence = runner.stable_read(
+        supplied_path, "Phase A anchor evidence"
+    )
+    require(
+        runner_anchor_evidence.raw == anchor_evidence.raw
+        and runner_anchor_evidence.sha256 == anchor_evidence.sha256,
+        "Phase A anchor evidence changed across validator loads",
+    )
     record = runner._parse_closed_record(
-        snapshot, "anchor", external_root=runner.EXTERNAL_ROOT
+        runner_anchor_evidence,
+        "anchor",
+        external_root=runner.EXTERNAL_ROOT,
     )
     inputs = record["inputs"]
+    modules = runner.load_modules()
+    root = runner.EXTERNAL_ROOT
+    paths = {
+        "phase_a_evidence": root / "evidence" / runner.PHASE_A_RECORD,
+        "anchor_evidence": supplied_path,
+        "manifest": root / "phase-a" / "input-manifest.json",
+        "approval_anchor": root / "external-review" / runner.ANCHOR_NAME,
+        "owner_marker": root / "phase-a" / ".owner",
+    }
+    snapshots = {
+        name: stable_read(path.resolve(), f"Phase A {name.replace('_', ' ')}")
+        for name, path in paths.items()
+    }
+    phase_record = runner._parse_closed_record(
+        runner.stable_read(paths["phase_a_evidence"], "Phase A evidence"),
+        "phase-a",
+        external_root=root,
+    )
+    manifest, manifest_sha256 = modules.phase_a.load_manifest(paths["manifest"])
+    require(
+        manifest_sha256 == inputs["phase_a_manifest_sha256"]
+        and snapshots["manifest"].sha256 == manifest_sha256
+        and phase_record["observations"]["manifest"]["sha256"] == manifest_sha256,
+        "live Phase A manifest digest differs",
+    )
+    require(
+        snapshots["phase_a_evidence"].sha256 == record["prior_sha256"]
+        == inputs["expected_phase_a_sha256"],
+        "live Phase A evidence chain differs",
+    )
+    require(
+        modules.phase_a.phase_a_approval_digest(manifest)
+        == inputs["phase_a_approval_digest"],
+        "live Phase A approval digest differs",
+    )
+    owner_value = runner._owner_value()
+    require(
+        snapshots["owner_marker"].raw == runner._canonical_json(owner_value)
+        and snapshots["owner_marker"].sha256
+        == phase_record["observations"]["owner_marker"]["sha256"],
+        "live Phase A owner marker differs",
+    )
+    anchor_value = json.loads(
+        snapshots["approval_anchor"].raw.decode("utf-8"),
+        object_pairs_hook=lambda pairs: runner._unique_object(pairs, runner.ANCHOR_NAME),
+    )
+    require(
+        set(anchor_value) == set(modules.anchor.ANCHOR_KEYS)
+        and snapshots["approval_anchor"].raw
+        == runner._canonical_json(record["observations"]["anchor"]["fields"])
+        and snapshots["approval_anchor"].sha256
+        == record["observations"]["anchor"]["sha256"],
+        "live Phase A approval anchor fields differ",
+    )
+    directories = {
+        os.fspath(path): runner._binding_record(
+            runner._directory_identity(path, f"live Phase A directory {path.name}", exact_mode=0o700)
+        )
+        for path in (root, root / "phase-a", root / "external-review", root / "evidence")
+    }
+    require(
+        phase_record["observations"]["external_root_binding"]
+        == directories[os.fspath(root)]
+        == record["observations"]["external_root_binding"]
+        and phase_record["observations"]["runtime_directory_bindings"]
+        == {key: value for key, value in directories.items() if key != os.fspath(root)},
+        "live Phase A directory bindings differ",
+    )
+    live_record = {
+        "schema": runner.EVIDENCE_SCHEMA,
+        "files": {name: _snapshot_record(item) for name, item in snapshots.items()},
+        "directories": directories,
+        "manifest_sha256": manifest_sha256,
+        "approval_digest": inputs["phase_a_approval_digest"],
+        "anchor_sha256": snapshots["approval_anchor"].sha256,
+        "owner_sha256": snapshots["owner_marker"].sha256,
+    }
     return PhaseAEvidence(
-        snapshot,
+        anchor_evidence,
         _sha(inputs["phase_a_manifest_sha256"], "Phase A manifest SHA-256"),
         _sha(inputs["phase_a_approval_digest"], "Phase A approval digest"),
+        live_record,
     )
+
+
+def load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
+    """Normalize every v2 evidence or filesystem failure to wrapper rejection."""
+    try:
+        return _load_phase_a_evidence(path, expected_sha256)
+    except Reject:
+        raise
+    except Exception as error:
+        raise Reject(f"Phase A live evidence rejected: {error}") from error
 
 
 @dataclass(frozen=True)
@@ -460,7 +590,7 @@ ProcessBoundary = Callable[[tuple[str, ...], bytes, Mapping[str, str]], ProcessR
 def _run_process(
     argv: tuple[str, ...], stdin: bytes, environment: Mapping[str, str]
 ) -> ProcessResult:
-    """The only real process boundary in this wrapper."""
+    """Run one child while enforcing output limits during pipe reads."""
     process = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
@@ -469,8 +599,57 @@ def _run_process(
         cwd="/",
         env=dict(environment),
     )
-    stdout, stderr = process.communicate(stdin)
-    return ProcessResult(process.pid, process.returncode, stdout, stderr)
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        raise Reject("process pipes are unavailable")
+    selector = selectors.DefaultSelector()
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    input_view = memoryview(stdin)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        os.set_blocking(stream.fileno(), False)
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    try:
+        while selector.get_map():
+            for key, _ in selector.select():
+                stream = key.fileobj
+                label = key.data
+                if label == "stdin":
+                    count = 1
+                    if input_view:
+                        try:
+                            count = os.write(stream.fileno(), input_view[:131072])
+                        except BrokenPipeError:
+                            count = 0
+                        input_view = input_view[count:]
+                    if not input_view or count == 0:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                chunk = os.read(stream.fileno(), 131072)
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                output[label].extend(chunk)
+                if len(output[label]) > MAX_BYTES:
+                    process.kill()
+                    process.wait()
+                    raise Reject(f"process {label} exceeds its byte limit")
+        returncode = process.wait()
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if not stream.closed:
+                stream.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    return ProcessResult(
+        process.pid, returncode, bytes(output["stdout"]), bytes(output["stderr"])
+    )
 
 
 def _run_root(pid: int) -> Path:
@@ -787,8 +966,13 @@ def _completion_bytes(
     return _canonical_json(value)
 
 
-def _write_new(path: Path, raw: bytes, label: str) -> tuple[Snapshot, tuple[int, int]]:
-    """Create and sync one new file; return its owned device and inode."""
+def _write_new(
+    path: Path,
+    raw: bytes,
+    label: str,
+    own: Callable[[Path, tuple[int, int]], None],
+) -> Snapshot:
+    """Create one file and report ownership immediately after descriptor open."""
     require(not os.path.lexists(path), f"{label} already exists")
     parent_fd = os.open(
         path.parent,
@@ -812,19 +996,13 @@ def _write_new(path: Path, raw: bytes, label: str) -> tuple[Snapshot, tuple[int,
         )
         opened = os.fstat(descriptor)
         owned = (int(opened.st_dev), int(opened.st_ino))
+        own(path, owned)
         view = memoryview(raw)
         while view:
             written = os.write(descriptor, view)
             require(written > 0, f"{label} write made no progress")
             view = view[written:]
         os.fsync(descriptor)
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-            descriptor = -1
-        if owned is not None:
-            _remove_owned(path, owned)
-        raise
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -833,7 +1011,7 @@ def _write_new(path: Path, raw: bytes, label: str) -> tuple[Snapshot, tuple[int,
     require(snapshot.raw == raw, f"{label} bytes differ after create")
     if owned is None:
         raise AssertionError("new file ownership was not recorded")
-    return snapshot, owned
+    return snapshot
 
 
 def _remove_owned(path: Path, owned: tuple[int, int]) -> bool:
@@ -864,6 +1042,7 @@ def publish_final(
     authority: Authority,
     phase_a: PhaseAEvidence,
     process: ProcessEvidence,
+    final_validator: Callable[[Publication], None] | None = None,
 ) -> Publication:
     """Create both final files or remove only this call's owned partial files."""
     result_path = pending.replay_root / RESULT_NAME
@@ -873,17 +1052,19 @@ def publish_final(
         "a final replay record already exists",
     )
     owned: list[tuple[Path, tuple[int, int]]] = []
+    def own(path: Path, inode: tuple[int, int]) -> None:
+        owned.append((path, inode))
+
     try:
-        result, result_owned = _write_new(
-            result_path, _result_bytes(pending, phase_a), "replay result"
+        result = _write_new(
+            result_path, _result_bytes(pending, phase_a), "replay result", own
         )
-        owned.append((result_path, result_owned))
-        completion, completion_owned = _write_new(
+        completion = _write_new(
             completion_path,
             _completion_bytes(result, pending, authority, phase_a, process),
             "replay completion",
+            own,
         )
-        owned.append((completion_path, completion_owned))
         parent_fd = os.open(
             pending.replay_root,
             os.O_RDONLY
@@ -901,6 +1082,9 @@ def publish_final(
         )
         require(publication.result == result, "final replay result changed")
         require(publication.completion == completion, "final replay completion changed")
+        verify_publication(publication, pending)
+        if final_validator is not None:
+            final_validator(publication)
         return publication
     except BaseException as primary:
         residue: list[str] = []
@@ -962,6 +1146,39 @@ def verify_publication(publication: Publication, pending: PendingFacts) -> None:
     )
 
 
+def _verify_live_inputs(
+    pending: PendingFacts,
+    authority_record: Mapping[str, Any],
+    phase_a: PhaseAEvidence,
+    expected_phase_a_evidence_sha256: str,
+    repository_observation: Mapping[str, str],
+) -> None:
+    """Reauthenticate every live input through closed primitive records."""
+    require(
+        _snapshot_record(stable_read(pending.snapshot.path, "pending live reread"))
+        == _snapshot_record(pending.snapshot),
+        "pending replay result changed during live verification",
+    )
+    require(
+        reobserve_repository(pending, load_authority()) == repository_observation,
+        "retained repository observations changed during live verification",
+    )
+    current_authority = load_authority()
+    require(
+        _authority_record(current_authority) == dict(authority_record),
+        "authority changed during live verification",
+    )
+    current_phase_a = load_phase_a_evidence(
+        phase_a.snapshot.path, expected_phase_a_evidence_sha256
+    )
+    require(
+        dict(current_phase_a.live_record) == dict(phase_a.live_record)
+        and _snapshot_record(current_phase_a.snapshot)
+        == _snapshot_record(phase_a.snapshot),
+        "Phase A live file set changed during verification",
+    )
+
+
 def execute_and_publish(
     phase_a_evidence: Path,
     expected_phase_a_evidence_sha256: str,
@@ -969,62 +1186,47 @@ def execute_and_publish(
     process_boundary: ProcessBoundary = _run_process,
 ) -> Publication:
     """Execute one exact retained driver call and publish validated evidence."""
-    phase_a = load_phase_a_evidence(
-        phase_a_evidence, expected_phase_a_evidence_sha256
-    )
-    authority = load_authority()
-    environment: Mapping[str, str] = {}
-    result = process_boundary(authority.argv, authority.stdin, environment)
-    process = validate_process(result, authority)
+    result: ProcessResult | None = None
     try:
+        phase_a = load_phase_a_evidence(
+            phase_a_evidence, expected_phase_a_evidence_sha256
+        )
+        authority = load_authority()
+        authority_record = _authority_record(authority)
+        environment: Mapping[str, str] = {}
+        result = process_boundary(authority.argv, authority.stdin, environment)
+        process = validate_process(result, authority)
         pending = load_pending(result, authority)
         observed = reobserve_repository(pending, authority)
-        require(
-            stable_read(pending.snapshot.path, "pending final reread")
-            == pending.snapshot,
-            "pending replay result changed before final publication",
+        _verify_live_inputs(
+            pending,
+            authority_record,
+            phase_a,
+            expected_phase_a_evidence_sha256,
+            observed,
         )
-        phase_a_after = load_phase_a_evidence(
-            phase_a.snapshot.path, expected_phase_a_evidence_sha256
+        publication = publish_final(
+            pending,
+            authority,
+            phase_a,
+            process,
+            final_validator=lambda _publication: _verify_live_inputs(
+                pending,
+                authority_record,
+                phase_a,
+                expected_phase_a_evidence_sha256,
+                observed,
+            ),
         )
-        require(
-            phase_a_after == phase_a, "Phase A evidence changed before publication"
-        )
-        authority_after = load_authority()
-        require(
-            authority_after.argv == authority.argv
-            and authority_after.stdin == authority.stdin
-            and authority_after.driver_source_sha256
-            == authority.driver_source_sha256
-            and authority_after.derived_stdin_sha256
-            == authority.derived_stdin_sha256
-            and authority_after.markdown_sha256 == authority.markdown_sha256
-            and authority_after.json_sha256 == authority.json_sha256
-            and authority_after.shell_sha256 == authority.shell_sha256
-            and authority_after.provenance_sha256 == authority.provenance_sha256
-            and authority_after.base_commit == authority.base_commit
-            and authority_after.base_tree == authority.base_tree
-            and authority_after.protected_main_commit
-            == authority.protected_main_commit
-            and authority_after.source_commit == authority.source_commit
-            and authority_after.required_ancestors == authority.required_ancestors
-            and authority_after.forbidden_ancestors
-            == authority.forbidden_ancestors,
-            "authority changed before publication",
-        )
-        # The verified module rereads above can take time. Repeat the complete
-        # repository observation so no earlier review crosses publication.
-        require(
-            reobserve_repository(pending, authority) == observed,
-            "retained repository observations changed before publication",
-        )
-        publication = publish_final(pending, authority, phase_a, process)
-        verify_publication(publication, pending)
         return publication
     except Reject as error:
         if error.pending_residue is not None:
             raise
-        raise Reject(str(error), _pending_residue(result.pid)) from error
+        residue = _pending_residue(result.pid) if result is not None else None
+        raise Reject(str(error), residue) from error
+    except Exception as error:
+        residue = _pending_residue(result.pid) if result is not None else None
+        raise Reject(f"wrapper input or filesystem failure: {error}", residue) from error
 
 
 def build_parser() -> argparse.ArgumentParser:
