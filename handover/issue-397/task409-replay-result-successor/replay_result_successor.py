@@ -34,9 +34,12 @@ GIT_AUTHORITY_PATH = (
     / "task464-candidate5-git-config-successor"
     / "candidate5_git_config_successor.py"
 )
-DRIVER_SHA256 = "a11bbba3feaab58e31011b2d76d15835c048b22447302d73e3f14dbab159e438"
+DRIVER_SHA256 = "3e3dc1444879b416fa7e8e884a3523566ba9f4a9a96f2857380d8c4869917e20"
+DERIVED_STDIN_SHA256 = (
+    "ea10248929964a5570623de3ecd653cd3ba7348d3df565491a94816872647e2d"
+)
 PHASE_A_RUNNER_SHA256 = (
-    "6f5024996daca712f5b2814d39d48540d0ea5369941d3e2b3f1c5a00dcb614f4"
+    "fb11d84062c05a2054a2f4162908de54ed15a530538fbf671ee54ff999baaf84"
 )
 GIT_AUTHORITY_SHA256 = (
     "b2b5a5f1e0ed813325a23cb32eb075b2637872f5c5176e81c79879af4ab1861a"
@@ -348,6 +351,10 @@ def load_authority() -> Authority:
         "derived stdin digest differs",
     )
     require(
+        contract.derived_sha256 == DERIVED_STDIN_SHA256,
+        "derived stdin differs from the approved self-contained driver",
+    )
+    require(
         contract.source_sha256 == frozen.shell.sha256
         and contract.derived_sha256 != contract.source_sha256,
         "derived and source shell boundary differs",
@@ -408,16 +415,27 @@ class PhaseAEvidence:
 
 
 def load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
-    """Use the verified #404 parser and an independent evidence digest."""
+    """Load only the exact durable #404 v2 anchor evidence interface."""
     _sha(expected_sha256, "expected Phase A evidence SHA-256")
     runner = _verified_module(
         PHASE_A_RUNNER_PATH,
         PHASE_A_RUNNER_SHA256,
         "issue397_retained_phase_a_runner",
     )
-    snapshot = runner.stable_read(_canonical(path, "Phase A evidence"), "Phase A evidence")
+    required_path = (
+        runner.EXTERNAL_ROOT / "evidence" / runner.ANCHOR_RECORD
+    ).resolve()
+    supplied_path = _canonical(path, "Phase A evidence")
+    require(supplied_path == required_path, "Phase A evidence path differs from v2 authority")
+    require(
+        runner.EVIDENCE_SCHEMA == "hermternal.issue-397.phase-a-anchor-evidence.v2",
+        "Phase A evidence schema differs from approved v2",
+    )
+    snapshot = runner.stable_read(supplied_path, "Phase A evidence")
     require(snapshot.sha256 == expected_sha256, "Phase A evidence SHA-256 differs")
-    record = runner._parse_closed_record(snapshot, "anchor")
+    record = runner._parse_closed_record(
+        snapshot, "anchor", external_root=runner.EXTERNAL_ROOT
+    )
     inputs = record["inputs"]
     return PhaseAEvidence(
         snapshot,
