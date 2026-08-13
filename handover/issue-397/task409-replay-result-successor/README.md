@@ -1,9 +1,10 @@
 # Retained replay-result lifecycle successor
 
-This successor is an offline-tested driver wrapper. Its tests mock only the
-single process boundary and the read-only repository observation. They do not
-run a replay, mutate Git, use a network, use credentials, use Hermes, or clean
-up data.
+This successor is an offline-tested authority gate. It verified-loads the exact
+integrated #403 final-freeze and orchestration bytes, #401 candidate authority,
+and #400 Git reviewer. It accepts only the fixed durable final root. Its tests
+also create an actual disposable #403 prepare output. They do not run replay,
+mutate Git, use a network, use credentials, use Hermes, or clean up data.
 
 The current Phase B result schema is closed. Therefore `replay-result.json`
 contains only `task409-execution-preflight/replay-result/v2` fields. The bound
@@ -27,20 +28,16 @@ that overlap. The driver must retain both roots after success. Cleanup is a
 separate future command; this successor rejects it even when requested and
 cannot delete a branch, stash, worktree, or any replay data.
 
-`publish_retained_result` stable-reads the closed #403 authority descriptor,
-provenance manifest, and triad three times. It derives the driver argv, stdin,
-artifact hashes, provenance hash, source commit, base, tree, and protected-main
-pins from these verified bytes. It then runs only that argv and stdin with an
-empty inherited environment. A successful process must emit the closed marker.
-The trusted repository reviewer derives the detached final head, its one parent,
-tree, device, inode, mode, and owner. The wrapper creates only private 0600
-files, fsyncs each file and parent, and stable-rereads all retained evidence.
+The gate derives the exact argv and stdin from genuine #401 validation. It reads
+base, base-tree, protected-main, source, and forbidden ancestry only from the
+authenticated candidate JSON. The real #403 provenance schema binds only its
+actual `output_root` and output records; no invented repository-boundary fields
+are accepted.
 
-`verify_publication` re-reads the complete authority and the repository. It
-rejects authority substitutions, path swaps, artifact changes, and semantic
-repository changes. Callers cannot provide replay facts or completion hashes.
-Cleanup remains disabled and has no implementation, so it cannot delete a
-branch, stash, worktree, or replay data.
+The retained replay driver remains unavailable. This is intentional: the
+approved candidate driver still deletes its replay output and cannot produce the
+required retained Phase-B result. Therefore the gate always blocks execution;
+it cannot delete a branch, stash, worktree, or replay data.
 
 Run the focused test with normal and optimized Python. This is not final-freeze
 approval, replay evidence, or Phase B approval.
