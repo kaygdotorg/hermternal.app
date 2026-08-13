@@ -709,12 +709,15 @@ class WrapperTests(unittest.TestCase):
             self.assertTrue(publication.completion.path.exists())
 
             owner = external_root / "phase-a" / ".owner"
-            with owner.open("ab") as stream:
-                stream.write(b"mutation")
+            replacement = owner.with_name("owner-replacement")
+            with replacement.open("xb") as stream:
+                stream.write(owner.read_bytes())
                 stream.flush()
                 os.fsync(stream.fileno())
+            replacement.chmod(0o600)
+            os.replace(replacement, owner)
             with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
-                with self.assertRaisesRegex(MODULE.Reject, "owner marker"):
+                with self.assertRaisesRegex(MODULE.Reject, "owner marker identity"):
                     MODULE.load_phase_a_evidence(anchor_path, anchor_snapshot.sha256)
 
     def test_parser_requires_both_phase_a_arguments(self) -> None:

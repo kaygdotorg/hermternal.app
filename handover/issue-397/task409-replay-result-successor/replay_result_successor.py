@@ -492,6 +492,18 @@ def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
         name: stable_read(path.resolve(), f"Phase A {name.replace('_', ' ')}")
         for name, path in paths.items()
     }
+    runner_snapshots = {
+        name: runner.stable_read(path.resolve(), f"Phase A {name.replace('_', ' ')}")
+        for name, path in paths.items()
+    }
+    for name in paths:
+        require(
+            runner_snapshots[name].raw == snapshots[name].raw
+            and runner_snapshots[name].sha256 == snapshots[name].sha256
+            and os.fspath(runner_snapshots[name].path)
+            == os.fspath(snapshots[name].path),
+            f"Phase A {name.replace('_', ' ')} changed across validator loads",
+        )
     phase_record = runner._parse_closed_record(
         runner.stable_read(paths["phase_a_evidence"], "Phase A evidence"),
         "phase-a",
@@ -503,6 +515,12 @@ def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
         and snapshots["manifest"].sha256 == manifest_sha256
         and phase_record["observations"]["manifest"]["sha256"] == manifest_sha256,
         "live Phase A manifest digest differs",
+    )
+    require(
+        phase_record["observations"]["manifest"]["identity"]
+        == dict(runner_snapshots["manifest"].identity)
+        == record["observations"]["phase_a_manifest_identity"],
+        "live Phase A manifest identity differs",
     )
     require(
         snapshots["phase_a_evidence"].sha256 == record["prior_sha256"]
@@ -521,6 +539,11 @@ def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
         == phase_record["observations"]["owner_marker"]["sha256"],
         "live Phase A owner marker differs",
     )
+    require(
+        phase_record["observations"]["owner_marker"]["identity"]
+        == dict(runner_snapshots["owner_marker"].identity),
+        "live Phase A owner marker identity differs",
+    )
     anchor_value = json.loads(
         snapshots["approval_anchor"].raw.decode("utf-8"),
         object_pairs_hook=lambda pairs: runner._unique_object(pairs, runner.ANCHOR_NAME),
@@ -532,6 +555,11 @@ def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
         and snapshots["approval_anchor"].sha256
         == record["observations"]["anchor"]["sha256"],
         "live Phase A approval anchor fields differ",
+    )
+    require(
+        record["observations"]["anchor"]["identity"]
+        == dict(runner_snapshots["approval_anchor"].identity),
+        "live Phase A approval anchor identity differs",
     )
     directories = {
         os.fspath(path): runner._binding_record(
@@ -549,7 +577,13 @@ def _load_phase_a_evidence(path: Path, expected_sha256: str) -> PhaseAEvidence:
     )
     live_record = {
         "schema": runner.EVIDENCE_SCHEMA,
-        "files": {name: _snapshot_record(item) for name, item in snapshots.items()},
+        "files": {
+            name: {
+                **_snapshot_record(item),
+                "identity": dict(runner_snapshots[name].identity),
+            }
+            for name, item in snapshots.items()
+        },
         "directories": directories,
         "manifest_sha256": manifest_sha256,
         "approval_digest": inputs["phase_a_approval_digest"],
