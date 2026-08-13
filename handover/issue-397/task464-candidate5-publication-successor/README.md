@@ -1,0 +1,15 @@
+# Candidate-five safe publication successor
+
+This speculative checkpoint publishes exactly three fixed candidate-five role
+names into one canonical private directory. It uses a private stage, retained
+descriptors, create-only hard links, reconciliation, data and directory fsync,
+and exact public-byte validation while the directory lock is held. Rollback
+removes only transaction-owned inodes and reports any residue.
+
+POSIX does not provide crash-atomic publication for three names. Process death
+can leave a partial set. Consumers must reject an incomplete set. This helper
+does not overwrite or adopt foreign paths. It does not run Git, replay, a
+candidate shell, a network operation, credentials, sockets, or Hermes.
+
+This checkpoint cannot be integrated or approved before checkpoint #401 and an
+independent review of these exact bytes.
