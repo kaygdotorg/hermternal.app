@@ -7,10 +7,10 @@ All publication behavior stays in the pinned generator.
 """
 
 import hashlib
-import importlib.util
 import os
 import re
 import stat
+import types
 from pathlib import Path
 
 
@@ -256,16 +256,28 @@ def _read_frozen_generator():
     return raw
 
 
+def _module_from_verified_bytes(raw):
+    """Execute only the bytes returned by the verified descriptor read.
+
+    The filename is diagnostic metadata for tracebacks. Python receives no
+    loader that can reopen that path after the descriptor verification ends.
+    """
+    if not isinstance(raw, bytes):
+        raise RuntimeError("verified generator content is not bytes")
+    module = types.ModuleType("candidate5_frozen_generator_for_successor")
+    module.__file__ = os.fspath(FROZEN_GENERATOR)
+    module.__package__ = ""
+    module.__loader__ = None
+    module.__spec__ = None
+    code = compile(raw, module.__file__, "exec", dont_inherit=True)
+    exec(code, module.__dict__)
+    return module
+
+
 def install_successor():
-    """Load the pinned checkpoint and install this reviewed range projection."""
-    _read_frozen_generator()
-    spec = importlib.util.spec_from_file_location(
-        "candidate5_frozen_generator_for_successor", FROZEN_GENERATOR
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("cannot load the frozen candidate-five generator")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Execute the pinned bytes and install the reviewed range projection."""
+    raw = _read_frozen_generator()
+    module = _module_from_verified_bytes(raw)
     module.GIT_RANGE_RE = INCLUSIVE_RANGE_RE
     module.parse_git_range = parse_git_range
     module.STRICT_RECORD_HELPERS = STRICT_RECORD_HELPERS

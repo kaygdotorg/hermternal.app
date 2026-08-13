@@ -3,9 +3,12 @@
 
 import ast
 import copy
+import hashlib
 import importlib.util
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 
@@ -203,6 +206,55 @@ def test_generated_validator(successor, frozen):
         require(token not in shell, f"generated shell retains raw range use: {token}")
 
 
+def test_swap_after_verified_read(successor):
+    """Prove a path replacement after verification cannot supply code bytes."""
+    trusted_raw = successor.FROZEN_GENERATOR.read_bytes()
+    original_path = successor.FROZEN_GENERATOR
+    original_hash = successor.FROZEN_GENERATOR_SHA256
+    original_reader = successor._read_frozen_generator
+    with tempfile.TemporaryDirectory(prefix="candidate5-successor-swap-") as directory:
+        root = Path(directory)
+        victim = root / "frozen-generator.py"
+        attacker = root / "replacement.py"
+        victim.write_bytes(trusted_raw)
+        attacker.write_bytes(b"SWAP_REPLACEMENT_EXECUTED = True\n")
+        successor.FROZEN_GENERATOR = victim
+        successor.FROZEN_GENERATOR_SHA256 = hashlib.sha256(trusted_raw).hexdigest()
+
+        def read_then_swap():
+            raw = original_reader()
+            os.replace(attacker, victim)
+            return raw
+
+        successor._read_frozen_generator = read_then_swap
+        try:
+            frozen = successor.install_successor()
+            require(
+                victim.read_bytes() == b"SWAP_REPLACEMENT_EXECUTED = True\n",
+                "the adversarial path replacement did not occur",
+            )
+            require(
+                not hasattr(frozen, "SWAP_REPLACEMENT_EXECUTED"),
+                "replacement bytes executed after the verified read",
+            )
+            require(
+                hasattr(frozen, "patch_shell"),
+                "the exact verified generator bytes did not execute",
+            )
+            require(
+                frozen.__file__ == os.fspath(victim),
+                "traceback filename metadata does not identify the verified path",
+            )
+            require(
+                frozen.__loader__ is None,
+                "the verified-byte module retained a path-reopening loader",
+            )
+        finally:
+            successor._read_frozen_generator = original_reader
+            successor.FROZEN_GENERATOR = original_path
+            successor.FROZEN_GENERATOR_SHA256 = original_hash
+
+
 def main():
     successor = load_successor()
     frozen = successor.install_successor()
@@ -210,6 +262,7 @@ def main():
     test_rejections(successor, records[0][1])
     test_embedded_helpers(successor, records)
     test_generated_validator(successor, frozen)
+    test_swap_after_verified_read(successor)
     print(f"candidate-five successor range checks passed for {len(records)} durable ranges")
 
 
