@@ -1,150 +1,202 @@
 #!/usr/bin/env python3
-"""Regressions for the successor Phase B lifecycle validator."""
+"""Regressions for genuine durable Phase A and Phase B lifecycle calls."""
 from __future__ import annotations
 
 import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import stat
+import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("phase_b_lifecycle_successor", HERE / "phase_b_lifecycle_successor.py")
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("cannot load lifecycle successor")
-MODULE = importlib.util.module_from_spec(SPEC)
-import sys
-sys.modules[SPEC.name] = MODULE
-SPEC.loader.exec_module(MODULE)
+
+
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+LIFECYCLE = load("issue397_lifecycle_tests", HERE / "phase_b_lifecycle_successor.py")
+FIXTURE = load("issue397_lifecycle_fixture", HERE / "candidate5_phase_a_fixture.py")
+
+
+class Guard:
+    def __init__(self, identity):
+        self.identity = identity
+    def assert_stable(self):
+        return None
 
 
 class LifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(prefix="issue397-phase-b-")
-        self.root = Path(self.temp.name).resolve()
-        self.shell = b"#!/bin/bash\nprintf '%s\\n' offline\n"
-        self.shell_sha = hashlib.sha256(self.shell).hexdigest()
-        token = "0" * 64
-        while True:
-            document = {"schema": "test-triad/v1", "shell_sha256": self.shell_sha, "driver_shell_sha256": self.shell_sha, "expected_body_sha256": self.shell_sha, "normalized_json_sha256": token}
-            raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode()
-            computed = MODULE.normalized_json_sha256(raw, token)
-            if computed == token:
-                break
-            token = computed
-        self.json_raw = raw
-        self.markdown = b"# Candidate five fixture\n\n```bash\n" + self.shell + b"```\n"
-        self.paths = {"markdown": self.root / "candidate-five.md", "json": self.root / "candidate-five.json", "shell": self.root / "candidate-five.sh"}
-        for role, raw_value in (("markdown", self.markdown), ("json", self.json_raw), ("shell", self.shell)):
-            self.paths[role].write_bytes(raw_value)
-            self.paths[role].chmod(0o600)
-        self.normalized = token
-        self.descriptor_path = self.root / "triad-descriptor.json"
-        self._write_descriptor()
+        self.temp = tempfile.TemporaryDirectory(prefix="issue397-lifecycle-")
+        self.base = Path(self.temp.name).resolve()
+        self.authority_root = self.base / "approved-candidate-five"
+        self.replay_root = self.base / "replay-root"
+        self.repository = self.base / "repository"
+        self.anchor_root = self.base / "anchor-root"
+        for path in (self.authority_root, self.replay_root, self.repository, self.anchor_root):
+            path.mkdir(mode=0o700)
+        self.manifest, self.paths = FIXTURE.build(self.authority_root, LIFECYCLE.PHASE_A)
+        self.manifest_path = self.base / "phase-a-manifest.json"
+        self.anchor_path = self.anchor_root / "phase-a-anchor.json"
+        self.result_path = self.replay_root / "replay-result.json"
+        self._write_json(self.manifest_path, self.manifest)
+        self.manifest_sha = hashlib.sha256(self.manifest_path.read_bytes()).hexdigest()
+        self.approval_digest = LIFECYCLE.PHASE_A.phase_a_approval_digest(self.manifest)
+        self.policy_sha = LIFECYCLE.PHASE_A.policy_digest(self.manifest["policy"])
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _descriptor(self) -> dict:
-        return {"schema": MODULE.SCHEMA, "artifacts": [{"role": role, "path": str(self.paths[role]), "sha256": hashlib.sha256(self.paths[role].read_bytes()).hexdigest()} for role in MODULE.ROLES], "normalized_json_sha256": self.normalized}
-
-    def _write_descriptor(self, value=None) -> str:
-        raw = (json.dumps(value or self._descriptor(), sort_keys=True, indent=2) + "\n").encode()
-        self.descriptor_path.write_bytes(raw)
-        self.descriptor_path.chmod(0o600)
-        self.descriptor_sha = hashlib.sha256(raw).hexdigest()
-        return self.descriptor_sha
+    @staticmethod
+    def _write_json(path: Path, value) -> None:
+        path.write_bytes((json.dumps(value, sort_keys=True, indent=2) + "\n").encode())
+        path.chmod(0o600)
 
     @staticmethod
-    def _observe_git() -> dict[str, str]:
-        return {"final_head": "a" * 40, "parent": "b" * 40, "tree": "c" * 40}
+    def _dir_identity(path: Path) -> dict[str, int]:
+        st = os.lstat(path)
+        return {"st_dev": st.st_dev, "st_ino": st.st_ino, "st_uid": st.st_uid, "st_mode": stat.S_IMODE(st.st_mode), "st_nlink": st.st_nlink}
 
-    def test_genuine_phase_a_anchor_phase_b_calls_exactly_one_plus_one(self) -> None:
-        calls = 0
-        original = MODULE.validate_phase_a
-        def counted(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return original(*args, **kwargs)
-        MODULE.validate_phase_a = counted
-        try:
-            anchor, first = MODULE.provision_anchor(self.descriptor_path, self.descriptor_sha)
-            observed, second = MODULE.validate_phase_b(self.descriptor_path, self.descriptor_sha, anchor, self._observe_git)
-        finally:
-            MODULE.validate_phase_a = original
-        self.assertEqual(calls, 2)  # exactly one anchor call plus one Phase B call
-        self.assertEqual(first.approval_digest, second.approval_digest)
+    def _write_result(self) -> tuple[str, str, str]:
+        head, parent, tree = "a" * 40, "b" * 40, "c" * 40
+        policy = self.manifest["policy"]
+        result = {
+            "schema": LIFECYCLE.PHASE_B.RESULT_SCHEMA, "phase": LIFECYCLE.PHASE_B.RESULT_PHASE,
+            "lane": LIFECYCLE.PHASE_B.LANE, "phase_a_manifest_sha256": self.manifest_sha,
+            "phase_a_approval_digest": self.approval_digest, "replay_root": str(self.replay_root),
+            "replay_root_identity": self._dir_identity(self.replay_root), "repository": str(self.repository),
+            "repository_identity": self._dir_identity(self.repository), "head_state": "detached",
+            "final_head": head, "parent": parent, "tree": tree, "base_commit": policy["base_commit"],
+            "base_tree": policy["base_tree"], "protected_main_commit": policy["main_commit"],
+            "required_ancestors": list(policy["required_ancestors"]), "forbidden_ancestors": list(policy["forbidden_ancestors"]),
+        }
+        self._write_json(self.result_path, result)
+        result["replay_root_identity"] = self._dir_identity(self.replay_root)
+        self._write_json(self.result_path, result)
+        return head, parent, tree
+
+    @contextmanager
+    def _git_boundary(self):
+        identity = SimpleNamespace(root=self.repository)
+        guard = Guard(identity)
+        repo_identity = self._dir_identity(self.repository)
+        with patch.object(LIFECYCLE.PHASE_B.REVIEW, "inspect_metadata", return_value=identity), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "RepoGuard", return_value=guard
+        ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "directory_identity", return_value=repo_identity), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "_check_repo_shape"
+        ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "_check_origin_and_base"), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "check_worktree_registry"
+        ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "check_clean"), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "check_index_flags"
+        ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "_check_fsck"), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "_check_explicit_closure"
+        ), patch.object(LIFECYCLE.PHASE_B.REVIEW, "_check_ancestry"), patch.object(
+            LIFECYCLE.PHASE_B, "_derive_identity", side_effect=lambda _r, claims, _g: {"final_head": claims[0], "parent": claims[1], "tree": claims[2]}
+        ), patch.object(LIFECYCLE.PHASE_B, "_raw_head_from_snapshot", return_value="a" * 40):
+            yield
+
+    def _anchor(self):
+        return LIFECYCLE.provision_external_anchor(
+            self.manifest_path, self.anchor_path, self.authority_root,
+            manifest_sha256=self.manifest_sha, approval_digest=self.approval_digest, policy_sha256=self.policy_sha,
+        )
+
+    def _phase_b(self):
+        return LIFECYCLE.validate_genuine_phase_b(
+            self.result_path, self.replay_root, self.repository, self.manifest_path, self.anchor_path, self.authority_root,
+            manifest_sha256=self.manifest_sha, approval_digest=self.approval_digest,
+        )
+
+    def test_genuine_durable_validator_calls_exactly_one_plus_one(self) -> None:
+        self.assertEqual(Path(LIFECYCLE.ANCHOR.PHASE_A.validate_artifacts.__code__.co_filename).resolve(), LIFECYCLE.PHASE_A_PATH)
+        self.assertEqual(Path(LIFECYCLE.PHASE_B.PHASE_A.validate_artifacts.__code__.co_filename).resolve(), LIFECYCLE.PHASE_A_PATH)
+        anchor_original = LIFECYCLE.ANCHOR.PHASE_A.validate_artifacts
+        phase_b_original = LIFECYCLE.PHASE_B.PHASE_A.validate_artifacts
+        calls = {"anchor": 0, "phase_b": 0}
+        def anchor_counted(manifest):
+            calls["anchor"] += 1
+            return anchor_original(manifest)
+        def phase_b_counted(manifest):
+            calls["phase_b"] += 1
+            return phase_b_original(manifest)
+        with patch.object(LIFECYCLE.ANCHOR.PHASE_A, "validate_artifacts", side_effect=anchor_counted), patch.object(
+            LIFECYCLE.PHASE_B.PHASE_A, "validate_artifacts", side_effect=phase_b_counted
+        ):
+            self._anchor()
+            self._write_result()
+            with self._git_boundary():
+                observed = self._phase_b()
+        self.assertEqual(calls, {"anchor": 1, "phase_b": 1})
         self.assertEqual(observed["final_head"], "a" * 40)
 
-    def test_path_substitution_and_duplicate_paths_reject(self) -> None:
-        for mutation in ("substitute", "duplicate"):
-            descriptor = self._descriptor()
-            if mutation == "substitute":
-                descriptor["artifacts"][0]["path"] = str(self.root / "missing.md")
+    def test_valid_alternate_path_with_matching_bytes_digest_and_identity_rejects(self) -> None:
+        alternate = self.base / "attacker-chosen.md"
+        shutil.copyfile(self.paths["markdown"], alternate)
+        alternate.chmod(0o600)
+        changed = json.loads(json.dumps(self.manifest))
+        changed["artifacts"]["markdown"] = {
+            "path": str(alternate), "sha256": hashlib.sha256(alternate.read_bytes()).hexdigest(),
+            "identity": LIFECYCLE.PHASE_A._identity(os.lstat(alternate)),
+        }
+        self._write_json(self.manifest_path, changed)
+        supplied = hashlib.sha256(self.manifest_path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(LIFECYCLE.Reject, "independent authority"):
+            LIFECYCLE.provision_external_anchor(self.manifest_path, self.anchor_path, self.authority_root, manifest_sha256=supplied, approval_digest=self.approval_digest, policy_sha256=self.policy_sha)
+        self.assertFalse(self.anchor_path.exists())
+
+    def test_duplicate_alias_and_alternate_root_reject(self) -> None:
+        for mutation in ("duplicate", "alias", "root"):
+            changed = json.loads(json.dumps(self.manifest))
+            if mutation == "duplicate":
+                changed["artifacts"]["json"] = dict(changed["artifacts"]["markdown"])
+            elif mutation == "alias":
+                changed["artifacts"]["shell"]["path"] = str(self.authority_root) + "/./candidate-five.sh"
             else:
-                descriptor["artifacts"][1]["path"] = descriptor["artifacts"][0]["path"]
-                descriptor["artifacts"][1]["sha256"] = descriptor["artifacts"][0]["sha256"]
-            digest = self._write_descriptor(descriptor)
-            with self.assertRaises((MODULE.Reject, FileNotFoundError)):
-                MODULE.provision_anchor(self.descriptor_path, digest)
+                other = self.base / "other-root"
+                other.mkdir(mode=0o700, exist_ok=True)
+                changed["artifacts"]["shell"]["path"] = str(other / "candidate-five.sh")
+            self._write_json(self.manifest_path, changed)
+            with self.assertRaises(LIFECYCLE.Reject):
+                LIFECYCLE.load_authorized_manifest(self.manifest_path, self.authority_root)
 
-    def test_role_cardinality_and_hash_substitution_reject(self) -> None:
-        mutations = []
-        duplicate_role = self._descriptor()
-        duplicate_role["artifacts"][1]["role"] = "markdown"
-        mutations.append(duplicate_role)
-        extra_role = self._descriptor()
-        extra_role["artifacts"].append(dict(extra_role["artifacts"][2]))
-        mutations.append(extra_role)
-        false_hash = self._descriptor()
-        false_hash["artifacts"][2]["sha256"] = "f" * 64
-        mutations.append(false_hash)
-        for descriptor in mutations:
-            digest = self._write_descriptor(descriptor)
-            with self.assertRaises(MODULE.Reject):
-                MODULE.provision_anchor(self.descriptor_path, digest)
+    def test_anchor_genuine_validator_bypass_sentinel_fails(self) -> None:
+        def sentinel(_manifest):
+            raise LIFECYCLE.ANCHOR.PHASE_A.Reject("anchor genuine validator sentinel")
+        with patch.object(LIFECYCLE.ANCHOR.PHASE_A, "validate_artifacts", side_effect=sentinel):
+            with self.assertRaisesRegex(LIFECYCLE.Reject, "anchor genuine validator sentinel"):
+                self._anchor()
+        self.assertFalse(self.anchor_path.exists())
 
-    def test_false_normalized_digest_rejects(self) -> None:
-        descriptor = self._descriptor()
-        descriptor["normalized_json_sha256"] = "f" * 64
-        digest = self._write_descriptor(descriptor)
-        with self.assertRaisesRegex(MODULE.Reject, "normalized"):
-            MODULE.provision_anchor(self.descriptor_path, digest)
-
-    def test_bypass_sentinels_reject_before_git(self) -> None:
-        called = False
-        def forbidden_git():
-            nonlocal called
-            called = True
-            return self._observe_git()
-        anchor, _ = MODULE.provision_anchor(self.descriptor_path, self.descriptor_sha)
-        forged = json.loads(anchor)
-        forged["phase_a_approval_digest"] = "f" * 64
-        forged_raw = (json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        with self.assertRaisesRegex(MODULE.Reject, "anchor authority"):
-            MODULE.validate_phase_b(self.descriptor_path, self.descriptor_sha, forged_raw, forbidden_git)
-        self.assertFalse(called)
-        with self.assertRaisesRegex(MODULE.Reject, "descriptor SHA"):
-            MODULE.validate_phase_b(self.descriptor_path, "f" * 64, anchor, forbidden_git)
-        self.assertFalse(called)
-
-    def test_artifact_swap_during_git_observation_rejects_final_stable_read(self) -> None:
-        anchor, _ = MODULE.provision_anchor(self.descriptor_path, self.descriptor_sha)
-        original = self.paths["shell"]
-        moved = self.root / "verified-shell"
-        replacement = self.root / "replacement-shell"
-
-        def swap_then_observe():
-            replacement.write_bytes(b"#!/bin/bash\nprintf 'replacement\\n'\n")
-            replacement.chmod(0o600)
-            os.rename(original, moved)
-            os.rename(replacement, original)
-            return self._observe_git()
-
-        with self.assertRaisesRegex(MODULE.Reject, "shell authority changed"):
-            MODULE.validate_phase_b(self.descriptor_path, self.descriptor_sha, anchor, swap_then_observe)
+    def test_phase_b_genuine_validator_bypass_sentinel_fails_before_git(self) -> None:
+        self._anchor()
+        self._write_result()
+        git_called = False
+        def sentinel(_manifest):
+            raise LIFECYCLE.PHASE_B.PHASE_A.Reject("phase B genuine validator sentinel")
+        def forbidden_git(*_args, **_kwargs):
+            nonlocal git_called
+            git_called = True
+        with patch.object(LIFECYCLE.PHASE_B.PHASE_A, "validate_artifacts", side_effect=sentinel), patch.object(
+            LIFECYCLE.PHASE_B.REVIEW, "inspect_metadata", side_effect=forbidden_git
+        ):
+            with self.assertRaisesRegex(LIFECYCLE.Reject, "phase B genuine validator sentinel"):
+                self._phase_b()
+        self.assertFalse(git_called)
 
 
 if __name__ == "__main__":
