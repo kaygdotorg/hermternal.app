@@ -181,9 +181,18 @@ class WrapperTests(unittest.TestCase):
     def test_real_driver_contract_is_derived_and_pinned(self) -> None:
         authority = self.real_authority
         self.assertEqual(
+            MODULE.DRIVER_SHA256,
+            "3e3dc1444879b416fa7e8e884a3523566ba9f4a9a96f2857380d8c4869917e20",
+        )
+        self.assertEqual(
+            MODULE.PHASE_A_RUNNER_SHA256,
+            "fb11d84062c05a2054a2f4162908de54ed15a530538fbf671ee54ff999baaf84",
+        )
+        self.assertEqual(
             authority.derived_stdin_sha256,
             hashlib.sha256(authority.stdin).hexdigest(),
         )
+        self.assertEqual(authority.derived_stdin_sha256, MODULE.DERIVED_STDIN_SHA256)
         self.assertNotEqual(
             authority.derived_stdin_sha256, authority.driver_source_sha256
         )
@@ -296,6 +305,77 @@ class WrapperTests(unittest.TestCase):
                 self._execute()
         self._assert_no_finals()
 
+    def test_400_boundary_accepts_self_contained_repository_facts(self) -> None:
+        """Exercise the complete #400 call path with no alternates exception."""
+        self.patches[-1].stop()
+        self.patches.pop()
+        _, replay_root, repository = self._layout()
+        value = self._pending_value(replay_root, repository)
+        pending_path = replay_root / MODULE.PENDING_NAME
+        pending_path.write_bytes(MODULE._canonical_json(value))
+        pending_path.chmod(0o600)
+        pending = MODULE.PendingFacts(
+            MODULE.stable_read(pending_path, "test pending"),
+            replay_root,
+            repository,
+            value,
+        )
+
+        class ReviewReject(Exception):
+            pass
+
+        reviewer = types.SimpleNamespace()
+        reviewer.Reject = ReviewReject
+        reviewer.require = lambda condition, message: (
+            None if condition else (_ for _ in ()).throw(ReviewReject(message))
+        )
+        head_snapshot = types.SimpleNamespace(
+            identity=(1, 2),
+            sha256=hashlib.sha256((OIDS["head"] + "\n").encode()).hexdigest(),
+            raw=(OIDS["head"] + "\n").encode(),
+        )
+        identity = types.SimpleNamespace(head_snapshot=head_snapshot)
+        guard = types.SimpleNamespace(assert_stable=mock.Mock())
+        reviewer.inspect_metadata = mock.Mock(return_value=identity)
+        reviewer.RepoGuard = mock.Mock(return_value=guard)
+        reviewer.check_worktree_registry = mock.Mock()
+        reviewer.check_clean = mock.Mock()
+        reviewer.check_index_flags = mock.Mock()
+        reviewer._check_repo_shape = mock.Mock()
+        reviewer._check_origin_and_base = mock.Mock()
+        reviewer.read_bound_file = mock.Mock(return_value=head_snapshot)
+        reviewer.run_git = mock.Mock(
+            return_value=types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+        )
+        reviewer._assert_oid_type = mock.Mock()
+        reviewer.git_output = mock.Mock(
+            return_value=f'{OIDS["head"]} {OIDS["parent"]}\n'.encode()
+        )
+        reviewer._decode = lambda raw, _label: raw.decode()
+        reviewer._rev_parse = mock.Mock(return_value=OIDS["tree"])
+        reviewer._check_ancestry = mock.Mock()
+        reviewer._check_fsck = mock.Mock()
+        reviewer._check_explicit_closure = mock.Mock()
+        reviewer.directory_identity = mock.Mock(
+            return_value=value["repository_identity"]
+        )
+        authority = MODULE.Authority(
+            **{**self.authority.__dict__, "reviewer": reviewer}
+        )
+        observed = MODULE.reobserve_repository(pending, authority)
+        self.assertEqual(
+            observed,
+            {
+                "final_head": OIDS["head"],
+                "parent": OIDS["parent"],
+                "tree": OIDS["tree"],
+            },
+        )
+        reviewer._check_repo_shape.assert_called_once()
+        reviewer._check_fsck.assert_called_once()
+        reviewer._check_explicit_closure.assert_called_once()
+        guard.assert_stable.assert_called_once()
+
     def test_pending_policy_drift_publishes_no_final(self) -> None:
         def boundary(argv, stdin, environment):
             self._create_pending(
@@ -366,8 +446,111 @@ class WrapperTests(unittest.TestCase):
         self.patches = []
         with self.assertRaisesRegex(MODULE.Reject, "64 lowercase"):
             MODULE.load_phase_a_evidence(self.root / "missing.json", "bad")
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(MODULE.Reject, "v2 authority"):
             MODULE.load_phase_a_evidence(self.root / "missing.json", "0" * 64)
+
+    def test_genuine_disposable_v2_anchor_evidence_is_accepted(self) -> None:
+        """Create real v2 evidence, then parse it through the pinned wrapper."""
+        for patcher in reversed(self.patches):
+            patcher.stop()
+        self.patches = []
+        runner = MODULE._verified_module(
+            MODULE.PHASE_A_RUNNER_PATH,
+            MODULE.PHASE_A_RUNNER_SHA256,
+            "issue397_wrapper_test_phase_a_runner",
+        )
+        external_root = self.root / "phase-a-v2"
+        modules = runner.load_modules(HERE.parents[2])
+
+        def guarded_observation():
+            identity = {
+                "st_dev": 1,
+                "st_ino": 2,
+                "st_uid": os.getuid(),
+                "st_gid": os.getgid(),
+                "st_mode": 0o700,
+                "st_size": 4096,
+                "st_nlink": 2,
+                "st_mtime_ns": 3,
+                "st_ctime_ns": 4,
+            }
+            binding = runner._binding_record(identity)
+            return {
+                "path": os.fspath(runner.REPOSITORY_ROOT),
+                "binding": binding,
+                "parent_binding": {**binding, "st_ino": 5},
+                "head": runner.FROZEN_COMMIT,
+                "tree": runner.FROZEN_TREE,
+                "detached": True,
+                "source_repository": {
+                    "path": os.fspath(runner.SOURCE_REPOSITORY_ROOT),
+                    "binding": {**binding, "st_ino": 6},
+                },
+                "git_common_dir": {
+                    "path": os.fspath(runner.GIT_COMMON_DIR),
+                    "binding": {**binding, "st_ino": 7},
+                },
+                "git_object_dir": {
+                    "path": os.fspath(runner.GIT_OBJECT_DIR),
+                    "binding": {**binding, "st_ino": 8},
+                },
+                "git_worktree_dir": {
+                    "path": os.fspath(runner.GIT_WORKTREE_DIR),
+                    "binding": {**binding, "st_ino": 9},
+                },
+            }
+
+        with mock.patch.object(runner, "EXTERNAL_ROOT", external_root), mock.patch.dict(
+            os.environ,
+            {"HERMTERNAL_PHASE_A_TEST_ROOT": os.fspath(external_root)},
+            clear=False,
+        ), mock.patch.object(
+            runner.subprocess,
+            "run",
+            side_effect=AssertionError("v2 fixture attempted a process"),
+        ):
+            runner.phase_a(
+                modules,
+                repository_root=runner.REPOSITORY_ROOT,
+                external_root=external_root,
+                worktree_verifier=guarded_observation,
+            )
+            phase_sha = runner.stable_read(
+                external_root / "evidence" / runner.PHASE_A_RECORD,
+                "fixture Phase A evidence",
+            ).sha256
+            runner.anchor(
+                modules,
+                repository_root=runner.REPOSITORY_ROOT,
+                external_root=external_root,
+                expected_phase_a_sha256=phase_sha,
+                worktree_verifier=guarded_observation,
+            )
+            anchor_path = external_root / "evidence" / runner.ANCHOR_RECORD
+            anchor_snapshot = runner.stable_read(anchor_path, "fixture anchor evidence")
+            genuine_verified_module = MODULE._verified_module
+
+            def verified(path, digest, name):
+                if Path(path) == MODULE.PHASE_A_RUNNER_PATH:
+                    self.assertEqual(digest, MODULE.PHASE_A_RUNNER_SHA256)
+                    return runner
+                return genuine_verified_module(path, digest, name)
+
+            with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
+                evidence = MODULE.load_phase_a_evidence(
+                    anchor_path, anchor_snapshot.sha256
+                )
+            record = json.loads(anchor_snapshot.raw)
+            self.assertEqual(record["schema"], runner.EVIDENCE_SCHEMA)
+            self.assertEqual(evidence.snapshot.sha256, anchor_snapshot.sha256)
+            self.assertEqual(
+                evidence.manifest_sha256,
+                record["inputs"]["phase_a_manifest_sha256"],
+            )
+            self.assertEqual(
+                evidence.approval_digest,
+                record["inputs"]["phase_a_approval_digest"],
+            )
 
     def test_parser_requires_both_phase_a_arguments(self) -> None:
         with self.assertRaises(SystemExit):
