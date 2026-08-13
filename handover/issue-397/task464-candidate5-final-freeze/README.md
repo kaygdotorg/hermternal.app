@@ -16,6 +16,14 @@ The five durable files are `candidate-five.md`, `candidate-five.json`,
 coordinator does not treat a partial set as valid and reports a failure instead
 of adopting, overwriting, or repairing a pre-existing path.
 
+On an in-process failure, the coordinator records each descriptor/provenance
+inode and each successful #402 triad inode. It removes only names that still
+refer to those owned inodes, fsyncs the held original root directory, and
+returns structured residue facts for foreign replacements, unknown moved
+triad inodes, root swaps, or cleanup failures. A rollback never claims success
+when any such residue remains. A later retry still rejects every remaining
+final-name residue; it does not repair or adopt it.
+
 Run focused checks with:
 
 ```sh

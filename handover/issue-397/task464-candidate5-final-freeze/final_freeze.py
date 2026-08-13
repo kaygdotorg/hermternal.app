@@ -34,6 +34,10 @@ ROLE_NAMES = ("markdown", "json", "shell")
 class Reject(Exception):
     """Fail closed before a final set can be mistaken for valid evidence."""
 
+    def __init__(self, message: str, *, residue: tuple["Residue", ...] = ()) -> None:
+        super().__init__(message)
+        self.residue = residue
+
 
 @dataclass(frozen=True)
 class Snapshot:
@@ -47,6 +51,34 @@ class Snapshot:
 class FreezeResult:
     root: Path
     snapshots: Mapping[str, Snapshot]
+
+
+@dataclass
+class OwnedEntry:
+    """One name and inode that this coordinator may remove during rollback.
+
+    Coordinator files retain their descriptors until commit.  #402 owns its
+    own retained descriptors, so its successful return is bound to immutable
+    dev/inode observations here.  A missing triad name is therefore unknown,
+    not evidence that a moved inode was safely removed.
+    """
+
+    name: str
+    device: int
+    inode: int
+    fd: int | None = None
+
+
+@dataclass(frozen=True)
+class Residue:
+    """Structured rollback evidence for an owned, foreign, or unknown name."""
+
+    name: str
+    state: str
+    detail: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"name": self.name, "state": self.state, "detail": self.detail}
 
 
 def require(condition: bool, message: str) -> None:
@@ -147,12 +179,15 @@ def ensure_root(root: Path, *, fsync_impl: Callable[[int], None] = os.fsync) -> 
     return _root_identity(root)
 
 
-def require_absent(root: Path) -> None:
+def require_absent(root: Path, *, root_fd: int | None = None) -> None:
     """Reject every complete and partial prior output before any writer runs."""
     present = []
     for name in NAMES:
         try:
-            os.lstat(root / name)
+            if root_fd is None:
+                os.lstat(root / name)
+            else:
+                os.stat(name, dir_fd=root_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
         present.append(name)
@@ -166,14 +201,27 @@ def create_once(
     *,
     fsync_impl: Callable[[int], None] = os.fsync,
     write_impl: Callable[[int, memoryview], int] = os.write,
+    root_fd: int | None = None,
+    owned: dict[str, OwnedEntry] | None = None,
 ) -> Snapshot:
-    """Create a distinct coordinator file with no replace or symlink follow."""
+    """Create a distinct coordinator file with no replace or symlink follow.
+
+    When a transaction registry is supplied, retain the new descriptor even if
+    a later write or fsync fails.  Rollback can then prove whether an owned
+    inode was moved away from its expected name instead of claiming success.
+    """
     require(name in NAMES and raw, "coordinator create request differs")
     path = root / name
     require_absent_path(path)
-    parent_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    close_parent = root_fd is None
+    parent_fd = root_fd if root_fd is not None else os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    fd = -1
     try:
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=parent_fd)
+        created = os.fstat(fd)
+        require(stat.S_ISREG(created.st_mode) and stat.S_IMODE(created.st_mode) == 0o600, f"{name} create mode differs")
+        if owned is not None:
+            owned[name] = OwnedEntry(name, int(created.st_dev), int(created.st_ino), fd)
         try:
             view = memoryview(raw)
             while view:
@@ -182,10 +230,15 @@ def create_once(
                 view = view[count:]
             fsync_impl(fd)
         finally:
-            os.close(fd)
+            if owned is None and fd >= 0:
+                os.close(fd)
+                fd = -1
         fsync_impl(parent_fd)
     finally:
-        os.close(parent_fd)
+        if fd >= 0 and owned is None:
+            os.close(fd)
+        if close_parent:
+            os.close(parent_fd)
     snapshot = stable_read(path, name)
     require(snapshot.raw == raw, f"{name} bytes differ after create")
     return snapshot
@@ -197,6 +250,103 @@ def require_absent_path(path: Path) -> None:
     except FileNotFoundError:
         return
     raise Reject(f"create-only target exists: {path.name}")
+
+
+def _entry_from_snapshot(name: str, snapshot: Snapshot) -> OwnedEntry:
+    return OwnedEntry(name, snapshot.identity[0], snapshot.identity[1])
+
+
+def _close_owned(owned: Mapping[str, OwnedEntry]) -> None:
+    for entry in owned.values():
+        if entry.fd is not None:
+            try:
+                os.close(entry.fd)
+            except OSError:
+                pass
+            entry.fd = None
+
+
+def rollback_owned(
+    root: Path,
+    root_fd: int,
+    root_identity: tuple[int, int, int, int],
+    owned: Mapping[str, OwnedEntry],
+    *,
+    fsync_impl: Callable[[int], None] = os.fsync,
+) -> tuple[Residue, ...]:
+    """Remove only recorded coordinator inodes and return all remaining risk.
+
+    The held directory descriptor addresses the original root after a pathname
+    swap.  Every unrecorded final name is foreign-or-unknown and is preserved.
+    Missing #402 names are also unknown because #402 closes its descriptors
+    before success, so a move away from the expected name cannot be disproved.
+    """
+    residue: list[Residue] = []
+    try:
+        current_root = _root_identity(root)
+    except (OSError, Reject) as error:
+        residue.append(Residue("<root>", "root-replaced-or-unknown", str(error)))
+    else:
+        if current_root != root_identity:
+            residue.append(Residue("<root>", "root-replaced-or-unknown", "path identity differs from transaction root"))
+    for name in NAMES:
+        entry = owned.get(name)
+        try:
+            current = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            current = None
+        except OSError as error:
+            residue.append(Residue(name, "name-unobserved", str(error)))
+            current = None
+        if current is not None:
+            if entry is None:
+                residue.append(Residue(name, "foreign-or-unknown", "name exists without transaction ownership"))
+            elif (int(current.st_dev), int(current.st_ino)) != (entry.device, entry.inode):
+                residue.append(Residue(name, "foreign-replacement", "name inode differs from transaction ownership"))
+            else:
+                try:
+                    os.unlink(name, dir_fd=root_fd)
+                except OSError as error:
+                    residue.append(Residue(name, "owned-unlink-failed", str(error)))
+                else:
+                    try:
+                        os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        residue.append(Residue(name, "post-unlink-unobserved", str(error)))
+                    else:
+                        residue.append(Residue(name, "post-unlink-present", "owned name remained present"))
+        if entry is None:
+            continue
+        if entry.fd is None:
+            # The #402 success API does not retain a descriptor for us.  A
+            # missing path might be a clean removal or a move; do not guess.
+            if current is None:
+                residue.append(Residue(name, "owned-moved-or-unknown", "#402 inode is no longer at its recorded name"))
+            continue
+        try:
+            retained = os.fstat(entry.fd)
+        except OSError as error:
+            residue.append(Residue(name, "owned-inode-unobserved", str(error)))
+        else:
+            if (int(retained.st_dev), int(retained.st_ino)) != (entry.device, entry.inode):
+                residue.append(Residue(name, "owned-inode-different", "retained descriptor identity differs"))
+            elif retained.st_nlink != 0:
+                residue.append(Residue(name, "owned-untracked-link", f"retained inode has {retained.st_nlink} link(s)"))
+    try:
+        fsync_impl(root_fd)
+    except OSError as error:
+        residue.append(Residue("<root>", "cleanup-fsync-failed", str(error)))
+    _close_owned(owned)
+    return tuple(residue)
+
+
+def rollback_message(error: BaseException, residue: tuple[Residue, ...]) -> str:
+    """Serialize rollback facts so callers never mistake residue for success."""
+    facts = [item.as_dict() for item in residue]
+    state = "with residue" if residue else "and rolled back"
+    return f"final freeze failed {state}: {type(error).__name__}: {error}; residue={json.dumps(facts, sort_keys=True)}"
 
 
 def _facts(root: Path, orchestrator: types.ModuleType) -> dict[str, Any]:
@@ -231,8 +381,11 @@ def freeze_to_root(
     root = Path(root)
     require(root.is_absolute() and os.path.realpath(root) == os.fspath(root), "output root is not canonical")
     root_identity = ensure_root(root, fsync_impl=fsync_impl)
-    require_absent(root)
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    owned: dict[str, OwnedEntry] = {}
     try:
+        require(_root_identity(root) == root_identity, "output root changed before transaction")
+        require_absent(root, root_fd=root_fd)
         if orchestrator is None or publication is None:
             approved_orchestrator, approved_publication = load_approved()
             orchestrator = approved_orchestrator if orchestrator is None else orchestrator
@@ -240,7 +393,7 @@ def freeze_to_root(
         generated = orchestrator.generate_in_memory(root)
         authority = orchestrator.verified_module(orchestrator.AUTHORITY, orchestrator.EXPECTED[orchestrator.AUTHORITY], "candidate5_final_freeze_authority")
         descriptor = orchestrator.descriptor_bytes(generated, authority)
-        descriptor_snapshot = create_once(root, NAMES[3], descriptor, fsync_impl=fsync_impl)
+        descriptor_snapshot = create_once(root, NAMES[3], descriptor, fsync_impl=fsync_impl, root_fd=root_fd, owned=owned)
         calls = 0
 
         def validate(paths: tuple[Path, ...], payloads: tuple[bytes, ...]) -> Any:
@@ -263,23 +416,27 @@ def freeze_to_root(
             snapshot = stable_read(root / name, role)
             require(snapshot.raw == generated.payloads[role], f"{role} bytes differ after publication")
             snapshots[name] = snapshot
+            owned[name] = _entry_from_snapshot(name, snapshot)
         provenance = orchestrator.provenance_bytes(generated, _facts(root, orchestrator), authority)
-        provenance_snapshot = create_once(root, NAMES[4], provenance, fsync_impl=fsync_impl)
+        provenance_snapshot = create_once(root, NAMES[4], provenance, fsync_impl=fsync_impl, root_fd=root_fd, owned=owned)
         snapshots[NAMES[4]] = provenance_snapshot
         require(_root_identity(root) == root_identity, "output root changed before final inspection")
         orchestrator.inspect_complete(root, descriptor_snapshot.sha256, provenance_snapshot.sha256)
         for name in NAMES:
             snapshots[name] = stable_read(root / name, name)
-        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            fsync_impl(root_fd)
-        finally:
-            os.close(root_fd)
+        fsync_impl(root_fd)
+        _close_owned(owned)
         return FreezeResult(root, snapshots)
-    except Reject:
-        raise
-    except Exception as error:
-        raise Reject(f"final freeze failed: {type(error).__name__}: {error}") from error
+    except BaseException as error:
+        residue = rollback_owned(root, root_fd, root_identity, owned, fsync_impl=fsync_impl)
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise Reject(rollback_message(error, residue), residue=residue) from error
+    finally:
+        try:
+            os.close(root_fd)
+        except OSError:
+            pass
 
 
 def _summary(result: FreezeResult) -> dict[str, Any]:

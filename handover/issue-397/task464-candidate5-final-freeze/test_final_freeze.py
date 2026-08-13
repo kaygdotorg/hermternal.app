@@ -27,6 +27,29 @@ class FreezeTests(unittest.TestCase):
         root.mkdir(mode=0o700)
         return root
 
+    def assert_empty(self, root: Path) -> None:
+        self.assertEqual(list(root.iterdir()), [])
+
+    def injected_create_failure(self, name_to_fail: str, *, stage: str):
+        original = FREEZE.create_once
+
+        def fail(root, name, raw, **kwargs):
+            if name != name_to_fail:
+                return original(root, name, raw, **kwargs)
+            if stage == "create":
+                original_open = FREEZE.os.open
+                def reject_open(path, *args, **open_kwargs):
+                    if path == name and open_kwargs.get("dir_fd") is not None:
+                        raise OSError("injected create")
+                    return original_open(path, *args, **open_kwargs)
+                with mock.patch.object(FREEZE.os, "open", side_effect=reject_open):
+                    return original(root, name, raw, **kwargs)
+            if stage == "write":
+                return original(root, name, raw, write_impl=lambda *_: (_ for _ in ()).throw(OSError("injected write")), **kwargs)
+            return original(root, name, raw, fsync_impl=lambda *_: (_ for _ in ()).throw(OSError("injected fsync")), **kwargs)
+
+        return fail
+
     def test_absent_success_uses_exact_reviewed_modules(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
             root = self.private_root(parent)
@@ -76,35 +99,110 @@ class FreezeTests(unittest.TestCase):
             def publish(self, *_args, **_kwargs):
                 raise OSError("link failure")
         with tempfile.TemporaryDirectory() as parent:
-            with self.assertRaisesRegex(FREEZE.Reject, "link failure"):
-                FREEZE.freeze_to_root(self.private_root(parent), publication=BrokenPublication())
+            root = self.private_root(parent)
+            with self.assertRaisesRegex(FREEZE.Reject, "rolled back") as raised:
+                FREEZE.freeze_to_root(root, publication=BrokenPublication())
+            self.assertEqual(raised.exception.residue, ())
+            self.assert_empty(root)
+
+    def test_descriptor_and_provenance_write_or_fsync_failures_roll_back(self) -> None:
+        for name, stage in ((FREEZE.NAMES[3], "create"), (FREEZE.NAMES[3], "write"), (FREEZE.NAMES[3], "fsync"), (FREEZE.NAMES[4], "create"), (FREEZE.NAMES[4], "write"), (FREEZE.NAMES[4], "fsync")):
+            with self.subTest(name=name, stage=stage), tempfile.TemporaryDirectory() as parent:
+                root = self.private_root(parent)
+                with mock.patch.object(FREEZE, "create_once", side_effect=self.injected_create_failure(name, stage=stage)):
+                    with self.assertRaisesRegex(FREEZE.Reject, "rolled back") as raised:
+                        FREEZE.freeze_to_root(root)
+                self.assertEqual(raised.exception.residue, ())
+                self.assert_empty(root)
+
+    def test_provenance_generation_failure_rolls_back_descriptor_and_triad(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = self.private_root(parent)
+            orchestrator, publication = FREEZE.load_approved()
+            with mock.patch.object(orchestrator, "provenance_bytes", side_effect=OSError("injected provenance")):
+                with self.assertRaisesRegex(FREEZE.Reject, "rolled back") as raised:
+                    FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+            self.assertEqual(raised.exception.residue, ())
+            self.assert_empty(root)
 
     def test_foreign_replacement_after_callback_rejects(self) -> None:
-        class ForeignPublication:
-            def publish(self, targets, payloads, *, validate):
-                for target, payload in zip(targets, payloads):
-                    target.write_bytes(payload); os.chmod(target, 0o600)
-                validate(tuple(targets), tuple(payloads))
-                foreign = targets[0].with_name("foreign")
-                foreign.write_bytes(b"foreign\n"); os.chmod(foreign, 0o600)
-                os.replace(foreign, targets[0])
         with tempfile.TemporaryDirectory() as parent:
-            with self.assertRaisesRegex(FREEZE.Reject, "bytes differ"):
-                FREEZE.freeze_to_root(self.private_root(parent), publication=ForeignPublication())
+            root = self.private_root(parent)
+            orchestrator, publication = FREEZE.load_approved()
+            target = root / FREEZE.NAMES[0]
+            def replace_then_fail(*_args, **_kwargs):
+                foreign = root / "foreign"
+                foreign.write_bytes(b"foreign\n"); os.chmod(foreign, 0o600)
+                os.replace(foreign, target)
+                raise OSError("injected foreign replacement")
+            with mock.patch.object(orchestrator, "provenance_bytes", side_effect=replace_then_fail):
+                with self.assertRaisesRegex(FREEZE.Reject, "foreign-replacement") as raised:
+                    FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+            self.assertEqual(target.read_bytes(), b"foreign\n")
+            self.assertTrue(any(item.state == "foreign-replacement" for item in raised.exception.residue))
+            with self.assertRaisesRegex(FREEZE.Reject, "partial residue"):
+                FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+
+    def test_unknown_moved_triad_is_reported_and_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = self.private_root(parent)
+            orchestrator, publication = FREEZE.load_approved()
+            target = root / FREEZE.NAMES[0]
+            moved = root / "moved-owned-triad"
+            def move_then_fail(*_args, **_kwargs):
+                os.rename(target, moved)
+                raise OSError("injected move")
+            with mock.patch.object(orchestrator, "provenance_bytes", side_effect=move_then_fail):
+                with self.assertRaisesRegex(FREEZE.Reject, "owned-moved-or-unknown") as raised:
+                    FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+            self.assertTrue(moved.exists())
+            self.assertTrue(any(item.state == "owned-moved-or-unknown" for item in raised.exception.residue))
+
+    def test_foreign_descriptor_and_provenance_replacements_are_preserved(self) -> None:
+        for target_name, after_creation in ((FREEZE.NAMES[3], False), (FREEZE.NAMES[4], True)):
+            with self.subTest(target_name=target_name), tempfile.TemporaryDirectory() as parent:
+                root = self.private_root(parent)
+                orchestrator, publication = FREEZE.load_approved()
+                target = root / target_name
+                def replace_target():
+                    foreign = root / "foreign"
+                    foreign.write_bytes(b"foreign\n"); os.chmod(foreign, 0o600)
+                    os.replace(foreign, target)
+                    raise OSError("injected foreign replacement")
+                if after_creation:
+                    with mock.patch.object(orchestrator, "inspect_complete", side_effect=lambda *_: replace_target()):
+                        with self.assertRaisesRegex(FREEZE.Reject, "foreign-replacement") as raised:
+                            FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+                else:
+                    with mock.patch.object(orchestrator, "provenance_bytes", side_effect=lambda *_: replace_target()):
+                        with self.assertRaisesRegex(FREEZE.Reject, "foreign-replacement") as raised:
+                            FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+                self.assertEqual(target.read_bytes(), b"foreign\n")
+                self.assertTrue(any(item.state == "foreign-replacement" and item.name == target_name for item in raised.exception.residue))
 
     def test_parent_swap_after_callback_rejects(self) -> None:
         with tempfile.TemporaryDirectory() as parent:
             root = self.private_root(parent)
             moved = root.with_name("moved")
-            class SwapPublication:
-                def publish(self, targets, payloads, *, validate):
-                    for target, payload in zip(targets, payloads):
-                        target.write_bytes(payload); os.chmod(target, 0o600)
-                    validate(tuple(targets), tuple(payloads))
-                    os.rename(root, moved); root.mkdir(mode=0o700)
+            orchestrator, publication = FREEZE.load_approved()
+            authority = orchestrator.verified_module(orchestrator.AUTHORITY, orchestrator.EXPECTED[orchestrator.AUTHORITY], "swap_authority")
+            original_validate = authority.validate
+            def swap_validate(*args, **kwargs):
+                result = original_validate(*args, **kwargs)
+                os.rename(root, moved); root.mkdir(mode=0o700)
+                return result
+            authority.validate = swap_validate
+            original_verified = orchestrator.verified_module
+            def verified(path, *args, **kwargs):
+                if path == orchestrator.AUTHORITY:
+                    return authority
+                return original_verified(path, *args, **kwargs)
             try:
-                with self.assertRaisesRegex(FREEZE.Reject, "output root changed"):
-                    FREEZE.freeze_to_root(root, publication=SwapPublication())
+                with mock.patch.object(orchestrator, "verified_module", side_effect=verified):
+                    with self.assertRaisesRegex(FREEZE.Reject, "root-replaced-or-unknown") as raised:
+                        FREEZE.freeze_to_root(root, orchestrator=orchestrator, publication=publication)
+                self.assertTrue(any(item.state == "root-replaced-or-unknown" for item in raised.exception.residue))
+                self.assert_empty(moved)
             finally:
                 shutil.rmtree(root, ignore_errors=True)
                 if moved.exists(): os.rename(moved, root)
