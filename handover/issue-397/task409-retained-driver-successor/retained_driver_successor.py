@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import types
@@ -60,6 +61,17 @@ PENDING_KEYS = frozenset(
     }
 )
 MAX_FILE_BYTES = 8 * 1024 * 1024
+OID = re.compile(r"[0-9a-f]{40}\Z")
+COMMIT_KEYS = frozenset(
+    {
+        "commit",
+        "commits",
+        "parent",
+        "parents",
+        "child",
+        "raw_semantic_source_commits",
+    }
+)
 
 
 class Reject(Exception):
@@ -322,6 +334,290 @@ PY
 '''
 
 
+def _required_proof_commit_roots(authority: FrozenAuthority) -> frozenset[str]:
+    """Return roots that no derived proof inventory is permitted to omit."""
+    document = authority.document
+    base = document["base"]
+    required = {base["commit"], base["protected_main_commit"]}
+    forbidden = document["forbidden_ancestry"]
+    required.update(forbidden["commits"])
+    required.update(forbidden["raw_semantic_source_commits"])
+    endpoints = forbidden["authentication_range"].split("..")
+    require(len(endpoints) == 2, "authentication range proof roots differ")
+    required.update(endpoints)
+    source_commits = {
+        lane["source_commit"]["commit"]
+        for lane in document["ordered_lanes"]
+        if isinstance(lane.get("source_commit"), dict)
+    }
+    required.update(source_commits)
+    require(
+        all(isinstance(value, str) and OID.fullmatch(value) for value in required),
+        "required proof root is not an exact commit ID",
+    )
+    return frozenset(required)
+
+
+def _validate_proof_commit_roots(
+    authority: FrozenAuthority, roots: tuple[str, ...]
+) -> None:
+    """Reject a reordered, duplicate, malformed, or incomplete root inventory."""
+    require(
+        isinstance(roots, tuple)
+        and roots == tuple(sorted(set(roots)))
+        and all(isinstance(value, str) and OID.fullmatch(value) for value in roots),
+        "proof root inventory shape differs",
+    )
+    require(
+        _required_proof_commit_roots(authority) <= set(roots),
+        "authenticated proof root inventory is incomplete",
+    )
+
+
+def _proof_commit_roots(authority: FrozenAuthority) -> tuple[str, ...]:
+    """Return every authenticated commit root needed after alternate removal."""
+    roots: set[str] = set()
+
+    def collect(value: Any, key: str | None = None) -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                collect(child, child_key)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child, key)
+        elif isinstance(value, str) and key in COMMIT_KEYS and re.fullmatch(
+            r"[0-9a-f]{40}", value
+        ):
+            roots.add(value)
+
+    collect(authority.document)
+    roots.update(_required_proof_commit_roots(authority))
+    result = tuple(sorted(roots))
+    _validate_proof_commit_roots(authority, result)
+    return result
+
+
+def _alternate_unlink_python() -> str:
+    """Return the shared descriptor-bound alternates unlink implementation."""
+    return r'''def file_identity(st):
+    return (int(st.st_dev), int(st.st_ino), int(st.st_uid),
+            int(stat.S_IMODE(st.st_mode)), int(st.st_size), int(st.st_nlink),
+            int(st.st_mtime_ns), int(st.st_ctime_ns))
+
+def read_descriptor(fd, limit, label):
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, min(131072, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError(label + ' exceeds its byte limit')
+    return b''.join(chunks)
+
+def unlink_bound_alternate(path, expected):
+    if not os.path.isabs(path) or os.path.realpath(path) != path:
+        raise RuntimeError('alternates path is not canonical absolute')
+    parent = os.path.dirname(path)
+    name = os.path.basename(path)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+    descriptor = -1
+    try:
+        parent_before = os.fstat(parent_fd)
+        if (not stat.S_ISDIR(parent_before.st_mode)
+                or parent_before.st_uid != os.getuid()
+                or stat.S_IMODE(parent_before.st_mode) & 0o022):
+            raise RuntimeError('alternates parent identity is unsafe')
+        descriptor = os.open(name, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0), dir_fd=parent_fd)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o600):
+            raise RuntimeError('alternates is not an owned mode-0600 single-link file')
+        raw = read_descriptor(descriptor, 8192, 'alternates')
+        after = os.fstat(descriptor)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if file_identity(before) != file_identity(after) or file_identity(before) != file_identity(current):
+            raise RuntimeError('alternates identity changed before unlink')
+        if raw != expected:
+            raise RuntimeError('alternates bytes differ from the bound clean-primary path')
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError('alternates path remains after unlink')
+        parent_after = os.fstat(parent_fd)
+        if (int(parent_after.st_dev), int(parent_after.st_ino), int(parent_after.st_uid), stat.S_IMODE(parent_after.st_mode)) != (int(parent_before.st_dev), int(parent_before.st_ino), int(parent_before.st_uid), stat.S_IMODE(parent_before.st_mode)):
+            raise RuntimeError('alternates parent identity changed during unlink')
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+'''
+
+
+def _self_contained_heredoc(authority: FrozenAuthority) -> str:
+    """Build the exact non-thin pack and alternate-removal shell function."""
+    roots = _proof_commit_roots(authority)
+    encoded_roots = json.dumps(roots, separators=(",", ":"))
+    unlink_source = _alternate_unlink_python()
+    return f'''make_retained_repository_self_contained() {{
+  "$PYTHON" - "$REPLAY" "$CLEAN_PRIMARY_OBJECTS" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+
+repo, clean_objects = sys.argv[1:]
+ROOTS = tuple(json.loads({encoded_roots!r}))
+OID = re.compile(r'[0-9a-f]{{40}}\\Z')
+ENV = {{
+    'PATH': '/usr/bin:/bin', 'HOME': '/dev/null', 'LANG': 'C', 'LC_ALL': 'C',
+    'GIT_CONFIG_NOSYSTEM': '1', 'GIT_ATTR_NOSYSTEM': '1',
+    'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_SYSTEM': '/dev/null',
+    'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0',
+    'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_NO_LAZY_FETCH': '1',
+}}
+MAX_OUTPUT = 64 * 1024 * 1024
+MAX_PACK = 1024 * 1024 * 1024
+
+def reject(message):
+    raise SystemExit(message)
+
+def run(args, input_bytes=None):
+    command = [
+        '/usr/bin/git', '--no-replace-objects', '--no-lazy-fetch',
+        '--no-optional-locks', '-C', repo,
+        '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', *args,
+    ]
+    process = subprocess.run(
+        command, input=input_bytes, env=ENV, cwd='/',
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if len(process.stdout) > MAX_OUTPUT or len(process.stderr) > MAX_OUTPUT:
+        reject('self-contained Git output exceeds its byte bound')
+    return process
+
+def require_success(process, label, stderr_empty=True):
+    if process.returncode != 0:
+        reject(label + ' failed')
+    if stderr_empty and process.stderr:
+        reject(label + ' wrote stderr')
+
+def snapshot(path, label):
+    if not os.path.isabs(path) or os.path.realpath(path) != path:
+        reject(label + ' path is not canonical absolute')
+    values = []
+    for _ in range(2):
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                    or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & 0o022
+                    or before.st_size <= 0 or before.st_size > MAX_PACK):
+                reject(label + ' file identity is unsafe')
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                block = os.read(fd, 131072)
+                if not block:
+                    break
+                digest.update(block)
+                total += len(block)
+                if total > MAX_PACK:
+                    reject(label + ' exceeds its byte bound')
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+        final = os.lstat(path)
+        value = (file_identity(before), digest.hexdigest())
+        if file_identity(before) != file_identity(after) or file_identity(before) != file_identity(final) or total != before.st_size:
+            reject(label + ' changed during read')
+        values.append(value)
+    if values[0] != values[1]:
+        reject(label + ' changed across reads')
+    return values[0]
+
+def assert_snapshot(path, expected, label):
+    if snapshot(path, label) != expected:
+        reject(label + ' changed after alternate removal')
+
+def require_empty_pack_directory(path):
+    if (not os.path.isabs(path) or os.path.realpath(path) != path
+            or not os.path.isdir(path) or os.path.islink(path)):
+        reject('retained pack directory differs')
+    if os.listdir(path):
+        reject('retained pack directory has a pre-existing entry')
+
+{unlink_source}
+if (not os.path.isabs(repo) or os.path.realpath(repo) != repo
+        or not os.path.isabs(clean_objects) or os.path.realpath(clean_objects) != clean_objects):
+    reject('self-contained input path differs')
+if not ROOTS or len(ROOTS) != len(set(ROOTS)) or not all(OID.fullmatch(root) for root in ROOTS):
+    reject('self-contained proof root inventory differs')
+git_dir = os.path.join(repo, '.git')
+objects = os.path.join(git_dir, 'objects')
+pack_dir = os.path.join(objects, 'pack')
+alternates = os.path.join(objects, 'info', 'alternates')
+require_empty_pack_directory(pack_dir)
+
+enumerated = run(['rev-list', '--objects', '--no-object-names', '--end-of-options', *ROOTS])
+require_success(enumerated, 'proof-root closure enumeration')
+object_ids = enumerated.stdout.splitlines()
+if (not object_ids or len(object_ids) != len(set(object_ids))
+        or not all(re.fullmatch(rb'[0-9a-f]{{40}}', value) for value in object_ids)):
+    reject('proof-root closure object inventory differs')
+pack_input = b'\\n'.join(object_ids) + b'\\n'
+pack_prefix = os.path.join(pack_dir, 'pack')
+packed = run(['pack-objects', pack_prefix], input_bytes=pack_input)
+require_success(packed, 'non-thin self-contained object pack')
+if not re.fullmatch(rb'[0-9a-f]{{40}}\\n', packed.stdout):
+    reject('pack-objects output differs')
+pack_hash = packed.stdout[:-1].decode('ascii')
+pack_path = os.path.join(pack_dir, 'pack-' + pack_hash + '.pack')
+index_path = os.path.join(pack_dir, 'pack-' + pack_hash + '.idx')
+if sorted(os.listdir(pack_dir)) != sorted([os.path.basename(pack_path), os.path.basename(index_path)]):
+    reject('retained pack output set differs')
+pack_snapshot = snapshot(pack_path, 'retained pack')
+index_snapshot = snapshot(index_path, 'retained pack index')
+
+try:
+    unlink_bound_alternate(alternates, (clean_objects + '\\n').encode('utf-8'))
+except Exception as error:
+    reject('bound alternates unlink failed: ' + str(error))
+if os.path.lexists(alternates):
+    reject('alternates exists after self-contained conversion')
+assert_snapshot(pack_path, pack_snapshot, 'retained pack')
+assert_snapshot(index_path, index_snapshot, 'retained pack index')
+
+fsck = run(['fsck', '--strict', '--full', '--no-reflogs', '--no-progress'])
+require_success(fsck, 'self-contained strict fsck', stderr_empty=False)
+fsck_text = (fsck.stdout + b'\\n' + fsck.stderr).lower()
+if re.search(rb'(?:missing|broken|corrupt|fatal|error):?', fsck_text):
+    reject('self-contained strict fsck reported invalid state')
+closure = run(['rev-list', '--objects', '--all', '--missing=error'])
+require_success(closure, 'self-contained all-ref closure')
+for root in ROOTS:
+    typed = run(['cat-file', '-t', root])
+    require_success(typed, 'self-contained proof-root type')
+    if typed.stdout != b'commit\\n':
+        reject('self-contained proof root is not a commit: ' + root)
+if os.path.lexists(alternates):
+    reject('alternates reappeared after closure checks')
+assert_snapshot(pack_path, pack_snapshot, 'retained pack final')
+assert_snapshot(index_path, index_snapshot, 'retained pack index final')
+PY
+}}
+'''
+
+
 def transform_shell(authority: FrozenAuthority) -> bytes:
     """Apply only the reviewed retained-success lifecycle transform."""
     # Derive from JSON authority after load_frozen_authority proves that the
@@ -363,6 +659,66 @@ def transform_shell(authority: FrozenAuthority) -> bytes:
         "before_mutation\nassert_final_matrix\nassert_forbidden_ancestry\nassert_primary_pins\n",
         "final validation anchor",
     )
+    shell = _replace_exact(
+        shell,
+        "  # Closure is checked after replay bootstrap and again immediately before\n"
+        "  # cleanup. The replay alternate is intentional, but only its exact bound\n"
+        "  # clean-primary object store is allowed; HTTP, replacement, promisor, partial,\n"
+        "  # helper, shallow, and graft metadata remain forbidden.\n",
+        "  # Bootstrap permits only the exact bound clean-primary alternate. The\n"
+        "  # retained-success boundary removes it after it creates and verifies a\n"
+        "  # complete non-thin self-contained pack. External object state is forbidden.\n",
+        "self-contained closure documentation",
+    )
+    old_alternate_check = '''alternate = os.path.join(objects, 'info', 'alternates')
+alt_st = require_regular(alternate, 'replay alternates')
+fd = os.open(alternate, os.O_RDONLY | os.O_NOFOLLOW)
+try:
+    first = os.fstat(fd)
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    second = os.fstat(fd)
+finally:
+    os.close(fd)
+final = os.stat(alternate, follow_symlinks=False)
+if identity(first) != identity(second) or identity(first) != identity(final):
+    raise SystemExit('replay alternates changed during closure check')
+expected_alternate = (os.path.realpath(clean_objects) + '\\n').encode('utf-8')
+if b''.join(chunks) != expected_alternate:
+    raise SystemExit('replay alternates are not the exact clean-primary object store')
+'''
+    new_alternate_check = '''alternate = os.path.join(objects, 'info', 'alternates')
+if os.path.lexists(alternate):
+    alt_st = require_regular(alternate, 'replay alternates')
+    fd = os.open(alternate, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        first = os.fstat(fd)
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        second = os.fstat(fd)
+    finally:
+        os.close(fd)
+    final = os.stat(alternate, follow_symlinks=False)
+    if identity(first) != identity(second) or identity(first) != identity(final):
+        raise SystemExit('replay alternates changed during closure check')
+    expected_alternate = (os.path.realpath(clean_objects) + '\\n').encode('utf-8')
+    if b''.join(chunks) != expected_alternate:
+        raise SystemExit('replay alternates are not the exact clean-primary object store')
+'''
+    shell = _replace_exact(
+        shell,
+        old_alternate_check,
+        new_alternate_check,
+        "optional bootstrap alternate closure",
+    )
     cleanup_start = shell.index("cleanup_success_only() {\n")
     cleanup_end = shell.index("\n\n# Static manifest validation is read-only.", cleanup_start)
     cleanup_stubs = '''cleanup_success_only() {
@@ -373,8 +729,14 @@ cleanup_clean_primary_success_only() {
   fail "retained driver forbids clean-primary cleanup"
 }'''
     shell = shell[:cleanup_start] + cleanup_stubs + shell[cleanup_end:]
+    self_contained = _self_contained_heredoc(authority)
     writer = _result_writer_heredoc(authority)
-    shell = _replace_exact(shell, "\n# Static manifest validation is read-only.", "\n" + writer + "\n# Static manifest validation is read-only.", "evidence-writer insertion")
+    shell = _replace_exact(
+        shell,
+        "\n# Static manifest validation is read-only.",
+        "\n" + self_contained + writer + "\n# Static manifest validation is read-only.",
+        "retained helper insertion",
+    )
     old_tail = '''printf 'FINAL_HEAD=%s\\nREMOTE_DEV=%s\\nINDEPENDENT_APPROVAL_REQUIRED=1\\nNO_PUSH_PERFORMED=1\\n' "$CURRENT_HEAD" "$(git_primary rev-parse origin/dev)"
 assert_replay_closure
 cleanup_success_only "$REPLAY" "$README_TMP" "$MATRIX_SNAPSHOT"
@@ -384,6 +746,14 @@ cleanup_clean_primary_success_only
 printf 'TASK409_FINAL_REPLAY_OK=1\\nCLEAN_PRIMARY_REMOVED=1\\n'
 '''
     new_tail = '''assert_replay_closure
+before_mutation
+make_retained_repository_self_contained
+test ! -e "$REPLAY/.git/objects/info/alternates" && test ! -L "$REPLAY/.git/objects/info/alternates" || fail "retained alternates remains after conversion"
+before_mutation
+assert_forbidden_ancestry
+git_replay merge-base --is-ancestor "$BASE" "$CURRENT_HEAD" || fail "required base ancestor is absent after self-contained conversion"
+assert_replay_closure
+test ! -e "$REPLAY/.git/objects/info/alternates" && test ! -L "$REPLAY/.git/objects/info/alternates" || fail "retained alternates reappeared after final proof"
 test ! -e "$RESULT_ROOT" && test ! -L "$RESULT_ROOT" || fail "replay evidence root appeared before publication"
 RETAINED_PARENT="$(git_replay rev-parse "$CURRENT_HEAD^")"
 publish_retained_replay_pending "$RETAINED_PARENT"
@@ -400,6 +770,7 @@ printf 'TASK409_RETAINED_REPLAY_OK=1\\n'
     )
     require(not any(token in shell for token in forbidden), "retained success path still deletes retained data")
     require(shell.count("publish_retained_replay_pending") == 2, "pending writer count differs")
+    require(shell.count("make_retained_repository_self_contained") == 2, "self-contained helper count differs")
     require(shell.count(PENDING_SCHEMA) == 1, "pending schema count differs")
     require("replay-result.json" not in shell and "replay-completion.json" not in shell, "driver publishes final evidence")
     success_markers = shell.count(SUCCESS_MARKER)

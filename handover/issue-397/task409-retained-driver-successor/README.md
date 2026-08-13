@@ -19,11 +19,11 @@ replay transaction and lane order unchanged. It changes only the successful
 lifecycle and its pending-output boundary:
 
 - The replay repository name changes from `replay` to `repository`.
-- The driver keeps the repository and clean-primary after success. The retained
-  repository needs the clean-primary object alternate for later review.
+- The driver keeps the repository and clean-primary after success.
 - The driver changes the old cleanup functions to fail-closed stubs.
-- The driver completes all internal Git and closure observations before it
-  creates the output directory.
+- The driver converts the retained repository to a self-contained object store
+  before it creates the output directory.
+- The driver repeats strict closure and ancestry checks without an alternate.
 - The last fallible driver action creates and syncs only
   `replay-result.pending.json`.
 - The only later shell action is the built-in
@@ -44,6 +44,34 @@ repository paths and identities, detached head, parent, tree, and frozen
 ancestry policy. It does not claim process success, replay completion, Phase A
 approval, stdout delivery, or stderr state. The derived driver never creates
 `replay-result.json` or `replay-completion.json`.
+
+## Self-contained retained repository
+
+The derived driver builds a closed, sorted commit-root inventory from the
+authenticated candidate JSON. It requires the fixed base, protected main,
+every source commit, both rejected-authentication endpoints, and every
+forbidden ancestry commit. It enumerates the complete object closure for all
+of these roots.
+
+It then runs exact `git pack-objects` without `--thin` and without `--local`.
+The object IDs are supplied on stdin. Git output is captured, bounded, and not
+written to driver stdout. The output must be one exact lowercase pack hash.
+The previously empty pack directory must then contain only the matching `.pack`
+and `.idx` files. Both files must be owned, private, single-link files. The
+driver hashes and binds both files through stable descriptor reads.
+
+Only after the pack is complete, the driver opens the exact private
+`repository/.git/objects/info/alternates` file through a held parent directory.
+It requires one link, mode `0600`, stable identity, and exact
+`CLEAN_PRIMARY_OBJECTS` plus LF bytes. It unlinks only that bound name, syncs
+the parent directory, and proves that the path is absent.
+
+With no alternate present, it runs strict `git fsck`, all-ref missing-object
+closure, and exact commit-type checks for every proof root. It stable-rereads
+the pack and index. The shell then repeats forbidden-ancestry and full replay
+closure checks. It proves again that the alternates path is absent before it
+creates pending evidence. The retained clean-primary remains available for
+diagnosis, but it is not an object dependency of the retained repository.
 
 `derive_contract()` supplies the trusted outer wrapper with the exact
 authenticated argv, exact derived stdin bytes, frozen source SHA-256, and
@@ -66,11 +94,13 @@ stably reread them. A nonzero exit, missing marker, extra stdout, late output
 failure, or validation mismatch must not produce final completion evidence.
 The wrapper must report any pending residue.
 
-The tests execute only the isolated Python pending writer in a temporary
-directory. They supply observed object IDs and do not execute the shell or Git.
-They verify create-only output, the closed pending schema, retained repository
-state, a late sync failure with pending residue, anchor drift, argv, and the
-derived-versus-source hash boundary.
+The tests execute only isolated file helpers and the pending writer in private
+temporary directories. They supply observed object IDs and do not execute the
+shell or Git. They verify create-only pending output, proof-root completeness,
+non-thin and non-local packing, pack and index mutation, alternates content,
+hardlink and swap rejection, exact unlink and parent sync, unlink-sync failure,
+pre-existing pack collision, post-unlink proof ordering, output capture, the
+sole marker, anchor drift, argv, and the derived-versus-source hash boundary.
 
 Run the offline checks with:
 
@@ -78,11 +108,13 @@ Run the offline checks with:
 python3 -B handover/issue-397/task409-retained-driver-successor/test_retained_driver_successor.py
 python3 -O -B handover/issue-397/task409-retained-driver-successor/test_retained_driver_successor.py
 python3 -B handover/issue-397/task409-retained-driver-successor/retained_driver_successor.py
+/bin/bash -n /absolute/path/to/create-only-derived-driver.sh
 ```
 
-The last command prints only a derivation summary. `--output PATH` creates a
-private derived shell at a new path and rejects an existing path. Do not
-execute that output before independent review and the complete #404/#405 gate.
+The third command prints only a derivation summary. `--output PATH` creates a
+private derived shell at a new path and rejects an existing path. The Bash
+command is a syntax check only. Do not execute the output before independent
+review and the complete #404/#405 gate.
 
 This checkpoint is not replay evidence. It is not Phase A approval, Phase B
 approval, a live Hermes result, or permission to update `dev` or `main`.
