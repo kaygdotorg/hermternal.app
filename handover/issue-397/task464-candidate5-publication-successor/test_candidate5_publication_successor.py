@@ -16,7 +16,12 @@ class Tests(unittest.TestCase):
     def tearDown(self): self.temp.cleanup()
     def assert_absent(self): self.assertTrue(all(not path.exists() for path in self.targets))
     def test_success_modes_bytes_and_idempotent_rejection(self):
-        MODULE.publish(self.targets, self.payloads)
+        def require_single_link(paths, payloads):
+            self.assertEqual(tuple(path.name for path in paths), MODULE.NAMES)
+            self.assertEqual(payloads, self.payloads)
+            self.assertTrue(all(path.stat().st_nlink == 1 for path in paths))
+            return "validated-single-link"
+        self.assertEqual(MODULE.publish(self.targets, self.payloads, validate=require_single_link), "validated-single-link")
         for path, raw in zip(self.targets, self.payloads): self.assertEqual(path.read_bytes(), raw); self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         before = [path.stat().st_ino for path in self.targets]
         with self.assertRaises(MODULE.Reject): MODULE.publish(self.targets, self.payloads)
@@ -68,6 +73,15 @@ class Tests(unittest.TestCase):
                     MODULE.publish(self.targets, self.payloads, validate=replace_and_return)
                 self.assertEqual(self.targets[index].read_bytes(), b"foreign")
                 os.unlink(self.targets[index]); os.unlink(moved)
+    def test_validator_append_never_returns_success(self):
+        for index, role in enumerate(MODULE.ROLES):
+            with self.subTest(role=role):
+                def append_and_return(paths, _payloads):
+                    with paths[index].open("ab") as stream: stream.write(b"HOSTILE-APPEND\n")
+                    return "must-not-return"
+                with self.assertRaisesRegex(MODULE.Reject, "rolled back"):
+                    MODULE.publish(self.targets, self.payloads, validate=append_and_return)
+                self.assert_absent()
     def test_post_link_reconciliation_observation_failure_cleans_owned_target(self):
         original_stat = MODULE.os.stat; injected = False
         def fail_once_after_link(path, *args, **kwargs):

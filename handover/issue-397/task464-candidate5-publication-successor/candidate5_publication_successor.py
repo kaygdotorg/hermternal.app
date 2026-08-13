@@ -72,18 +72,29 @@ def _owned_unlink(dir_fd: int, name: str, inode: tuple[int, int]) -> bool:
 
 
 def _validate_public(entry: dict, public_fd: int) -> None:
-    """Bind a public name to its owned inode and exact retained payload."""
+    """Bind a single-link public name to its full retained payload."""
     fd = os.open(entry["path"].name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=public_fd)
     try:
         before = os.fstat(fd)
         require(_inode(before) == entry["inode"], f"{entry['role']} public inode differs")
-        require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600, f"{entry['role']} public mode differs")
+        require(
+            stat.S_ISREG(before.st_mode)
+            and stat.S_IMODE(before.st_mode) == 0o600
+            and before.st_size == len(entry["payload"])
+            and before.st_nlink == 1,
+            f"{entry['role']} public identity differs",
+        )
         raw = _read_fd(fd, len(entry["payload"]))
+        require(os.read(fd, 1) == b"", f"{entry['role']} public bytes have a suffix")
         after = os.fstat(fd)
     finally:
         os.close(fd)
     final = os.stat(entry["path"].name, dir_fd=public_fd, follow_symlinks=False)
-    require(_inode(before) == _inode(after) == _inode(final) == entry["inode"], f"{entry['role']} public identity changed")
+    require(
+        _file_identity(before) == _file_identity(after) == _file_identity(final)
+        and _inode(final) == entry["inode"],
+        f"{entry['role']} public identity changed",
+    )
     require(raw == entry["payload"] and hashlib.sha256(raw).digest() == hashlib.sha256(entry["payload"]).digest(), f"{entry['role']} public bytes differ")
 
 
@@ -157,6 +168,13 @@ def publish(
             if link_error is not None: raise link_error
             require(entry["published"], f"{entry['role']} link reconciliation failed")
         fsync_impl(public_fd)
+        # Remove only the staging names before authority validation. The open
+        # file descriptors and inode records retain transaction ownership while
+        # each public artifact reaches the required single-link state.
+        for entry in entries:
+            require(_owned_unlink(stage_fd, entry["leaf"], entry["inode"]), f"{entry['role']} stage ownership changed")
+        fsync_impl(stage_fd)
+        fsync_impl(public_fd)
         for entry in entries:
             _current_parent(parent, parent_identity)
             _validate_public(entry, public_fd)
@@ -168,7 +186,6 @@ def publish(
             _validate_public(entry, public_fd)
         _current_parent(parent, parent_identity)
         for entry in entries:
-            require(_owned_unlink(stage_fd, entry["leaf"], entry["inode"]), f"{entry['role']} stage ownership changed")
             os.close(entry["fd"]); entry["fd"] = -1
         fsync_impl(stage_fd); os.close(stage_fd); stage_fd = -1
         os.rmdir(stage_name, dir_fd=public_fd); fsync_impl(public_fd)
