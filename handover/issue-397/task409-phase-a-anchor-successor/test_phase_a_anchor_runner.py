@@ -51,18 +51,33 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
     def _phase_a(self, **kwargs):
         return RUNNER.phase_a(
             self.modules,
-            repository_root=self.checkout,
+            repository_root=RUNNER.REPOSITORY_ROOT,
             external_root=self.external_root,
             **kwargs,
         )
 
-    def _anchor(self, **kwargs):
+    def _phase_sha(self) -> str:
+        return RUNNER.stable_read(
+            self.external_root / "evidence" / RUNNER.PHASE_A_RECORD,
+            "test Phase A evidence",
+        ).sha256
+
+    def _anchor(self, expected_phase_a_sha256=None, **kwargs):
         return RUNNER.anchor(
             self.modules,
-            repository_root=self.checkout,
+            repository_root=RUNNER.REPOSITORY_ROOT,
             external_root=self.external_root,
+            expected_phase_a_sha256=expected_phase_a_sha256 or self._phase_sha(),
             **kwargs,
         )
+
+    def _rewrite_phase_record(self, change) -> str:
+        path = self.external_root / "evidence" / RUNNER.PHASE_A_RECORD
+        value = json.loads(path.read_text(encoding="utf-8"))
+        change(value)
+        path.unlink()
+        snapshot = RUNNER._publish_record(path, value)
+        return snapshot.sha256
 
     def test_full_genuine_chain_has_exact_calls_and_closed_evidence(self) -> None:
         phase_wrapper_calls = 0
@@ -127,6 +142,7 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
             "anchor evidence",
         )
         self.assertEqual(anchor_record["prior_sha256"], phase_snapshot.sha256)
+        self.assertEqual(anchor_record["inputs"]["expected_phase_a_sha256"], phase_snapshot.sha256)
         self.assertEqual(anchor_snapshot.raw, RUNNER._canonical_json(anchor_record))
         self.assertTrue(anchor_snapshot.raw.endswith(b"\n"))
         self.assertFalse(anchor_snapshot.raw.endswith(b"\n\n"))
@@ -151,6 +167,54 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.Reject, "strict JSON"):
             self._anchor()
         self.assertFalse(os.path.lexists(self.external_root / "external-review" / RUNNER.ANCHOR_NAME))
+
+    def test_anchor_requires_the_separately_reviewed_phase_a_digest(self) -> None:
+        self._phase_a()
+        with self.assertRaisesRegex(RUNNER.Reject, "reviewed handoff"):
+            self._anchor(expected_phase_a_sha256="f" * 64)
+        with self.assertRaisesRegex(RUNNER.Reject, "expected Phase A SHA-256 is invalid"):
+            self._anchor(expected_phase_a_sha256="missing")
+        with self.assertRaises(SystemExit):
+            RUNNER.build_parser().parse_args(["anchor"])
+        self.assertFalse(os.path.lexists(self.external_root / "external-review" / RUNNER.ANCHOR_NAME))
+
+    def test_anchor_rejects_scalar_type_and_single_field_rewrites(self) -> None:
+        self._phase_a()
+        digest = self._rewrite_phase_record(
+            lambda value: value["observations"]["manifest"].__setitem__("bytes", "1")
+        )
+        with self.assertRaisesRegex(RUNNER.Reject, "manifest byte count"):
+            self._anchor(expected_phase_a_sha256=digest)
+
+    def test_anchor_rejects_coordinated_canonical_digest_rewrite(self) -> None:
+        self._phase_a()
+
+        def change(value):
+            replacement = "f" * 64
+            value["observations"]["phase_a_approval_digest"] = replacement
+
+        digest = self._rewrite_phase_record(change)
+        with self.assertRaisesRegex(RUNNER.Reject, "derived digests"):
+            self._anchor(expected_phase_a_sha256=digest)
+        self.assertFalse(os.path.lexists(self.external_root / "external-review" / RUNNER.ANCHOR_NAME))
+
+    def test_anchor_rejects_root_mutation(self) -> None:
+        self._phase_a()
+        digest = self._phase_sha()
+        os.chmod(self.external_root, 0o710)
+        with self.assertRaisesRegex(RUNNER.Reject, "mode differs"):
+            self._anchor(expected_phase_a_sha256=digest)
+
+    def test_anchor_rejects_owner_marker_mutation(self) -> None:
+        self._phase_a()
+        digest = self._phase_sha()
+        marker = self.external_root / "phase-a" / ".owner"
+        with marker.open("ab") as stream:
+            stream.write(b" \n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        with self.assertRaisesRegex(RUNNER.Reject, "owner marker observation"):
+            self._anchor(expected_phase_a_sha256=digest)
 
     def test_exact_pins_and_verified_module_objects_are_installed(self) -> None:
         for relative, (expected_sha256, _blob) in RUNNER.SOURCE_PINS.items():
