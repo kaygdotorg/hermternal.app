@@ -4,7 +4,7 @@ This checkpoint wraps the frozen `task409-execution-preflight/review_task464_git
 
 The local `.git/config` authority is an exact byte contract. It permits the four canonical Git-init records plus `core.hooksPath=/dev/null` and `protocol.allow=never`. It rejects all other serialization and semantic records. This includes extra keys, duplicate keys, alternate case, quotes, continuations, comments, CRLF, NUL, and a missing final LF.
 
-After the frozen metadata inspection creates its guard, the successor makes exactly one semantic config call. The call must return the same six records from `file:.git/config`. The successor binds `/usr/bin/git` by identity and SHA-256 before use. It uses one fixed environment and command prefix. It rechecks the executable and repository metadata before and after the semantic call and each later Git call.
+After the frozen metadata inspection creates its guard, the successor makes exactly one semantic config call. The call must return the same six records from `file:.git/config`. The successor binds `/usr/bin/git` by identity and SHA-256 before use. It uses one fixed environment and command prefix. A closed command grammar permits only the frozen reviewer's known read-only subcommands and exact operand forms. It rejects later `-c`, `--config-env`, repository selectors, option abbreviations, credentials, and all other command expansion before a subprocess starts. It rechecks the executable and repository metadata before and after the semantic call and each later Git call.
 
 Run the focused checks from the repository root:
 

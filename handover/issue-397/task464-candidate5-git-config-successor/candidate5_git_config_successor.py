@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -72,6 +73,10 @@ GIT_CONFIG_OVERRIDES = (
     "core.fsmonitor=false",
     "-c",
     "protocol.allow=never",
+)
+OID_RE = re.compile(r"[0-9a-f]{40}\Z")
+REV_EXPRESSION_RE = re.compile(
+    r"(?:[0-9a-f]{40}|HEAD|refs/remotes/origin/(?:dev|main))\^\{(?:commit|tree)\}\Z"
 )
 
 
@@ -180,7 +185,72 @@ def git_argv(root: Path, args: Sequence[str]) -> list[str]:
         not isinstance(value, str) or not value or "\x00" in value for value in args
     ):
         raise ValueError("Git arguments are not a closed string sequence")
+    validate_git_args(args)
     return [*GIT_PREFIX, "-C", os.fspath(root), *GIT_CONFIG_OVERRIDES, *args]
+
+
+def validate_git_args(args: Sequence[str]) -> None:
+    """Accept only the frozen reviewer's exact read-only Git grammar.
+
+    Git accepts global options after ``-C`` and later ``-c`` values override
+    earlier ones. An allowlist of complete command shapes prevents a caller
+    from adding a second configuration or repository authority.
+    """
+    values = tuple(args)
+    exact = {
+        ("config", "--local", "--show-origin", "--null", "--list"),
+        ("worktree", "list", "--porcelain"),
+        ("status", "--porcelain=v1", "--untracked-files=all", "--ignored=traditional", "--ignore-submodules=none"),
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+        ("ls-files", "--stage", "-z"),
+        ("ls-files", "-v", "-z"),
+        ("diff", "--no-ext-diff", "--no-textconv", "--quiet"),
+        ("diff", "--cached", "--no-ext-diff", "--no-textconv", "--quiet"),
+        ("rev-parse", "--is-bare-repository"),
+        ("rev-parse", "--is-shallow-repository"),
+        ("rev-parse", "--show-object-format"),
+        ("rev-parse", "--show-toplevel"),
+        ("rev-parse", "--git-dir"),
+        ("rev-parse", "--git-common-dir"),
+        ("rev-parse", "--git-path", "objects"),
+        ("fsck", "--strict", "--full", "--no-reflogs", "--no-progress"),
+        ("rev-list", "--objects", "--all", "--missing=error"),
+        ("cat-file", "--batch-check"),
+        ("symbolic-ref", "-q", "HEAD"),
+    }
+    if values in exact:
+        return
+    if (
+        len(values) == 3
+        and values[:2] == ("cat-file", "-t")
+        and OID_RE.fullmatch(values[2]) is not None
+    ):
+        return
+    if (
+        len(values) == 4
+        and values[:3] == ("rev-parse", "--verify", "--end-of-options")
+        and REV_EXPRESSION_RE.fullmatch(values[3]) is not None
+    ):
+        return
+    if (
+        len(values) == 4
+        and values[:2] == ("merge-base", "--is-ancestor")
+        and all(OID_RE.fullmatch(item) is not None for item in values[2:])
+    ):
+        return
+    if (
+        len(values) == 4
+        and values[:3] == ("rev-list", "--objects", "--missing=error")
+        and OID_RE.fullmatch(values[3]) is not None
+    ):
+        return
+    if (
+        len(values) == 5
+        and values[:4] == ("rev-list", "--parents", "-n", "1")
+        and OID_RE.fullmatch(values[4]) is not None
+    ):
+        return
+    raise ValueError("Git command is outside the closed read-only grammar")
 
 
 def _expected_semantic_config() -> bytes:
@@ -227,6 +297,10 @@ def install_successor():
         root = Path(argv[5])
         if not root.is_absolute() or os.path.realpath(root) != os.fspath(root):
             reviewer.reject("Git subprocess root differs")
+        try:
+            validate_git_args(argv[12:])
+        except ValueError as exc:
+            reviewer.reject(str(exc))
         if cwd != "/" or reviewer.SAFE_ENV != SAFE_ENV:
             reviewer.reject("Git subprocess environment or cwd differs")
         _assert_git_stable(binding)

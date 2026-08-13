@@ -215,7 +215,16 @@ def test_fixed_process_boundary(successor):
     reviewer = successor.install_successor()
     with tempfile.TemporaryDirectory(prefix="candidate5-git-argv-") as directory:
         root = Path(directory).resolve()
-        expected = successor.git_argv(root, ["status", "--porcelain=v1"])
+        expected = successor.git_argv(
+            root,
+            [
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=traditional",
+                "--ignore-submodules=none",
+            ],
+        )
         require(tuple(expected[:4]) == successor.GIT_PREFIX, "Git executable prefix differs")
         require(tuple(expected[6:12]) == successor.GIT_CONFIG_OVERRIDES, "Git overrides differ")
         rejects(successor.git_argv, Path("relative"), ["status"])
@@ -247,10 +256,89 @@ def test_fixed_process_boundary(successor):
             reviewer.SAFE_ENV.pop("GIT_CONFIG_COUNT")
 
 
+def test_public_git_boundary_rejects_injection_without_process(successor):
+    reviewer = successor.install_successor()
+    with tempfile.TemporaryDirectory(prefix="candidate5-git-reject-") as directory:
+        root = Path(directory).resolve()
+        hostile = (
+            ["-c", "core.hooksPath=/tmp/hooks", "status"],
+            ["status", "-c", "protocol.allow=always"],
+            ["--config-env=credential.helper=HELPER", "status"],
+            ["--config-env", "credential.helper=HELPER", "status"],
+            ["-C", "/tmp", "status"],
+            ["--git-dir=/tmp/git", "status"],
+            ["--work-tree=/tmp/tree", "status"],
+            ["--namespace=hostile", "status"],
+            ["--super-prefix=hostile", "status"],
+            ["--exec-path=/tmp", "status"],
+            ["--bare", "status"],
+            ["--replace-objects", "status"],
+            ["--lazy-fetch", "status"],
+            ["--optional-locks", "status"],
+            ["--no-replace-object", "status"],
+            ["--config-en=credential.helper=HELPER", "status"],
+            ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=traditional", "--ignore-submodules=none", "-c", "core.hooksPath=/tmp"],
+            ["credential", "fill"],
+            ["config", "--global", "credential.helper", "/tmp/helper"],
+            ["config", "--local", "--show-origin", "--null", "--list", "--includes"],
+            ["rev-parse", "--verify", "--end-of-options", "--help"],
+        )
+        calls = []
+        original = subprocess.run
+
+        def counted(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+        subprocess.run = counted
+        try:
+            for args in hostile:
+                rejects(lambda args=args: reviewer.run_git(root, args))
+                require(not calls, f"hostile Git args reached subprocess: {args!r}")
+                full = [*successor.GIT_PREFIX, "-C", str(root), *successor.GIT_CONFIG_OVERRIDES, *args]
+                rejects(lambda full=full: reviewer._run_process(full, timeout=3))
+                require(not calls, f"hostile full argv reached subprocess: {args!r}")
+        finally:
+            subprocess.run = original
+
+
+def test_complete_review_command_grammar(successor):
+    oid = "1" * 40
+    allowed = (
+        ["config", "--local", "--show-origin", "--null", "--list"],
+        ["worktree", "list", "--porcelain"],
+        ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=traditional", "--ignore-submodules=none"],
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        ["ls-files", "--stage", "-z"],
+        ["ls-files", "-v", "-z"],
+        ["diff", "--no-ext-diff", "--no-textconv", "--quiet"],
+        ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--quiet"],
+        ["cat-file", "-t", oid],
+        ["cat-file", "--batch-check"],
+        ["rev-parse", "--verify", "--end-of-options", f"{oid}^{{tree}}"],
+        ["rev-parse", "--verify", "--end-of-options", "refs/remotes/origin/dev^{commit}"],
+        ["rev-parse", "--is-bare-repository"],
+        ["rev-parse", "--is-shallow-repository"],
+        ["rev-parse", "--show-object-format"],
+        ["rev-parse", "--show-toplevel"],
+        ["rev-parse", "--git-dir"],
+        ["rev-parse", "--git-common-dir"],
+        ["rev-parse", "--git-path", "objects"],
+        ["merge-base", "--is-ancestor", oid, oid],
+        ["fsck", "--strict", "--full", "--no-reflogs", "--no-progress"],
+        ["rev-list", "--objects", "--all", "--missing=error"],
+        ["rev-list", "--objects", "--missing=error", oid],
+        ["rev-list", "--parents", "-n", "1", oid],
+        ["symbolic-ref", "-q", "HEAD"],
+    )
+    for args in allowed:
+        successor.validate_git_args(args)
+
+
 def test_pre_post_executable_guards(successor):
     reviewer = successor.install_successor()
     root = Path("/")
-    argv = successor.git_argv(root, ["version"])
+    argv = successor.git_argv(root, ["rev-parse", "--show-toplevel"])
     calls = []
     original_assert = successor._assert_git_stable
     original_process = subprocess.run
@@ -286,6 +374,8 @@ def main():
     test_real_semantic_gate(successor)
     test_metadata_and_semantic_swaps_reject(successor)
     test_fixed_process_boundary(successor)
+    test_public_git_boundary_rejects_injection_without_process(successor)
+    test_complete_review_command_grammar(successor)
     test_pre_post_executable_guards(successor)
     print("candidate-five Git-config successor checks passed")
 
