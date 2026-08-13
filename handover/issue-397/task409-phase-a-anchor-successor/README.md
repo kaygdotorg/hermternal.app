@@ -56,17 +56,22 @@ worktree. The final authority remains at its separately frozen canonical path
 because the approved #401 descriptor binds that path. No branch or upstream is
 accepted for the guarded execution worktree.
 
-## Durable external layout
+## Durable external layout v2
 
 The external root is fixed at
-`/home/kayg/Developer/hermternal-issue397-phase-a-anchor`. It must not exist
+`/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v2`. It must not exist
 before the real Phase A command. Its parent must be canonical, owned by the
 current user, and not group or world writable.
+
+The former v1 root
+`/home/kayg/Developer/hermternal-issue397-phase-a-anchor` is not an input or a
+resume location. The v2 runner rejects it and does not inspect, adopt, repair,
+or remove it.
 
 The Phase A command creates only this layout:
 
 ```text
-/home/kayg/Developer/hermternal-issue397-phase-a-anchor/  0700
+/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v2/  0700
   phase-a/                                                0700
     .owner                                                0600
     input-manifest.json                                   0600
@@ -87,6 +92,23 @@ file and parent directory and then does three stable no-follow rereads. A
 runner evidence write failure removes only the exact runner-owned inode. It
 reports foreign or moved residue and does not claim a clean rollback.
 
+## Directory binding policy
+
+Evidence schema `hermternal.issue-397.phase-a-anchor-evidence.v2` compares only
+device, inode, user, group, and permission mode for directories across stages.
+These fields bind the same owned directory without rejecting safe metadata
+changes caused by child creation or access. Directory link count, size, mtime,
+and ctime are not cross-stage authority. Directory link count can change when
+the runner creates or removes child directories.
+
+Each individual verifier call still requires one full identity to remain
+stable during that call. The policy applies to the guarded worktree parent,
+source repository, Git common directory, Git object directory, Git worktree
+administrative directory, authority directories, v2 root and parent, and the
+three mutable runtime directories. A device, inode, owner, group, or mode
+change rejects the stage. Immutable regular files keep their complete
+identity, byte count, SHA-256, link count, and stable reread contract.
+
 ## Stage contract
 
 Run Phase A only from a clean checkout at the recorded repository root:
@@ -98,13 +120,14 @@ Run Phase A only from a clean checkout at the recorded repository root:
 The runner builds the manifest from genuine stable reads. It calls the genuine
 durable `validate_artifacts` function exactly once before it creates the
 external root. It then writes one closed Phase A evidence record. The record
-contains actual file and directory identities, byte counts, LF counts,
-terminal bytes, SHA-256 values, the Phase A approval digest, the approved
-policy digest, and explicit not-run safety values.
+contains complete immutable-file identities, stable directory bindings, byte
+counts, LF counts, terminal bytes, SHA-256 values, the Phase A approval digest,
+the approved policy digest, and explicit not-run safety values.
 
-The closed schema requires exact canonical paths and scalar types. Identity
-records include device, inode, user, group, mode, size, link count, mtime, and
-ctime. The Phase A prior digest is the exact all-zero SHA-256 sentinel.
+The closed schema requires exact canonical paths and scalar types. Regular-file
+identity records include device, inode, user, group, mode, size, link count,
+mtime, and ctime. Directory records use the binding policy above. The Phase A
+prior digest is the exact all-zero SHA-256 sentinel.
 
 An independent reviewer must check the Phase A result before the anchor stage.
 The runner does not make or infer this independent decision.
@@ -128,7 +151,7 @@ anchor evidence record. Both `prior_sha256` and
 `inputs.expected_phase_a_sha256` bind the reviewed Phase A record SHA-256.
 
 A collision, changed record, changed manifest, changed final file, changed
-parent identity, extra validator call, or existing target causes a rejection.
+directory binding, extra validator call, or existing target causes a rejection.
 The runner does not repair, replace, adopt, or delete durable evidence.
 
 ## Tests
@@ -145,6 +168,6 @@ python3 -B handover/issue-397/task409-phase-a-anchor-successor/test_phase_a_anch
 python3 -O -B handover/issue-397/task409-phase-a-anchor-successor/test_phase_a_anchor_runner.py
 ```
 
-This checkpoint is create-capable but has not run against the durable external
-root. Its existence is not Phase A approval, anchor approval, replay evidence,
-or live Hermes approval.
+This checkpoint is create-capable but has not run against the durable v2
+external root. Its existence is not Phase A approval, anchor approval, replay
+evidence, or live Hermes approval.
