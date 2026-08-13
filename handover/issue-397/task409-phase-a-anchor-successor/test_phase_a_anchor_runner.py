@@ -79,7 +79,8 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
     @staticmethod
     def _guarded_observation():
         identity = {"st_dev": 1, "st_ino": 2, "st_uid": os.getuid(), "st_gid": os.getgid(), "st_mode": 0o700, "st_size": 4096, "st_nlink": 2, "st_mtime_ns": 3, "st_ctime_ns": 4}
-        return {"path": os.fspath(RUNNER.REPOSITORY_ROOT), "identity": identity, "parent_identity": {**identity, "st_ino": 5}, "head": RUNNER.FROZEN_COMMIT, "tree": RUNNER.FROZEN_TREE, "detached": True, "source_repository": {"path": os.fspath(RUNNER.SOURCE_REPOSITORY_ROOT), "identity": {**identity, "st_ino": 6}}, "git_common_dir": {"path": os.fspath(RUNNER.GIT_COMMON_DIR), "identity": {**identity, "st_ino": 7}}, "git_object_dir": {"path": os.fspath(RUNNER.GIT_OBJECT_DIR), "identity": {**identity, "st_ino": 8}}, "git_worktree_dir": {"path": os.fspath(RUNNER.GIT_WORKTREE_DIR), "identity": {**identity, "st_ino": 9}}}
+        binding = RUNNER._binding_record(identity)
+        return {"path": os.fspath(RUNNER.REPOSITORY_ROOT), "binding": binding, "parent_binding": {**binding, "st_ino": 5}, "head": RUNNER.FROZEN_COMMIT, "tree": RUNNER.FROZEN_TREE, "detached": True, "source_repository": {"path": os.fspath(RUNNER.SOURCE_REPOSITORY_ROOT), "binding": {**binding, "st_ino": 6}}, "git_common_dir": {"path": os.fspath(RUNNER.GIT_COMMON_DIR), "binding": {**binding, "st_ino": 7}}, "git_object_dir": {"path": os.fspath(RUNNER.GIT_OBJECT_DIR), "binding": {**binding, "st_ino": 8}}, "git_worktree_dir": {"path": os.fspath(RUNNER.GIT_WORKTREE_DIR), "binding": {**binding, "st_ino": 9}}}
 
     def _rewrite_phase_record(self, change) -> str:
         path = self.external_root / "evidence" / RUNNER.PHASE_A_RECORD
@@ -157,6 +158,26 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
         self.assertTrue(anchor_snapshot.raw.endswith(b"\n"))
         self.assertFalse(anchor_snapshot.raw.endswith(b"\n\n"))
 
+    def test_non_mocked_lifecycle_accepts_benign_directory_timestamps(self) -> None:
+        """Run genuine Phase A and anchor while directory timestamps change."""
+        phase_record = self._phase_a()
+        for path in (self.external_root, self.external_root / "phase-a", self.external_root / "external-review", self.external_root / "evidence"):
+            os.utime(path, None)
+        anchor_record = self._anchor()
+        self.assertEqual(phase_record["schema"], RUNNER.EVIDENCE_SCHEMA)
+        self.assertEqual(anchor_record["schema"], RUNNER.EVIDENCE_SCHEMA)
+
+    def test_v1_durable_root_is_rejected_and_untouched(self) -> None:
+        before = os.path.lexists(RUNNER.V1_EXTERNAL_ROOT)
+        with self.assertRaisesRegex(RUNNER.Reject, "fixed v2 authority"):
+            RUNNER.phase_a(
+                self.modules,
+                repository_root=RUNNER.REPOSITORY_ROOT,
+                external_root=RUNNER.V1_EXTERNAL_ROOT,
+                worktree_verifier=self._guarded_observation,
+            )
+        self.assertEqual(os.path.lexists(RUNNER.V1_EXTERNAL_ROOT), before)
+
     def test_anchor_is_create_only_and_preserves_collision(self) -> None:
         self._phase_a()
         target = self.external_root / "external-review" / RUNNER.ANCHOR_NAME
@@ -215,6 +236,29 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.Reject, "mode differs"):
             self._anchor(expected_phase_a_sha256=digest)
 
+    def test_anchor_rejects_directory_binding_substitution(self) -> None:
+        self._phase_a()
+        evidence = self.external_root / "evidence" / RUNNER.PHASE_A_RECORD
+        original = json.loads(evidence.read_text(encoding="utf-8"))
+        for field in ("st_dev", "st_ino", "st_uid"):
+            with self.subTest(field=field):
+                digest = self._rewrite_phase_record(
+                    lambda value, field=field: value["observations"]["external_root_binding"].__setitem__(field, value["observations"]["external_root_binding"][field] + 1)
+                )
+                with self.assertRaisesRegex(RUNNER.Reject, "external.root"):
+                    self._anchor(expected_phase_a_sha256=digest)
+                evidence.unlink()
+                RUNNER._publish_record(evidence, original)
+
+    def test_anchor_rejects_runtime_directory_replacement(self) -> None:
+        self._phase_a()
+        review = self.external_root / "external-review"
+        moved = self.external_root / "external-review-old"
+        review.rename(moved)
+        review.mkdir(mode=0o700)
+        with self.assertRaisesRegex(RUNNER.Reject, "runtime directory binding"):
+            self._anchor()
+
     def test_anchor_rejects_owner_marker_mutation(self) -> None:
         self._phase_a()
         digest = self._phase_sha()
@@ -250,8 +294,8 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
     def test_source_has_no_legacy_temporary_authority_or_live_operation(self) -> None:
         source = RUNNER_PATH.read_text(encoding="utf-8")
         self.assertNotIn("/private/" + "tmp", source)
-        self.assertIn('EXTERNAL_ROOT = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")', source)
-        self.assertFalse(os.path.lexists(Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor")))
+        self.assertIn('EXTERNAL_ROOT = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v2")', source)
+        self.assertFalse(os.path.lexists(Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v2")))
         for forbidden in ("--execute", "socket.", "hermes_agent", "git push"):
             self.assertNotIn(forbidden, source.lower())
 
@@ -288,13 +332,14 @@ class PhaseAAnchorRunnerTests(unittest.TestCase):
 
     def _verify_guarded_with(self, *, head=None, tree=None, status=b"", worktrees=None, git_paths=None):
         observation = self._guarded_observation()
+        full = {"st_dev": 1, "st_ino": 2, "st_uid": os.getuid(), "st_gid": os.getgid(), "st_mode": 0o700, "st_size": 4096, "st_nlink": 2, "st_mtime_ns": 3, "st_ctime_ns": 4}
         identities = {
-            RUNNER.REPOSITORY_ROOT: observation["identity"],
-            RUNNER.REPOSITORY_ROOT.parent: observation["parent_identity"],
-            RUNNER.SOURCE_REPOSITORY_ROOT: observation["source_repository"]["identity"],
-            RUNNER.GIT_COMMON_DIR: observation["git_common_dir"]["identity"],
-            RUNNER.GIT_OBJECT_DIR: observation["git_object_dir"]["identity"],
-            RUNNER.GIT_WORKTREE_DIR: observation["git_worktree_dir"]["identity"],
+            RUNNER.REPOSITORY_ROOT: full,
+            RUNNER.REPOSITORY_ROOT.parent: {**full, "st_ino": 5},
+            RUNNER.SOURCE_REPOSITORY_ROOT: {**full, "st_ino": 6},
+            RUNNER.GIT_COMMON_DIR: {**full, "st_ino": 7},
+            RUNNER.GIT_OBJECT_DIR: {**full, "st_ino": 8},
+            RUNNER.GIT_WORKTREE_DIR: {**full, "st_ino": 9},
         }
         valid_worktrees = (
             b"worktree " + os.fspath(RUNNER.REPOSITORY_ROOT).encode() + b"\0"
