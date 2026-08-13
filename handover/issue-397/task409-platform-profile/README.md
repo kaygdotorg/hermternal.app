@@ -16,6 +16,14 @@ transform. `linux_replay_wrapper.py` pins the reviewed outer wrapper to the new
 driver contract. It is a read-only preflight and cannot run replay. New Phase A
 v3 evidence is required before replay authorization.
 
+`linux_phase_a_v3.py` verified-loads the approved Phase A v2 runner and changes
+only its schema, Linux authority pins, profile-bound owner record, and durable
+v3 evidence root. Its `phase-a` and `anchor` commands are separate create-only
+steps. Do not run these durable commands until an independent review approves
+this adapter. `load_approved_wrapper` removes the deliberate disabled boundary
+only after it authenticates an independently supplied anchor digest. Loading
+or testing the adapter does not run replay.
+
 Run:
 
 ```sh
@@ -23,6 +31,8 @@ Run:
 /usr/bin/python3 -O -B test_platform_profile.py
 /usr/bin/python3 -B platform_successor.py --prepare
 /usr/bin/python3 -B linux_replay_wrapper.py
+/usr/bin/python3 -B test_linux_phase_a_v3.py
+/usr/bin/python3 -O -B test_linux_phase_a_v3.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
