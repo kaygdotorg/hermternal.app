@@ -20,9 +20,8 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Sequence
 
-BASE = Path(__file__).resolve().parents[1]
 PINS_PATH = Path(__file__).resolve().with_name("final-linux-pins.json")
 REPORT_SCHEMA = "hermternal.issue-397.offline-gates/v3"
 PINS_SCHEMA = "hermternal.issue-397.offline-gates/v3-final-linux-pins"
@@ -31,6 +30,7 @@ MAX_FILE = 8 * 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 OID_RE = re.compile(r"[0-9a-f]{40}\Z")
 SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/opt/hermternal/playwright-browsers", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
+LOCAL_GIT_ENV = {**SAFE_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
 
 
 class Reject(Exception):
@@ -129,16 +129,18 @@ class Pins:
     dependencies_sha256: str
 
 
-def _pin_path(value: Any, label: str) -> Path:
+def _pin_path(value: Any, label: str, pins_path: Path, base: Path) -> Path:
     require(isinstance(value, str) and value and not os.path.isabs(value), f"{label} path differs")
-    path = (PINS_PATH.parent / value).resolve()
-    require(path.is_relative_to(BASE), f"{label} escapes handover")
+    path = (pins_path.parent / value).resolve()
+    require(path.is_relative_to(base), f"{label} escapes handover")
     return path
 
 
-def load_pins(path: Path = PINS_PATH) -> Pins:
+def load_pins(path: Path | None = None) -> Pins:
     """Load the one finalization file; deferred values are an execution stop."""
-    raw = stable_read(path.resolve(), "final Linux pins", 64 * 1024, 0o644)
+    pins_path = Path(path or PINS_PATH).resolve()
+    base = pins_path.parents[1]
+    raw = stable_read(pins_path, "final Linux pins", 64 * 1024, 0o644)
     value = strict_json(raw.raw, "final Linux pins")
     required = {"schema", "status", "platform_profile", "linux_authority", "replay", "expected_dev_base", "toolchain"}
     require(set(value) == required and value.get("schema") == PINS_SCHEMA, "final Linux pins schema differs")
@@ -153,8 +155,8 @@ def load_pins(path: Path = PINS_PATH) -> Pins:
     require(isinstance(value["expected_dev_base"], str) and OID_RE.fullmatch(value["expected_dev_base"]), "expected dev base differs")
     require(isinstance(toolchain["image"], str) and "@sha256:" in toolchain["image"] and toolchain["image"].endswith(toolchain["repo_digest"]), "toolchain image differs")
     require(toolchain["bun"] == "1.3.14" and toolchain["node"] == "26.7.0" and toolchain["playwright"] == "1.62.1", "toolchain version pins differ")
-    root = _pin_path(authority["root"], "Linux authority root")
-    return Pins(_pin_path(profile["path"], "platform profile"), profile["sha256"], root, _pin_path(authority["module_path"], "Linux authority"), authority["module_sha256"], _pin_path(replay["wrapper_path"], "Linux wrapper"), replay["wrapper_sha256"], _pin_path(replay["phase_a_path"], "Linux Phase A"), replay["phase_a_sha256"], value["expected_dev_base"], toolchain["image"], toolchain["repo_digest"], toolchain["dependencies_sha256"])
+    root = _pin_path(authority["root"], "Linux authority root", pins_path, base)
+    return Pins(_pin_path(profile["path"], "platform profile", pins_path, base), profile["sha256"], root, _pin_path(authority["module_path"], "Linux authority", pins_path, base), authority["module_sha256"], _pin_path(replay["wrapper_path"], "Linux wrapper", pins_path, base), replay["wrapper_sha256"], _pin_path(replay["phase_a_path"], "Linux Phase A", pins_path, base), replay["phase_a_sha256"], value["expected_dev_base"], toolchain["image"], toolchain["repo_digest"], toolchain["dependencies_sha256"])
 
 
 @dataclass(frozen=True)
@@ -251,13 +253,56 @@ def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[byte
     require(isinstance(labels, dict) and labels.get("org.hermternal.bun") == "1.3.14" and labels.get("org.hermternal.node") == "26.7.0" and labels.get("org.hermternal.playwright") == "1.62.1" and labels.get("org.hermternal.dependencies-sha256") == pins.dependencies_sha256, "pre-staged image toolchain attestation differs")
 
 
-def semantic_evidence(repository: Path) -> dict[str, Any]:
-    paths = {"auth": repository / "apps/web/tests/e2e/ui-preview.spec.ts", "privacy": repository / "apps/web/src/lib/live-artifact-policy.test.ts", "screenshots": repository / "apps/web/src/lib/live-screenshot-contract.test.ts"}
-    sources = {name: stable_read(path.resolve(), f"semantic {name}", 2 * 1024 * 1024, 0o600) for name, path in paths.items()}
+SEMANTIC_PATHS = {
+    "auth": "apps/web/tests/e2e/ui-preview.spec.ts",
+    "privacy": "apps/web/src/lib/live-artifact-policy.test.ts",
+    "screenshots": "apps/web/src/lib/live-screenshot-contract.test.ts",
+}
+
+
+def _local_git(repository: Path, *args: str, stdin: bytes = b"") -> bytes:
+    """Read only local Git objects with every config and fetch path disabled."""
+    command = ("/usr/bin/git", "-C", os.fspath(repository), "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", *args)
+    try:
+        result = subprocess.run(command, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LOCAL_GIT_ENV), cwd="/", timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Reject("semantic Git binding is unavailable") from error
+    stdout, stderr = bytes(result.stdout or b""), bytes(result.stderr or b"")
+    require(result.returncode == 0 and len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT, "semantic Git binding differs")
+    return stdout
+
+
+def semantic_evidence(chain: Chain) -> dict[str, Any]:
+    """Bind normal immutable source files to the approved final Git tree.
+
+    Evidence records stay private at mode 0600. Source is different: Git tracks
+    reviewed application files at mode 0644. We accept only that exact owner,
+    regular-file, single-link mode, then bind its stable bytes to the final tree
+    mode and blob. This rejects an unstaged replacement without making a normal
+    retained checkout impossible to read.
+    """
+    repository = chain.repository.resolve()
+    require(repository == chain.repository and repository.is_absolute() and os.path.realpath(repository) == os.fspath(repository), "semantic repository path differs")
+    paths = {name: repository / relative for name, relative in SEMANTIC_PATHS.items()}
+    for name, path in paths.items():
+        metadata = os.lstat(path)
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o644 and metadata.st_nlink == 1, f"semantic {name} metadata differs")
+    sources = {name: stable_read(path.resolve(), f"semantic {name}", 2 * 1024 * 1024, 0o644) for name, path in paths.items()}
+    bindings: dict[str, dict[str, str]] = {}
+    for name, source in sources.items():
+        relative = SEMANTIC_PATHS[name]
+        require(source.path == paths[name] and source.path.is_relative_to(repository) and source.identity[2] == os.getuid(), f"semantic {name} ownership or path differs")
+        listing = _local_git(repository, "ls-tree", "--full-tree", chain.final_tree, "--", relative)
+        match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\t" + re.escape(relative.encode("utf-8")) + rb"\n", listing)
+        require(match is not None, f"semantic {name} final Git mode or blob differs")
+        blob = match.group(1).decode("ascii")
+        calculated = _local_git(repository, "hash-object", "--no-filters", "--stdin", stdin=source.raw).decode("ascii", "strict").strip()
+        require(calculated == blob, f"semantic {name} working bytes differ from final Git blob")
+        bindings[name] = {"git_mode": "100644", "git_blob": blob}
     auth, privacy, screenshots = (sources["auth"].raw.decode("utf-8"), sources["privacy"].raw.decode("utf-8"), sources["screenshots"].raw.decode("utf-8"))
     checks = {"click": "activation === 'click'" in auth and ".click()" in auth, "enter": "activation === 'enter'" in auth and ".press('Enter')" in auth, "clearing": auth.count("toHaveValue('')") >= 4 and "outerHTML" in auth, "redaction": "page.screenshot()" in auth and "not.toContain(passwordValue)" in auth and "not.toContain(usernameValue)" in auth, "accessibility": "AxeBuilder" in auth and "axe violations" in auth, "privacy_policy": "LIVE_ARTIFACT_REDACTION" in privacy and "screenshot: 'off'" in privacy, "screenshot_contract": "blockedLiveScreenshotManifest" in screenshots}
     require(all(checks.values()), "semantic privacy, accessibility, or authentication evidence is incomplete")
-    return {"checks": checks, "sources": {name: {"path": os.fspath(item.path), "sha256": item.sha256, "identity": list(item.identity)} for name, item in sources.items()}}
+    return {"checks": checks, "sources": {name: {"path": os.fspath(item.path), "sha256": item.sha256, "identity": list(item.identity), **bindings[name]} for name, item in sources.items()}}
 
 
 Run = Callable[..., subprocess.CompletedProcess[bytes]]
@@ -296,9 +341,10 @@ def write_report(path: Path, chain: Chain, gates: list[dict[str, Any]], semantic
     return report
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image) -> int:
+    """Run the real CLI, with only its container boundary injectable for tests."""
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--result", type=Path, required=True); parser.add_argument("--completion", type=Path, required=True); parser.add_argument("--report", type=Path, required=True); args = parser.parse_args(argv)
-    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain.repository); gates = run_gates(chain, pins); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain.repository)
+    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain); gates = run_gates(chain, pins, run, attest); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain)
     require(chain == final_chain and before_semantic == final_semantic, "replay repository or semantic evidence changed during offline gates")
     write_report(args.report, final_chain, gates, final_semantic)
     return 0
