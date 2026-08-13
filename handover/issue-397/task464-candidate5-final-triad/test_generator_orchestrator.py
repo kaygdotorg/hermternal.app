@@ -59,9 +59,42 @@ class OrchestratorTests(unittest.TestCase):
             descriptor_value = json.loads(descriptor)
             self.assertEqual(set(descriptor_value), {"schema", "roles", "normalized_json_sha256"})
             facts = {"generation": {}, "repository_boundary": {}, "dependencies": [], "source_inputs": [], "publication": {}, "safety_claims": {}}
-            provenance = ORCH.provenance_bytes(generated, facts)
+            provenance = ORCH.provenance_bytes(generated, facts, authority)
             self.assertEqual(set(json.loads(provenance)), ORCH.PROVENANCE_KEYS)
             self.assertNotEqual(descriptor, provenance)
+            cross = json.loads(provenance)["cross_format_authority"]
+            self.assertEqual(cross["json_shell_sha256"], cross["markdown_shell_sha256"])
+            self.assertEqual(cross["markdown_shell_sha256"], cross["shell_sha256"])
+
+    def test_provenance_rejects_malformed_markdown_old_code_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = self.private_root(parent); generated = ORCH.generate_in_memory(root)
+            authority = ORCH.verified_module(ORCH.AUTHORITY, ORCH.EXPECTED[ORCH.AUTHORITY], "malformed_authority")
+            malformed = dict(generated.payloads)
+            malformed["markdown"] += b"```\n"
+            hostile = ORCH.Generated(root, malformed)
+            facts = {"generation": {}, "repository_boundary": {}, "dependencies": [], "source_inputs": [], "publication": {}, "safety_claims": {}}
+            with self.assertRaisesRegex(Exception, "duplicate closing fence"):
+                ORCH.provenance_bytes(hostile, facts, authority)
+
+    def test_inspect_rejects_each_cross_format_provenance_substitution(self) -> None:
+        fields = ("normalized_json_sha256", "json_shell_sha256", "markdown_shell_sha256", "shell_sha256", "fresh_cli_argv_sha256", "all_shell_hashes_equal")
+        for field in fields:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as parent:
+                root = self.private_root(parent); generated = ORCH.generate_in_memory(root)
+                authority = ORCH.verified_module(ORCH.AUTHORITY, ORCH.EXPECTED[ORCH.AUTHORITY], "inspect_authority_" + field)
+                descriptor = ORCH.descriptor_bytes(generated, authority)
+                for role in ORCH.ROLE_ORDER:
+                    ORCH.create_once(root / ORCH.FINAL_NAMES[role], generated.payloads[role])
+                descriptor_snapshot = ORCH.create_once(root / ORCH.DESCRIPTOR_NAME, descriptor)
+                facts = {"generation": {}, "repository_boundary": {}, "dependencies": [], "source_inputs": [], "publication": {}, "safety_claims": {}}
+                value = json.loads(ORCH.provenance_bytes(generated, facts, authority))
+                current = value["cross_format_authority"][field]
+                value["cross_format_authority"][field] = (not current) if isinstance(current, bool) else ("0" * 64)
+                raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                provenance_snapshot = ORCH.create_once(root / ORCH.PROVENANCE_NAME, raw)
+                with self.assertRaisesRegex(ORCH.Reject, "cross-format provenance"):
+                    ORCH.inspect_complete(root, descriptor_snapshot.sha256, provenance_snapshot.sha256)
 
     def test_partial_set_is_never_authority(self) -> None:
         with tempfile.TemporaryDirectory() as parent:

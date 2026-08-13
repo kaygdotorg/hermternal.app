@@ -16,6 +16,11 @@ a private temporary root and using genuine #401 as its callback. The callback
 must see single-link artifacts and exact JSON, Markdown, shell, argv, and stdin
 authority. Source formatting and source-text searches do not decide approval.
 
+Provenance generation and final inspection both use approved #401 parsing and
+extraction against the exact JSON, Markdown, and standalone shell bytes. They
+derive and compare all three shell hashes, normalized JSON identity, and argv
+digest. No equality field or hash is a constant claim.
+
 The durable Markdown has later prose closing fences, which #401 treats as an
 ambiguous second shell-fence close. The successor makes one explicit final-only
 adaptation: it keeps the authority closing fence and replaces each later exact

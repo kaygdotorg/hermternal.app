@@ -241,25 +241,39 @@ def _record(path: str, raw: bytes, role: str) -> dict[str, Any]:
     }
 
 
-def provenance_bytes(generated: Generated, facts: Mapping[str, Any]) -> bytes:
+def _cross_format(raw_json: bytes, raw_markdown: bytes, raw_shell: bytes, authority: types.ModuleType) -> dict[str, Any]:
+    """Derive every cross-format field through the approved #401 algorithms."""
+    document = authority.parse_object(raw_json, "authority JSON")
+    execution = document.get("execution_driver")
+    require(isinstance(execution, dict), "JSON execution_driver is absent")
+    json_shell = execution.get("shell", "").encode("utf-8")
+    markdown_shell = authority.extract_shell(raw_markdown)
+    require(json_shell == markdown_shell == raw_shell, "JSON, Markdown, and standalone shell bytes differ")
+    normalized = execution.get("matrix_identity", {}).get("expected_normalized_sha256", "")
+    require(authority.normalized_json_sha256(raw_json, normalized) == normalized, "normalized JSON identity differs")
+    argv = execution.get("argv")
+    require(tuple(argv) == authority.ARGV, "authenticated argv differs")
+    hashes = [hashlib.sha256(item).hexdigest() for item in (json_shell, markdown_shell, raw_shell)]
+    return {
+        "schema": authority.SCHEMA, "normalized_json_sha256": normalized,
+        "json_shell_sha256": hashes[0], "markdown_shell_sha256": hashes[1],
+        "shell_sha256": hashes[2],
+        "fresh_cli_argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest(),
+        "all_shell_hashes_equal": len(set(hashes)) == 1,
+    }
+
+
+def provenance_bytes(generated: Generated, facts: Mapping[str, Any], authority_module: types.ModuleType) -> bytes:
     """Build deterministic provenance from a closed, caller-supplied fact set."""
     require(set(facts) == {"generation", "repository_boundary", "dependencies", "source_inputs", "publication", "safety_claims"}, "provenance facts differ")
-    shell = generated.payloads["shell"]
-    document = json.loads(generated.payloads["json"])
-    normalized = document["execution_driver"]["matrix_identity"]["expected_normalized_sha256"]
+    cross_format = _cross_format(generated.payloads["json"], generated.payloads["markdown"], generated.payloads["shell"], authority_module)
+    require(cross_format["all_shell_hashes_equal"] is True, "cross-format shell hashes differ")
     value = {
         "schema": PROVENANCE_SCHEMA, "issue": 397, "candidate": "five",
         "generation": facts["generation"], "repository_boundary": facts["repository_boundary"],
         "dependencies": facts["dependencies"], "source_inputs": facts["source_inputs"],
         "outputs": {role: _record(str(generated.root / FINAL_NAMES[role]), generated.payloads[role], role) for role in ROLE_ORDER},
-        "cross_format_authority": {
-            "schema": "hermternal.issue-397.candidate-five-authority.v1",
-            "normalized_json_sha256": normalized,
-            "json_shell_sha256": hashlib.sha256(document["execution_driver"]["shell"].encode()).hexdigest(),
-            "markdown_shell_sha256": hashlib.sha256(shell).hexdigest(),
-            "fresh_cli_argv_sha256": hashlib.sha256(json.dumps(document["execution_driver"]["argv"], separators=(",", ":")).encode()).hexdigest(),
-            "all_shell_hashes_equal": True,
-        },
+        "cross_format_authority": cross_format,
         "publication": facts["publication"], "safety_claims": facts["safety_claims"],
     }
     require(set(value) == PROVENANCE_KEYS, "provenance fields differ")
@@ -297,6 +311,8 @@ def inspect_complete(root: Path, descriptor_sha256: str, provenance_sha256: str)
     require(set(value) == PROVENANCE_KEYS and value["schema"] == PROVENANCE_SCHEMA, "provenance schema differs")
     for role in ROLE_ORDER:
         require(value["outputs"][role]["sha256"] == result.artifacts[role].sha256, f"{role} provenance differs")
+    derived = _cross_format(result.artifacts["json"].raw, result.artifacts["markdown"].raw, result.artifacts["shell"].raw, authority)
+    require(value["cross_format_authority"] == derived, "cross-format provenance differs from exact triad")
     return result
 
 
