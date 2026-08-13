@@ -52,6 +52,24 @@ one durable HTML boundary. The derived validator now parses exactly one JSON
 appendix and requires that exact boundary. The frozen authority and preserved
 `hermternal-issue397-replay-failure-v1` evidence stay unchanged.
 
+`git_config_policy.py` is the one canonical Git-config policy source for the
+Linux correction. It binds the exact #400 replay config bytes and records to
+`protocol.allow=never`. Its generated-validator predicate treats `remote.*`
+records as repository metadata. It applies the `never` value rule only to
+`protocol.allow` and named `protocol.<name>.allow` records.
+
+`linux_retained_driver_v2.py` embeds that shared predicate at the one faulty
+generated-shell anchor. `linux_replay_wrapper_v2.py` binds #405 to the new
+derived stdin and checks the shared policy against #400. The original driver,
+wrapper, authority triad, and failure-v2 evidence stay frozen.
+
+The derived stdin hash changed. Thus, `linux_phase_a_v5.py` uses a new
+create-only `hermternal-issue397-phase-a-anchor-v5` evidence root.
+`linux_replay_failure_v3.py` uses a separate
+`hermternal-issue397-replay-failure-v3` root. Do not reuse or change v4 Phase A
+or failure-v2 evidence. The new tests use only disposable evidence roots and
+local temporary Git repositories. They do not run replay.
+
 Run:
 
 ```sh
@@ -65,6 +83,13 @@ Run:
 /usr/bin/python3 -O -B test_linux_replay_failure_v1.py
 /usr/bin/python3 -B test_linux_replay_failure_v2.py
 /usr/bin/python3 -O -B test_linux_replay_failure_v2.py
+/usr/bin/python3 -B test_git_config_policy.py
+/usr/bin/python3 -O -B test_git_config_policy.py
+/usr/bin/python3 -B linux_replay_wrapper_v2.py
+/usr/bin/python3 -B test_linux_phase_a_v5.py
+/usr/bin/python3 -O -B test_linux_phase_a_v5.py
+/usr/bin/python3 -B test_linux_replay_failure_v3.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v3.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
