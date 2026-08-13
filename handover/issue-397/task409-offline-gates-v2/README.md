@@ -34,7 +34,11 @@ dedicated tmpfs. Separate tmpfs mounts cover `.svelte-kit`, `build`,
 `test-results`, and `playwright-report`, so source stays read-only while build
 and browser tooling can write. The report records stable privacy,
 accessibility, click/Enter, input-clearing, and screenshot/DOM-redaction source
-evidence before and after the gates.
+evidence before and after the gates. Those tracked source files use normal Git
+mode `0644`; they are accepted only when owner-owned, single-link regular
+files have stable bytes that match the exact `100644` blob in the replay final
+tree. This is different from authority, replay, and report evidence, which
+remains mode `0600`.
 
 Run only after independent review authorizes the real retained replay result:
 
@@ -45,8 +49,10 @@ python3 -B handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py \
   --report /tmp/<approved-retained-run>/replay-root/offline-gates.json
 ```
 
-Offline checks (these mock only the subprocess/container boundary and image
-discovery; parsers, semantic evidence, and report writer are real):
+Offline checks use a real controlled Git checkout, real hash-bound Linux and
+#405 fixture modules, real parsers, semantic Git/blob evidence, and the real
+create-only report writer. They replace only the Podman subprocess and image
+discovery boundary:
 
 ```sh
 python3 -m py_compile handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
