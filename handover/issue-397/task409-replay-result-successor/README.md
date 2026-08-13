@@ -29,7 +29,9 @@ The wrapper has one injectable process boundary. The production boundary uses
 the exact derived argv and stdin, an empty inherited environment, `/` as its
 working directory, and byte pipes for stdin, stdout, and stderr. The derived
 argv starts `/usr/bin/env -i`, so the child gets only the environment that the
-approved shell creates.
+approved shell creates. The wrapper drains stdout and stderr incrementally and
+stops the child as soon as either stream exceeds its fixed byte limit. It never
+uses an unbounded `communicate()` capture.
 
 Success requires all of these exact observations:
 
@@ -64,6 +66,14 @@ and parses the closed anchor record. The wrapper extracts
 `phase_a_manifest_sha256` and `phase_a_approval_digest` from the verified
 record. It does not accept these two values directly from the caller.
 
+Before the process and after both final files exist, the wrapper uses the
+genuine v2 validators to stable-read `phase-a.json`, `anchor.json`,
+`input-manifest.json`, `phase-a-approval-anchor.json`, and `.owner`. It also
+binds the v2 root and its three runtime directories. Cross-module snapshots are
+converted to closed primitive path, hash, byte-count, identity, and directory
+records. The wrapper never compares dataclass instances from separate verified
+module loads.
+
 ## Final publication
 
 Only a successful complete validation can create:
@@ -84,9 +94,12 @@ module, frozen driver source, final triad, provenance, source commit, and Phase
 A evidence.
 
 Both final files use `O_EXCL`, file `fsync`, directory `fsync`, and three stable
-no-follow rereads. If publication fails, the wrapper removes only the exact
-device and inode that this call created. It does not remove pending evidence or
-the retained repository. A pre-existing final file is never changed.
+no-follow rereads. Publication is one transaction. It records each owned device
+and inode immediately after creation. Any write, sync, stable-read, schema
+verification, or final live-input verification failure reconciles both final
+names. It removes only exact files owned by that transaction, preserves a
+foreign replacement, and reports residue. It does not remove pending evidence
+or the retained repository. A pre-existing final file is never changed.
 
 ## Self-contained repository review
 
@@ -123,6 +136,10 @@ Git. They cover exact argv, stdin, and environment; pinned derived stdin;
 nonzero exit; missing, late, and extra markers; stderr; pending mutation;
 repository drift; policy drift; pre-existing final files; late final sync
 failure; pending residue; and the exact #404 v2 input interface.
+They also cover cross-module primitive equality, missing pending evidence,
+stream overflow, post-create read failure, final verification failure, late
+pending replacement, live Phase A file mutation, and complete rollback of both
+owned final names.
 
 This checkpoint is not replay evidence, Phase B approval, live Hermes proof, or
 permission to update `dev` or `main`.

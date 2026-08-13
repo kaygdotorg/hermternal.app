@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -85,6 +86,7 @@ class WrapperTests(unittest.TestCase):
             ),
             "f" * 64,
             "9" * 64,
+            {"fixture": "closed"},
         )
         self.patches = [
             mock.patch.object(MODULE, "RUN_PARENT", self.run_parent),
@@ -440,6 +442,100 @@ class WrapperTests(unittest.TestCase):
         )
         self.assertTrue(pending.exists())
 
+    def test_post_create_read_failure_reconciles_owned_finals(self) -> None:
+        genuine = MODULE.stable_read
+
+        def fail_result(path, label, **kwargs):
+            if label == "replay result":
+                raise OSError("injected post-create read failure")
+            return genuine(path, label, **kwargs)
+
+        with mock.patch.object(MODULE, "stable_read", side_effect=fail_result):
+            with self.assertRaisesRegex(MODULE.Reject, "post-create read"):
+                self._execute()
+        self._assert_no_finals()
+
+    def test_final_live_verification_failure_reconciles_both_finals(self) -> None:
+        genuine = MODULE._verify_live_inputs
+        calls = 0
+
+        def fail_final(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise MODULE.Reject("injected final live verification failure")
+            return genuine(*args, **kwargs)
+
+        with mock.patch.object(MODULE, "_verify_live_inputs", side_effect=fail_final):
+            with self.assertRaisesRegex(MODULE.Reject, "final live verification"):
+                self._execute()
+        self._assert_no_finals()
+
+    def test_final_transaction_preserves_foreign_inode_replacement(self) -> None:
+        calls = 0
+
+        def replace_result(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                replay_root = self.run_parent / f"{MODULE.RUN_PREFIX}{self.pid}" / "replay-root"
+                result = replay_root / MODULE.RESULT_NAME
+                foreign = replay_root / "foreign-result"
+                foreign.write_bytes(b"foreign\n")
+                foreign.chmod(0o600)
+                os.replace(foreign, result)
+                raise MODULE.Reject("injected foreign replacement")
+
+        with mock.patch.object(MODULE, "_verify_live_inputs", side_effect=replace_result):
+            with self.assertRaisesRegex(MODULE.Reject, "final residue"):
+                self._execute()
+        replay_root = self.run_parent / f"{MODULE.RUN_PREFIX}{self.pid}" / "replay-root"
+        self.assertEqual((replay_root / MODULE.RESULT_NAME).read_bytes(), b"foreign\n")
+        self.assertFalse((replay_root / MODULE.COMPLETION_NAME).exists())
+
+    def test_late_pending_swap_reconciles_both_finals(self) -> None:
+        genuine = MODULE._verify_live_inputs
+        calls = 0
+
+        def swap_pending(pending, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                replacement = pending.snapshot.path.with_name("pending-replacement")
+                replacement.write_bytes(pending.snapshot.raw)
+                replacement.chmod(0o600)
+                os.replace(replacement, pending.snapshot.path)
+            return genuine(pending, *args, **kwargs)
+
+        with mock.patch.object(MODULE, "_verify_live_inputs", side_effect=swap_pending):
+            with self.assertRaisesRegex(MODULE.Reject, "pending replay result changed"):
+                self._execute()
+        self._assert_no_finals()
+
+    def test_missing_pending_is_normalized_and_publishes_no_final(self) -> None:
+        def boundary(argv, stdin, environment):
+            return MODULE.ProcessResult(self.pid, 0, MODULE.SUCCESS_OUTPUT, b"")
+
+        with self.assertRaisesRegex(MODULE.Reject, "filesystem failure"):
+            self._execute(boundary)
+        self._assert_no_finals()
+
+    def test_process_output_is_bounded_while_streaming(self) -> None:
+        source = inspect.getsource(MODULE._run_process)
+        self.assertNotIn("communicate(", source)
+        self.assertIn("selectors.DefaultSelector", source)
+        with mock.patch.object(MODULE, "MAX_BYTES", 128):
+            with self.assertRaisesRegex(MODULE.Reject, "stdout exceeds"):
+                MODULE._run_process(
+                    (
+                        "/usr/bin/python3",
+                        "-c",
+                        "import sys; sys.stdout.buffer.write(b'x' * 129)",
+                    ),
+                    b"",
+                    {},
+                )
+
     def test_phase_a_interface_requires_independent_hash_and_real_path(self) -> None:
         for patcher in reversed(self.patches):
             patcher.stop()
@@ -540,6 +636,9 @@ class WrapperTests(unittest.TestCase):
                 evidence = MODULE.load_phase_a_evidence(
                     anchor_path, anchor_snapshot.sha256
                 )
+                second_evidence = MODULE.load_phase_a_evidence(
+                    anchor_path, anchor_snapshot.sha256
+                )
             record = json.loads(anchor_snapshot.raw)
             self.assertEqual(record["schema"], runner.EVIDENCE_SCHEMA)
             self.assertEqual(evidence.snapshot.sha256, anchor_snapshot.sha256)
@@ -551,6 +650,72 @@ class WrapperTests(unittest.TestCase):
                 evidence.approval_digest,
                 record["inputs"]["phase_a_approval_digest"],
             )
+            self.assertEqual(
+                dict(evidence.live_record), dict(second_evidence.live_record)
+            )
+            self.assertIsNot(
+                type(evidence.snapshot),
+                type(runner.stable_read(anchor_path, "cross-module anchor")),
+            )
+
+            real_authority = MODULE.load_authority()
+            observed = {
+                "final_head": OIDS["head"],
+                "parent": OIDS["parent"],
+                "tree": OIDS["tree"],
+            }
+
+            def boundary(argv, stdin, environment):
+                self.assertEqual(
+                    (argv, stdin, dict(environment)),
+                    (real_authority.argv, real_authority.stdin, {}),
+                )
+                run_root = self.run_parent / f"{MODULE.RUN_PREFIX}{self.pid}"
+                run_root.mkdir(mode=0o700)
+                replay_root = run_root / "replay-root"
+                repository = run_root / "repository"
+                replay_root.mkdir(mode=0o700)
+                repository.mkdir(mode=0o700)
+                value = {
+                    "schema": MODULE.PENDING_SCHEMA,
+                    "replay_root": os.fspath(replay_root),
+                    "replay_root_identity": MODULE._directory_identity(replay_root, "fixture replay root"),
+                    "repository": os.fspath(repository),
+                    "repository_identity": MODULE._directory_identity(repository, "fixture repository"),
+                    "head_state": "detached",
+                    **observed,
+                    "base_commit": real_authority.base_commit,
+                    "base_tree": real_authority.base_tree,
+                    "protected_main_commit": real_authority.protected_main_commit,
+                    "required_ancestors": list(real_authority.required_ancestors),
+                    "forbidden_ancestors": list(real_authority.forbidden_ancestors),
+                }
+                pending = replay_root / MODULE.PENDING_NAME
+                pending.write_bytes(MODULE._canonical_json(value))
+                pending.chmod(0o600)
+                return MODULE.ProcessResult(self.pid, 0, MODULE.SUCCESS_OUTPUT, b"")
+
+            with mock.patch.object(MODULE, "_verified_module", side_effect=verified), mock.patch.object(
+                MODULE, "RUN_PARENT", self.run_parent
+            ), mock.patch.object(
+                MODULE, "reobserve_repository", return_value=observed
+            ):
+                publication = MODULE.execute_and_publish(
+                    anchor_path,
+                    anchor_snapshot.sha256,
+                    process_boundary=boundary,
+                )
+            self.assertTrue(publication.result.path.exists())
+            self.assertTrue(publication.completion.path.exists())
+
+            owner = external_root / "phase-a" / ".owner"
+            with owner.open("ab") as stream:
+                stream.write(b"mutation")
+                stream.flush()
+                os.fsync(stream.fileno())
+            with mock.patch.object(MODULE, "_verified_module", side_effect=verified):
+                with self.assertRaisesRegex(MODULE.Reject, "owner marker"):
+                    MODULE.load_phase_a_evidence(anchor_path, anchor_snapshot.sha256)
 
     def test_parser_requires_both_phase_a_arguments(self) -> None:
         with self.assertRaises(SystemExit):
