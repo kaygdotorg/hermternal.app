@@ -92,6 +92,13 @@ file and parent directory and then does three stable no-follow rereads. A
 runner evidence write failure removes only the exact runner-owned inode. It
 reports foreign or moved residue and does not claim a clean rollback.
 
+The Phase A evidence binds the owner marker with its exact canonical path,
+canonical JSON content, complete regular-file identity, integer byte and LF
+counts, SHA-256, and terminal LF byte. Anchor reads the marker three times with
+no-follow handles and a fixed byte bound. It compares the exact bytes, digest,
+size, terminal contract, and full identity. A same-length content rewrite or
+an identical-byte inode replacement rejects the anchor stage.
+
 ## Directory binding policy
 
 Evidence schema `hermternal.issue-397.phase-a-anchor-evidence.v2` compares only

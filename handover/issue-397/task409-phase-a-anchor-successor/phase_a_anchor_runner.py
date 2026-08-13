@@ -88,6 +88,11 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _owner_value() -> dict[str, Any]:
+    """Return the one exact canonical owner-marker content value."""
+    return {"executor": "not-implemented", "kind": "task409-phase-a-anchor-successor-owner", "read_only": True, "schema": SCHEMA, "uid": os.getuid()}
+
+
 def _identity(st: os.stat_result) -> dict[str, int]:
     return {
         "st_dev": int(st.st_dev), "st_ino": int(st.st_ino), "st_uid": int(st.st_uid),
@@ -494,10 +499,16 @@ def _validate_evidence(value: Mapping[str, Any], stage: str, external_root: Path
         require(isinstance(observations["manifest"]["bytes"], int) and not isinstance(observations["manifest"]["bytes"], bool) and observations["manifest"]["bytes"] > 0, "Phase A manifest byte count differs")
         _validate_identity(observations["manifest"]["identity"], "Phase A manifest")
         require(observations["manifest"]["identity"]["st_uid"] == os.getuid() and observations["manifest"]["identity"]["st_mode"] == 0o600 and observations["manifest"]["identity"]["st_nlink"] == 1, "Phase A manifest file contract differs")
-        require(set(observations["owner_marker"]) == {"path", "identity"}, "owner marker fields differ")
-        require(observations["owner_marker"]["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / ".owner"), "owner marker path differs")
-        _validate_identity(observations["owner_marker"]["identity"], "owner marker")
-        require(observations["owner_marker"]["identity"]["st_uid"] == os.getuid() and observations["owner_marker"]["identity"]["st_mode"] == 0o600 and observations["owner_marker"]["identity"]["st_nlink"] == 1, "owner marker file contract differs")
+        marker = observations["owner_marker"]
+        require(set(marker) == {"path", "identity", "bytes", "sha256", "lf_count", "terminal_byte_hex", "content"}, "owner marker fields differ")
+        require(marker["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / ".owner"), "owner marker path differs")
+        require(marker["content"] == _owner_value(), "owner marker content differs")
+        expected_owner_raw = _canonical_json(_owner_value())
+        require(all(isinstance(marker[name], int) and not isinstance(marker[name], bool) for name in ("bytes", "lf_count")), "owner marker scalar type differs")
+        require(marker["bytes"] == len(expected_owner_raw) and marker["sha256"] == hashlib.sha256(expected_owner_raw).hexdigest(), "owner marker byte binding differs")
+        require(marker["lf_count"] == 1 and marker["terminal_byte_hex"] == "0a", "owner marker terminal contract differs")
+        _validate_identity(marker["identity"], "owner marker")
+        require(marker["identity"]["st_uid"] == os.getuid() and marker["identity"]["st_mode"] == 0o600 and marker["identity"]["st_nlink"] == 1 and marker["identity"]["st_size"] == marker["bytes"], "owner marker file contract differs")
         require(_is_sha256(observations["phase_a_approval_digest"]) and _is_sha256(observations["policy_sha256"]), "Phase A derived digest differs")
     elif stage == "anchor":
         require(value["prior_sha256"] != "0" * 64, "anchor prior SHA-256 is zero")
@@ -597,7 +608,7 @@ def phase_a(
     phase_root = external_root / "phase-a"
     _create_directory(phase_root, "Phase A root")
     owner_marker = phase_root / ".owner"
-    _publish_record(owner_marker, {"executor": "not-implemented", "kind": "task409-phase-a-anchor-successor-owner", "read_only": True, "schema": SCHEMA, "uid": os.getuid()})
+    owner_snapshot = _publish_record(owner_marker, _owner_value())
     manifest_path = phase_root / "input-manifest.json"
     manifest_raw = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
     manifest_snapshot = _publish_bytes(manifest_path, manifest_raw, "Phase A manifest")
@@ -618,7 +629,7 @@ def phase_a(
         "external_root_binding": _binding_record(_directory_identity(external_root, "external root", exact_mode=0o700)),
         "guarded_worktree": guarded_worktree,
         "manifest": {"path": os.fspath(manifest_path), "sha256": manifest_sha256, "identity": dict(manifest_snapshot.identity), "bytes": len(manifest_snapshot.raw)},
-        "owner_marker": {"path": os.fspath(owner_marker), "identity": dict(stable_read(owner_marker, "owner marker").identity)},
+        "owner_marker": {"path": os.fspath(owner_marker), "identity": dict(owner_snapshot.identity), "bytes": len(owner_snapshot.raw), "sha256": owner_snapshot.sha256, "lf_count": owner_snapshot.raw.count(b"\n"), "terminal_byte_hex": owner_snapshot.raw[-1:].hex(), "content": _owner_value()},
         "phase_a_approval_digest": approval_digest,
         "phase_a_validator_calls": calls,
         "policy_sha256": policy_sha256,
@@ -629,6 +640,7 @@ def phase_a(
     evidence_snapshot = _publish_evidence(evidence_path, record, "phase-a", external_root)
     final_authority, _, final_root_identity, final_parent_identity = _authority_state(modules)
     require(after == final_authority and _directory_binding(authority_root_identity) == _directory_binding(final_root_identity) and _directory_binding(authority_parent_identity) == _directory_binding(final_parent_identity), "final authority changed after Phase A evidence")
+    require(stable_read(owner_marker, "final Phase A owner marker") == owner_snapshot, "owner marker changed before Phase A PASS")
     require(stable_read(manifest_path, "final Phase A manifest") == manifest_snapshot, "Phase A manifest changed before PASS")
     require(stable_read(evidence_path, "final Phase A evidence") == evidence_snapshot, "Phase A evidence changed before PASS")
     require(_binding_record(_directory_identity(external_root, "final external root", exact_mode=0o700)) == observations["external_root_binding"], "external root changed before Phase A PASS")
@@ -677,7 +689,9 @@ def anchor(
     require(manifest_record.get("bytes") == len(manifest_snapshot.raw), "Phase A manifest byte observation differs")
     owner_path = external_root / "phase-a" / ".owner"
     owner_snapshot = stable_read(owner_path, "Phase A owner marker")
-    require(observations.get("owner_marker") == {"path": os.fspath(owner_path), "identity": dict(owner_snapshot.identity)}, "Phase A owner marker observation changed")
+    owner_record = {"path": os.fspath(owner_path), "identity": dict(owner_snapshot.identity), "bytes": len(owner_snapshot.raw), "sha256": owner_snapshot.sha256, "lf_count": owner_snapshot.raw.count(b"\n"), "terminal_byte_hex": owner_snapshot.raw[-1:].hex(), "content": _owner_value()}
+    require(owner_snapshot.raw == _canonical_json(_owner_value()), "Phase A owner marker canonical bytes changed")
+    require(observations.get("owner_marker") == owner_record, "Phase A owner marker observation changed")
     manifest, observed_manifest_sha = modules.phase_a.load_manifest(manifest_path)
     require(observed_manifest_sha == manifest_snapshot.sha256, "Phase A manifest stable digest differs")
     approval_digest = modules.phase_a.phase_a_approval_digest(manifest)
