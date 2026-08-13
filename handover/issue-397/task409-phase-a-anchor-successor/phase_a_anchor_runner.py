@@ -85,6 +85,7 @@ def _identity(st: os.stat_result) -> dict[str, int]:
         "st_dev": int(st.st_dev), "st_ino": int(st.st_ino), "st_uid": int(st.st_uid),
         "st_gid": int(st.st_gid), "st_mode": stat.S_IMODE(st.st_mode),
         "st_size": int(st.st_size), "st_nlink": int(st.st_nlink),
+        "st_mtime_ns": int(st.st_mtime_ns), "st_ctime_ns": int(st.st_ctime_ns),
     }
 
 
@@ -387,7 +388,7 @@ def _is_sha256(value: Any) -> bool:
 
 
 def _validate_identity(value: Any, label: str) -> None:
-    keys = {"st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_size", "st_nlink"}
+    keys = {"st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_size", "st_nlink", "st_mtime_ns", "st_ctime_ns"}
     require(isinstance(value, dict) and set(value) == keys, f"{label} identity fields differ")
     require(all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in value.values()), f"{label} identity values differ")
 
@@ -402,32 +403,54 @@ def _validate_evidence(value: Mapping[str, Any], stage: str) -> None:
     observations = value["observations"]
     require(isinstance(inputs, dict) and isinstance(observations, dict), f"{stage} evidence objects differ")
     if stage == "phase-a":
+        require(value["prior_sha256"] == "0" * 64, "Phase A prior SHA-256 is not zero")
         require(set(inputs) == {"frozen_commit", "frozen_tree", "repository_root", "external_root"}, "Phase A input fields differ")
+        require(inputs == {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(REPOSITORY_ROOT), "external_root": os.fspath(EXTERNAL_ROOT)} or os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT") == inputs.get("external_root"), "Phase A canonical inputs differ")
         require(set(observations) == {"anchor_provisioner_calls", "authority_files", "authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity", "manifest", "owner_marker", "phase_a_approval_digest", "phase_a_validator_calls", "policy_sha256"}, "Phase A observation fields differ")
         require(observations["phase_a_validator_calls"] == 1 and observations["anchor_provisioner_calls"] == 0, "Phase A call counts differ")
         require(set(observations["authority_files"]) == set(FINAL_NAMES), "Phase A authority file set differs")
         for name, record in observations["authority_files"].items():
             require(set(record) == {"path", "sha256", "identity", "bytes", "lf_count", "terminal_byte_hex"}, f"Phase A {name} fields differ")
             require(_is_sha256(record["sha256"]) and record["sha256"] == FINAL_PINS[name], f"Phase A {name} digest differs")
+            require(record["path"] == os.fspath(REPOSITORY_ROOT / AUTHORITY_REL / name), f"Phase A {name} path differs")
+            require(all(isinstance(record[field], int) and not isinstance(record[field], bool) and record[field] >= 0 for field in ("bytes", "lf_count")), f"Phase A {name} scalar type differs")
+            require(record["terminal_byte_hex"] == "0a", f"Phase A {name} terminal byte differs")
             _validate_identity(record["identity"], f"Phase A {name}")
+            require(record["identity"]["st_uid"] == os.getuid() and record["identity"]["st_nlink"] == 1 and not record["identity"]["st_mode"] & 0o022, f"Phase A {name} file contract differs")
         for name in ("authority_parent_identity", "authority_root_identity", "external_parent_identity", "external_root_identity"):
             _validate_identity(observations[name], name)
         require(set(observations["manifest"]) == {"path", "sha256", "identity", "bytes"}, "Phase A manifest fields differ")
         require(_is_sha256(observations["manifest"]["sha256"]), "Phase A manifest digest differs")
+        require(observations["manifest"]["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / "input-manifest.json"), "Phase A manifest path differs")
+        require(isinstance(observations["manifest"]["bytes"], int) and not isinstance(observations["manifest"]["bytes"], bool) and observations["manifest"]["bytes"] > 0, "Phase A manifest byte count differs")
         _validate_identity(observations["manifest"]["identity"], "Phase A manifest")
+        require(observations["manifest"]["identity"]["st_uid"] == os.getuid() and observations["manifest"]["identity"]["st_mode"] == 0o600 and observations["manifest"]["identity"]["st_nlink"] == 1, "Phase A manifest file contract differs")
         require(set(observations["owner_marker"]) == {"path", "identity"}, "owner marker fields differ")
+        require(observations["owner_marker"]["path"] == os.fspath(Path(inputs["external_root"]) / "phase-a" / ".owner"), "owner marker path differs")
         _validate_identity(observations["owner_marker"]["identity"], "owner marker")
+        require(observations["owner_marker"]["identity"]["st_uid"] == os.getuid() and observations["owner_marker"]["identity"]["st_mode"] == 0o600 and observations["owner_marker"]["identity"]["st_nlink"] == 1, "owner marker file contract differs")
         require(_is_sha256(observations["phase_a_approval_digest"]) and _is_sha256(observations["policy_sha256"]), "Phase A derived digest differs")
     elif stage == "anchor":
-        require(set(inputs) == {"phase_a_manifest_sha256", "phase_a_approval_digest", "policy_sha256"}, "anchor input fields differ")
+        require(value["prior_sha256"] != "0" * 64, "anchor prior SHA-256 is zero")
+        require(set(inputs) == {"expected_phase_a_sha256", "phase_a_manifest_sha256", "phase_a_approval_digest", "policy_sha256"}, "anchor input fields differ")
         require(all(_is_sha256(item) for item in inputs.values()), "anchor input digest differs")
+        require(inputs["expected_phase_a_sha256"] == value["prior_sha256"], "anchor reviewed Phase A digest differs")
         require(set(observations) == {"anchor", "anchor_genuine_phase_a_validator_calls", "anchor_provisioner_calls", "authority_files", "external_root_identity", "phase_a_manifest_identity"}, "anchor observation fields differ")
         require(observations["anchor_provisioner_calls"] == 1 and observations["anchor_genuine_phase_a_validator_calls"] == 1, "anchor call counts differ")
         anchor_record = observations["anchor"]
         require(set(anchor_record) == {"path", "sha256", "identity", "bytes", "lf_count", "terminal_byte_hex", "fields"}, "anchor file fields differ")
         require(_is_sha256(anchor_record["sha256"]), "anchor file digest differs")
+        require(isinstance(anchor_record["bytes"], int) and not isinstance(anchor_record["bytes"], bool) and anchor_record["bytes"] > 0, "anchor byte count differs")
+        require(isinstance(anchor_record["lf_count"], int) and not isinstance(anchor_record["lf_count"], bool) and anchor_record["lf_count"] == 1, "anchor LF count differs")
+        require(anchor_record["terminal_byte_hex"] == "0a", "anchor terminal byte differs")
         _validate_identity(anchor_record["identity"], "anchor file")
         require(set(anchor_record["fields"]) == {"schema", "phase", "manifest_sha256", "phase_a_approval_digest", "policy_sha256", "decision", "provisioning_boundary"}, "anchor content fields differ")
+        require(anchor_record["fields"] == {"schema": "task409-execution-preflight/phase-a-approval-anchor/v1", "phase": "external-review-of-phase-a-consistency", "manifest_sha256": inputs["phase_a_manifest_sha256"], "phase_a_approval_digest": inputs["phase_a_approval_digest"], "policy_sha256": inputs["policy_sha256"], "decision": "approve-consistency-only", "provisioning_boundary": "external-review-input"}, "anchor content values differ")
+        expected_root = Path(os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT", os.fspath(EXTERNAL_ROOT)))
+        require(anchor_record["path"] == os.fspath(expected_root / "external-review" / ANCHOR_NAME), "anchor canonical path differs")
+        expected_anchor_raw = _canonical_json(anchor_record["fields"])
+        require(anchor_record["sha256"] == hashlib.sha256(expected_anchor_raw).hexdigest() and anchor_record["bytes"] == len(expected_anchor_raw), "anchor byte binding differs")
+        require(anchor_record["identity"]["st_uid"] == os.getuid() and anchor_record["identity"]["st_mode"] == 0o600 and anchor_record["identity"]["st_nlink"] == 1, "anchor file contract differs")
         require(set(observations["authority_files"]) == set(FINAL_NAMES), "anchor authority file set differs")
         for name, record in observations["authority_files"].items():
             require(set(record) == {"sha256", "identity"} and record["sha256"] == FINAL_PINS[name], f"anchor {name} binding differs")
@@ -520,7 +543,7 @@ def phase_a(
         "authority_files": {name: {"path": os.fspath(item.path), "sha256": item.sha256, "identity": dict(item.identity), "bytes": len(item.raw), "lf_count": item.raw.count(b"\n"), "terminal_byte_hex": item.raw[-1:].hex()} for name, item in after.items()},
         "authority_parent_identity": authority_parent_identity,
         "authority_root_identity": authority_root_identity,
-        "external_parent_identity": parent_identity,
+        "external_parent_identity": _directory_identity(external_root.parent, "external root parent"),
         "external_root_identity": _directory_identity(external_root, "external root", exact_mode=0o700),
         "manifest": {"path": os.fspath(manifest_path), "sha256": manifest_sha256, "identity": dict(manifest_snapshot.identity), "bytes": len(manifest_snapshot.raw)},
         "owner_marker": {"path": os.fspath(owner_marker), "identity": dict(stable_read(owner_marker, "owner marker").identity)},
@@ -544,6 +567,7 @@ def anchor(
     *,
     repository_root: Path = REPOSITORY_ROOT,
     external_root: Path = EXTERNAL_ROOT,
+    expected_phase_a_sha256: str,
     provisioner_wrapper: Callable[[Callable[..., dict[str, Any]]], Callable[..., dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Resume exact Phase-A evidence and call the genuine anchor once."""
@@ -552,16 +576,29 @@ def anchor(
     require(external_root == EXTERNAL_ROOT or os.environ.get("HERMTERNAL_PHASE_A_TEST_ROOT") == os.fspath(external_root), "external root differs from fixed authority")
     root_identity = _directory_identity(external_root, "external root", exact_mode=0o700)
     phase_snapshot = stable_read(external_root / "evidence" / PHASE_A_RECORD, "Phase A evidence")
+    require(_is_sha256(expected_phase_a_sha256), "expected Phase A SHA-256 is invalid")
+    require(phase_snapshot.sha256 == expected_phase_a_sha256, "Phase A evidence SHA-256 differs from reviewed handoff")
     phase_record = _parse_closed_record(phase_snapshot, "phase-a")
     require(phase_record["inputs"] == {"frozen_commit": FROZEN_COMMIT, "frozen_tree": FROZEN_TREE, "repository_root": os.fspath(repository_root), "external_root": os.fspath(external_root)}, "Phase A evidence inputs differ")
     observations = phase_record["observations"]
     require(isinstance(observations, dict) and observations.get("phase_a_validator_calls") == 1 and observations.get("anchor_provisioner_calls") == 0, "Phase A evidence call counts differ")
     before, _, authority_root_identity, authority_parent_identity = _authority_state(modules)
     require(observations.get("authority_root_identity") == authority_root_identity and observations.get("authority_parent_identity") == authority_parent_identity, "Phase A authority binding differs")
+    observed_authority = observations.get("authority_files")
+    require(isinstance(observed_authority, dict), "Phase A authority observations differ")
+    for name, snapshot in before.items():
+        expected_record = {"path": os.fspath(snapshot.path), "sha256": snapshot.sha256, "identity": dict(snapshot.identity), "bytes": len(snapshot.raw), "lf_count": snapshot.raw.count(b"\n"), "terminal_byte_hex": snapshot.raw[-1:].hex()}
+        require(observed_authority.get(name) == expected_record, f"Phase A {name} observation changed")
+    require(observations.get("external_root_identity") == root_identity, "Phase A external root observation changed")
+    require(observations.get("external_parent_identity") == _directory_identity(external_root.parent, "external root parent"), "Phase A external parent observation changed")
     manifest_path = external_root / "phase-a" / "input-manifest.json"
     manifest_snapshot = stable_read(manifest_path, "Phase A manifest")
     manifest_record = observations.get("manifest")
     require(isinstance(manifest_record, dict) and manifest_record.get("path") == os.fspath(manifest_path) and manifest_record.get("sha256") == manifest_snapshot.sha256 and manifest_record.get("identity") == manifest_snapshot.identity, "Phase A manifest evidence differs")
+    require(manifest_record.get("bytes") == len(manifest_snapshot.raw), "Phase A manifest byte observation differs")
+    owner_path = external_root / "phase-a" / ".owner"
+    owner_snapshot = stable_read(owner_path, "Phase A owner marker")
+    require(observations.get("owner_marker") == {"path": os.fspath(owner_path), "identity": dict(owner_snapshot.identity)}, "Phase A owner marker observation changed")
     manifest, observed_manifest_sha = modules.phase_a.load_manifest(manifest_path)
     require(observed_manifest_sha == manifest_snapshot.sha256, "Phase A manifest stable digest differs")
     approval_digest = modules.phase_a.phase_a_approval_digest(manifest)
@@ -601,7 +638,7 @@ def anchor(
     after, _, final_root_identity, final_parent_identity = _authority_state(modules)
     require(before == after and authority_root_identity == final_root_identity and authority_parent_identity == final_parent_identity, "final authority changed during anchor creation")
     require(_directory_identity(external_root, "external root", exact_mode=0o700) == root_identity, "external root changed")
-    record = {"schema": EVIDENCE_SCHEMA, "stage": "anchor", "prior_sha256": phase_snapshot.sha256, "inputs": {"phase_a_manifest_sha256": manifest_snapshot.sha256, "phase_a_approval_digest": approval_digest, "policy_sha256": policy_sha256}, "observations": {"anchor": {"path": os.fspath(anchor_path), "sha256": anchor_snapshot.sha256, "identity": dict(anchor_snapshot.identity), "bytes": len(anchor_snapshot.raw), "lf_count": anchor_snapshot.raw.count(b"\n"), "terminal_byte_hex": anchor_snapshot.raw[-1:].hex(), "fields": anchor_value}, "anchor_genuine_phase_a_validator_calls": validation_calls, "anchor_provisioner_calls": calls, "authority_files": {name: {"sha256": item.sha256, "identity": dict(item.identity)} for name, item in after.items()}, "external_root_identity": root_identity, "phase_a_manifest_identity": dict(manifest_snapshot.identity)}, "safety": _safety()}
+    record = {"schema": EVIDENCE_SCHEMA, "stage": "anchor", "prior_sha256": expected_phase_a_sha256, "inputs": {"expected_phase_a_sha256": expected_phase_a_sha256, "phase_a_manifest_sha256": manifest_snapshot.sha256, "phase_a_approval_digest": approval_digest, "policy_sha256": policy_sha256}, "observations": {"anchor": {"path": os.fspath(anchor_path), "sha256": anchor_snapshot.sha256, "identity": dict(anchor_snapshot.identity), "bytes": len(anchor_snapshot.raw), "lf_count": anchor_snapshot.raw.count(b"\n"), "terminal_byte_hex": anchor_snapshot.raw[-1:].hex(), "fields": anchor_value}, "anchor_genuine_phase_a_validator_calls": validation_calls, "anchor_provisioner_calls": calls, "authority_files": {name: {"sha256": item.sha256, "identity": dict(item.identity)} for name, item in after.items()}, "external_root_identity": root_identity, "phase_a_manifest_identity": dict(manifest_snapshot.identity)}, "safety": _safety()}
     evidence_path = external_root / "evidence" / ANCHOR_RECORD
     evidence_snapshot = _publish_evidence(evidence_path, record, "anchor")
     final_authority, _, final_root_identity, final_parent_identity = _authority_state(modules)
@@ -616,7 +653,10 @@ def anchor(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run genuine Phase A or create its external approval anchor")
-    parser.add_argument("stage", choices=("phase-a", "anchor"))
+    subparsers = parser.add_subparsers(dest="stage", required=True)
+    subparsers.add_parser("phase-a")
+    anchor_parser = subparsers.add_parser("anchor")
+    anchor_parser.add_argument("--expected-phase-a-sha256", required=True)
     return parser
 
 
@@ -625,7 +665,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = build_parser().parse_args(list(sys.argv[1:] if argv is None else argv))
         modules = load_modules()
         verify_frozen_repository(modules.git_reviewer.CANDIDATE5_GIT_BINDING)
-        record = phase_a(modules) if args.stage == "phase-a" else anchor(modules)
+        record = phase_a(modules) if args.stage == "phase-a" else anchor(modules, expected_phase_a_sha256=args.expected_phase_a_sha256)
         print(f"PASS: genuine {args.stage} checkpoint completed")
         print(json.dumps(record, sort_keys=True, separators=(",", ":")))
         return 0

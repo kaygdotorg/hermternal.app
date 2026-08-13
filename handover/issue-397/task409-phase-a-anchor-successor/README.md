@@ -78,20 +78,30 @@ contains actual file and directory identities, byte counts, LF counts,
 terminal bytes, SHA-256 values, the Phase A approval digest, the approved
 policy digest, and explicit not-run safety values.
 
+The closed schema requires exact canonical paths and scalar types. Identity
+records include device, inode, user, group, mode, size, link count, mtime, and
+ctime. The Phase A prior digest is the exact all-zero SHA-256 sentinel.
+
 An independent reviewer must check the Phase A result before the anchor stage.
 The runner does not make or infer this independent decision.
 
 After that review, run the create-only anchor stage:
 
 ```sh
-/usr/bin/python3 -B handover/issue-397/task409-phase-a-anchor-successor/phase_a_anchor_runner.py anchor
+/usr/bin/python3 -B handover/issue-397/task409-phase-a-anchor-successor/phase_a_anchor_runner.py anchor \
+  --expected-phase-a-sha256 <INDEPENDENTLY_REVIEWED_PHASE_A_EVIDENCE_SHA256>
 ```
 
 The anchor stage stable-rereads the Phase A record, manifest, and final
-authority. It recomputes the manifest, approval, and policy digests. It calls
+authority. The supplied Phase A evidence digest is a required handoff from the
+independent review. The runner rejects a missing, malformed, or different
+digest before it trusts the record. It compares every recorded authority,
+root, parent, owner-marker, manifest, and digest observation with a fresh
+stable read. It recomputes the manifest, approval, and policy digests. It calls
 the genuine anchor provisioner exactly once and proves that the provisioner
 calls its genuine Phase A validator exactly once. It then writes the closed
-anchor evidence record. The anchor record binds the Phase A record SHA-256.
+anchor evidence record. Both `prior_sha256` and
+`inputs.expected_phase_a_sha256` bind the reviewed Phase A record SHA-256.
 
 A collision, changed record, changed manifest, changed final file, changed
 parent identity, extra validator call, or existing target causes a rejection.
