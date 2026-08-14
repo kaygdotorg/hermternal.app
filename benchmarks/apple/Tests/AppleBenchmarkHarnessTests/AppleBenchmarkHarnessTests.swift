@@ -3,6 +3,10 @@ import XCTest
 
 @testable import AppleBenchmarkHarness
 
+private struct HugeJSONPayload: Encodable {
+  let value: String
+}
+
 private final class TestClock: @unchecked Sendable {
   private var value: UInt64 = 0
 
@@ -293,6 +297,23 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
 
   func testEmptyDistributionFailsClosedWithoutIndexing() {
     XCTAssertThrowsError(try DistributionCalculator.calculate([])) { error in
+      XCTAssertEqual(error as? AppleBenchmarkError, .evidenceMalformed)
+    }
+  }
+
+  func testBoundedJSONCapsFixtureInputAndEncodedOutput() throws {
+    let oversizedFixture = Data(
+      repeating: 0,
+      count: BenchmarkJSON.maximumInputBytes + 1
+    )
+    XCTAssertThrowsError(try WorkloadFixtureLoader.load(from: oversizedFixture)) { error in
+      XCTAssertEqual(error as? AppleBenchmarkError, .workloadMalformed)
+    }
+
+    let oversizedPayload = HugeJSONPayload(
+      value: String(repeating: "x", count: BenchmarkJSON.maximumOutputBytes)
+    )
+    XCTAssertThrowsError(try BenchmarkJSON.encode(oversizedPayload)) { error in
       XCTAssertEqual(error as? AppleBenchmarkError, .evidenceMalformed)
     }
   }
