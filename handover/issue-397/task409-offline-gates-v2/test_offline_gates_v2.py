@@ -329,6 +329,19 @@ class OfflineGatesV3Tests(unittest.TestCase):
         self.assertEqual(updated.count(new), 4)
         self.assertNotIn("updated.count(new) != 3", MOD.RENDERER_ADAPTATION_SCRIPT)
 
+    def test_private_workspace_post_read_rejects_a_trailing_byte(self) -> None:
+        expected = b"reviewed-result"
+        stored = expected + b"!"
+        published = stored[:len(expected)]
+        trailing = stored[len(expected):len(expected) + 1]
+        self.assertEqual(published, expected)
+        self.assertEqual(trailing, b"!")
+        self.assertIn("published_final.st_size != len(updated)",
+                      MOD.RENDERER_ADAPTATION_SCRIPT)
+        self.assertIn("trailing = os.read(descriptor, 1)",
+                      MOD.RENDERER_ADAPTATION_SCRIPT)
+        self.assertIn("trailing != b\"\"", MOD.RENDERER_ADAPTATION_SCRIPT)
+
     def test_private_workspace_adaptation_rejects_contract_near_misses(self) -> None:
         contract = MOD.RENDERER_ADAPTATION_CONTRACT
         mutations = []
