@@ -230,10 +230,12 @@ def _validate_semantic_evidence(value: Any) -> None:
     require(all(item is True for item in checks.values()), "#406 semantic checks differ")
     sources = _pin_record(semantic["sources"], {"auth", "privacy", "screenshots"}, "#406 semantic sources")
     for label, source in sources.items():
-        record = _pin_record(source, {"path", "sha256", "identity"}, f"#406 semantic {label}")
+        record = _pin_record(source, {"path", "sha256", "identity", "git_mode", "git_blob"}, f"#406 semantic {label}")
         require(isinstance(record["path"], str) and record["path"], f"#406 semantic {label} path differs")
         _sha(record["sha256"], f"#406 semantic {label} SHA-256")
         require(isinstance(record["identity"], list) and len(record["identity"]) == 8 and all(isinstance(item, int) for item in record["identity"]), f"#406 semantic {label} identity differs")
+        require(record["git_mode"] == "100644", f"#406 semantic {label} Git mode differs")
+        _oid(record["git_blob"], f"#406 semantic {label} Git blob")
 
 
 def validate_offline_report(pin: Pin) -> Candidate:

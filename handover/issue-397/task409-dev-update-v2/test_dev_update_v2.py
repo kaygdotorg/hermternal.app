@@ -80,7 +80,7 @@ class DevUpdateV2Tests(unittest.TestCase):
             "final_head": self.candidate, "final_tree": self.tree, "protected_main": MOD.PROTECTED_MAIN,
             "expected_dev_base": MOD.BASE_DEV, "dev_target": self.candidate,
             "inputs": {"result": {"path": str(self.result), "sha256": result_sha}, "completion": {"path": str(self.completion), "sha256": completion_sha}, "phase_a_anchor": {"path": "/private/anchor.json", "sha256": "d" * 64}, "provenance": {"path": "/private/provenance.json", "sha256": "e" * 64}},
-            "semantic_evidence": {"checks": {"click": True, "enter": True, "clearing": True, "redaction": True, "accessibility": True, "privacy_policy": True, "screenshot_contract": True}, "sources": {label: {"path": f"/private/{label}", "sha256": "f" * 64, "identity": [1] * 8} for label in ("auth", "privacy", "screenshots")}},
+            "semantic_evidence": {"checks": {"click": True, "enter": True, "clearing": True, "redaction": True, "accessibility": True, "privacy_policy": True, "screenshot_contract": True}, "sources": {label: {"path": f"/private/{label}", "sha256": "f" * 64, "identity": [1] * 8, "git_mode": "100644", "git_blob": "a" * 40} for label in ("auth", "privacy", "screenshots")}},
             "gates": gates,
         }
         report_sha = self._write(self.report, report)
@@ -157,6 +157,26 @@ class DevUpdateV2Tests(unittest.TestCase):
             with self.subTest(failure=failure), self.assertRaises(MOD.Reject):
                 MOD.preflight(MOD.load_pin(self.pin), self.repository, run)
             self.assertFalse(any("push" in call for call in calls))
+
+    def test_rejects_changed_semantic_source_contract(self) -> None:
+        cases = {
+            "missing": lambda source: source.pop("git_blob"),
+            "extra": lambda source: source.update({"unexpected": True}),
+            "bad mode": lambda source: source.update({"git_mode": "100755"}),
+            "bad OID": lambda source: source.update({"git_blob": "A" * 40}),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label=label):
+                self._write_inputs()
+                report = json.loads(self.report.read_text())
+                mutate(report["semantic_evidence"]["sources"]["auth"])
+                report_sha = self._write(self.report, report)
+                pin = json.loads(self.pin.read_text())
+                pin["report"]["sha256"] = report_sha
+                self.pin.write_bytes((json.dumps(pin, sort_keys=True, separators=(",", ":")) + "\n").encode())
+                os.chmod(self.pin, 0o644)
+                with self.assertRaisesRegex(MOD.Reject, "semantic auth"):
+                    MOD.validate_offline_report(MOD.load_pin(self.pin))
 
     def test_rejects_dirty_local_state_wrong_tree_and_post_main_change(self) -> None:
         def dirty(argv, **kwargs):
