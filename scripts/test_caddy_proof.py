@@ -1882,6 +1882,43 @@ marker.write_text("ready")
                     caddy_proof._strict_git_environment(),
                 )
 
+    def test_git_metadata_link_scan_bounds_live_fds_for_wide_object_fanout(self) -> None:
+        """The topology scan must close sibling directories before the next open."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self._init_repository(Path(directory) / "repo")
+            objects = repository / ".git" / "objects"
+            sibling_directories = [objects / f"{index:02x}" for index in range(256)]
+            for sibling in sibling_directories:
+                sibling.mkdir()
+
+            original_open = caddy_proof.os.open
+            original_close = caddy_proof.os.close
+            live_descriptors: set[int] = set()
+            peak = 0
+
+            def tracked_open(*args: object, **kwargs: object) -> int:
+                nonlocal peak
+                descriptor = original_open(*args, **kwargs)  # type: ignore[arg-type]
+                live_descriptors.add(descriptor)
+                peak = max(peak, len(live_descriptors))
+                return descriptor
+
+            def tracked_close(descriptor: int) -> None:
+                live_descriptors.discard(descriptor)
+                original_close(descriptor)
+
+            with mock.patch.object(caddy_proof.os, "open", side_effect=tracked_open):
+                with mock.patch.object(caddy_proof.os, "close", side_effect=tracked_close):
+                    caddy_proof._reject_git_metadata_links((repository / ".git").resolve())
+
+            self.assertFalse(live_descriptors)
+            self.assertGreaterEqual(peak, 2)
+            # The rejected implementation retained one descriptor per sibling;
+            # this bound stays independent of the 256-way fanout and fails that
+            # implementation while allowing the root/path traversal descriptors.
+            self.assertLessEqual(peak, 64)
+
     def test_nested_git_metadata_links_are_rejected(self) -> None:
         for relative in (Path("objects"), Path("refs"), Path("objects") / "pack"):
             with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
