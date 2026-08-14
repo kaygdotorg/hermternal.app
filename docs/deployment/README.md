@@ -82,17 +82,19 @@ historical build pair, and reconstructs the deterministic runtime inputs; it
 does not require the historical static build to exist locally. The fixed browser
 schema binds either workflow's declared status to the verified build, static
 manifest, rendered Caddyfile, and runtime-input digests. Browser JSON is
-bounded to 4096 bytes, requires UTF-8, and rejects duplicate object keys at
-every nesting level. These caller-authored standalone and retained JSON maps
+bounded to 4096 bytes, requires UTF-8, rejects duplicate object keys and
+non-finite numbers at every nesting level, and fails closed on malformed Git
+output. These caller-authored standalone and retained JSON maps
 are historical/non-execution observations, not browser execution attestations;
 they cannot satisfy `browser_journey=passed`. Passed release proof requires a
 verifier-controlled browser harness or a separately trusted signed attestation;
 neither is present in this no-live-VM/Hermes lane. The current retained map is
 `blocked_provider` with only `provider_unavailable`; no browser event payload or
-provider payload is retained. Passed, blocked-empty-session, and failed
-statuses each require their matching validated evidence, and missing, stale,
-mismatched, malformed, oversized, or extra-key maps fail closed. No preview URL
-is valid. This lane does not implement or attest Traefik.
+provider payload is retained. `blocked_empty_session` and `failed` statuses
+require their matching validated evidence; a passed release claim is unavailable
+without the trusted execution path described above. Missing, stale, mismatched,
+malformed, oversized, or extra-key maps fail closed. No preview URL is valid.
+This lane does not implement or attest Traefik.
 
 The local Caddy/mock-upstream proof emits no `Set-Cookie`. Its renderer test
 covers only the configured `Secure` rewrite; `HttpOnly`, `SameSite`, and `Path`
