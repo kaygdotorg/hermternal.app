@@ -940,14 +940,38 @@ def _metadata_parent_pin_identity(metadata: os.stat_result) -> tuple[int, int, i
     return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode))
 
 
+def _new_git_operation_deadline() -> float:
+    """Start the one bounded budget shared by metadata validation and Git."""
+
+    return time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+
+
+class _GitOperationTimeout(ValueError):
+    """Identify deadline failures so trust wrappers cannot relabel them."""
+
+
+def _check_git_operation_deadline(deadline: float | None, phase: str) -> None:
+    """Fail closed when any pre/post Git trust phase overruns its budget."""
+
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _GitOperationTimeout(f"Git provenance operation timed out during {phase}")
+
+
 class _BoundGitCommand(list[str]):
     """List-shaped Git argv carrying the descriptor-bound working directory."""
 
-    __slots__ = ("cwd_fd",)
+    __slots__ = ("cwd_fd", "deadline")
 
-    def __init__(self, values: Iterable[str], *, cwd_fd: int | None = None) -> None:
+    def __init__(
+        self,
+        values: Iterable[str],
+        *,
+        cwd_fd: int | None = None,
+        deadline: float | None = None,
+    ) -> None:
         super().__init__(values)
         self.cwd_fd = cwd_fd
+        self.deadline = deadline
 
 
 class _GitMetadataPin:
@@ -1036,13 +1060,16 @@ def _open_verified_regular_file_at(
     limit: int | None,
     label: str,
     allow_hard_links: bool = False,
+    deadline: float | None = None,
 ) -> tuple[int, os.stat_result]:
     """Open one directory entry with no-follow and race-checked identity."""
 
     if type(name) is not str or not name or name in {".", ".."} or "/" in name:
         raise ValueError(f"{label} has an invalid pathname component")
+    _check_git_operation_deadline(deadline, f"opening {label}")
     try:
         pre_open = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _check_git_operation_deadline(deadline, f"opening {label}")
         _verify_regular_metadata(
             pre_open,
             limit=limit,
@@ -1052,7 +1079,9 @@ def _open_verified_regular_file_at(
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
         descriptor = os.open(name, flags, dir_fd=parent_fd)
         try:
+            _check_git_operation_deadline(deadline, f"opening {label}")
             post_open = os.fstat(descriptor)
+            _check_git_operation_deadline(deadline, f"opening {label}")
             _verify_regular_metadata(
                 post_open,
                 limit=limit,
@@ -1071,19 +1100,29 @@ def _open_verified_regular_file_at(
         raise ValueError(f"{label} could not be opened safely") from exc
 
 
-def _open_verified_directory_at(parent_fd: int, name: str, *, label: str) -> int:
+def _open_verified_directory_at(
+    parent_fd: int,
+    name: str,
+    *,
+    label: str,
+    deadline: float | None = None,
+) -> int:
     """Open one directory component without following symlink races."""
 
     if type(name) is not str or not name or name in {".", ".."} or "/" in name:
         raise ValueError(f"{label} has an invalid pathname component")
+    _check_git_operation_deadline(deadline, f"opening {label}")
     try:
         pre_open = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        _check_git_operation_deadline(deadline, f"opening {label}")
         if not stat.S_ISDIR(pre_open.st_mode):
             raise ValueError(f"{label} is not a directory")
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         descriptor = os.open(name, flags, dir_fd=parent_fd)
         try:
+            _check_git_operation_deadline(deadline, f"opening {label}")
             post_open = os.fstat(descriptor)
+            _check_git_operation_deadline(deadline, f"opening {label}")
             if not stat.S_ISDIR(post_open.st_mode):
                 raise ValueError(f"{label} is not a directory")
             if (pre_open.st_dev, pre_open.st_ino) != (post_open.st_dev, post_open.st_ino):
@@ -1102,6 +1141,7 @@ def _open_verified_parent(
     path: Path,
     *,
     label: str,
+    deadline: float | None = None,
     resolve_parent_aliases: bool = True,
 ) -> tuple[int, str]:
     """Walk parent descriptors with O_NOFOLLOW for every opened component.
@@ -1124,17 +1164,22 @@ def _open_verified_parent(
     if len(parts) < 2 or parts[0] != "/" or any(part in {"", ".", ".."} for part in parts[1:]):
         raise ValueError(f"{label} has a non-canonical pathname")
     try:
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         current_fd = os.open(
             "/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         )
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         for component in parts[1:-1]:
+            _check_git_operation_deadline(deadline, f"opening {label} parent")
             next_fd = _open_verified_directory_at(
                 current_fd,
                 component,
                 label=f"{label} parent",
+                deadline=deadline,
             )
             os.close(current_fd)
             current_fd = next_fd
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         return current_fd, parts[-1]
     except BaseException:
         try:
@@ -1149,6 +1194,7 @@ def _snapshot_git_metadata_tree(
     *,
     label: str,
     content_budget: list[int] | None = None,
+    deadline: float | None = None,
 ) -> tuple[
     tuple[str, tuple[int, int, int, int, int, int, int, int], str | None], ...
 ]:
@@ -1170,11 +1216,13 @@ def _snapshot_git_metadata_tree(
         content_budget = [0]
 
     def read_children(directory_fd: int) -> list[Any]:
+        _check_git_operation_deadline(deadline, f"scanning {label}")
         try:
             with os.scandir(directory_fd) as iterator:
                 children = list(iterator)
         except (OSError, RuntimeError, TypeError) as exc:
             raise ValueError(f"{label} could not be inspected") from exc
+        _check_git_operation_deadline(deadline, f"scanning {label}")
         if len(children) > GIT_METADATA_ENTRY_MAX:
             raise ValueError(f"{label} exceeds the bounded entry count")
         children.sort(key=lambda item: item.name)
@@ -1188,6 +1236,7 @@ def _snapshot_git_metadata_tree(
     ]
     try:
         while stack:
+            _check_git_operation_deadline(deadline, f"scanning {label}")
             directory_fd, prefix, children, index, owned = stack[-1]
             if index >= len(children):
                 stack.pop()
@@ -1203,8 +1252,12 @@ def _snapshot_git_metadata_tree(
             if len(relative_parts) > GIT_METADATA_MAX_DEPTH:
                 raise ValueError(f"{label} exceeds the bounded depth")
             relative = "/".join(relative_parts)
+            _check_git_operation_deadline(deadline, f"scanning {label}")
             try:
                 metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                _check_git_operation_deadline(deadline, f"scanning {label}")
+            except _GitOperationTimeout:
+                raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise ValueError(f"{label} entry could not be inspected") from exc
             if stat.S_ISLNK(metadata.st_mode):
@@ -1214,9 +1267,12 @@ def _snapshot_git_metadata_tree(
                     directory_fd,
                     name,
                     label=f"{label} directory",
+                    deadline=deadline,
                 )
                 try:
+                    _check_git_operation_deadline(deadline, f"scanning {label}")
                     child_metadata = os.fstat(child_fd)
+                    _check_git_operation_deadline(deadline, f"scanning {label}")
                     if _metadata_identity(child_metadata) != _metadata_identity(metadata):
                         raise ValueError(f"{label} directory changed during pinning")
                     child_children = read_children(child_fd)
@@ -1237,26 +1293,33 @@ def _snapshot_git_metadata_tree(
                 limit=GIT_METADATA_FILE_MAX_BYTES,
                 label=f"{label} file",
                 allow_hard_links=True,
+                deadline=deadline,
             )
             try:
                 if _metadata_identity(descriptor_metadata) != _metadata_identity(metadata):
                     raise ValueError(f"{label} file changed during pinning")
+                _check_git_operation_deadline(deadline, f"reading {label}")
                 content = _read_bounded_fd(
                     descriptor_for_file,
                     GIT_METADATA_FILE_MAX_BYTES,
                     f"{label} file",
+                    deadline=deadline,
                 )
+                _check_git_operation_deadline(deadline, f"reading {label}")
                 after_read = os.fstat(descriptor_for_file)
+                _check_git_operation_deadline(deadline, f"reading {label}")
                 if _metadata_identity(after_read) != _metadata_identity(descriptor_metadata):
                     raise ValueError(f"{label} file changed during pinning")
                 if len(content) != after_read.st_size:
                     raise ValueError(f"{label} file changed during pinning")
             finally:
                 os.close(descriptor_for_file)
+            _check_git_operation_deadline(deadline, f"reading {label}")
             content_budget[0] += len(content)
             if content_budget[0] > GIT_METADATA_TOTAL_CONTENT_MAX_BYTES:
                 raise ValueError(f"{label} exceeds the bounded content size")
             entries.append((relative, _metadata_identity(descriptor_metadata), digest_bytes(content)))
+            _check_git_operation_deadline(deadline, f"reading {label}")
             if len(entries) > GIT_METADATA_ENTRY_MAX:
                 raise ValueError(f"{label} exceeds the bounded entry count")
     finally:
@@ -1274,6 +1337,7 @@ def _open_git_metadata_pin_parent(
     path: Path,
     *,
     label: str,
+    deadline: float | None = None,
 ) -> tuple[int, str]:
     """Open the deepest existing parent and pin the first missing component."""
 
@@ -1287,19 +1351,32 @@ def _open_git_metadata_pin_parent(
         raise ValueError(f"{label} has a non-canonical pathname")
     current_fd: int | None = None
     try:
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         current_fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         for component in parts[1:-1]:
+            _check_git_operation_deadline(deadline, f"opening {label} parent")
             try:
                 metadata = os.stat(component, dir_fd=current_fd, follow_symlinks=False)
+                _check_git_operation_deadline(deadline, f"opening {label} parent")
             except FileNotFoundError:
+                _check_git_operation_deadline(deadline, f"opening {label} parent")
                 return current_fd, component
+            except _GitOperationTimeout:
+                raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise ValueError(f"{label} parent could not be inspected") from exc
             if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
                 raise ValueError(f"{label} parent is unsafe")
-            next_fd = _open_verified_directory_at(current_fd, component, label=f"{label} parent")
+            next_fd = _open_verified_directory_at(
+                current_fd,
+                component,
+                label=f"{label} parent",
+                deadline=deadline,
+            )
             os.close(current_fd)
             current_fd = next_fd
+        _check_git_operation_deadline(deadline, f"opening {label} parent")
         return current_fd, parts[-1]
     except BaseException:
         if current_fd is not None:
@@ -1317,16 +1394,22 @@ def _pin_git_metadata_path(
     pin_content: bool,
     pin_entries: bool,
     content_budget: list[int] | None = None,
+    deadline: float | None = None,
 ) -> _GitMetadataPin:
     """Retain descriptor, identity, and bounded bytes for one Git path."""
 
-    parent_fd, name = _open_git_metadata_pin_parent(path, label=label)
+    _check_git_operation_deadline(deadline, f"pinning {label}")
+    parent_fd, name = _open_git_metadata_pin_parent(path, label=label, deadline=deadline)
     descriptor: int | None = None
     try:
+        _check_git_operation_deadline(deadline, f"pinning {label}")
         parent_identity = _metadata_parent_pin_identity(os.fstat(parent_fd))
+        _check_git_operation_deadline(deadline, f"pinning {label}")
         try:
             entry_metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            _check_git_operation_deadline(deadline, f"pinning {label}")
         except FileNotFoundError:
+            _check_git_operation_deadline(deadline, f"pinning {label}")
             return _GitMetadataPin(
                 path=path,
                 parent_fd=parent_fd,
@@ -1341,17 +1424,25 @@ def _pin_git_metadata_path(
         if stat.S_ISLNK(entry_metadata.st_mode):
             raise ValueError(f"{label} must not be a symlink")
         if stat.S_ISDIR(entry_metadata.st_mode):
-            descriptor = _open_verified_directory_at(parent_fd, name, label=label)
+            descriptor = _open_verified_directory_at(
+                parent_fd,
+                name,
+                label=label,
+                deadline=deadline,
+            )
         elif stat.S_ISREG(entry_metadata.st_mode):
             descriptor, entry_metadata = _open_verified_regular_file_at(
                 parent_fd,
                 name,
                 limit=GIT_CONFIG_MAX_BYTES if pin_content else None,
                 label=label,
+                deadline=deadline,
             )
         else:
             raise ValueError(f"{label} is not a regular file or directory")
+        _check_git_operation_deadline(deadline, f"pinning {label}")
         descriptor_metadata = os.fstat(descriptor)
+        _check_git_operation_deadline(deadline, f"pinning {label}")
         identity = _metadata_pin_identity(descriptor_metadata)
         if identity != _metadata_pin_identity(entry_metadata):
             raise ValueError(f"{label} changed during pinning")
@@ -1365,15 +1456,24 @@ def _pin_git_metadata_path(
                     descriptor,
                     label=label,
                     content_budget=content_budget,
+                    deadline=deadline,
                 )
         elif pin_content:
-            content = _read_bounded_fd(descriptor, GIT_CONFIG_MAX_BYTES, label)
+            _check_git_operation_deadline(deadline, f"reading {label}")
+            content = _read_bounded_fd(
+                descriptor,
+                GIT_CONFIG_MAX_BYTES,
+                label,
+                deadline=deadline,
+            )
+            _check_git_operation_deadline(deadline, f"reading {label}")
             if len(content) != descriptor_metadata.st_size:
                 raise ValueError(f"{label} changed during pinning")
             if content_budget is not None:
                 content_budget[0] += len(content)
                 if content_budget[0] > GIT_METADATA_TOTAL_CONTENT_MAX_BYTES:
                     raise ValueError(f"{label} exceeds the bounded content size")
+        _check_git_operation_deadline(deadline, f"pinning {label}")
         return _GitMetadataPin(
             path=path,
             parent_fd=parent_fd,
@@ -1398,21 +1498,34 @@ def _pin_git_metadata_path(
         raise
 
 
-def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
+def _assert_git_metadata_pin(
+    pin: _GitMetadataPin,
+    *,
+    phase: str,
+    deadline: float | None = None,
+) -> None:
     """Fail closed when a pinned Git entry or its bytes changed."""
 
+    _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
     try:
         parent_metadata = os.fstat(pin.parent_fd)
+        _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
+    except _GitOperationTimeout:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError(f"Git metadata {pin.label} parent changed {phase}") from exc
     if _metadata_parent_pin_identity(parent_metadata) != pin.parent_identity:
         raise ValueError(f"Git metadata {pin.label} parent changed {phase}")
     try:
         current = os.stat(pin.name, dir_fd=pin.parent_fd, follow_symlinks=False)
+        _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
     except FileNotFoundError as exc:
+        _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
         if pin.identity is None:
             return
         raise ValueError(f"Git metadata {pin.label} disappeared {phase}") from exc
+    except _GitOperationTimeout:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError(f"Git metadata {pin.label} could not be checked {phase}") from exc
     current_identity = _metadata_pin_identity(current)
@@ -1424,13 +1537,23 @@ def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
         raise ValueError(f"Git metadata {pin.label} descriptor is missing")
     try:
         descriptor_metadata = os.fstat(pin.descriptor)
+        _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
+    except _GitOperationTimeout:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError(f"Git metadata {pin.label} descriptor changed {phase}") from exc
     if _metadata_pin_identity(descriptor_metadata) != pin.identity:
         raise ValueError(f"Git metadata {pin.label} descriptor changed {phase}")
     if pin.entries is not None:
         try:
-            current_entries = _snapshot_git_metadata_tree(pin.descriptor, label=pin.label)
+            current_entries = _snapshot_git_metadata_tree(
+                pin.descriptor,
+                label=pin.label,
+                deadline=deadline,
+            )
+            _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
+        except _GitOperationTimeout:
+            raise
         except ValueError as exc:
             raise ValueError(f"Git metadata {pin.path} entries changed {phase}") from exc
         if current_entries != pin.entries:
@@ -1443,6 +1566,7 @@ def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
             raise ValueError(f"Git metadata {pin.label} bytes cannot be checked")
         offset = 0
         while offset < len(pin.content):
+            _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
             try:
                 chunk = pread(
                     pin.descriptor,
@@ -1454,15 +1578,18 @@ def _assert_git_metadata_pin(pin: _GitMetadataPin, *, phase: str) -> None:
             if not chunk or chunk != pin.content[offset : offset + len(chunk)]:
                 raise ValueError(f"Git metadata {pin.label} bytes changed {phase}")
             offset += len(chunk)
+            _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
 
 
 def _assert_git_metadata_pins(
     pins: tuple[_GitMetadataPin, ...],
     *,
     phase: str,
+    deadline: float | None = None,
 ) -> None:
     for pin in pins:
-        _assert_git_metadata_pin(pin, phase=phase)
+        _check_git_operation_deadline(deadline, f"checking Git metadata {phase}")
+        _assert_git_metadata_pin(pin, phase=phase, deadline=deadline)
 
 
 def _close_git_metadata_pins(pins: tuple[_GitMetadataPin, ...]) -> None:
@@ -1473,10 +1600,12 @@ def _close_git_metadata_pins(pins: tuple[_GitMetadataPin, ...]) -> None:
 def _run_with_git_metadata_pins(
     pins: tuple[_GitMetadataPin, ...],
     operation: Any,
+    *,
+    deadline: float | None = None,
 ) -> Any:
     """Run one provenance command with descriptor and byte pins held."""
 
-    _assert_git_metadata_pins(pins, phase="before command")
+    _assert_git_metadata_pins(pins, phase="before command", deadline=deadline)
     operation_error: Exception | None = None
     result: Any = None
     try:
@@ -1484,7 +1613,9 @@ def _run_with_git_metadata_pins(
     except Exception as exc:
         operation_error = exc
     try:
-        _assert_git_metadata_pins(pins, phase="after command")
+        _assert_git_metadata_pins(pins, phase="after command", deadline=deadline)
+    except _GitOperationTimeout:
+        raise
     except ValueError as exc:
         raise ValueError("Git metadata changed during provenance command") from exc
     if operation_error is not None:
@@ -1511,21 +1642,21 @@ def _read_bounded_fd(
     chunks = bytearray()
     while len(chunks) <= limit:
         if deadline is not None and time.monotonic() >= deadline:
-            raise ValueError(f"{label} read deadline exceeded")
+            raise _GitOperationTimeout(f"{label} read deadline exceeded")
         remaining = limit + 1 - len(chunks)
         try:
             chunk = os.read(descriptor, min(64 * 1024, remaining))
         except (OSError, RuntimeError, TypeError) as exc:
             raise ValueError(f"{label} could not be read") from exc
         if deadline is not None and time.monotonic() >= deadline:
-            raise ValueError(f"{label} read deadline exceeded")
+            raise _GitOperationTimeout(f"{label} read deadline exceeded")
         if not chunk:
             break
         chunks.extend(chunk)
         if len(chunks) > limit:
             raise ValueError(f"{label} exceeds the bounded input size")
     if deadline is not None and time.monotonic() >= deadline:
-        raise ValueError(f"{label} read deadline exceeded")
+        raise _GitOperationTimeout(f"{label} read deadline exceeded")
     return bytes(chunks)
 
 
@@ -1550,36 +1681,51 @@ def _verify_fd_content_identity(
     offset = 0
     while offset < len(expected):
         if time.monotonic() >= deadline:
-            raise ValueError(f"{label} read deadline exceeded")
+            raise _GitOperationTimeout(f"{label} read deadline exceeded")
         try:
             chunk = pread(descriptor, min(64 * 1024, len(expected) - offset), offset)
         except (OSError, RuntimeError, TypeError) as exc:
             raise ValueError(f"{label} content identity could not be read") from exc
         if time.monotonic() >= deadline:
-            raise ValueError(f"{label} read deadline exceeded")
+            raise _GitOperationTimeout(f"{label} read deadline exceeded")
         if not chunk or chunk != expected[offset : offset + len(chunk)]:
             raise ValueError(f"{label} content changed during read")
         offset += len(chunk)
     if time.monotonic() >= deadline:
-        raise ValueError(f"{label} read deadline exceeded")
+        raise _GitOperationTimeout(f"{label} read deadline exceeded")
 
 
-def _read_verified_file_path(path: Path, limit: int, label: str) -> bytes:
-    parent_fd, name = _open_verified_parent(path, label=label)
+def _read_verified_file_path(
+    path: Path,
+    limit: int,
+    label: str,
+    *,
+    deadline: float | None = None,
+) -> bytes:
+    """Read a bounded regular file while honoring the caller's total budget."""
+
+    _check_git_operation_deadline(deadline, f"opening {label}")
+    parent_fd, name = _open_verified_parent(path, label=label, deadline=deadline)
     descriptor: int | None = None
     try:
+        _check_git_operation_deadline(deadline, f"opening {label}")
         descriptor, metadata = _open_verified_regular_file_at(
             parent_fd,
             name,
             limit=limit,
             label=label,
+            deadline=deadline,
         )
-        data = _read_bounded_fd(descriptor, limit, label)
+        _check_git_operation_deadline(deadline, f"reading {label}")
+        data = _read_bounded_fd(descriptor, limit, label, deadline=deadline)
+        _check_git_operation_deadline(deadline, f"reading {label}")
         after_read = os.fstat(descriptor)
+        _check_git_operation_deadline(deadline, f"reading {label}")
         if _metadata_identity(metadata) != _metadata_identity(after_read):
             raise ValueError(f"{label} changed during read")
         try:
             after_entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            _check_git_operation_deadline(deadline, f"reading {label}")
             _verify_regular_metadata(after_entry, limit=limit, label=label)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             if isinstance(exc, ValueError):
@@ -1587,6 +1733,7 @@ def _read_verified_file_path(path: Path, limit: int, label: str) -> bytes:
             raise ValueError(f"{label} changed after read") from exc
         if _metadata_identity(metadata) != _metadata_identity(after_entry):
             raise ValueError(f"{label} changed after read")
+        _check_git_operation_deadline(deadline, f"reading {label}")
         return data
     finally:
         if descriptor is not None:
@@ -1886,12 +2033,19 @@ def _run_bounded_git(command: list[str], environment: dict[str, str]) -> tuple[i
     process: _ForkedGitProcess | None = None
     selector: selectors.BaseSelector | None = None
     streams: tuple[Any, ...] = ()
-    deadline: float | None = None
+    command_deadline = getattr(command, "deadline", None)
+    if command_deadline is not None and type(command_deadline) is not float:
+        raise ValueError("Git operation deadline is malformed")
+    deadline: float | None = (
+        command_deadline
+        if command_deadline is not None
+        else time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+    )
     buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
     try:
-        # The command budget includes fork/setup and descriptor-bound fchdir,
-        # not only pipe collection after exec.
-        deadline = time.monotonic() + GIT_COMMAND_TIMEOUT_SECONDS
+        # The command budget begins before metadata validation and includes
+        # fork/setup, descriptor-bound fchdir, and pipe collection after exec.
+        _check_git_operation_deadline(deadline, "spawning Git")
         process = _fork_exec_git(command, environment)
         streams = (process.stdout, process.stderr)
         selector = selectors.DefaultSelector()
@@ -1961,18 +2115,28 @@ def _git_output_bounded(command: list[str], environment: dict[str, str]) -> tupl
     return _run_bounded_git(command, environment)
 
 
-def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
+def _git_metadata_roots(
+    root: Path,
+    *,
+    deadline: float | None = None,
+) -> tuple[Path, ...]:
     """Resolve reviewed worktree metadata without following nested links."""
 
+    _check_git_operation_deadline(deadline, "discovering Git metadata")
     try:
         root = Path(root).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git repository root is unavailable") from exc
+    _check_git_operation_deadline(deadline, "discovering Git metadata")
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
     git_entry = root / ".git"
+    _check_git_operation_deadline(deadline, "discovering Git metadata")
     try:
         git_entry_metadata = os.lstat(git_entry)
+        _check_git_operation_deadline(deadline, "discovering Git metadata")
+    except _GitOperationTimeout:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git metadata root is unavailable") from exc
     if stat.S_ISLNK(git_entry_metadata.st_mode):
@@ -1980,7 +2144,14 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
     if stat.S_ISDIR(git_entry_metadata.st_mode):
         git_dir = git_entry
     elif stat.S_ISREG(git_entry_metadata.st_mode):
-        pointer = _read_verified_file_path(git_entry, 4096, "Git worktree pointer")
+        _check_git_operation_deadline(deadline, "reading Git worktree pointer")
+        pointer = _read_verified_file_path(
+            git_entry,
+            4096,
+            "Git worktree pointer",
+            deadline=deadline,
+        )
+        _check_git_operation_deadline(deadline, "reading Git worktree pointer")
         try:
             text = pointer.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -1998,22 +2169,35 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
     git_fd, git_dir = _open_verified_directory_path(
         git_dir,
         label="Git metadata root",
+        deadline=deadline,
         resolve_parent_aliases=False,
     )
+    _check_git_operation_deadline(deadline, "discovering Git metadata")
     os.close(git_fd)
     roots = [git_dir]
 
     common_file = git_dir / "commondir"
+    _check_git_operation_deadline(deadline, "discovering Git common-dir metadata")
     try:
         common_metadata = os.lstat(common_file)
+        _check_git_operation_deadline(deadline, "discovering Git common-dir metadata")
     except FileNotFoundError:
         common_metadata = None
+    except _GitOperationTimeout:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git common-dir pointer is unavailable") from exc
     if common_metadata is not None:
         if not stat.S_ISREG(common_metadata.st_mode):
             raise ValueError("Git common-dir pointer is unsafe")
-        common_bytes = _read_verified_file_path(common_file, 4096, "Git common-dir pointer")
+        _check_git_operation_deadline(deadline, "reading Git common-dir pointer")
+        common_bytes = _read_verified_file_path(
+            common_file,
+            4096,
+            "Git common-dir pointer",
+            deadline=deadline,
+        )
+        _check_git_operation_deadline(deadline, "reading Git common-dir pointer")
         try:
             common_text = common_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -2028,21 +2212,26 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
         common_fd, common_dir = _open_verified_directory_path(
             common_target,
             label="Git common metadata root",
+            deadline=deadline,
             resolve_parent_aliases=False,
         )
+        _check_git_operation_deadline(deadline, "discovering Git common-dir metadata")
         os.close(common_fd)
         roots.append(common_dir)
 
     unique_roots: list[Path] = []
     seen_identity: set[tuple[int, int]] = set()
     for candidate in roots:
+        _check_git_operation_deadline(deadline, "deduplicating Git metadata roots")
         candidate_fd, _canonical = _open_verified_directory_path(
             candidate,
             label="Git metadata root",
+            deadline=deadline,
             resolve_parent_aliases=False,
         )
         try:
             metadata = os.fstat(candidate_fd)
+            _check_git_operation_deadline(deadline, "deduplicating Git metadata roots")
             identity = (metadata.st_dev, metadata.st_ino)
         finally:
             os.close(candidate_fd)
@@ -2050,10 +2239,15 @@ def _git_metadata_roots(root: Path) -> tuple[Path, ...]:
             continue
         seen_identity.add(identity)
         unique_roots.append(candidate)
+    _check_git_operation_deadline(deadline, "discovering Git metadata")
     return tuple(unique_roots)
 
 
-def _reject_git_metadata_links(metadata_root: Path) -> None:
+def _reject_git_metadata_links(
+    metadata_root: Path,
+    *,
+    deadline: float | None = None,
+) -> None:
     """Reject nested metadata links with descriptor-relative DFS.
 
     The reviewed checkout may use a ``.git`` file and a regular ``commondir``
@@ -2065,14 +2259,18 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
     sibling opens, so the live descriptor count is O(depth), not O(entries).
     """
 
+    _check_git_operation_deadline(deadline, "opening Git metadata root")
     root_fd, _canonical = _open_verified_directory_path(
         metadata_root,
         label="Git metadata root",
+        deadline=deadline,
         resolve_parent_aliases=False,
     )
+    _check_git_operation_deadline(deadline, "scanning Git metadata")
     entries_seen = 0
 
     def read_children(directory_fd: int) -> list[Any]:
+        _check_git_operation_deadline(deadline, "scanning Git metadata")
         try:
             with os.scandir(directory_fd) as iterator:
                 entries = []
@@ -2084,6 +2282,7 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
             raise
         except (OSError, RuntimeError, TypeError) as exc:
             raise ValueError("Git metadata directory could not be inspected") from exc
+        _check_git_operation_deadline(deadline, "scanning Git metadata")
         entries.sort(key=lambda entry: entry.name)
         return entries
 
@@ -2094,6 +2293,7 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
     try:
         stack.append((root_fd, (), read_children(root_fd), 0, False))
         while stack:
+            _check_git_operation_deadline(deadline, "scanning Git metadata")
             directory_fd, prefix, entries, index, owned = stack[-1]
             if index >= len(entries):
                 stack.pop()
@@ -2111,8 +2311,12 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
             entries_seen += 1
             if entries_seen > GIT_METADATA_ENTRY_MAX:
                 raise ValueError("Git metadata exceeds the bounded entry count")
+            _check_git_operation_deadline(deadline, "scanning Git metadata")
             try:
                 metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                _check_git_operation_deadline(deadline, "scanning Git metadata")
+            except _GitOperationTimeout:
+                raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 raise ValueError("Git metadata entry could not be inspected") from exc
             relative_parts = (*prefix, name)
@@ -2125,6 +2329,7 @@ def _reject_git_metadata_links(metadata_root: Path) -> None:
                 directory_fd,
                 name,
                 label="Git metadata directory",
+                deadline=deadline,
             )
             try:
                 child_entries = read_children(child_fd)
@@ -2265,13 +2470,19 @@ def _reject_promisor_pack_sidecars(metadata_root: Path) -> None:
         raise ValueError("Git pack metadata could not be inspected") from exc
 
 
-def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
+def _validated_git_metadata(
+    root: Path,
+    *,
+    deadline: float | None = None,
+) -> tuple[_GitMetadataPin, ...]:
     """Validate and retain the local Git metadata trust surface."""
 
+    _check_git_operation_deadline(deadline, "validating Git metadata")
     try:
         root = Path(root).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git repository root is unavailable") from exc
+    _check_git_operation_deadline(deadline, "validating Git metadata")
     pins: list[_GitMetadataPin] = []
     metadata_content_budget = [0]
     try:
@@ -2283,11 +2494,14 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                 label="Git repository root",
                 pin_content=False,
                 pin_entries=False,
+                deadline=deadline,
             )
         )
-        metadata_roots = _git_metadata_roots(root)
+        _check_git_operation_deadline(deadline, "discovering Git metadata")
+        metadata_roots = _git_metadata_roots(root, deadline=deadline)
         for metadata_root in metadata_roots:
-            _reject_git_metadata_links(metadata_root)
+            _check_git_operation_deadline(deadline, "scanning Git metadata")
+            _reject_git_metadata_links(metadata_root, deadline=deadline)
 
         specs: list[tuple[Path, bool, bool, str]] = [
             (Path(root) / ".git", True, False, "Git worktree metadata entry"),
@@ -2300,6 +2514,7 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                 specs.append((metadata_root / relative, True, False, f"Git metadata {relative}"))
         seen: set[str] = set()
         for path, pin_content, pin_entries, label in specs:
+            _check_git_operation_deadline(deadline, "pinning Git metadata")
             key = os.fspath(path)
             if key in seen:
                 continue
@@ -2311,10 +2526,12 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                     pin_content=pin_content,
                     pin_entries=pin_entries,
                     content_budget=metadata_content_budget,
+                    deadline=deadline,
                 )
             )
+        _check_git_operation_deadline(deadline, "validating Git metadata")
         retained = tuple(pins)
-        _assert_git_metadata_pins(retained, phase="validation")
+        _assert_git_metadata_pins(retained, phase="validation", deadline=deadline)
         pins_by_path = {pin.path: pin for pin in retained}
 
         def require_pin(path: Path, label: str) -> _GitMetadataPin | None:
@@ -2331,6 +2548,7 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                 raise ValueError(f"{label} is malformed") from exc
 
         for metadata_root in metadata_roots:
+            _check_git_operation_deadline(deadline, "validating Git metadata")
             for relative in GIT_FORBIDDEN_METADATA:
                 forbidden = require_pin(metadata_root / relative, f"Git metadata {relative}")
                 if forbidden is not None and forbidden.identity is not None:
@@ -2343,6 +2561,7 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
             packed_text = pinned_text(packed_refs, "Git packed-refs")
             if packed_text is not None:
                 for raw_line in packed_text.splitlines():
+                    _check_git_operation_deadline(deadline, "validating Git metadata")
                     fields = raw_line.strip().split()
                     if len(fields) >= 2 and fields[1].startswith("refs/replace/"):
                         raise ValueError("Git metadata uses replacement refs")
@@ -2350,11 +2569,13 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
             objects_directory = require_pin(metadata_root / "objects", "Git object metadata")
             if objects_directory is not None and objects_directory.entries is not None:
                 for relative, _identity, _content in objects_directory.entries:
+                    _check_git_operation_deadline(deadline, "validating Git metadata")
                     if relative.startswith("pack/") and relative.endswith(".promisor"):
                         raise ValueError("Git metadata uses a promisor pack sidecar")
 
         worktree_config_active = False
         for metadata_root in metadata_roots:
+            _check_git_operation_deadline(deadline, "validating Git configuration")
             config = require_pin(metadata_root / "config", "Git config")
             config_text = pinned_text(config, "Git config")
             if config_text is None:
@@ -2366,6 +2587,7 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
 
         if worktree_config_active:
             for metadata_root in metadata_roots:
+                _check_git_operation_deadline(deadline, "validating Git configuration")
                 worktree_config = require_pin(metadata_root / "config.worktree", "Git worktree config")
                 worktree_text = pinned_text(worktree_config, "Git worktree config")
                 if worktree_text is None:
@@ -2375,7 +2597,8 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
                     raise ValueError(
                         "Git repository uses lazy, promisor, partial, or included worktree metadata"
                     )
-        _assert_git_metadata_pins(retained, phase="validation")
+        _check_git_operation_deadline(deadline, "validating Git configuration")
+        _assert_git_metadata_pins(retained, phase="validation", deadline=deadline)
         return retained
     except BaseException:
         _close_git_metadata_pins(tuple(pins))
@@ -2385,7 +2608,8 @@ def _validated_git_metadata(root: Path) -> tuple[_GitMetadataPin, ...]:
 def _validate_git_metadata(root: Path) -> None:
     """Validate Git metadata without retaining command-lifetime descriptors."""
 
-    pins = _validated_git_metadata(root)
+    deadline = _new_git_operation_deadline()
+    pins = _validated_git_metadata(root, deadline=deadline)
     _close_git_metadata_pins(pins)
 
 
@@ -2393,6 +2617,7 @@ def _bound_git_command(
     executable: Path,
     root_fd: int,
     *arguments: str,
+    deadline: float | None = None,
 ) -> _BoundGitCommand:
     """Build Git argv with no pathname-based repository rediscovery."""
 
@@ -2405,6 +2630,7 @@ def _bound_git_command(
             *arguments,
         ],
         cwd_fd=root_fd,
+        deadline=deadline,
     )
 
 
@@ -2423,26 +2649,39 @@ def _git_root_descriptor(pins: tuple[_GitMetadataPin, ...], root: Path) -> int:
 def _verify_git_repository(repository_root: Path) -> None:
     """Reject shallow, redirected, replacement, and promisor repositories."""
 
+    deadline = _new_git_operation_deadline()
+    _check_git_operation_deadline(deadline, "resolving Git repository root")
     try:
         root = Path(repository_root).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git repository root is unavailable") from exc
+    _check_git_operation_deadline(deadline, "resolving Git repository root")
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
-    pins = _validated_git_metadata(root)
+    _check_git_operation_deadline(deadline, "validating Git repository root")
+    pins = _validated_git_metadata(root, deadline=deadline)
     try:
+        _check_git_operation_deadline(deadline, "checking trusted Git executable")
         executable = _trusted_git_path()
+        _check_git_operation_deadline(deadline, "checking trusted Git executable")
+        _check_git_operation_deadline(deadline, "preparing Git environment")
         environment = _strict_git_environment()
+        _check_git_operation_deadline(deadline, "preparing Git environment")
+        _check_git_operation_deadline(deadline, "retaining Git root descriptor")
         root_fd = _git_root_descriptor(pins, root)
+        _check_git_operation_deadline(deadline, "retaining Git root descriptor")
+        _check_git_operation_deadline(deadline, "starting Git provenance")
         command = _bound_git_command(
             executable,
             root_fd,
             "rev-parse",
             "--is-shallow-repository",
+            deadline=deadline,
         )
         returncode, stdout, stderr = _run_with_git_metadata_pins(
             pins,
             lambda: _run_bounded_git(command, environment),
+            deadline=deadline,
         )
         if type(returncode) is not int or returncode != 0:
             raise ValueError("Git repository trust could not be checked")
@@ -2460,22 +2699,34 @@ _verify_git_repository_integrity = _verify_git_repository
 def _validated_git_context(repository_root: Path) -> dict[str, object]:
     """Return a trusted executable, sanitized environment, and local Git root."""
 
+    deadline = _new_git_operation_deadline()
+    _check_git_operation_deadline(deadline, "resolving Git repository root")
     try:
         root = Path(repository_root).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ValueError("Git repository root is unavailable") from exc
+    _check_git_operation_deadline(deadline, "resolving Git repository root")
     if not root.is_dir():
         raise ValueError("Git repository root is unavailable")
+    _check_git_operation_deadline(deadline, "validating Git repository root")
+    _check_git_operation_deadline(deadline, "checking trusted Git executable")
     executable = _trusted_git_path()
+    _check_git_operation_deadline(deadline, "checking trusted Git executable")
+    _check_git_operation_deadline(deadline, "preparing Git environment")
     environment = _strict_git_environment()
-    pins = _validated_git_metadata(root)
+    _check_git_operation_deadline(deadline, "preparing Git environment")
+    _check_git_operation_deadline(deadline, "preparing Git provenance")
+    pins = _validated_git_metadata(root, deadline=deadline)
+    _check_git_operation_deadline(deadline, "retaining Git root descriptor")
     root_fd = _git_root_descriptor(pins, root)
+    _check_git_operation_deadline(deadline, "retaining Git root descriptor")
     return {
         "root": root,
         "executable": executable,
         "environment": environment,
         "pins": pins,
         "root_fd": root_fd,
+        "deadline": deadline,
     }
 
 
@@ -2488,19 +2739,23 @@ def _git(repo_root: Path, *arguments: str) -> bytes:
     environment = context["environment"]
     pins = context["pins"]
     root_fd = context["root_fd"]
+    deadline = context["deadline"]
     if (
         not isinstance(root, Path)
         or not isinstance(executable, Path)
         or not isinstance(environment, dict)
         or not isinstance(pins, tuple)
         or type(root_fd) is not int
+        or type(deadline) is not float
     ):
         raise ValueError("Git context is malformed")
     try:
-        command = _bound_git_command(executable, root_fd, *arguments)
+        _check_git_operation_deadline(deadline, "starting Git provenance")
+        command = _bound_git_command(executable, root_fd, *arguments, deadline=deadline)
         returncode, stdout, stderr = _run_with_git_metadata_pins(
             pins,
             lambda: _git_output_bounded(command, environment),
+            deadline=deadline,
         )
         if type(returncode) is not int or returncode != 0:
             raise ValueError("Git provenance could not be checked")
@@ -2530,18 +2785,22 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
     environment = context["environment"]
     pins = context["pins"]
     root_fd = context["root_fd"]
+    deadline = context["deadline"]
     if (
         not isinstance(root, Path)
         or not isinstance(executable, Path)
         or not isinstance(environment, dict)
         or not isinstance(pins, tuple)
         or type(root_fd) is not int
+        or type(deadline) is not float
     ):
         raise ValueError("Git context is malformed")
-    command = _bound_git_command(executable, root_fd, *arguments)
+    _check_git_operation_deadline(deadline, "starting Git provenance")
+    command = _bound_git_command(executable, root_fd, *arguments, deadline=deadline)
     try:
         if subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
             def legacy_run() -> Any:
+                _check_git_operation_deadline(deadline, "starting Git provenance")
                 try:
                     return subprocess.run(
                         command,
@@ -2550,7 +2809,7 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=False,
-                        timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+                        timeout=max(0.0, deadline - time.monotonic()),
                         env=environment,
                     )
                 except (
@@ -2563,7 +2822,7 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
                 ) as exc:
                     raise ValueError("Git provenance could not be checked") from exc
 
-            result = _run_with_git_metadata_pins(pins, legacy_run)
+            result = _run_with_git_metadata_pins(pins, legacy_run, deadline=deadline)
             try:
                 returncode = result.returncode
                 output = result.stdout
@@ -2582,6 +2841,7 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
             returncode, output, diagnostics = _run_with_git_metadata_pins(
                 pins,
                 lambda: _git_output_bounded(command, environment),
+                deadline=deadline,
             )
             if type(returncode) is not int or returncode != 0:
                 raise ValueError("Git provenance could not be checked")
@@ -3101,12 +3361,18 @@ def _open_verified_directory_path(
     parent_fd, name = _open_verified_parent(
         candidate,
         label=label,
+        deadline=deadline,
         resolve_parent_aliases=False,
     )
     descriptor: int | None = None
     try:
         check_deadline()
-        descriptor = _open_verified_directory_at(parent_fd, name, label=label)
+        descriptor = _open_verified_directory_at(
+            parent_fd,
+            name,
+            label=label,
+            deadline=deadline,
+        )
         check_deadline()
         return descriptor, candidate
     except BaseException:
@@ -3226,6 +3492,7 @@ def _build_static_digest(site_root: Path) -> str:
                         directory_fd,
                         name,
                         label="static build directory",
+                        deadline=deadline,
                     )
                     child_metadata = os.fstat(child_fd)
                     check_deadline()
@@ -3248,6 +3515,7 @@ def _build_static_digest(site_root: Path) -> str:
                     name,
                     limit=per_file_limit,
                     label="static build file",
+                    deadline=deadline,
                 )
                 try:
                     check_deadline()
