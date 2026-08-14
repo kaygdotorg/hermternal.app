@@ -5,10 +5,10 @@ Hermes, a network command, or a gate during its tests.
 
 The tool accepts only the real Linux #405 `replay-result.json` and
 `replay-completion.json`. `final-linux-pins.json` already pins the approved
-shared Linux profile and #401 authority module. It remains intentionally
-deferred for the final Linux authority root, #404/#405 successor bytes,
+shared Linux profile, #401 authority module, and Linux authority root. It
+remains intentionally deferred for the final Phase A and #405 wrapper bytes,
 expected `dev` base, and local toolchain digest. It rejects until those final
-replay values are written. It has no macOS or `/private/tmp` fallback.
+values are written. It has no macOS or `/private/tmp` fallback.
 
 After finalization, it loads and pins:
 
@@ -18,10 +18,18 @@ After finalization, it loads and pins:
 - the pre-update `dev` base. `dev` must still equal that base, not the replay
   final head; #407 is the only later normal update to the final head.
 
-It uses the actual #405 closed schemas, completion bindings, and #404 anchor
-validator. It then repeats the complete chain after the final gate and before
-the create-only report write. The report has mode `0600`, uses `O_EXCL`, fsyncs
-the file and directory, and has three stable no-follow rereads.
+It accepts a positive, unpadded version in the exact Phase A evidence schema
+namespace. It then requires the anchor record to use the exact schema exported
+by the hash-pinned Phase A module. It uses the actual #405 closed schemas,
+completion bindings, and #404 anchor validator. It then repeats the complete
+chain after the final gate and before the create-only report write. The report
+has mode `0600`, uses `O_EXCL`, fsyncs the file and directory, and has three
+stable no-follow rereads.
+
+The current Linux replay adapters configure the final #405 wrapper only in
+memory. No final source file currently exposes both that configured authority
+and the closed #405 result API that this gate loads. Thus, the wrapper path and
+digest stay null until the replay lane supplies one reviewed load boundary.
 
 All executable gates are fixed in code. They run only in rootless Podman with
 a locally staged image digest, `--pull=never`, `--network=none`, a read-only
@@ -39,6 +47,12 @@ mode `0644`; they are accepted only when owner-owned, single-link regular
 files have stable bytes that match the exact `100644` blob in the replay final
 tree. This is different from authority, replay, and report evidence, which
 remains mode `0600`.
+
+This repository does not yet contain the exact image construction and staging
+specification. Thus, the image name, repository digest, and dependency-tree
+digest stay null. Do not derive them from the lock file alone. #406 stays
+fail-closed until a reviewed image specification defines the exact contents,
+digest algorithm, local staging procedure, and required attestation labels.
 
 Run only after independent review authorizes the real retained replay result:
 
