@@ -38,6 +38,13 @@ pin, and create-only evidence root. `linux_replay_failure_v7.py` retains the
 same one-shot failure interface against the v9 adapter in a separate v7 root.
 Neither successor regenerates authority or runs replay.
 
+`linux_replay_failure_v8.py` corrects one outer-loader propagation gap without
+changing v9 or replay bytes.  The inherited failure-v2 mechanism creates a
+fresh failure-v1 module and reads that module's adapter pin.  Failure v8 wraps
+that exact factory so it receives the authenticated v9 adapter.  Its test runs
+the complete disposable Phase-to-anchor flow through the actual outer failure
+loader.  It does not execute replay, network access, credentials, or Hermes.
+
 `linux_phase_a_v4.py` verified-loads the unchanged v3 adapter. It binds only
 the corrected Linux driver and wrapper bytes, the v4 evidence schema, and the
 new `hermternal-issue397-phase-a-anchor-v4` root. The v1-v3 evidence stays
