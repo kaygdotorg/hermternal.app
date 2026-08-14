@@ -17,9 +17,13 @@ class ToolchainSpecTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manifest = json.loads((HERE / "staging-manifest.json").read_text(encoding="utf-8"))
 
-    def test_build_output_stays_deferred(self) -> None:
+    def test_build_output_is_exactly_pinned(self) -> None:
         self.assertEqual(self.manifest["status"], "authenticated-inputs")
-        self.assertEqual(self.manifest["image_output"], {"image": None, "repo_digest": None, "status": "deferred-until-authorized-build"})
+        output = self.manifest["image_output"]
+        self.assertEqual(output["image"], "localhost/hermternal-offline-gates:issue-406-v1")
+        self.assertRegex(output["image_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(output["repo_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(output["status"], "verified-local-build")
 
     def test_runtime_contract_is_offline_and_read_only(self) -> None:
         contract = self.manifest["runtime_contract"]
@@ -47,7 +51,8 @@ class ToolchainSpecTests(unittest.TestCase):
     def test_final_verifier_requires_repo_digest(self) -> None:
         text = (HERE / "verify_staging.py").read_text(encoding="utf-8")
         self.assertIn('require((image is None) == (repo_digest is None)', text)
-        self.assertIn('f"{image}@{repo_digest}" in value.get("RepoDigests", [])', text)
+        self.assertIn('f"{repository}@{repo_digest}" in value.get("RepoDigests", [])', text)
+        self.assertIn('value.get("Id", "")', text)
 
 
 if __name__ == "__main__":
