@@ -1241,8 +1241,29 @@ class CliTests(unittest.TestCase):
         repo_root = self._copy_fixture_repo()
         index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
         # These are the two retained negative inputs named by the canonical
-        # path/pointer/value policy; the unchanged indexed corpus must pass.
+        # path/pointer/value/ancestry policy; the unchanged indexed corpus must pass.
         validate._validate_index_document(index, repo_root)
+
+        # The pointer text is intentionally unchanged when the reviewed list is
+        # replaced by numeric object keys. The container-shape binding must still
+        # reject this array-to-object reuse for each historical allowance.
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/attachment-policy/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["cases"] = {str(index): case for index, case in enumerate(document["cases"])}
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/session-search/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["cases"] = {str(index): case for index, case in enumerate(document["cases"])}
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
 
         nul = chr(0)
         expected = "../unsafe name" + nul + ".png"
