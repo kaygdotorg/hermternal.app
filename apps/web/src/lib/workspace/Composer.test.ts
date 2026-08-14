@@ -51,4 +51,59 @@ describe('Composer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
     expect(onAction).not.toHaveBeenCalled();
   });
+
+  it('restores retained text and attachment metadata and emits bounded draft updates', async () => {
+    const onDraftChange = vi.fn();
+    render(Composer, {
+      retainedDraft: {
+        text: 'Restored draft',
+        attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+      },
+      onDraftChange
+    });
+
+    expect(screen.getByRole('textbox', { name: 'Message Hermes' })).toHaveValue('Restored draft');
+    fireEvent.input(screen.getByRole('textbox', { name: 'Message Hermes' }), {
+      target: { value: 'Restored draft with edit' }
+    });
+
+    await waitFor(() =>
+      expect(onDraftChange).toHaveBeenLastCalledWith({
+        text: 'Restored draft with edit',
+        attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+      })
+    );
+  });
+
+  it('keeps local and root draft state when the live send boundary rejects a prompt', async () => {
+    const onAction = vi.fn(() => false);
+    const onDraftChange = vi.fn();
+    render(Composer, { onAction, onDraftChange });
+    const editor = screen.getByRole('textbox', { name: 'Message Hermes' });
+    fireEvent.input(editor, { target: { value: 'Retry after recovery' } });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(onAction).toHaveBeenCalledWith({ type: 'send', text: 'Retry after recovery' });
+    expect(editor).toHaveValue('Retry after recovery');
+    expect(onDraftChange).not.toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('retains bounded metadata when the mock attachment action is activated', async () => {
+    const onAction = vi.fn();
+    const onDraftChange = vi.fn();
+    render(Composer, { onAction, onDraftChange });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add an attachment' }));
+
+    expect(onAction).toHaveBeenCalledWith({ type: 'attach' });
+    expect(onDraftChange).toHaveBeenLastCalledWith({
+      text: '',
+      attachments: [
+        { id: 'mock-attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }
+      ]
+    });
+    expect(JSON.stringify(onDraftChange.mock.calls)).not.toContain('blob');
+    expect(JSON.stringify(onDraftChange.mock.calls)).not.toContain('path');
+  });
 });

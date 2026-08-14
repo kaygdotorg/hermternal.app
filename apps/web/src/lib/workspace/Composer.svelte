@@ -1,31 +1,83 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
-  import type { WorkspaceActionHandler } from './types';
+  import type { LiveWorkspaceDraft } from './live-workspace-session';
+  import type { WorkspaceAction } from './types';
+
+  type ComposerActionHandler = (action: WorkspaceAction) => void | boolean;
 
   export let model = 'Atlas · balanced';
   export let disabled = false;
   export let isStreaming = false;
   export let placeholder = 'Message Hermes…';
-  export let onAction: WorkspaceActionHandler = () => {};
+  export let retainedDraft: Readonly<LiveWorkspaceDraft> | undefined = undefined;
+  export let onDraftChange: (draft: LiveWorkspaceDraft | undefined) => void = () => {};
+  export let onAction: ComposerActionHandler = () => {};
+
+  const MAX_MOCK_ATTACHMENTS = 8;
 
   let draft = '';
+  let attachments: LiveWorkspaceDraft['attachments'] = [];
+  let observedDraft: Readonly<LiveWorkspaceDraft> | undefined;
   let selectedModel = model;
   let lastSubmittedText = '';
   let editedSinceSubmit = true;
+
+  // The root-owned snapshot is the restore authority after the authenticated
+  // view unmounts. Do not mirror it into storage or a transcript-local item.
+  $: if (retainedDraft !== observedDraft) {
+    observedDraft = retainedDraft;
+    draft = retainedDraft?.text ?? '';
+    attachments = retainedDraft?.attachments ?? [];
+    lastSubmittedText = '';
+    editedSinceSubmit = true;
+  }
 
   function sendMessage(): void {
     const text = draft.trim();
     if (!text || disabled || isStreaming || (!editedSinceSubmit && text === lastSubmittedText)) return;
 
+    // Keep local and root-owned state until the action boundary confirms that
+    // the live transport adopted the request. A rejected send must be retryable.
+    const accepted = onAction({ type: 'send', text });
+    if (accepted === false) return;
     lastSubmittedText = text;
     editedSinceSubmit = false;
     draft = '';
-    onAction({ type: 'send', text });
+    attachments = [];
+    onDraftChange(undefined);
+  }
+
+  function publishDraft(): void {
+    const next: LiveWorkspaceDraft | undefined =
+      draft.length > 0 || attachments.length > 0
+        ? { text: draft, attachments: [...attachments] }
+        : undefined;
+    onDraftChange(next);
+  }
+
+  function addMockAttachment(): void {
+    if (disabled || attachments.length >= MAX_MOCK_ATTACHMENTS) return;
+    // The prototype does not open a file picker or retain file bytes. This
+    // deterministic metadata-only record proves attachment draft retention
+    // without introducing paths, blobs, credentials, or transport payloads.
+    const index = attachments.length + 1;
+    attachments = [
+      ...attachments,
+      {
+        id: `mock-attachment-${index}`,
+        name: index === 1 ? 'brief.png' : `attachment-${index}.dat`,
+        mediaType: index === 1 ? 'image/png' : 'application/octet-stream',
+        sizeBytes: 12
+      }
+    ];
+    publishDraft();
+    onAction({ type: 'attach' });
   }
 
   function handleDraftInput(): void {
     editedSinceSubmit = true;
+    publishDraft();
   }
 
   function handleSubmit(event: SubmitEvent): void {
@@ -70,7 +122,7 @@
         label="Add attachment"
         variant="ghost"
         {disabled}
-        onActivate={() => onAction({ type: 'attach' })}
+        onActivate={addMockAttachment}
       />
       <Pill
         ariaLabel="Open security policy"

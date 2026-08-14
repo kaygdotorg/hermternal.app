@@ -107,10 +107,12 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
   const auth = new BrowserAuthSession({
     client: createBrowserAuthClient({ fetch: dependencies.fetch }),
     discoverProviders: (signal) => discoverProviders({ fetch: dependencies.fetch, signal }),
-    // Authentication invalidation closes chat and drops session presentation
-    // references before logout or expiry publishes its next observable state.
-    // The active root lease is retired first, so an old 4401 control cannot
-    // affect the bridge created by a later authenticated lifecycle.
+    // Authentication invalidation closes active chat, Terminal, and session
+    // transport resources before logout or expiry publishes its next observable
+    // state. The root-owned workspace and bounded draft remain available through
+    // expiry; explicit logout clears the draft in the wrapper below. The active
+    // root lease is retired first, so an old 4401 control cannot affect the bridge
+    // created by a later authenticated lifecycle.
     invalidateLocalSession: () => {
       activeTerminalLifecycle = undefined;
       workspace.invalidate();
@@ -119,6 +121,22 @@ export function createLiveRootContext(dependencies: LiveRootDependencies = {}): 
 
   let disposed = false;
   let activeTerminalLifecycle: ActiveTerminalLifecycle | undefined;
+
+  // BrowserAuthView owns the visible discard action, but the root owns the
+  // draft lifetime. Intercept the existing auth methods without persisting the
+  // draft or changing the auth presentation: expiry preserves it, explicit
+  // discard clears it, and logout clears it before local invalidation.
+  const clearSelection = auth.clearSelection.bind(auth);
+  auth.clearSelection = () => {
+    const discardingExpiredDraft = auth.current.status === 'expired';
+    clearSelection();
+    if (discardingExpiredDraft && !disposed) workspace.clearComposerDraft();
+  };
+  const logout = auth.logout.bind(auth);
+  auth.logout = async () => {
+    if (!disposed) workspace.clearComposerDraft();
+    await logout();
+  };
 
   function retireTerminalLifecycle(): void {
     // Dropping the only capability reference makes an old rendered callback

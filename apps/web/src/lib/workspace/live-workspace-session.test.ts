@@ -411,6 +411,51 @@ describe('LiveWorkspaceSession', () => {
     expect(JSON.stringify(session.current)).not.toContain('must not enter presentation state');
   });
 
+  it('retains only bounded metadata drafts through auth invalidation and clears them explicitly', async () => {
+    const rest = createRest();
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+
+    const draft = {
+      text: 'x'.repeat(5_000),
+      attachments: Array.from({ length: 10 }, (_, index) => ({
+        id: `attachment-${index}`,
+        name: `attachment-${index}.png`,
+        mediaType: 'image/png',
+        sizeBytes: index
+      }))
+    };
+    session.setComposerDraft(draft);
+
+    expect(session.current.draft?.text).toHaveLength(4096);
+    expect(session.current.draft?.attachments).toHaveLength(8);
+    expect(JSON.stringify(session.current.draft)).not.toContain('src');
+
+    session.invalidate();
+    expect(session.current.draft).toEqual({
+      text: 'x'.repeat(4096),
+      attachments: draft.attachments.slice(0, 8)
+    });
+
+    session.clearComposerDraft();
+    expect(session.current.draft).toBeUndefined();
+    session.setComposerDraft({ text: 'dispose this draft', attachments: [] });
+    session.dispose();
+    expect(session.current.draft).toBeUndefined();
+  });
+
+  it('clears the retained draft only after the transport accepts a prompt', async () => {
+    const rest = createRest();
+    const chat = createChatHarness();
+    const session = new LiveWorkspaceSession({ rest, createChat: chat.createChat });
+    await session.initialize();
+    session.setComposerDraft({ text: 'accepted draft', attachments: [] });
+
+    expect(session.sendPrompt('accepted prompt')).toBe(true);
+    expect(session.current.draft).toBeUndefined();
+  });
+
   it('retries a pre-identity persisted restore without creating a new session', async () => {
     const rest = createRest([]);
     vi.mocked(rest.getSessionMessages).mockRejectedValueOnce(new Error('synthetic history parse failure'));

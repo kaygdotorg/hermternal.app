@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import AuthPreview from '$lib/auth-ui/AuthPreview.svelte';
   import { discoverProviders } from '$lib/auth-ui/provider-discovery';
   import { DEFAULT_PROVIDERS } from '$lib/auth-ui/fixtures';
   import WorkspacePreview from '$lib/workspace/WorkspacePreview.svelte';
+  import type { LiveWorkspaceDraft } from '$lib/workspace/live-workspace-session';
   import {
     authStateForProviderKind,
     type AuthAction,
@@ -27,9 +28,13 @@
     'unsupported-version'
   ];
 
+  // The leaf selector covers the seven approved Paper families and their
+  // reviewed password/discovery presentation variants. Interaction,
+  // localization, and zoom remain CSS/test evidence, not selector values.
   const authStates: AuthViewState[] = [
     'provider-selection',
     'password',
+    'password-submitting',
     'callback',
     'failure',
     'session-expired',
@@ -38,8 +43,7 @@
     'discovery-empty',
     'discovery-malformed',
     'discovery-aborted',
-    'provider-unavailable',
-    'password-submitting'
+    'provider-unavailable'
   ];
 
   const liveDiscoveryConfigured = import.meta.env.VITE_HERMES_LIVE_AUTH_DISCOVERY === 'true';
@@ -58,11 +62,58 @@
   let discoveryAttempt = 0;
   let discoveryActive = false;
 
+  const MAX_UNSENT_DRAFT_LENGTH = 4096;
+  const MAX_UNSENT_DRAFT_ATTACHMENTS = 8;
+  const FIXTURE_UNSENT_DRAFT: LiveWorkspaceDraft = {
+    text: 'A pending fixture draft for the current Hermes conversation.',
+    attachments: []
+  };
+  // Keep one bounded payload for this mounted preview only. It is never rendered,
+  // serialized, or merged into the synthetic timeline, so this is draft state,
+  // not a transcript mirror. Explicit lifecycle handlers and route teardown drop
+  // the reference; no browser storage participates in its lifetime.
+  let currentUnsentDraft: LiveWorkspaceDraft | undefined;
+
+  function restoreCurrentUnsentDraft(): void {
+    if (currentUnsentDraft !== undefined) return;
+    currentUnsentDraft = {
+      text: FIXTURE_UNSENT_DRAFT.text.slice(0, MAX_UNSENT_DRAFT_LENGTH),
+      attachments: [...FIXTURE_UNSENT_DRAFT.attachments]
+    };
+  }
+
+  function setCurrentUnsentDraft(draft: LiveWorkspaceDraft | undefined): void {
+    if (draft === undefined) {
+      currentUnsentDraft = undefined;
+      return;
+    }
+    const text = typeof draft.text === 'string' ? draft.text.slice(0, MAX_UNSENT_DRAFT_LENGTH) : '';
+    const attachments = draft.attachments
+      .slice(0, MAX_UNSENT_DRAFT_ATTACHMENTS)
+      .filter((attachment) => attachment.id.length > 0 && attachment.name.length > 0)
+      .map((attachment) => ({
+        id: attachment.id.slice(0, 128),
+        name: attachment.name.slice(0, 128),
+        ...(attachment.mediaType ? { mediaType: attachment.mediaType.slice(0, 96) } : {}),
+        ...(attachment.sizeBytes === undefined ? {} : { sizeBytes: attachment.sizeBytes })
+      }));
+    currentUnsentDraft = text.length > 0 || attachments.length > 0 ? { text, attachments } : undefined;
+  }
+
+  function clearCurrentUnsentDraft(): void {
+    currentUnsentDraft = undefined;
+  }
+
   function formatState(value: string): string {
     return value
       .split('-')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
+  }
+
+  function handleAuthStateSelection(event: Event): void {
+    const nextState = (event.currentTarget as HTMLSelectElement).value;
+    if (nextState === 'session-expired') restoreCurrentUnsentDraft();
   }
 
   function isLiveDiscoveryRequested(): boolean {
@@ -104,21 +155,47 @@
 
   function handleRuntimeAction(action: WorkspaceAction): void {
     lastRuntimeAction = action.type;
+
+    // The fixture treats a send action as the successful prompt boundary. The
+    // live workspace owns transport uncertainty separately; this preview only
+    // drops the one local draft after an explicit successful fixture action.
+    if (action.type === 'send') clearCurrentUnsentDraft();
+
+    // Returning to sign-in or ending the Terminal lifecycle ends this mounted
+    // draft's ownership. Reauthentication can restore it only before these
+    // explicit clears, and teardown clears the final in-memory reference too.
+    if (
+      action.type === 'return-to-sign-in' ||
+      action.type === 'back-to-sessions' ||
+      action.type === 'dismiss' ||
+      action.type === 'terminal-close' ||
+      action.type === 'terminal-detach'
+    ) {
+      clearCurrentUnsentDraft();
+    }
   }
 
   function handleAuthAction(action: AuthAction): void {
     authActionCount += 1;
     lastAuthAction = action.type;
 
-    if (action.type === 'retry-discovery' && discoveryMode === 'live') {
-      if (!liveDiscoveryConfigured) {
-        // Retry cannot bypass the build-time gate or send ambient cookies.
-        providers = [];
-        authState = 'provider-unavailable';
-        lastAuthAction = 'live-discovery-disabled';
+    if (action.type === 'retry-discovery') {
+      if (discoveryMode === 'live') {
+        if (!liveDiscoveryConfigured) {
+          // Retry cannot bypass the build-time gate or send ambient cookies.
+          providers = [];
+          authState = 'provider-unavailable';
+          lastAuthAction = 'live-discovery-disabled';
+          return;
+        }
+        startProviderDiscovery();
         return;
       }
-      startProviderDiscovery();
+      // Fixture retry has no async boundary. Resolve it directly to the
+      // deterministic provider-selection state instead of showing a pending
+      // transition that cannot produce a new provider response.
+      providers = DEFAULT_PROVIDERS;
+      authState = 'provider-selection';
       return;
     }
 
@@ -131,7 +208,7 @@
       return;
     }
 
-    // Runtime-shaped provider data is untrusted. Only the two reviewed kinds
+    // Runtime-shaped provider data is untrusted. Only the reviewed kinds
     // may advance; missing or future values fail closed instead of assuming OAuth.
     if (action.type === 'choose-provider') {
       authState = authStateForProviderKind(action.providerKind);
@@ -146,14 +223,22 @@
       action.type === 'discard-draft'
     ) {
       authState = 'provider-selection';
+      if (action.type === 'discard-draft') clearCurrentUnsentDraft();
     }
 
-    if (action.type === 'retry-authentication' || action.type === 'retry-discovery') {
-      authState = action.type === 'retry-discovery' ? 'discovery-pending' : 'provider-selection';
+    if (action.type === 'retry-authentication') {
+      authState = 'provider-selection';
     }
 
     if (action.type === 'submit-password-fixture') authState = 'password-submitting';
-    if (action.type === 'sign-in-again') authState = 'provider-selection';
+
+    if (action.type === 'sign-in-again') {
+      // The fixture has no network completion event. Treat this explicit
+      // recovery action as the successful auth boundary and restore the same
+      // bounded draft reference, never a transcript copy or a new boolean.
+      restoreCurrentUnsentDraft();
+      authState = 'provider-selection';
+    }
   }
 
   onMount(() => {
@@ -172,6 +257,12 @@
 
     startProviderDiscovery();
     return stopProviderDiscovery;
+  });
+
+  onDestroy(() => {
+    // This route-local draft must die with the mounted preview. The explicit
+    // clear keeps a future remount from acquiring stale in-memory state.
+    clearCurrentUnsentDraft();
   });
 </script>
 
@@ -224,7 +315,13 @@
     </div>
     <p class="section-note">{lastRuntimeAction}</p>
     <div class="runtime-stage">
-      <WorkspacePreview {appearance} state={runtimeState} onAction={handleRuntimeAction} />
+      <WorkspacePreview
+        {appearance}
+        composerDraft={currentUnsentDraft}
+        state={runtimeState}
+        onAction={handleRuntimeAction}
+        onDraftChange={setCurrentUnsentDraft}
+      />
     </div>
   </section>
 
@@ -234,97 +331,108 @@
         <p class="eyebrow">WEB STATES · AUTHENTICATION</p>
         <h2 id="auth-heading">Browser authentication boundary</h2>
       </div>
-      <label class="state-control">
-        <span>{discoveryMode === 'live' ? 'Authentication state · live result' : 'Authentication state'}</span>
-        {#if discoveryMode === 'live'}
-          <!-- The live selector is output-only. It has no binding or change
-               listener, so a forced DOM event cannot relabel a fixture as a
-               same-origin discovery result. -->
-          <select
-            aria-label="Authentication state"
-            disabled
-            title="Live discovery state follows the same-origin response."
-            value={authState}
-          >
-            {#each authStates as state}
-              <option value={state}>{formatState(state)}</option>
-            {/each}
-          </select>
-        {:else}
-          <select bind:value={authState} aria-label="Authentication state">
-            {#each authStates as state}
-              <option value={state}>{formatState(state)}</option>
-            {/each}
-          </select>
-        {/if}
-      </label>
+      <div class="auth-controls">
+        <label class="state-control">
+          <span>{discoveryMode === 'live' ? 'Authentication state · live result' : 'Authentication state'}</span>
+          {#if discoveryMode === 'live'}
+            <!-- The live selector is output-only. It has no binding or change
+                 listener, so a forced DOM event cannot relabel a fixture as a
+                 same-origin discovery result. -->
+            <select aria-label="Authentication state" disabled title="Live discovery state follows the same-origin response." value={authState}>
+              {#each authStates as state}
+                <option value={state}>{formatState(state)}</option>
+              {/each}
+            </select>
+          {:else}
+            <select bind:value={authState} aria-label="Authentication state" onchange={handleAuthStateSelection}>
+              {#each authStates as state}
+                <option value={state}>{formatState(state)}</option>
+              {/each}
+            </select>
+          {/if}
+        </label>
+      </div>
     </div>
-    <p class="section-note" data-auth-action-count={authActionCount}>{lastAuthAction}</p>
+    <p
+      class="section-note"
+      data-auth-action-count={authActionCount}
+      data-draft-attachment-count={currentUnsentDraft?.attachments.length ?? 0}
+      data-draft-state={currentUnsentDraft === undefined ? 'empty' : 'retained'}
+    >
+      {lastAuthAction}{currentUnsentDraft === undefined ? '' : ' · draft retained locally'}
+    </p>
     <div class="auth-stage">
-      <AuthPreview {appearance} {discoveryMode} {providers} state={authState} onAction={handleAuthAction} />
+      <AuthPreview
+        {appearance}
+        {discoveryMode}
+        {providers}
+        state={authState}
+        onAction={handleAuthAction}
+      />
     </div>
   </section>
 
   <footer class="preview-footer">
     <span>Prototype-only fixture data</span>
-    <span>Keyboard, reduced-motion, and reduced-transparency states are represented in the components.</span>
+    <span>Keyboard, reduced-motion, reduced-transparency, forced-colors, and retained-draft states are represented in the components.</span>
   </footer>
 </main>
 
 <style>
   .preview-page {
-    --canvas: #f3f5f8;
-    --surface: #ffffff;
-    --ink: #16181d;
-    --muted: #667080;
-    --line: #d8dde5;
-    --signal: #3157c7;
     box-sizing: border-box;
     display: flex;
     min-width: 0;
     min-height: 100vh;
     flex-direction: column;
     gap: 28px;
-    padding: 32px;
-    background: var(--canvas);
-    color: var(--ink);
-    font-family: 'Instrument Sans', system-ui, sans-serif;
+    padding: var(--space-8);
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
     font-synthesis: none;
   }
 
   .preview-page[data-appearance='dark'] {
-    --canvas: #0d1117;
-    --surface: #171c24;
-    --ink: #f4f6fa;
-    --muted: #a7b0bf;
-    --line: #343c49;
-    --signal: #6f88ff;
+    background: var(--color-dark-canvas);
+    color: var(--color-dark-ink);
   }
 
   .preview-header,
   .section-heading,
-  .preview-footer {
+  .preview-footer,
+  .auth-controls {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 24px;
+    gap: var(--space-6);
   }
 
   .heading-copy,
-  .section-heading > div {
+  .section-heading > div:first-child {
     display: flex;
     min-width: 0;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-2);
+  }
+
+  .auth-controls {
+    align-items: flex-end;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .eyebrow {
     margin: 0;
-    color: var(--signal);
-    font-size: 12px;
-    font-weight: 600;
+    color: var(--color-auth-signal);
+    font-size: var(--text-meta);
+    font-weight: var(--weight-semibold);
     letter-spacing: 0.08em;
-    line-height: 16px;
+    line-height: var(--leading-meta);
+  }
+
+  .preview-page[data-appearance='dark'] .eyebrow {
+    color: var(--color-dark-signal);
   }
 
   h1,
@@ -335,23 +443,29 @@
 
   h1 {
     font-size: 34px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     letter-spacing: -0.03em;
     line-height: 40px;
   }
 
   h2 {
     font-size: 24px;
-    font-weight: 600;
+    font-weight: var(--weight-semibold);
     letter-spacing: -0.02em;
     line-height: 30px;
   }
 
   .intro {
     max-width: 720px;
-    color: var(--muted);
-    font-size: 15px;
-    line-height: 23px;
+    color: var(--color-muted);
+    font-size: var(--text-body);
+    line-height: var(--leading-body);
+  }
+
+  .preview-page[data-appearance='dark'] .intro,
+  .preview-page[data-appearance='dark'] .section-note,
+  .preview-page[data-appearance='dark'] .preview-footer {
+    color: var(--color-dark-muted);
   }
 
   .page-controls,
@@ -371,30 +485,46 @@
     display: flex;
     flex-direction: column;
     gap: 5px;
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 16px;
+    color: var(--color-muted);
+    font-size: var(--text-meta);
+    line-height: var(--leading-meta);
+  }
+
+  .preview-page[data-appearance='dark'] .page-controls label,
+  .preview-page[data-appearance='dark'] .state-control {
+    color: var(--color-dark-muted);
   }
 
   select {
     min-height: 44px;
-    padding: 8px 34px 8px 12px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface);
-    color: var(--ink);
+    padding: var(--space-2) 34px var(--space-2) var(--space-3);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-input);
+    background: var(--color-paper);
+    color: var(--color-ink);
     font: inherit;
-    font-size: 14px;
+    font-size: var(--text-control);
+  }
+
+  .preview-page[data-appearance='dark'] select {
+    border-color: var(--color-dark-line);
+    background: var(--color-dark-paper);
+    color: var(--color-dark-ink);
   }
 
   select:focus-visible,
   .back-link:focus-visible {
-    outline: 3px solid color-mix(in srgb, var(--signal) 32%, transparent);
+    outline: 3px solid color-mix(in srgb, var(--color-gate-light-focus) 32%, transparent);
     outline-offset: 3px;
   }
 
+  .preview-page[data-appearance='dark'] select:focus-visible,
+  .preview-page[data-appearance='dark'] .back-link:focus-visible {
+    outline-color: var(--color-gate-dark-focus);
+  }
+
   select:disabled {
-    color: var(--muted);
+    color: var(--color-muted);
     cursor: not-allowed;
     opacity: 0.72;
   }
@@ -403,29 +533,37 @@
     display: inline-flex;
     min-height: 44px;
     align-items: center;
-    padding: 8px 12px;
-    border-radius: 999px;
-    color: var(--signal);
-    font-size: 14px;
-    line-height: 18px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-pill);
+    color: var(--color-auth-signal);
+    font-size: var(--text-control);
+    line-height: var(--leading-control);
     text-decoration: none;
   }
 
+  .preview-page[data-appearance='dark'] .back-link {
+    color: var(--color-dark-signal);
+  }
+
   .back-link:hover {
-    background: color-mix(in srgb, var(--signal) 8%, transparent);
+    background: color-mix(in srgb, var(--color-auth-signal) 8%, transparent);
+  }
+
+  .preview-page[data-appearance='dark'] .back-link:hover {
+    background: color-mix(in srgb, var(--color-dark-signal) 12%, transparent);
   }
 
   .preview-section {
     display: flex;
     min-width: 0;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .section-note {
     min-height: 18px;
-    color: var(--muted);
-    font-size: 12px;
+    color: var(--color-muted);
+    font-size: var(--text-meta);
     line-height: 18px;
   }
 
@@ -433,19 +571,16 @@
   .auth-stage {
     min-width: 0;
     overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: 22px;
-    background: var(--surface);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-structural);
+    background: var(--color-paper);
   }
 
-  /* The workspace preview is an exact Paper artboard surface. Its stage is
-     full-bleed so the 760px named-container switch and 390/1440 geometry are
-     measured against the same effective width as the approved boards. */
   .runtime-stage {
     box-sizing: border-box;
     position: relative;
-    left: -32px;
-    width: calc(100% + 64px);
+    left: calc(-1 * var(--space-8));
+    width: calc(100% + 2 * var(--space-8));
     border: 0;
     border-radius: 0;
   }
@@ -460,8 +595,8 @@
 
   .preview-footer {
     flex-wrap: wrap;
-    color: var(--muted);
-    font-size: 12px;
+    color: var(--color-muted);
+    font-size: var(--text-meta);
     line-height: 18px;
   }
 
@@ -472,7 +607,8 @@
     }
 
     .preview-header,
-    .section-heading {
+    .section-heading,
+    .auth-controls {
       flex-direction: column;
       align-items: stretch;
     }
@@ -497,13 +633,19 @@
 
     .back-link {
       justify-content: center;
-      border: 1px solid var(--line);
-      background: var(--surface);
+      border: 1px solid var(--color-line);
+      background: var(--color-paper);
+    }
+
+    .preview-page[data-appearance='dark'] .back-link {
+      border-color: var(--color-dark-line);
+      background: var(--color-dark-paper);
+      color: var(--color-dark-signal);
     }
 
     .runtime-stage,
     .auth-stage {
-      border-radius: 16px;
+      border-radius: var(--radius-card);
     }
 
     .runtime-stage {
@@ -517,7 +659,30 @@
   @media (prefers-reduced-transparency: reduce) {
     .runtime-stage,
     .auth-stage {
-      background: var(--surface);
+      background: var(--color-paper);
+    }
+  }
+
+  @media (forced-colors: active) {
+    .preview-page,
+    .preview-page[data-appearance='dark'] {
+      background: Canvas;
+      color: CanvasText;
+    }
+
+    .runtime-stage,
+    .auth-stage,
+    select,
+    .back-link {
+      forced-color-adjust: none;
+      border-color: CanvasText;
+      background: Canvas;
+      color: CanvasText;
+    }
+
+    select:focus-visible,
+    .back-link:focus-visible {
+      outline-color: Highlight;
     }
   }
 </style>

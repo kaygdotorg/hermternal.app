@@ -5,7 +5,12 @@
   import AuthPreview from './AuthPreview.svelte';
   import { browserAuthErrorMessage } from './browser-auth';
   import { BrowserAuthSession, type BrowserAuthSnapshot } from './browser-auth-session';
-  import type { AuthAction, AuthViewState, PasswordSubmission } from './types';
+  import {
+    authStateForProviderKind,
+    type AuthAction,
+    type AuthViewState,
+    type PasswordSubmission
+  } from './types';
 
   export let session: BrowserAuthSession;
   export let appearance: Appearance = 'light';
@@ -16,17 +21,22 @@
   let lastPublishedIdentity: AuthIdentity | undefined;
 
   $: authState = toViewState(snapshot);
+  $: keepAuthenticatedProjection = snapshot.status === 'authenticated' || snapshot.status === 'logging_out';
   $: if (snapshot.status === 'authenticated' && snapshot.identity !== lastPublishedIdentity) {
     lastPublishedIdentity = snapshot.identity;
     if (snapshot.identity) onAuthenticated(snapshot.identity);
   }
 
   function handleAction(action: AuthAction): void {
-    if (action.type === 'retry-logout') {
-      if (snapshot.status === 'logout_failed') void session.logout();
+    // The approved failure family supplies the visible retry. Keep its action
+    // internal so recovery reuses the retained identity and session lifecycle.
+    if (action.type === 'retry-authentication' && snapshot.status === 'logout_failed') {
+      void session.logout();
       return;
     }
-    if (snapshot.status === 'logging_out' || snapshot.status === 'logout_failed') return;
+    // A pending logout remains an authenticated projection and cannot be
+    // interrupted by generic auth controls.
+    if (snapshot.status === 'logging_out') return;
     if (action.type === 'choose-provider') {
       session.chooseProvider(action.providerId);
       return;
@@ -86,15 +96,24 @@
     if (value.status === 'provider_unavailable') return 'provider-unavailable';
     if (value.status === 'password_submitting') return 'password-submitting';
     if (value.status === 'expired') return 'session-expired';
-    if (value.status === 'logging_out') return 'logout-pending';
-    if (value.status === 'logout_failed') return 'logout-failed';
+    if (value.status === 'logout_failed') return 'failure';
     if (value.status === 'failed') return 'failure';
-    if (value.selectedProviderId) return 'password';
-    return 'provider-selection';
+    if (!value.selectedProviderId) return 'provider-selection';
+
+    const selectedProvider = value.providers.find((provider) => provider.id === value.selectedProviderId);
+    if (!selectedProvider) return 'provider-unavailable';
+    // This view is the live browser boundary. OAuth has a fixture callback
+    // family, but no reviewed live callback transport, so it must fail closed
+    // instead of entering the password form or implying a provider window.
+    if (selectedProvider.kind === 'oauth') return 'provider-unavailable';
+    return authStateForProviderKind(selectedProvider.kind);
   }
 </script>
 
-{#if snapshot.status === 'authenticated'}
+{#if keepAuthenticatedProjection}
+  <!-- Logout pending/recovery is deliberately not a new Authentication
+       presentation state. The authenticated projection remains mounted until
+       the internal lifecycle proves signed-out or a reviewed Paper state exists. -->
   <slot />
 {:else}
   <AuthPreview
@@ -102,7 +121,7 @@
     discoveryMode="live"
     failureCode={snapshot.errorCode}
     failureMessage={snapshot.errorCode ? browserAuthErrorMessage(snapshot.errorCode) : undefined}
-    providers={snapshot.providers.filter((provider) => provider.kind === 'password')}
+    providers={snapshot.providers}
     state={authState}
     onAction={handleAction}
     onPasswordSubmit={handlePasswordSubmit}

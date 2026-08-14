@@ -127,6 +127,52 @@ describe('root route composition', () => {
     expect(context.workspace.current).toMatchObject({ state: 'loading', sessions: [], timeline: [] });
   });
 
+  it('preserves a bounded draft through auth expiry and clears it on explicit discard', async () => {
+    const fetch: LiveRestFetch = vi.fn(async (input) => {
+      if (String(input) === '/api/auth/me') return jsonResponse(IDENTITY);
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({ fetch });
+    await context.auth.initialize();
+    context.workspace.setComposerDraft({
+      text: 'restore after expiry',
+      attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+    });
+
+    context.auth.expire();
+    expect(context.workspace.current.draft).toEqual({
+      text: 'restore after expiry',
+      attachments: [{ id: 'attachment-1', name: 'brief.png', mediaType: 'image/png', sizeBytes: 12 }]
+    });
+
+    await context.auth.initialize();
+    expect(context.workspace.current.draft?.text).toBe('restore after expiry');
+
+    context.auth.expire();
+    context.auth.clearSelection();
+    expect(context.workspace.current.draft).toBeUndefined();
+    context.dispose();
+  });
+
+  it('clears the root-owned draft before logout invalidates the workspace', async () => {
+    const fetch: LiveRestFetch = vi.fn(async (input, init) => {
+      const path = String(input);
+      if (path === '/api/auth/me') return jsonResponse(IDENTITY);
+      if (path === '/auth/logout' && init?.method === 'POST') {
+        return new Response(null, { status: 302, headers: { location: '/login' } });
+      }
+      throw new Error('unexpected request');
+    });
+    const context = createLiveRootContext({ fetch });
+    await context.auth.initialize();
+    context.workspace.setComposerDraft({ text: 'logout draft', attachments: [] });
+
+    await context.auth.logout();
+
+    expect(context.workspace.current.draft).toBeUndefined();
+    context.dispose();
+  });
+
   it('owns the PTY adapter at the root and releases its socket exactly once', async () => {
     const harness = createPtySocketHarness();
     const urls: string[] = [];
@@ -262,9 +308,11 @@ describe('root route composition', () => {
     const disposeAuth = vi.spyOn(context.auth, 'dispose');
 
     await context.auth.initialize();
+    context.workspace.setComposerDraft({ text: 'dispose draft', attachments: [] });
     context.dispose();
     context.dispose();
 
+    expect(context.workspace.current.draft).toBeUndefined();
     expect(disposeWorkspace).toHaveBeenCalledTimes(1);
     expect(disposeAuth).toHaveBeenCalledTimes(1);
   });
