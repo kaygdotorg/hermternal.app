@@ -1,0 +1,104 @@
+{
+  "architecture": "linux/amd64",
+  "base_image": {
+    "config_sha256": "f9223c31312db5abf6e474e470292699ba3e9fa7271e5a1c135a73183767c74f",
+    "index_sha256": "4ebb5ace66f15a24c14c492e01a8beeed4fddf970a856109f5126e703e5fe503",
+    "manifest_sha256": "0a83d7979d0b593faabfa8c6003bf0b33800e62a796242d4df40d80e1871aead",
+    "reference": "docker.io/library/node:26.7.0-trixie-slim"
+  },
+  "bun": {
+    "archive": {
+      "bytes": 35969274,
+      "path": "bun-linux-x64.zip",
+      "sha256": "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f",
+      "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+    },
+    "binary": {
+      "bytes": 92752752,
+      "path": "bun/bun-linux-x64/bun",
+      "sha256": "9fd36f87e4b90b07632b987a2e4ec81ca15a62c81bf983190cea6d715be2ad74"
+    },
+    "version": "1.3.14"
+  },
+  "debian": {
+    "archive_keyring": {
+      "bytes": 55918,
+      "package_version": "2025.1",
+      "path": "snapshot/debian-archive-keyring.gpg",
+      "sha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+    },
+    "inrelease": {
+      "bytes": 140416,
+      "path": "snapshot/trixie-InRelease",
+      "sha256": "98b25b5cd185c59d34aa6e4c3e9b5b8f01bbe9d104fe2dcfbcd30dc0a14a59ed",
+      "url": "https://snapshot.debian.org/archive/debian/20260814T082106Z/dists/trixie/InRelease"
+    },
+    "package_count": 114,
+    "packages_index": {
+      "bytes": 9672648,
+      "path": "snapshot/Packages.xz",
+      "sha256": "3ab4e811cf4f3e5a335d382c58cc19d85f1abe7a4ef4689160ca1f637fa0e9b3",
+      "url": "https://snapshot.debian.org/archive/debian/20260814T082106Z/dists/trixie/main/binary-amd64/Packages.xz"
+    },
+    "package_manifest": {
+      "committed_bytes": 16287,
+      "committed_path": "debian-packages.tsv",
+      "committed_sha256": "4d9e1ed55d286860e2930f407f918b42bded7db50db5cec3d522ce40a7bc0bd9",
+      "staged_path": "snapshot/packages.tsv",
+      "staged_sha256": "17517af10d374136dbb6ff9cbfe9452d02b17e3cb8c08db2a3113fa57ceb4b19"
+    },
+    "snapshot": "20260814T082106Z",
+    "source": "http://snapshot.debian.org/archive/debian/20260814T082106Z/"
+  },
+  "dependencies": {
+    "install_command": ["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+    "path": "deps/node_modules",
+    "source": {
+      ".bun-version": "56b0485099b6c5427d3b68c042fd05b632d5e52e924c5064473389812227164c",
+      "bun.lock": "76a2e956462387ce42f7183c2894a4e99ec3981797060001fc25ff76b996d8bf",
+      "package.json": "32a830f042845675c78bfdf10ba92c5a7d4aceabf8753c35c47b7f4d78e58fe1"
+    },
+    "tree_identity_source": {
+      "path": "apps/web/benchmarks/production-build/run.ts",
+      "sha256": "de0e3dbc0249483c721f5b7497cc3e8fbed972f2a28762fc99ec1e6473b6fff8"
+    },
+    "tree": {
+      "bytes": 185037916,
+      "files": 5788,
+      "sha256": "8e1321ecbcff2f795138fea6448e286d68c9817540cc96952a685cc8f6588697",
+      "symlinks": 15
+    }
+  },
+  "image_output": {
+    "image": null,
+    "repo_digest": null,
+    "status": "deferred-until-authorized-build"
+  },
+  "playwright": {
+    "browser_version": "151.0.7922.34",
+    "headless_shell_archive": {
+      "bytes": 120231126,
+      "md5": "792047b3c2625d7d4b0fc7c4fc67d7ad",
+      "path": "chrome-headless-shell-linux64.zip",
+      "sha256": "3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14",
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip"
+    },
+    "headless_shell_tree": {
+      "bytes": 273378828,
+      "files": 287,
+      "path": "browser/chrome-headless-shell-linux64",
+      "sha256": "9a5c706322ab3564cc7f637b6cf698fe606fb914e903ad181d23394e3cdb10db",
+      "symlinks": 0
+    },
+    "revision": "1234",
+    "version": "1.62.1"
+  },
+  "runtime_contract": {
+    "network": "none",
+    "pull": "never",
+    "repository_mount": "read-only",
+    "tmpfs": ["/tmp", "/workspace/apps/web/node_modules", "/workspace/apps/web/.svelte-kit", "/workspace/apps/web/build", "/workspace/apps/web/test-results", "/workspace/apps/web/playwright-report"]
+  },
+  "schema": "hermternal.issue-397.offline-toolchain-staging/v1",
+  "status": "authenticated-inputs"
+}
