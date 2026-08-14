@@ -271,36 +271,57 @@ def preserve(source: Path, clean: Path, transfer_root: Path, authority_path: Pat
 
 def repair_generated_validator(stdin: bytes, expected_record: Mapping[str, Any],
                                 expected_sha256: str, policy_path: Path,
-                                policy_sha256: str) -> bytes:
+                                policy_sha256: str, proof_path: Path,
+                                proof_sha256: str) -> bytes:
     """Insert preservation after the exact clone and before identity binding."""
     if record_sha256(expected_record) != expected_sha256:
         raise PreservationError("expected preservation record SHA-256 differs")
     if hashlib.sha256(Path(policy_path).read_bytes()).hexdigest() != policy_sha256:
         raise PreservationError("object preservation policy SHA-256 differs")
+    if hashlib.sha256(Path(proof_path).read_bytes()).hexdigest() != proof_sha256:
+        raise PreservationError("forbidden proof policy SHA-256 differs")
     old = b'''  git_hermetic -c protocol.file.allow=always clone --no-local --no-hardlinks --no-checkout --no-tags "$SOURCE" "$CLEAN_PRIMARY" >/dev/null
   bind_clean_primary_identity
 '''
     payload = json.dumps(expected_record, sort_keys=True, separators=(",", ":"))
     new = f'''  git_hermetic -c protocol.file.allow=always clone --no-local --no-hardlinks --no-checkout --no-tags "$SOURCE" "$CLEAN_PRIMARY" >/dev/null
-  "$PYTHON" - "$SOURCE" "$CLEAN_PRIMARY" "$CLEAN_PRIMARY_ROOT" "$MATRIX" {json.dumps(os.fspath(Path(policy_path).resolve()))} {json.dumps(policy_sha256)} {json.dumps(expected_sha256)} {json.dumps(payload)} <<'PY'
-import hashlib, importlib.util, json, os, stat, sys
-source, clean, root, matrix, policy_path, policy_sha256, record_sha256, payload = sys.argv[1:]
-descriptor = os.open(policy_path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+  "$PYTHON" - "$SOURCE" "$CLEAN_PRIMARY" "$CLEAN_PRIMARY_ROOT" "$MATRIX" {json.dumps(os.fspath(Path(policy_path).resolve()))} {json.dumps(policy_sha256)} {json.dumps(os.fspath(Path(proof_path).resolve()))} {json.dumps(proof_sha256)} {json.dumps(expected_sha256)} {json.dumps(payload)} <<'PY'
+import hashlib, json, os, stat, sys, types
+source, clean, root, matrix, policy_path, policy_sha256, proof_path, proof_sha256, record_sha256, payload = sys.argv[1:]
+def verified_bytes(path, expected_sha256, label):
+    reads = []
+    for _pass in range(2):
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        try:
+            before = os.fstat(descriptor); blocks = []
+            while True:
+                block = os.read(descriptor, 1024 * 1024)
+                if not block: break
+                blocks.append(block)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        current = os.lstat(path); raw = b''.join(blocks)
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode, value.st_size, value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+        if (identity(before) != identity(after) or identity(before) != identity(current)
+                or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or len(raw) != before.st_size):
+            raise SystemExit(label + ' identity differs')
+        reads.append((identity(before), raw, hashlib.sha256(raw).hexdigest()))
+    if reads[0] != reads[1] or reads[0][2] != expected_sha256:
+        raise SystemExit(label + ' stable bytes or SHA-256 differs')
+    return reads[0][1]
+proof_raw = verified_bytes(proof_path, proof_sha256, 'forbidden proof policy')
+policy_raw = verified_bytes(policy_path, policy_sha256, 'object preservation policy')
+proof_module = types.ModuleType('forbidden_proof'); proof_module.__file__ = proof_path
+exec(compile(proof_raw, proof_path, 'exec', dont_inherit=True), proof_module.__dict__)
+module = types.ModuleType('issue397_object_preservation_runtime'); module.__file__ = policy_path
+previous = sys.modules.get('forbidden_proof'); sys.modules['forbidden_proof'] = proof_module
 try:
-    before = os.fstat(descriptor)
-    raw = os.read(descriptor, before.st_size)
-    after = os.fstat(descriptor)
+    exec(compile(policy_raw, policy_path, 'exec', dont_inherit=True), module.__dict__)
 finally:
-    os.close(descriptor)
-current = os.lstat(policy_path)
-identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode, value.st_size, value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
-if (identity(before) != identity(after) or identity(before) != identity(current)
-        or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-        or hashlib.sha256(raw).hexdigest() != policy_sha256):
-    raise SystemExit('object preservation policy identity or SHA-256 differs')
-spec = importlib.util.spec_from_file_location('issue397_object_preservation_runtime', policy_path)
-sys.path.insert(0, os.path.dirname(policy_path))
-module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    if previous is None: sys.modules.pop('forbidden_proof', None)
+    else: sys.modules['forbidden_proof'] = previous
 record = json.loads(payload)
 if module.record_sha256(record) != record_sha256:
     raise SystemExit('object preservation record SHA-256 differs')

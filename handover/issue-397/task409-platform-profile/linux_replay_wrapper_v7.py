@@ -13,8 +13,8 @@ HERE = Path(__file__).resolve().parent
 V6_PATH = HERE / "linux_replay_wrapper_v6.py"
 V6_SHA256 = "c8887fd0449ad6af3cfdebb721cf14ef9c91840f4d9b35e53f47b150f9821331"
 DRIVER_PATH = HERE / "linux_retained_driver_v7.py"
-DRIVER_SHA256 = "dcdafa6f84c5ef3cc5b594e58e79526fa81231291a7a47425e72af6f9aab3653"
-DERIVED_STDIN_SHA256 = "de1614ca82a4d32eab96d97ed47d5a9ce43edcbb9727c953d02c2338e71c2d79"
+DRIVER_SHA256 = "11adb45e1600717cb5b9cc91d99ea34d5d383320de6bc449cca1e10f0ad35476"
+DERIVED_STDIN_SHA256 = "49e5fdc4345bdd5f2a65b437128dc9ed5b070d945f067433b74d741ba46f617c"
 
 
 def _load_v6():

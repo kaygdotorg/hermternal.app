@@ -175,6 +175,11 @@ disposable clone. Pack bytes, file identity, mode, and SHA-256 stay stable
 before and after import. The temporary pack is private and is removed after the
 check. No durable replay result is made by this step.
 
+The generated runtime reads the preservation policy and forbidden-proof policy
+twice with `O_NOFOLLOW`. It checks full file identity and SHA-256, then compiles
+and executes those exact buffers. A pathname reopen cannot select different
+code, and an earlier unverified `forbidden_proof` import cannot win resolution.
+
 `linux_retained_driver_v7.py` changes only the generated clone predicate.
 `linux_replay_wrapper_v7.py` stays disabled. `linux_phase_a_v11.py` binds the
 canonical record, record SHA-256, and policy SHA-256 in a new create-only owner

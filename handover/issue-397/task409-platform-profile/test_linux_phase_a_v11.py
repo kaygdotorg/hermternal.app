@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -53,6 +54,10 @@ class PhaseAV11Tests(unittest.TestCase):
             phase_snapshot = runner.stable_read(
                 runner.EXTERNAL_ROOT / "evidence" / runner.PHASE_A_RECORD, "phase"
             )
+            owner_snapshot = runner.stable_read(
+                runner.EXTERNAL_ROOT / "phase-a" / ".owner", "Phase A owner", mode=0o600
+            )
+            owner = json.loads(owner_snapshot.raw)
             anchor = runner.anchor(
                 modules, repository_root=runner.REPOSITORY_ROOT,
                 external_root=runner.EXTERNAL_ROOT,
@@ -75,7 +80,6 @@ class PhaseAV11Tests(unittest.TestCase):
                 )
             with self.assertRaises((RuntimeError, FileNotFoundError)):
                 FAILURE.load_approved_wrapper("0" * 64)
-        owner = phase["owner"]
         self.assertEqual(phase["schema"], V11.V11_EVIDENCE_SCHEMA)
         self.assertEqual(anchor["prior_sha256"], phase_snapshot.sha256)
         self.assertEqual(owner["object_preservation"]["typed_count"], 563)
