@@ -1502,6 +1502,7 @@ def _assert_git_metadata_pin(
     pin: _GitMetadataPin,
     *,
     phase: str,
+    content_budget: list[int] | None = None,
     deadline: float | None = None,
 ) -> None:
     """Fail closed when a pinned Git entry or its bytes changed."""
@@ -1549,6 +1550,7 @@ def _assert_git_metadata_pin(
             current_entries = _snapshot_git_metadata_tree(
                 pin.descriptor,
                 label=pin.label,
+                content_budget=content_budget,
                 deadline=deadline,
             )
             _check_git_operation_deadline(deadline, f"checking {pin.label} {phase}")
@@ -1587,9 +1589,18 @@ def _assert_git_metadata_pins(
     phase: str,
     deadline: float | None = None,
 ) -> None:
+    # A post-command assertion must account for the bytes read from every
+    # recursive metadata root together. Fresh per-root budgets would let a
+    # distributed oversized snapshot pass its individual checks.
+    content_budget = [0]
     for pin in pins:
         _check_git_operation_deadline(deadline, f"checking Git metadata {phase}")
-        _assert_git_metadata_pin(pin, phase=phase, deadline=deadline)
+        _assert_git_metadata_pin(
+            pin,
+            phase=phase,
+            content_budget=content_budget,
+            deadline=deadline,
+        )
 
 
 def _close_git_metadata_pins(pins: tuple[_GitMetadataPin, ...]) -> None:

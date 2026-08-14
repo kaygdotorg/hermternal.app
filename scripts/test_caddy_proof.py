@@ -1814,6 +1814,42 @@ marker.write_text("ready")
                 with self.assertRaisesRegex(ValueError, "content size|bounded"):
                     caddy_proof._validate_git_metadata(repository)
 
+    def test_git_post_command_metadata_budget_is_aggregate_across_roots(self) -> None:
+        """Post-command snapshots share one content budget across roots."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            first_root = parent / "first-metadata"
+            second_root = parent / "second-metadata"
+            first_root.mkdir()
+            second_root.mkdir()
+            (first_root / "first").write_bytes(b"123456")
+            (second_root / "second").write_bytes(b"abcdef")
+            with mock.patch.object(caddy_proof, "GIT_METADATA_TOTAL_CONTENT_MAX_BYTES", 10):
+                pins = (
+                    caddy_proof._pin_git_metadata_path(
+                        first_root.resolve(),
+                        label="first metadata root",
+                        pin_content=False,
+                        pin_entries=True,
+                    ),
+                    caddy_proof._pin_git_metadata_path(
+                        second_root.resolve(),
+                        label="second metadata root",
+                        pin_content=False,
+                        pin_entries=True,
+                    ),
+                )
+                try:
+                    # Each root is individually below the cap; only the
+                    # aggregate post-command check must reject the pair.
+                    for pin in pins:
+                        caddy_proof._assert_git_metadata_pin(pin, phase="after command")
+                    with self.assertRaisesRegex(ValueError, "content size|bounded|entries changed"):
+                        caddy_proof._assert_git_metadata_pins(pins, phase="after command")
+                finally:
+                    caddy_proof._close_git_metadata_pins(pins)
+
     def test_git_loose_object_in_place_bytes_are_rejected(self) -> None:
         mutation = """
 from pathlib import Path
