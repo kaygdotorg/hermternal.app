@@ -604,10 +604,11 @@ def _validate_paper(document: dict[str, Any]) -> None:
     })
     pages = paper["pages"]
     require(type(pages) is list and len(pages) == 7)
+    # C-0 and D-0 are the populated source pages; legacy 3-0 and 4-0 are empty.
     expected_pages = (
         ("A-0", "Chat workspace", 34),
-        ("3-0", "Web states — Authentication", 48),
-        ("4-0", "Web states — Runtime", 68),
+        ("C-0", "Authentication", 48),
+        ("D-0", "Runtime and recovery", 40),
         ("B-0", "Shared Chat–Terminal workspace", 25),
         ("E-0", "Terminal desktop lifecycle", 22),
         ("F-0", "Terminal narrow and mobile", 28),

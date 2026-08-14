@@ -10,7 +10,7 @@ Token work follows the proof order: Paper first, then accessibility and performa
 
 ## Web Paper evidence
 
-[`web/artboards.json`](web/artboards.json) is the checked-in, machine-readable map from the approved Paper file to the web UI states in the `dashboard-v0.0.1` contract. It records exact Paper file and page metadata, artboard IDs and names, `1440 × 960` Runtime/workspace or `1440 × 900` Authentication/standalone Terminal desktop dimensions, `390 × 844` narrow dimensions, light/dark variant order, shipped token values, the current 84-record Paper token snapshot (`b5b2b8c5`), and evidence status.
+[`web/artboards.json`](web/artboards.json) is the checked-in, machine-readable map from the approved Paper file to the web UI states in the `dashboard-v0.0.1` contract. It records exact Paper file and page metadata, artboard IDs and names, `1440 × 960` Runtime/workspace or `1440 × 900` Authentication/standalone Terminal desktop dimensions, `390 × 844` narrow dimensions, light/dark variant order, shipped token values, the current 84-record Paper token snapshot (`b5b2b8c5`), and evidence status. Populated Authentication evidence is sourced from Paper page `C-0`; populated Runtime evidence is sourced from `D-0`. Empty legacy pages `3-0` and `4-0` are not claimed as those sources.
 
 The generic map covers 120 Paper artboards in 30 state records:
 
