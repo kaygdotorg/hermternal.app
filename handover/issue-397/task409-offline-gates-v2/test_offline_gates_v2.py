@@ -67,14 +67,16 @@ class OfflineGatesV3Tests(unittest.TestCase):
         final_root = handover / "task464-candidate5-linux-v1-final"; final_root.mkdir(parents=True, mode=0o700)
         descriptor = self._write(final_root / "authority-descriptor.json", b'{"schema":"fixture"}\n', 0o600)
         provenance = self._write(final_root / "provenance-manifest.json", b'{"schema":"fixture"}\n', 0o600)
-        anchor = self.root / "anchor.json"; self._write(anchor, b'{"schema":"fixture"}\n', 0o600)
+        phase_schema = "hermternal.issue-397.phase-a-anchor-evidence.v11"
+        anchor_raw = (json.dumps({"schema": phase_schema}, separators=(",", ":")) + "\n").encode()
+        anchor = self.root / "anchor.json"; self._write(anchor, anchor_raw, 0o600)
         result_keys = ["schema", "phase", "lane", "phase_a_manifest_sha256", "phase_a_approval_digest", "replay_root", "replay_root_identity", "repository", "repository_identity", "head_state", "final_head", "parent", "tree", "base_commit", "base_tree", "protected_main_commit", "required_ancestors", "forbidden_ancestors"]
         completion_keys = ["schema", "completion_marker", "stderr_policy", "returncode", "result_path", "result_sha256", "driver_module_sha256", "driver_source_sha256", "markdown_sha256", "json_sha256", "shell_sha256", "provenance_sha256", "source_commit", "phase_a_evidence_path", "phase_a_evidence_sha256"]
         modules = {
             handover / "task409-platform-profile" / "profile.py": f"from types import SimpleNamespace as N\ndef load(): return N(authority_root={str(final_root)!r})\n".encode(),
             handover / "task464-candidate5-authority-successor" / "authority.py": b"from types import SimpleNamespace as N\ndef validate(*_): return N(artifacts={'shell':N(sha256='shell'),'markdown':N(sha256='markdown'),'json':N(sha256='json')})\n",
-            handover / "task409-replay-result-successor" / "wrapper.py": ("from types import SimpleNamespace as N\nRESULT_KEYS=frozenset(" + repr(result_keys) + ")\nRESULT_SCHEMA='result/v1'\nRESULT_PHASE='phase'\nRESULT_LANE='linux'\nCOMPLETION_KEYS=frozenset(" + repr(completion_keys) + ")\nCOMPLETION_SCHEMA='completion/v1'\nSUCCESS_OUTPUT=b'OK\\n'\nSTDERR_POLICY='empty'\nDRIVER_SHA256='driver'\ndef load_authority(): return N(base_commit='1'*40,base_tree='2'*40,protected_main_commit='6'*40,required_ancestors=['1'*40],forbidden_ancestors=['9'*40],source_commit='a'*40)\ndef load_phase_a_evidence(*_): return N(manifest_sha256='b'*64,approval_digest='c'*64,snapshot=N(path=" + repr(str(anchor)) + ",raw=b'x',sha256='d'*64,identity=(1,2,3,384,1,1,1,1)))\n").encode(),
-            handover / "task409-phase-a-anchor-successor" / "phase.py": b"EVIDENCE_SCHEMA='fixture.v3'\n",
+            handover / "task409-replay-result-successor" / "wrapper.py": ("from types import SimpleNamespace as N\nRESULT_KEYS=frozenset(" + repr(result_keys) + ")\nRESULT_SCHEMA='result/v1'\nRESULT_PHASE='phase'\nRESULT_LANE='linux'\nCOMPLETION_KEYS=frozenset(" + repr(completion_keys) + ")\nCOMPLETION_SCHEMA='completion/v1'\nSUCCESS_OUTPUT=b'OK\\n'\nSTDERR_POLICY='empty'\nDRIVER_SHA256='driver'\ndef load_authority(): return N(base_commit='1'*40,base_tree='2'*40,protected_main_commit='6'*40,required_ancestors=['1'*40],forbidden_ancestors=['9'*40],source_commit='a'*40)\ndef load_phase_a_evidence(*_): return N(manifest_sha256='b'*64,approval_digest='c'*64,snapshot=N(path=" + repr(str(anchor)) + ",raw=" + repr(anchor_raw) + ",sha256='d'*64,identity=(1,2,3,384,1,1,1,1)))\n").encode(),
+            handover / "task409-phase-a-anchor-successor" / "phase.py": ("EVIDENCE_SCHEMA=" + repr(phase_schema) + "\n").encode(),
         }
         hashes = {path: self._write(path, raw, 0o644) for path, raw in modules.items()}
         replay_root = self.root / "replay-root"; replay_root.mkdir(mode=0o700)
@@ -109,6 +111,21 @@ class OfflineGatesV3Tests(unittest.TestCase):
         chain = MOD._load_chain(self.result, self.completion, self.pins)
         self.assertEqual(chain.repository, self.repository)
         self.assertEqual(chain.final_tree, self.final_tree)
+        self.assertTrue(hasattr(self.pins, "wrapper_module"))
+
+    def test_versioned_phase_schema_parser_is_closed(self) -> None:
+        for value in (
+            "hermternal.issue-397.phase-a-anchor-evidence.v11",
+            "hermternal.issue-397.phase-a-anchor-evidence.v123",
+        ):
+            self.assertIsNotNone(MOD.PHASE_EVIDENCE_SCHEMA_RE.fullmatch(value))
+        for value in (
+            "fixture.v11",
+            "hermternal.issue-397.phase-a-anchor-evidence.v0",
+            "hermternal.issue-397.phase-a-anchor-evidence.v01",
+            "hermternal.issue-397.phase-a-anchor-evidence.v11-extra",
+        ):
+            self.assertIsNone(MOD.PHASE_EVIDENCE_SCHEMA_RE.fullmatch(value))
 
     def test_closed_podman_layout_and_dev_base_contract(self) -> None:
         argv = MOD.podman_argv(self.repository, MOD.GATES[0], self.pins)

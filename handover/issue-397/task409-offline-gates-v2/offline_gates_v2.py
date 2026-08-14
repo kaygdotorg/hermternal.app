@@ -2,8 +2,8 @@
 """Create a Linux-bound, evidence-only offline-gate report after replay.
 
 The committed pins are deliberately incomplete until the reviewed Linux
-authority and #405 successor exist.  This program rejects that state instead
-of falling back to the retired macOS authority.  It never pulls, installs, or
+authority and #405 successor exist. This program rejects that state instead
+of falling back to the retired macOS authority. It never pulls, installs, or
 contacts a service: a reviewed local Podman image must already contain the
 exact Bun, browser, and locked dependency set.
 """
@@ -29,6 +29,9 @@ MAX_OUTPUT = 2 * 1024 * 1024
 MAX_FILE = 8 * 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 OID_RE = re.compile(r"[0-9a-f]{40}\Z")
+PHASE_EVIDENCE_SCHEMA_RE = re.compile(
+    r"hermternal\.issue-397\.phase-a-anchor-evidence\.v[1-9][0-9]*\Z"
+)
 SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/opt/hermternal/playwright-browsers", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
 LOCAL_GIT_ENV = {**SAFE_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
 
@@ -187,7 +190,8 @@ def _load_chain(result_path: Path, completion_path: Path, pins: Pins | None = No
     authority = verified_module(pins.authority_module, pins.authority_sha256, "issue397_offline_authority")
     wrapper = verified_module(pins.wrapper_module, pins.wrapper_sha256, "issue397_offline_wrapper")
     phase = verified_module(pins.phase_a_module, pins.phase_a_sha256, "issue397_offline_phase_a")
-    require(phase.EVIDENCE_SCHEMA.endswith(".v2") or phase.EVIDENCE_SCHEMA.endswith(".v3"), "Linux Phase A schema differs")
+    phase_schema = getattr(phase, "EVIDENCE_SCHEMA", None)
+    require(isinstance(phase_schema, str) and PHASE_EVIDENCE_SCHEMA_RE.fullmatch(phase_schema) is not None, "Linux Phase A schema differs")
     descriptor = stable_read(pins.authority_root / "authority-descriptor.json", "Linux authority descriptor", mode=0o600)
     provenance = stable_read(pins.authority_root / "provenance-manifest.json", "Linux provenance", mode=0o600)
     validated = authority.validate(descriptor.path, pins.authority_root, descriptor.sha256)
@@ -209,6 +213,8 @@ def _load_chain(result_path: Path, completion_path: Path, pins: Pins | None = No
     repo_meta = os.lstat(repository)
     require(stat.S_ISDIR(repo_meta.st_mode) and repo_meta.st_uid == os.getuid() and stat.S_IMODE(repo_meta.st_mode) == 0o700, "retained repository is not private")
     evidence = wrapper.load_phase_a_evidence(Path(completion_value.get("phase_a_evidence_path", "")), completion_value.get("phase_a_evidence_sha256", ""))
+    phase_anchor = strict_json(evidence.snapshot.raw, "Phase A anchor")
+    require(phase_anchor.get("schema") == phase_schema, "Phase A anchor schema differs")
     require(result_value.get("phase_a_manifest_sha256") == evidence.manifest_sha256 and result_value.get("phase_a_approval_digest") == evidence.approval_digest, "Linux/#405 Phase A binding differs")
     return Chain(repository, _identity(repo_meta), final_head, final_tree, result_value["protected_main_commit"], pins.expected_dev_base, result, completion, evidence.snapshot, provenance)
 
