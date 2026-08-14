@@ -82,6 +82,44 @@ function decodePathForInspection(manifestKey) {
   return inspectedPath.split('/');
 }
 
+function normalizeDotSegments(pathSegments) {
+  const normalizedSegments = [];
+  for (const segment of pathSegments) {
+    if (segment.length === 0 || segment === '.') continue;
+    if (segment === '..') {
+      if (normalizedSegments.at(-1) && normalizedSegments.at(-1) !== '..') {
+        normalizedSegments.pop();
+      } else {
+        normalizedSegments.push(segment);
+      }
+      continue;
+    }
+    normalizedSegments.push(segment);
+  }
+  return normalizedSegments;
+}
+
+function isPackageSegment(segment, expectedSegment, offset) {
+  return offset < 2
+    ? segment.toLowerCase() === expectedSegment.toLowerCase()
+    : segment === expectedSegment;
+}
+
+function matchesIdentityAt(pathSegments, identity, startIndex) {
+  const identitySegments = identity.split('/').slice(1);
+  return identitySegments.every((segment, offset) =>
+    isPackageSegment(pathSegments[startIndex + offset], segment, offset)
+  );
+}
+
+function containsExactTerminalIdentity(pathSegments, identity) {
+  const identitySegments = identity.split('/').slice(1);
+  for (let index = 0; index <= pathSegments.length - identitySegments.length; index += 1) {
+    if (matchesIdentityAt(pathSegments, identity, index)) return true;
+  }
+  return false;
+}
+
 function isUnsafeInspectionSegment(segment) {
   return segment === '.' || segment === '..' || segment.includes('%');
 }
@@ -91,7 +129,9 @@ function claimsTerminalBoundary(pathSegments, identity) {
   const packageSegments = identitySegments.slice(0, -1);
   const terminalSegment = identitySegments.at(-1);
   for (let index = 0; index <= pathSegments.length - packageSegments.length; index += 1) {
-    if (!packageSegments.every((segment, offset) => pathSegments[index + offset] === segment)) {
+    if (!packageSegments.every((segment, offset) =>
+      isPackageSegment(pathSegments[index + offset], segment, offset)
+    )) {
       continue;
     }
 
@@ -107,9 +147,11 @@ function claimsTerminalBoundary(pathSegments, identity) {
 
 function looksLikeTerminalModuleKey(manifestKey) {
   if (typeof manifestKey !== 'string') return false;
-  const pathSegments = decodePathForInspection(manifestKey);
+  const decodedSegments = decodePathForInspection(manifestKey);
+  const normalizedSegments = normalizeDotSegments(decodedSegments);
   return TERMINAL_ONLY_MODULE_IDENTITIES.some((identity) =>
-    claimsTerminalBoundary(pathSegments, identity)
+    containsExactTerminalIdentity(normalizedSegments, identity) ||
+    claimsTerminalBoundary(decodedSegments, identity)
   );
 }
 
