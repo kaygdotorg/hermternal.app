@@ -14,6 +14,7 @@ import {
   assertNoDisallowedNetworkRequests,
   BENCHMARK_BUILD_COMMAND,
   BENCHMARK_EXECUTION_INPUT_PATHS,
+  BENCHMARK_HARNESS_TIMEOUT_MS,
   BENCHMARK_REPETITIONS,
   isAllowedBenchmarkRequest,
   type BenchmarkBuild,
@@ -288,7 +289,7 @@ async function run(): Promise<Trace> {
         value?.samples &&
         (Object.keys(value.samples).length > 0 || typeof value.environment.error === 'string')
       );
-    }, undefined, { timeout: 120_000 });
+    }, undefined, { timeout: BENCHMARK_HARNESS_TIMEOUT_MS });
     const browserResult = await activePage.evaluate(() => {
       const value = (window as Window & { __hermternalTerminalRendererBenchmark?: BrowserBenchmarkResult })
         .__hermternalTerminalRendererBenchmark;
