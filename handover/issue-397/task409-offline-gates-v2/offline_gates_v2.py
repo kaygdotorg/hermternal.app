@@ -10,7 +10,9 @@ exact Bun, browser, and locked dependency set.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import os
 import pwd
@@ -18,10 +20,11 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 PINS_PATH = Path(__file__).resolve().with_name("final-linux-pins.json")
 REPORT_SCHEMA = "hermternal.issue-397.offline-gates/v3"
@@ -208,6 +211,39 @@ class Chain:
     provenance: Snapshot
 
 
+@dataclass(frozen=True)
+class WorkspaceArchive:
+    root: Path
+    root_identity: tuple[int, int, int, int]
+    head: str
+    tree: str
+    members: tuple[str, ...]
+    snapshot: Snapshot
+
+
+@dataclass(frozen=True)
+class HistoricalObjects:
+    """The Phase-v11 guarded object store used by exact parent-source tests."""
+
+    repository: Path
+    repository_identity: tuple[int, int, int, int]
+    object_dir: Path
+    object_dir_identity: tuple[int, int, int, int]
+    head: str
+    tree: str
+
+
+@dataclass(frozen=True)
+class GitRequirement:
+    """One exact commit/path state that a selected web test reads with Git."""
+
+    commit: str
+    path: str
+    blob: str
+    purpose: str
+    guarded_only: bool = False
+
+
 def _require_oid(value: Any, label: str) -> str:
     require(isinstance(value, str) and OID_RE.fullmatch(value), f"{label} differs")
     return value
@@ -268,7 +304,50 @@ GATES = (Gate("git-head", "/workspace", ("git", "rev-parse", "HEAD^{commit}")), 
 GATE_LIST_SHA256 = digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in GATES], separators=(",", ":")).encode())
 LOCAL_GIT_GATE_IDS = ("git-head", "git-tree", "git-main", "git-dev-base", "git-clean", "git-fsck")
 PODMAN_GATE_IDS = ("web-typecheck", "web-unit", "web-build", "privacy-redaction", "accessibility", "no-network-browser", "auth-click-enter")
-WRITABLE_WEB_PATHS = ("/workspace/apps/web/node_modules", "/workspace/apps/web/.svelte-kit", "/workspace/apps/web/build", "/workspace/apps/web/test-results", "/workspace/apps/web/playwright-report")
+WORKSPACE_TRACKED_INPUTS = (
+    "apps/web/.bun-version", "apps/web/bun.lock", "apps/web/package.json",
+    "apps/web/playwright.config.ts", "apps/web/playwright.live.config.ts",
+    "apps/web/svelte.config.js", "apps/web/tsconfig.json",
+    "apps/web/vite.config.ts", "apps/web/vitest.config.ts", "apps/web/src",
+    "apps/web/static", "apps/web/tests/setup.ts", "apps/web/tests/e2e",
+    "apps/web/tests/live", "apps/web/tests/static", "apps/web/tests/bench",
+    "contracts/fixtures/behavioral-probe/probe-fixtures.json",
+    "contracts/fixtures/compatibility-attestation/cases.json",
+    "contracts/fixtures/compatibility-attestation/revision_attestation.json",
+    "contracts/hermes-dashboard/manifest.md",
+)
+WORKSPACE_TRACKED_INPUTS_SHA256 = "8305ef9d20a15b6b78f94654c98942045ae9e040272b735fdbba8541f466ec24"
+GIT_REQUIREMENTS = (
+    GitRequirement("d88cd9adfcef94980ae674f40d99c65e1cf9b666", "apps/web/src/lib/auth-ui/AuthPreview.svelte", "8e6e652129f6fd90ce941a02c067e31fcc53bfd3", "approved authentication parent"),
+    GitRequirement("f87ce048b5afc4fad7ac361baa589d47745b580b", "apps/web/src/lib/auth-ui/AuthPreview.svelte", "7f847ea0762ad90eb6d4e04effafc6763792c22f", "authentication correction parent"),
+    GitRequirement("a7d43f636424dcd02bf65743966db30e5aeb30f0", "apps/web/tests/live/live-proof-ledger.mjs", "838a905b24e81c877e891e6c41bfdf0fc11f51c6", "live-proof ledger parent", True),
+    GitRequirement("4c1cd74f6d703a99a29ef85a08142df45234e9f5", "apps/web/tests/live/live-proof-page-bridge.mjs", "cb5a853525889f3044ffb170ae65d07f59df2939", "live-proof bridge parent", True),
+    GitRequirement("77c6701c652a6bbd23d2c32227dcd61c34dd8c33", "apps/web/src/lib/live-screenshot-capture.test.ts", "c30e3ea50b6ba5db2cccc554a69f8483a9f75171", "live-support parent"),
+    GitRequirement("77c6701c652a6bbd23d2c32227dcd61c34dd8c33", "apps/web/tests/live/live-screenshot-contract.mjs", "8998659df76513ba7c7a7a0256dd90f37a98a0f8", "live-support screenshot contract"),
+    GitRequirement("77c6701c652a6bbd23d2c32227dcd61c34dd8c33", "apps/web/tests/live/official-hermes.spec.ts", "fe269bb21d40690463b320dc59d9023950d0dd1d", "live-support official specification"),
+    GitRequirement("5559e9ad4cf78debc98e8935c47cdc956535f96c", "apps/web/src/lib/terminal/renderer.test.ts", "6448ddf3286a1e3d04dbeeab6dfe18e60d3da14d", "renderer deadline parent"),
+    GitRequirement("9d9756b2a0a20130258766ea3a532c067e2f13f6", "apps/web/src/lib/terminal/renderer.test.ts", "fc1989b7a00baf9f3846ac88e916d64ea8d9e059", "renderer stream-cleanup parent"),
+    GitRequirement("d36d68ab795608d2c96db0bcfe1d213e64081103", "apps/web/tests/bench/terminal-renderer.evidence.json", "98dfd03ef22c02705f7e9cf5f611d166aeab6c84", "renderer benchmark source"),
+    GitRequirement("2de293cf2b7d84386bbffaf3f41ace8a73e4c19a", "apps/web/tests/bench/terminal-renderer.evidence.json", "b005ae8ffd930a4814a70fc9db931fd6c5b8146c", "renderer benchmark evidence child"),
+)
+GIT_REQUIREMENTS_SHA256 = "286bdccb8c4221d65c1784b5f0142f7fe5768a068703492061ecdf10c3574b53"
+GIT_DECLARATIONS = (
+    ("apps/web/src/lib/auth-ui/AuthPreview.test.ts", "d88cd9adfcef94980ae674f40d99c65e1cf9b666"),
+    ("apps/web/src/lib/auth-ui/AuthPreview.test.ts", "f87ce048b5afc4fad7ac361baa589d47745b580b"),
+    ("apps/web/tests/live/live-proof-parent-compat.mjs", "a7d43f636424dcd02bf65743966db30e5aeb30f0"),
+    ("apps/web/tests/live/live-proof-parent-compat.mjs", "4c1cd74f6d703a99a29ef85a08142df45234e9f5"),
+    ("apps/web/tests/live/live-support-parent-compat.mjs", "77c6701c652a6bbd23d2c32227dcd61c34dd8c33"),
+    ("apps/web/src/lib/terminal/renderer.test.ts", "5559e9ad4cf78debc98e8935c47cdc956535f96c"),
+    ("apps/web/src/lib/terminal/renderer.test.ts", "9d9756b2a0a20130258766ea3a532c067e2f13f6"),
+    ("apps/web/tests/bench/terminal-renderer.evidence.json", "d36d68ab795608d2c96db0bcfe1d213e64081103"),
+)
+GIT_DECLARATIONS_SHA256 = "ee3b20585e5da7fb67e1ea1bf87ee7c7508ebb6e76631d738b3d7b616b022655"
+BENCHMARK_EVIDENCE_PATH = "apps/web/tests/bench/terminal-renderer.evidence.json"
+BENCHMARK_SOURCE_COMMIT = "d36d68ab795608d2c96db0bcfe1d213e64081103"
+BENCHMARK_ANCHOR_COMMIT = "2de293cf2b7d84386bbffaf3f41ace8a73e4c19a"
+BENCHMARK_EVIDENCE_BLOB = "b005ae8ffd930a4814a70fc9db931fd6c5b8146c"
+GUARDED_SOURCE_HEAD = "c6b9a185500a1928055b9b3a475c14b0add38f05"
+GUARDED_SOURCE_TREE = "ecf9c8e5712249ded71120d62e29981c4a59219b"
 
 
 def rootless_podman_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
@@ -295,17 +374,30 @@ def rootless_podman_environment(environment: dict[str, str] | None = None) -> di
     }
 
 
-def podman_argv(repository: Path, gate: Gate, pins: Pins) -> tuple[str, ...]:
-    """Run a fixed gate with source read-only and all tool output in tmpfs.
+def podman_argv(repository: Path, archive: WorkspaceArchive, historical: HistoricalObjects,
+                gate: Gate, pins: Pins) -> tuple[str, ...]:
+    """Run a fixed gate from an authenticated private final-tree workspace.
 
     The reviewed image carries immutable dependencies at /opt/hermternal. The
-    entry script copies them into the dedicated tmpfs before Bun runs; it never
-    installs or downloads packages.
+    entry script extracts only reviewed tracked inputs without restoring archive
+    ownership, copies image dependencies into the dedicated tmpfs, and generates
+    SvelteKit metadata before Bun runs. Explicit no-same-owner is required because
+    rootless ID mapping can otherwise make extracted parent directories read-only
+    to the fixed image user. Podman starts in the existing workspace mount; it
+    must not create the later web working directory before this script runs. A
+    private Git directory keeps reviewed tests on the retained objects plus the
+    Phase-v11 guarded object store even when a test removes inherited Git
+    environment variables. Both stores are read-only. No object or ref enters
+    the replay repository, and no package install or download is permitted.
+    The private init process reaps descendant test processes after bounded
+    process-group cleanup. Without it, closed inherited pipes can remain held
+    by container zombies and turn the reviewed timeout result into a false
+    cleanup-timeout failure.
     """
     uid, gid = os.getuid(), os.getgid()
-    setup = "for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]* /opt/hermternal/node_modules/..?*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; exec \"$@\""
-    tmpfs = sum((("--mount", f"type=tmpfs,destination={item},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup") for item in ("/tmp", *WRITABLE_WEB_PATHS)), ())
-    return ("/usr/bin/podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/workspace,ro=true", *tmpfs, "--workdir", gate.workdir, *sum((("--env", f"{key}={value}") for key, value in sorted(SAFE_ENV.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
+    setup = "tar --no-same-owner -xf /workspace-input.tar -C /workspace; umask 077; mkdir -m 0700 /workspace/.gitdir /workspace/.gitdir/objects /workspace/.gitdir/objects/info /workspace/.gitdir/refs /workspace/.gitdir/refs/heads /tmp/home; mkdir -m 0700 -p /tmp/home/.bun/install/cache; printf 'gitdir: /workspace/.gitdir\\n' > /workspace/.git; printf '[core]\\n\\trepositoryformatversion = 0\\n\\tbare = false\\n\\tworktree = /workspace\\n' > /workspace/.gitdir/config; printf '%s\\n' '" + archive.head + "' > /workspace/.gitdir/HEAD; printf '/source/.git/objects\\n/authority-objects\\n' > /workspace/.gitdir/objects/info/alternates; for cache_source in /usr/local/install/cache/* /usr/local/install/cache/.[!.]* /usr/local/install/cache/..?*; do { [ -e \"$cache_source\" ] || [ -L \"$cache_source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$cache_source\" /tmp/home/.bun/install/cache/; done; mkdir -m 0700 /workspace/apps/web/node_modules; for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]* /opt/hermternal/node_modules/..?*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; cd /workspace/apps/web; bun x --no-install svelte-kit sync; exec \"$@\""
+    container_environment = {**SAFE_ENV, "HOME": "/tmp/home", "BUN_INSTALL_CACHE_DIR": "/tmp/home/.bun/install/cache", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+    return ("/usr/bin/podman", "run", "--init", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/source,ro=true", "--mount", f"type=bind,src={historical.object_dir},dst=/authority-objects,ro=true", "--mount", f"type=bind,src={archive.snapshot.path},dst=/workspace-input.tar,ro=true", "--mount", "type=tmpfs,destination=/workspace,tmpfs-size=4026531840,tmpfs-mode=0700,U=true,notmpcopyup", "--mount", "type=tmpfs,destination=/tmp,tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup", "--workdir", "/workspace", *sum((("--env", f"{key}={value}") for key, value in sorted(container_environment.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
 
 
 def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run) -> None:
@@ -334,7 +426,11 @@ def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[byte
             "Podman rootless storage boundary differs")
     require(result.returncode == 0 and len(result.stdout or b"") <= MAX_OUTPUT, "pre-staged Podman image is unavailable")
     value = strict_json(bytes(result.stdout).strip().removeprefix(b"[").removesuffix(b"]"), "Podman image inspection")
-    digests = value.get("RepoDigests"); labels = value.get("Labels") or value.get("Config", {}).get("Labels")
+    configuration = value.get("Config")
+    require(isinstance(configuration, dict)
+            and configuration.get("User") == f"{os.getuid()}:{os.getgid()}",
+            "pre-staged image user differs")
+    digests = value.get("RepoDigests"); labels = value.get("Labels") or configuration.get("Labels")
     require(isinstance(digests, list) and any(isinstance(item, str) and item.endswith(pins.image_digest) for item in digests), "pre-staged image digest differs")
     require(isinstance(labels, dict) and labels.get("org.hermternal.bun") == "1.3.14" and labels.get("org.hermternal.node") == "26.7.0" and labels.get("org.hermternal.playwright") == "1.62.1" and labels.get("org.hermternal.dependencies-sha256") == pins.dependencies_sha256, "pre-staged image toolchain attestation differs")
 
@@ -368,6 +464,244 @@ def _local_git(repository: Path, *args: str, stdin: bytes = b"") -> bytes:
     result = _run_local_git(repository, *args, stdin=stdin)
     require(result.returncode == 0, "semantic Git binding differs")
     return bytes(result.stdout or b"")
+
+
+def _directory_binding(path: Path, label: str) -> tuple[int, int, int, int]:
+    metadata = os.lstat(path)
+    binding = (metadata.st_dev, metadata.st_ino, metadata.st_uid, stat.S_IMODE(metadata.st_mode))
+    require(path.is_absolute() and os.path.realpath(path) == os.fspath(path), f"{label} path differs")
+    require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == os.getuid(), f"{label} metadata differs")
+    return binding
+
+
+def _git_requirements_bytes() -> bytes:
+    rows = [[item.commit, item.path, item.blob, item.purpose, item.guarded_only] for item in GIT_REQUIREMENTS]
+    return json.dumps(rows, separators=(",", ":")).encode()
+
+
+def _historical_git(repository: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        result = subprocess.run(
+            local_git_argv(repository, *args), input=b"", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=dict(LOCAL_GIT_ENV), cwd="/", timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Reject("historical Git dependency check is unavailable") from error
+    require(len(result.stdout or b"") <= MAX_OUTPUT and len(result.stderr or b"") <= MAX_OUTPUT,
+            "historical Git dependency output differs")
+    return result
+
+
+def historical_objects(chain: Chain) -> HistoricalObjects:
+    """Authenticate the Phase-v11 source and the exact web-test Git objects.
+
+    The retained replay intentionally lacks two rejected-history commits that
+    focused regression tests read by OID. The durable Phase-v11 record already
+    binds the guarded worktree and common object directory. This check exposes
+    that directory read-only; it never imports objects or refs into the replay.
+    """
+    require(digest(_git_requirements_bytes()) == GIT_REQUIREMENTS_SHA256,
+            "historical Git dependency list differs")
+    declaration_bytes = json.dumps([list(item) for item in GIT_DECLARATIONS], separators=(",", ":")).encode()
+    require(digest(declaration_bytes) == GIT_DECLARATIONS_SHA256,
+            "historical Git declaration list differs")
+    anchor = strict_json(chain.phase_anchor.raw, "Phase A anchor")
+    phase_anchor_path = Path(chain.phase_anchor.path)
+    phase_path = phase_anchor_path.with_name("phase-a.json")
+    require(phase_anchor_path.name == "anchor.json" and phase_path.parent.name == "evidence",
+            "Phase A evidence placement differs")
+    phase = stable_read(phase_path, "Phase A execution evidence", mode=0o600)
+    require(anchor.get("prior_sha256") == phase.sha256, "Phase A execution evidence SHA-256 differs")
+    phase_value = strict_json(phase.raw, "Phase A execution evidence")
+    guarded = phase_value.get("observations", {}).get("guarded_worktree")
+    require(isinstance(guarded, dict), "Phase A guarded-worktree evidence differs")
+    repository = Path(guarded.get("path", ""))
+    object_record = guarded.get("git_object_dir")
+    require(isinstance(object_record, dict), "Phase A guarded object-directory evidence differs")
+    object_dir = Path(object_record.get("path", ""))
+    repository_binding = _directory_binding(repository, "Phase A guarded repository")
+    object_dir_binding = _directory_binding(object_dir, "Phase A guarded object directory")
+    expected_repository = guarded.get("binding")
+    expected_objects = object_record.get("binding")
+    require(isinstance(expected_repository, dict) and repository_binding == (
+        expected_repository.get("st_dev"), expected_repository.get("st_ino"),
+        expected_repository.get("st_uid"), expected_repository.get("st_mode"),
+    ), "Phase A guarded repository binding differs")
+    require(isinstance(expected_objects, dict) and object_dir_binding == (
+        expected_objects.get("st_dev"), expected_objects.get("st_ino"),
+        expected_objects.get("st_uid"), expected_objects.get("st_mode"),
+    ), "Phase A guarded object-directory binding differs")
+    require(guarded.get("detached") is True and guarded.get("head") == GUARDED_SOURCE_HEAD
+            and guarded.get("tree") == GUARDED_SOURCE_TREE,
+            "Phase A guarded source revision differs")
+    for arguments, expected in (("HEAD^{commit}", GUARDED_SOURCE_HEAD), ("HEAD^{tree}", GUARDED_SOURCE_TREE)):
+        observed = _historical_git(repository, "rev-parse", arguments)
+        require(observed.returncode == 0 and observed.stderr == b""
+                and observed.stdout.decode("ascii", "strict").strip() == expected,
+                "Phase A guarded source revision changed")
+
+    declarations: dict[str, list[str]] = {}
+    for path, commit in GIT_DECLARATIONS:
+        declarations.setdefault(path, []).append(commit)
+    for path, commits in declarations.items():
+        source = _historical_git(chain.repository, "show", f"{chain.final_tree}:{path}")
+        require(source.returncode == 0 and source.stderr == b"",
+                f"historical Git declaration source is unavailable: {path}")
+        for commit in commits:
+            require(source.stdout.count(commit.encode("ascii")) == 1,
+                    f"historical Git declaration differs: {path}")
+
+    missing: set[str] = set()
+    checked_commits: set[str] = set()
+    for requirement in GIT_REQUIREMENTS:
+        source_type = _historical_git(repository, "cat-file", "-t", requirement.commit)
+        require(source_type.returncode == 0 and source_type.stderr == b"" and source_type.stdout == b"commit\n",
+                f"historical Git commit is unavailable for {requirement.purpose}")
+        source_blob = _historical_git(repository, "rev-parse", f"{requirement.commit}:{requirement.path}")
+        require(source_blob.returncode == 0 and source_blob.stderr == b""
+                and source_blob.stdout.decode("ascii", "strict").strip() == requirement.blob,
+                f"historical Git path differs for {requirement.purpose}")
+        if requirement.commit in checked_commits:
+            continue
+        checked_commits.add(requirement.commit)
+        retained = _historical_git(chain.repository, "cat-file", "-t", requirement.commit)
+        if retained.returncode != 0:
+            require(retained.returncode == 128 and retained.stdout == b""
+                    and retained.stderr == b"fatal: git cat-file: could not get object info\n",
+                    f"retained historical Git lookup failed for {requirement.purpose}")
+            missing.add(requirement.commit)
+        else:
+            require(retained.stderr == b"" and retained.stdout == b"commit\n",
+                    f"retained historical Git type differs for {requirement.purpose}")
+    expected_missing = {item.commit for item in GIT_REQUIREMENTS if item.guarded_only}
+    require(missing == expected_missing, "retained historical Git dependency set differs")
+    anchor_parent = _historical_git(chain.repository, "show", "-s", "--format=%P", BENCHMARK_ANCHOR_COMMIT)
+    final_evidence = _historical_git(chain.repository, "rev-parse", f"{chain.final_tree}:{BENCHMARK_EVIDENCE_PATH}")
+    require(anchor_parent.returncode == 0 and anchor_parent.stderr == b""
+            and anchor_parent.stdout.decode("ascii", "strict").strip() == BENCHMARK_SOURCE_COMMIT
+            and final_evidence.returncode == 0 and final_evidence.stderr == b""
+            and final_evidence.stdout.decode("ascii", "strict").strip() == BENCHMARK_EVIDENCE_BLOB,
+            "renderer benchmark evidence ancestry differs")
+    return HistoricalObjects(repository, repository_binding, object_dir, object_dir_binding,
+                             GUARDED_SOURCE_HEAD, GUARDED_SOURCE_TREE)
+
+
+def verify_historical_objects(source: HistoricalObjects) -> None:
+    """Reject replacement of either Phase-bound source directory."""
+    require(_directory_binding(source.repository, "Phase A guarded repository") == source.repository_identity,
+            "Phase A guarded repository changed")
+    require(_directory_binding(source.object_dir, "Phase A guarded object directory") == source.object_dir_identity,
+            "Phase A guarded object directory changed")
+
+
+def _workspace_members(chain: Chain) -> tuple[str, ...]:
+    """Resolve the closed workspace allowlist from the authenticated final tree."""
+    require(digest(json.dumps(list(WORKSPACE_TRACKED_INPUTS), separators=(",", ":")).encode())
+            == WORKSPACE_TRACKED_INPUTS_SHA256,
+            "workspace tracked-input allowlist differs")
+    result = _run_local_git(
+        chain.repository, "ls-tree", "-r", "--name-only", "-z",
+        chain.final_tree, "--", *WORKSPACE_TRACKED_INPUTS,
+    )
+    require(result.returncode == 0 and not result.stderr and result.stdout.endswith(b"\0"),
+            "workspace tree inventory differs")
+    try:
+        members = tuple(item.decode("utf-8", "strict") for item in result.stdout[:-1].split(b"\0"))
+    except UnicodeDecodeError as error:
+        raise Reject("workspace tree inventory is not UTF-8") from error
+    require(members == tuple(sorted(set(members))) and all(
+        item and not item.startswith("/") and "\x00" not in item
+        and all(part not in ("", ".", "..") for part in item.split("/"))
+        for item in members
+    ), "workspace tree inventory differs")
+    require(all(any(item == wanted or item.startswith(wanted + "/") for item in members)
+                for wanted in WORKSPACE_TRACKED_INPUTS),
+            "workspace tracked input is missing")
+    return members
+
+
+def verify_workspace_archive(archive: WorkspaceArchive) -> None:
+    """Require the same private archive inode, bytes, root, tree, and members."""
+    root = os.lstat(archive.root)
+    require((root.st_dev, root.st_ino, root.st_uid, stat.S_IMODE(root.st_mode)) == archive.root_identity,
+            "workspace archive root changed")
+    require(stable_read(archive.snapshot.path, "workspace archive", mode=0o600) == archive.snapshot,
+            "workspace archive changed")
+    require(OID_RE.fullmatch(archive.head) is not None and OID_RE.fullmatch(archive.tree) is not None
+            and archive.members,
+            "workspace archive binding differs")
+
+
+@contextlib.contextmanager
+def workspace_archive(chain: Chain) -> Iterator[WorkspaceArchive]:
+    """Create one private final-tree archive and remove only its exact inode."""
+    root = Path(f"/tmp/hermternal-task409-offline-workspace.{os.getpid()}")
+    archive_path = root / "workspace.tar"
+    try:
+        os.mkdir(root, 0o700)
+    except FileExistsError as error:
+        raise Reject("workspace archive root already exists") from error
+    root_metadata = os.lstat(root)
+    require(stat.S_ISDIR(root_metadata.st_mode) and root_metadata.st_uid == os.getuid()
+            and stat.S_IMODE(root_metadata.st_mode) == 0o700 and root_metadata.st_nlink == 2,
+            "workspace archive root metadata differs")
+    root_identity = (root_metadata.st_dev, root_metadata.st_ino, root_metadata.st_uid, stat.S_IMODE(root_metadata.st_mode))
+    descriptor = -1
+    owned_identity: tuple[int, int, int, int, int, int, int, int] | None = None
+    try:
+        members = _workspace_members(chain)
+        descriptor = os.open(
+            archive_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        command = local_git_argv(
+            chain.repository, "archive", "--format=tar", chain.final_tree,
+            "--", *WORKSPACE_TRACKED_INPUTS,
+        )
+        try:
+            result = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=descriptor, stderr=subprocess.PIPE,
+                env=dict(LOCAL_GIT_ENV), cwd="/", timeout=60, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise Reject("workspace archive creation is unavailable") from error
+        os.fsync(descriptor)
+        owned_identity = _identity(os.fstat(descriptor))
+        os.close(descriptor); descriptor = -1
+        require(result.returncode == 0 and len(result.stderr or b"") <= MAX_OUTPUT,
+                "workspace archive creation failed")
+        snapshot = stable_read(archive_path, "workspace archive", mode=0o600)
+        with tarfile.open(fileobj=io.BytesIO(snapshot.raw), mode="r:") as handle:
+            entries = handle.getmembers()
+        require(all(item.isdir() or item.isfile() for item in entries),
+                "workspace archive contains a non-file entry")
+        archived_files = tuple(item.name.rstrip("/") for item in entries if item.isfile())
+        require(archived_files == members, "workspace archive members differ")
+        archive = WorkspaceArchive(root, root_identity, chain.final_head, chain.final_tree, members, snapshot)
+        verify_workspace_archive(archive)
+        yield archive
+        verify_workspace_archive(archive)
+    finally:
+        if descriptor >= 0:
+            owned_identity = _identity(os.fstat(descriptor))
+            os.close(descriptor)
+        if archive_path.exists():
+            current = os.lstat(archive_path)
+            expected_identity = snapshot.identity if 'snapshot' in locals() else owned_identity
+            if expected_identity is None or _identity(current) != expected_identity:
+                raise Reject("workspace archive residue identity differs")
+            os.unlink(archive_path)
+            root_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+            try:
+                os.fsync(root_descriptor)
+            finally:
+                os.close(root_descriptor)
+        if root.exists():
+            final_root = os.lstat(root)
+            require((final_root.st_dev, final_root.st_ino, final_root.st_uid, stat.S_IMODE(final_root.st_mode)) == root_identity,
+                    "workspace archive root changed")
+            os.rmdir(root)
 
 
 def semantic_evidence(chain: Chain) -> dict[str, Any]:
@@ -411,7 +745,10 @@ Run = Callable[..., subprocess.CompletedProcess[bytes]]
 LocalGit = Callable[..., subprocess.CompletedProcess[bytes]]
 
 
-def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image, *, local_git: LocalGit = _run_local_git) -> list[dict[str, Any]]:
+def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run,
+              attest: Callable[[Pins], None] = attest_image, *,
+              local_git: LocalGit = _run_local_git,
+              historical: Callable[[Chain], HistoricalObjects] = historical_objects) -> list[dict[str, Any]]:
     """Run six hermetic host-Git observations, then seven isolated web gates."""
     require(digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in GATES], separators=(",", ":")).encode()) == GATE_LIST_SHA256, "immutable gate list differs")
     require(tuple(gate.gate_id for gate in GATES[:6]) == LOCAL_GIT_GATE_IDS
@@ -421,30 +758,38 @@ def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run, attest: Calla
             and all(gate.workdir == "/workspace/apps/web" and gate.command[0] == "bun" for gate in GATES[6:]),
             "gate backend command differs")
     require(_identity(os.lstat(chain.repository)) == chain.repository_identity, "retained repository changed before gates")
+    source = historical(chain)
+    verify_historical_objects(source)
     attest(pins)
-    podman_environment = rootless_podman_environment()
     records: list[dict[str, Any]] = []
     expected = {"git-head": chain.final_head, "git-tree": chain.final_tree, "git-main": chain.protected_main, "git-dev-base": chain.expected_dev_base, "git-clean": ""}
-    for gate in GATES:
-        if gate.gate_id in LOCAL_GIT_GATE_IDS:
-            argv = local_git_argv(chain.repository, *gate.command[1:])
-            try:
-                result = local_git(chain.repository, *gate.command[1:])
-            except Reject as error:
-                raise Reject(f"{gate.gate_id} failed") from error
-            require(tuple(result.args) == argv, f"{gate.gate_id} argv differs")
-            stdout, stderr, returncode = bytes(result.stdout or b""), bytes(result.stderr or b""), result.returncode
-        else:
-            argv = podman_argv(chain.repository, gate, pins)
+    for gate in GATES[:6]:
+        argv = local_git_argv(chain.repository, *gate.command[1:])
+        try:
+            result = local_git(chain.repository, *gate.command[1:])
+        except Reject as error:
+            raise Reject(f"{gate.gate_id} failed") from error
+        require(tuple(result.args) == argv, f"{gate.gate_id} argv differs")
+        stdout, stderr, returncode = bytes(result.stdout or b""), bytes(result.stderr or b""), result.returncode
+        require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT and returncode == 0, f"{gate.gate_id} failed")
+        if gate.gate_id in expected:
+            require(stdout.decode("utf-8", "strict").strip() == expected[gate.gate_id], f"{gate.gate_id} output differs")
+        records.append({"id": gate.gate_id, "argv": list(argv), "exit_code": returncode, "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr), "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
+
+    podman_environment = rootless_podman_environment()
+    with workspace_archive(chain) as archive:
+        for gate in GATES[6:]:
+            verify_workspace_archive(archive)
+            verify_historical_objects(source)
+            argv = podman_argv(chain.repository, archive, source, gate, pins)
             try:
                 result = run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=podman_environment, cwd="/", timeout=900, check=False)
             except (OSError, subprocess.TimeoutExpired) as error:
                 raise Reject(f"{gate.gate_id} was unavailable") from error
             stdout, stderr, returncode = bytes(result.stdout or b""), bytes(result.stderr or b""), result.returncode
-        require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT and returncode == 0, f"{gate.gate_id} failed")
-        if gate.gate_id in expected:
-            require(stdout.decode("utf-8", "strict").strip() == expected[gate.gate_id], f"{gate.gate_id} output differs")
-        records.append({"id": gate.gate_id, "argv": list(argv), "exit_code": returncode, "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr), "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
+            require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT and returncode == 0, f"{gate.gate_id} failed")
+            records.append({"id": gate.gate_id, "argv": list(argv), "exit_code": returncode, "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr), "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
+    verify_historical_objects(source)
     return records
 
 
@@ -462,10 +807,12 @@ def write_report(path: Path, chain: Chain, gates: list[dict[str, Any]], semantic
     return report
 
 
-def main(argv: Sequence[str] | None = None, *, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image, local_git: LocalGit = _run_local_git) -> int:
+def main(argv: Sequence[str] | None = None, *, run: Run = subprocess.run,
+         attest: Callable[[Pins], None] = attest_image, local_git: LocalGit = _run_local_git,
+         historical: Callable[[Chain], HistoricalObjects] = historical_objects) -> int:
     """Run the real CLI with only its two process boundaries injectable."""
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--result", type=Path, required=True); parser.add_argument("--completion", type=Path, required=True); parser.add_argument("--report", type=Path, required=True); args = parser.parse_args(argv)
-    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain); gates = run_gates(chain, pins, run, attest, local_git=local_git); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain)
+    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain); gates = run_gates(chain, pins, run, attest, local_git=local_git, historical=historical); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain)
     require(chain == final_chain and before_semantic == final_semantic, "replay repository or semantic evidence changed during offline gates")
     write_report(args.report, final_chain, gates, final_semantic)
     return 0

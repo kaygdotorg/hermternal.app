@@ -1,33 +1,67 @@
 FROM docker.io/library/node@sha256:0a83d7979d0b593faabfa8c6003bf0b33800e62a796242d4df40d80e1871aead
 
 LABEL org.hermternal.bun="1.3.14" \
+      org.hermternal.bun-cache-sha256="ff1b8357aa15b51aee36b86e608174a98ec44baaae469bfb8e8e24598de6fea5" \
+      org.hermternal.git="2.47.3" \
       org.hermternal.node="26.7.0" \
       org.hermternal.playwright="1.62.1" \
+      org.hermternal.python="3.13.5" \
+      org.hermternal.python-sha256="7890299302c21138c7677b606fe427c8740f55c1549e5edc689bd70b0f9195d7" \
       org.hermternal.dependencies-sha256="8e1321ecbcff2f795138fea6448e286d68c9817540cc96952a685cc8f6588697" \
       org.hermternal.bun-archive-sha256="951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f" \
       org.hermternal.browser-archive-sha256="3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14" \
-      org.hermternal.debian-packages-sha256="17517af10d374136dbb6ff9cbfe9452d02b17e3cb8c08db2a3113fa57ceb4b19"
+      org.hermternal.chromium-archive-sha256="ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8" \
+      org.hermternal.chromium-tree-sha256="19d67696f64af39a2262a57784437951dd74f407cea0ba6e5e8684aa803a3025" \
+      org.hermternal.debian-packages-sha256="7d6607d9cf4415779ade6bb587ca40185a094416421f7029d2b3551393229bd7"
 
 # The build context is the authenticated staging root. The build command must
 # use --pull=never and --network=none. No instruction can fetch a moving input.
 COPY --chown=0:0 snapshot/debs/ /tmp/hermternal-debs/
-RUN DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/hermternal-debs/*.deb \
+# Python's default-runtime packages use Pre-Depends. Install their exact
+# signed chain in dependency order before the closed full-set transaction.
+RUN DEBIAN_FRONTEND=noninteractive dpkg -i \
+      /tmp/hermternal-debs/libexpat1_2.7.1-2_amd64.deb \
+      /tmp/hermternal-debs/libpython3.13-minimal_3.13.5-2+deb13u3_amd64.deb \
+    && dpkg -i /tmp/hermternal-debs/python3.13-minimal_3.13.5-2+deb13u3_amd64.deb \
+    && dpkg -i /tmp/hermternal-debs/python3-minimal_3.13.5-1_amd64.deb \
+    && dpkg -i /tmp/hermternal-debs/*.deb \
     && dpkg --audit \
+    && cp --remove-destination /usr/bin/python3.13 /usr/bin/python3 \
+    && chown 0:0 /usr/bin/python3 \
+    && chmod 0755 /usr/bin/python3 \
     && rm -f /var/log/alternatives.log /var/log/dpkg.log \
     && rm -rf /tmp/hermternal-debs
 
 COPY --chown=0:0 --chmod=0755 bun/bun-linux-x64/bun /usr/local/bin/bun
 COPY --chown=0:0 browser/chrome-headless-shell-linux64/ /ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/
+COPY --chown=1001:1001 browser/chrome-linux64/ /ms-playwright/chromium-1234/chrome-linux64/
+COPY --chown=1001:1001 bun/image-cache/ /usr/local/install/cache/
 COPY --chown=0:0 deps/node_modules/ /opt/hermternal/node_modules/
+COPY --chown=0:0 tree_identity.ts /opt/hermternal/handover/issue-397/task409-offline-gates-v2/toolchain/tree_identity.ts
+COPY --chown=0:0 tree_identity_source.ts /opt/hermternal/apps/web/benchmarks/production-build/run.ts
 
 ENV BUN_INSTALL=/usr/local \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# These checks use only files from the closed context and the pinned base.
+# Git is part of the test runtime. Its version check also loads the closed
+# shared-library closure before the image can become a publication input.
 RUN test "$(bun --version)" = "1.3.14" \
+    && test "$(git --version)" = "git version 2.47.3" \
     && test "$(node --version)" = "v26.7.0" \
+    && test "$(python3 --version)" = "Python 3.13.5" \
+    && test ! -L /usr/bin/python3 \
+    && test "$(stat -c '%F %u:%g %a %h %s' /usr/bin/python3)" = "regular file 0:0 755 1 6828688" \
+    && test "$(sha256sum /usr/bin/python3.13)" = "7890299302c21138c7677b606fe427c8740f55c1549e5edc689bd70b0f9195d7  /usr/bin/python3.13" \
+    && test "$(sha256sum /usr/bin/python3)" = "7890299302c21138c7677b606fe427c8740f55c1549e5edc689bd70b0f9195d7  /usr/bin/python3" \
     && test -x /ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-linux64/chrome-headless-shell \
-    && test -d /opt/hermternal/node_modules/playwright
+    && test "$(stat -c '%u:%g %a %s' /ms-playwright/chromium-1234/chrome-linux64/chrome)" = "1001:1001 755 290614600" \
+    && test "$(sha256sum /ms-playwright/chromium-1234/chrome-linux64/chrome)" = "0b20b130e7edd9dd51873be867761295fe0cfad490c2b9a64f95bd3cfc08fa71  /ms-playwright/chromium-1234/chrome-linux64/chrome" \
+    && test -d /opt/hermternal/node_modules/playwright \
+    && cd /opt/hermternal \
+    && test "$(node --input-type=module -e "import { chromium } from 'playwright'; process.stdout.write(chromium.executablePath())")" = "/ms-playwright/chromium-1234/chrome-linux64/chrome"
 
+# Podman derives U=true tmpfs ownership from the image user. Keep this exact so
+# private 0700 gate workspaces remain usable without adding chown capability.
+USER 1001:1001
 WORKDIR /workspace/apps/web
