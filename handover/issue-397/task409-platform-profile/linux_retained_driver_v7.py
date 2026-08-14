@@ -167,7 +167,7 @@ def preservation_record() -> dict[str, object]:
 
 
 def derive_contract():
-    """Change only the clone object-availability predicate in derived stdin."""
+    """Apply authenticated preservation, validation, commit, and pack fixes to v6."""
     _authenticate()
     base = predecessor.derive_contract()
     record = preservation_record()

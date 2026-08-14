@@ -47,7 +47,9 @@ class ReplayObjectPathTests(unittest.TestCase):
 
             semantic = lane.get("semantic_delta")
             if semantic:
-                paths = semantic["delta_paths"]
+                # Runtime projects every owned path, not only the paths used to
+                # authenticate the semantic patch identity.
+                paths = semantic["owned_paths"]
                 target = semantic["child"]
             elif lane.get("kind") == "single-semantic-commit":
                 paths = lane["source_commit"]["changed_paths"]
@@ -85,6 +87,7 @@ class ReplayObjectPathTests(unittest.TestCase):
         }))
 
         self.assertEqual(len(operations), 79)
+        self.assertEqual(sum(len(states) for _, states in operations), 305)
         for label, states in operations:
             with self.subTest(operation=label):
                 self.assertTrue(states)

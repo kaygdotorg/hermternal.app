@@ -208,9 +208,9 @@ wrapper. Thus, the final public stdin has exactly one local-pack preservation
 call before clean-primary validation. The regression compares the public stdin
 with independently derived v7 bytes; it does not execute that stdin.
 `test_linux_retained_driver_v7_object_path.py` also enumerates all 79 commit
-operations in the frozen matrix. It requires one exact post-state for every
-path in each active operation and proves that the generated commit gate does
-not call the old global path-state inference.
+operations and all 305 active path instances in the frozen matrix. It requires
+one exact post-state for every path in each active operation and proves that
+the generated commit gate does not call the old global path-state inference.
 The successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
 bytes. It uses the separate, create-only
 `hermternal-issue397-replay-failure-v11` root only if a later approved replay
