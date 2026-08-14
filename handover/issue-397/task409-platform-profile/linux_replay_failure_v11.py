@@ -16,9 +16,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 V10_PATH = HERE / "linux_replay_failure_v10.py"
-V10_SHA256 = "2bf37efcdbf1eab857719502d73f273dc6b42481872d8398f11c17352c3d98ad"
+V10_SHA256 = "ca322ff8cb2e391edde5ab2e4498f3a6a58d6dfb7b25c81ff6dcba7049b953a9"
 PHASE_A_V11_PATH = HERE / "linux_phase_a_v11.py"
-PHASE_A_V11_SHA256 = "41801613d136dd0d7b24e1ce1dd400583183e964154393fc63ebb185655bb745"
+PHASE_A_V11_SHA256 = "f6fcefac9a88ef56313af84c8ffc7f91243cdb1291783e8318fbc1b2cb2b4927"
 PHASE_A_V10_PATH = HERE / "linux_phase_a_v10.py"
 PHASE_A_V10_SHA256 = "15e1492607fcb43f14cd290eef9e0e3df6d4b4a19e5b4bbf278b69647853461b"
 PHASE_SCHEMA = "hermternal.issue-397.phase-a-anchor-runner.v11"
@@ -28,7 +28,7 @@ PHASE_EXTERNAL_ROOT = Path("/home/kayg/Developer") / PHASE_ROOT_NAME
 SCHEMA = "hermternal.issue-397.replay-failure.v11"
 DIRECTORY_NAME = "hermternal-issue397-replay-failure-v11"
 WRAPPER_V6_SHA256 = "c8887fd0449ad6af3cfdebb721cf14ef9c91840f4d9b35e53f47b150f9821331"
-WRAPPER_V7_SHA256 = "58914bfbd8e99a28d12a8d24fe9d6e3f7eafb2f67d675fa152496db4395867d5"
+WRAPPER_V7_SHA256 = "ec4ab846d5c837673b60033cbeeefc8d01931ab502d42368989b2c553a9aa7b0"
 V10_DISABLED_BOUNDARY = b'    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Phase A v10 authority is not installed"))\n'
 V11_DISABLED_BOUNDARY = b'''    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(
         RuntimeError("Phase A v11 authority is not installed")
@@ -57,8 +57,8 @@ DEPENDENCY_PINS = (
     ("linux_retained_driver_v6", "4363f123a52863304f56eb6847c7e228fc43eae765eb1658d3c0cf521af88cde"),
     ("linux_replay_wrapper_v6", "c8887fd0449ad6af3cfdebb721cf14ef9c91840f4d9b35e53f47b150f9821331"),
     ("object_preservation", "1894901105a07fc925b7271bdb32b0cae92ffb80bd2cbbcd77c828a09819b57e"),
-    ("linux_retained_driver_v7", "8194a315b31c78bac6c7ff80077131f3b9975e786b626fb229daed94bbf76684"),
-    ("linux_replay_wrapper_v7", "58914bfbd8e99a28d12a8d24fe9d6e3f7eafb2f67d675fa152496db4395867d5"),
+    ("linux_retained_driver_v7", "6592efac6ec27fde1508372d1ee2f9402cac0fdd9e6fd44276b2af8dffe54382"),
+    ("linux_replay_wrapper_v7", "ec4ab846d5c837673b60033cbeeefc8d01931ab502d42368989b2c553a9aa7b0"),
     ("linux_phase_a_v10", PHASE_A_V10_SHA256),
 )
 SYNTHETIC_MODULE_NAMES = frozenset({

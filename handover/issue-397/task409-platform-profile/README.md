@@ -188,6 +188,9 @@ README-merge operation into the commit gate, and ignores shared `/tmp` link
 count churn while it still binds directory device, inode, owner, mode, and
 canonical path. It disables Git's optional reverse-index sidecar for the final
 retained pack, so the verified output stays an exact pack/index pair.
+Two generated validator heredocs each receive the same strict LF record parser
+source. Each heredoc starts a separate Python process, so neither process can
+reuse a parser definition from another heredoc.
 `linux_replay_wrapper_v7.py` stays disabled. `linux_phase_a_v11.py` binds the
 canonical record, record SHA-256, and policy SHA-256 in a new create-only owner
 and evidence root. `linux_replay_failure_v10.py` uses a separate failure root.
@@ -211,8 +214,9 @@ with independently derived v7 bytes; it does not execute that stdin.
 operations and all 305 active path instances in the frozen matrix. It requires
 one exact post-state for every path in each active operation and proves that
 the generated commit gate does not call the old global path-state inference.
-The successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
-bytes. It uses the separate, create-only
+The source-pin correction changes the wrapper, Phase-v11, and failure module
+hashes but leaves the derived stdin unchanged. The failure successor uses the
+separate, create-only
 `hermternal-issue397-replay-failure-v11` root only if a later approved replay
 calls the boundary.
 
