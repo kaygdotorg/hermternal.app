@@ -471,6 +471,7 @@ PARITY_FIXTURE_PATHS = {
 PARSER_IMPLEMENTATION_PATH = "scripts/traefik_proof.py"
 PARSER_TEST_PATH = "scripts/test_traefik_proof.py"
 PARSER_SOURCE_MAX_BYTES = 1 << 20
+PARSER_SOURCE_MAX_COMMITS = 4096
 PARSER_PROVENANCE_KEYS = frozenset(
     {
         "implementation_path",
@@ -508,10 +509,75 @@ def _git_blob_oid(source: bytes) -> str:
     return hashlib.sha1(header + source).hexdigest()
 
 
-def _current_parser_provenance() -> dict[str, str]:
-    """Derive and verify parser source identity instead of trusting CLI claims."""
+def _parser_source_predecessor(
+    project_root: Path,
+    implementation: bytes,
+    test_source: bytes,
+    head: str,
+) -> tuple[str, bytes, bytes]:
+    """Find the newest commit that contains the exact current parser source pair.
 
-    project_root = Path(__file__).resolve().parents[1]
+    Evidence-only descendants must not move the source identity. Searching the
+    path history instead of binding to HEAD keeps a retained manifest stable
+    until either parser source changes, while the byte comparison still fails
+    closed for an uncommitted source drift.
+    """
+
+    try:
+        history = _git_output(
+            project_root,
+            "log",
+            "--format=%H",
+            head,
+            "--",
+            PARSER_IMPLEMENTATION_PATH,
+            PARSER_TEST_PATH,
+        ).decode("ascii").splitlines()
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("parser provenance source history cannot be read") from exc
+    if not history or len(history) > PARSER_SOURCE_MAX_COMMITS:
+        raise ValueError("parser provenance source history exceeds its bounded limit")
+    if any(not re.fullmatch(r"[0-9a-f]{40}", commit) for commit in history):
+        raise ValueError("parser provenance source history contains an invalid Git SHA")
+
+    for candidate in history:
+        committed_implementation = _git_output(
+            project_root,
+            "show",
+            f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+        )
+        committed_tests = _git_output(
+            project_root,
+            "show",
+            f"{candidate}:{PARSER_TEST_PATH}",
+        )
+        if committed_implementation != implementation or committed_tests != test_source:
+            continue
+        implementation_blob = _git_output(
+            project_root,
+            "rev-parse",
+            f"{candidate}:{PARSER_IMPLEMENTATION_PATH}",
+        ).decode("ascii").strip()
+        test_blob = _git_output(
+            project_root,
+            "rev-parse",
+            f"{candidate}:{PARSER_TEST_PATH}",
+        ).decode("ascii").strip()
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", implementation_blob)
+            or not re.fullmatch(r"[0-9a-f]{40}", test_blob)
+            or implementation_blob != _git_blob_oid(committed_implementation)
+            or test_blob != _git_blob_oid(committed_tests)
+        ):
+            raise ValueError("parser provenance Git blob identity does not match source bytes")
+        return candidate, committed_implementation, committed_tests
+    raise ValueError("parser provenance requires a committed source predecessor")
+
+
+def _current_parser_provenance(project_root: Path | None = None) -> dict[str, str]:
+    """Derive and verify stable parser identity instead of trusting CLI claims."""
+
+    project_root = Path(__file__).resolve().parents[1] if project_root is None else project_root.resolve()
     implementation = _read_bounded_regular_file(
         project_root / PARSER_IMPLEMENTATION_PATH,
         PARSER_SOURCE_MAX_BYTES,
@@ -525,15 +591,11 @@ def _current_parser_provenance() -> dict[str, str]:
     implementation_commit = _git_output(project_root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", implementation_commit):
         raise ValueError("current parser source commit is not a lowercase Git SHA")
-    committed_implementation = _git_output(
+    implementation_commit, committed_implementation, committed_tests = _parser_source_predecessor(
         project_root,
-        "show",
-        f"{implementation_commit}:{PARSER_IMPLEMENTATION_PATH}",
-    )
-    committed_tests = _git_output(
-        project_root,
-        "show",
-        f"{implementation_commit}:{PARSER_TEST_PATH}",
+        implementation,
+        test_source,
+        implementation_commit,
     )
     if committed_implementation != implementation or committed_tests != test_source:
         raise ValueError("parser provenance requires clean committed implementation and test sources")
@@ -1135,7 +1197,7 @@ def render_manifest(
                 "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
                 "configured hosts and forwarded DNS authorities share per-label validation, reject trailing dots, and enforce 63-byte labels and a 253-byte host bound",
                 "ForwardAuth ports use canonical decimal syntax in the 1..65535 range; parser-leading OWS is normalized consistently across generated metadata and Origin, while trailing/internal OWS and obs-fold are rejected before policy",
-                "ForwardAuth generation verifies the current committed parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; caller-supplied provenance cannot forge retained evidence",
+                "ForwardAuth generation verifies the stable source-predecessor commit containing the current parser implementation and test source, including Git commit/blob and recomputed SHA-256 identities; evidence-only descendants do not drift provenance and caller-supplied values cannot forge retained evidence",
                 "X-Forwarded-Method is a nonempty HTTP token, X-Forwarded-For is a canonical comma-list of IP addresses with delimiter OWS, and present Origin is a nonempty serialized HTTP origin or null",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
