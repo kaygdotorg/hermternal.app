@@ -5380,6 +5380,12 @@ def _control_alias_bindings(
                 elif bound in _CONTROL_RESERVED_NAMES:
                     _control_bind_name(bindings, scope, bound, _CONTROL_INVALID)
         elif isinstance(node, ast.ImportFrom):
+            # A star import has no finite, source-visible export set. Treating
+            # ``*`` as an ordinary alias would let a module expose an approved
+            # constructor outside the reviewed control inventory, so reject it
+            # before any runtime-selected name can bypass the scanner.
+            if any(alias.name == "*" for alias in node.names):
+                raise ValidationError()
             scope = _control_scope(parents, node)
             module = node.module or ""
             for alias in node.names:
