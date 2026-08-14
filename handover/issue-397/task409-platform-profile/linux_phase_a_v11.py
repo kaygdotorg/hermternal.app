@@ -23,6 +23,7 @@ DRIVER_SHA256 = "11adb45e1600717cb5b9cc91d99ea34d5d383320de6bc449cca1e10f0ad3547
 V11_SCHEMA = "hermternal.issue-397.phase-a-anchor-runner.v11"
 V11_EVIDENCE_SCHEMA = "hermternal.issue-397.phase-a-anchor-evidence.v11"
 V11_ROOT_NAME = "hermternal-issue397-phase-a-anchor-v11"
+V11_EXTERNAL_ROOT = Path("/home/kayg/Developer") / V11_ROOT_NAME
 
 
 def _adapter_sha256() -> str:
@@ -37,7 +38,31 @@ def _load_v10():
         raise RuntimeError("Linux replay wrapper v7 SHA-256 differs")
     if hashlib.sha256(DRIVER_PATH.read_bytes()).hexdigest() != DRIVER_SHA256:
         raise RuntimeError("Linux retained-driver v7 SHA-256 differs")
-    base = predecessor._load_v9()
+    def retarget(module):
+        """Retarget every reviewed lifecycle factory to the one v11 root."""
+        for name in tuple(module.__dict__):
+            if name.endswith("_ROOT_NAME"):
+                module.__dict__[name] = V11_ROOT_NAME
+        if "load_runner" in module.__dict__:
+            prior_load_runner = module.load_runner
+
+            def load_v11_runner():
+                value = prior_load_runner()
+                value.EXTERNAL_ROOT = V11_EXTERNAL_ROOT
+                return value
+
+            module.load_runner = load_v11_runner
+        for name in ("_load_v8", "_load_v7", "_load_v3"):
+            if name in module.__dict__:
+                prior_factory = module.__dict__[name]
+
+                def load_v11_factory(factory=prior_factory):
+                    return retarget(factory())
+
+                module.__dict__[name] = load_v11_factory
+        return module
+
+    base = retarget(predecessor._load_v9())
     runner = base.load_runner()
     modules_globals = runner.load_modules.__globals__
     modules_globals["linux_replay_wrapper_v5"] = linux_replay_wrapper_v7
@@ -51,6 +76,7 @@ def _load_v10():
     owner_globals["V3_SCHEMA"] = V11_SCHEMA
     owner_globals["V3_EVIDENCE_SCHEMA"] = V11_EVIDENCE_SCHEMA
     owner_globals["V3_ROOT_NAME"] = V11_ROOT_NAME
+    runner.EXTERNAL_ROOT = V11_EXTERNAL_ROOT
     prior_profile = owner_globals["_profile_record"]
 
     def preservation_profile(profile):

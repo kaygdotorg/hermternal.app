@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 V9_PATH = HERE / "linux_replay_failure_v9.py"
 V9_SHA256 = "edc4108d1efa0aa1f154e0fd162ce4cd61fa01aeded7bd0333cc28443cc69e47"
 PHASE_A_V11_PATH = HERE / "linux_phase_a_v11.py"
-PHASE_A_V11_SHA256 = "fde754792e6c2c73df424ffabb5a73c92ca25156ceb76a87e40348b859facc6d"
+PHASE_A_V11_SHA256 = "8fcee2a45123ea635c06e358fd2c82feda17617ef89eed0faba9dac5d0a401bd"
 SCHEMA = "hermternal.issue-397.replay-failure.v10"
 DIRECTORY_NAME = "hermternal-issue397-replay-failure-v10"
 

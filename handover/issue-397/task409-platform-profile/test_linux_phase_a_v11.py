@@ -8,6 +8,7 @@ import os
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,6 +40,55 @@ class PhaseAV11Tests(unittest.TestCase):
             "git_worktree_dir": {"path": str(runner.GIT_WORKTREE_DIR), "binding": {**binding, "st_ino": 9}},
         }
 
+    def test_production_paths_are_closed_over_v11_root(self) -> None:
+        root = Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11")
+        runner = V11.load_runner()
+        self.assertEqual(runner.EXTERNAL_ROOT, root)
+        self.assertEqual(runner.phase_a.__globals__["SCHEMA"], V11.V11_SCHEMA)
+        self.assertEqual(runner.phase_a.__globals__["EVIDENCE_SCHEMA"], V11.V11_EVIDENCE_SCHEMA)
+        paths = {
+            "phase": root / "evidence" / runner.PHASE_A_RECORD,
+            "anchor": root / "evidence" / runner.ANCHOR_RECORD,
+            "owner": root / "phase-a/.owner",
+            "manifest": root / "phase-a/input-manifest.json",
+            "approval": root / "external-review" / runner.ANCHOR_NAME,
+        }
+        self.assertEqual({name: os.fspath(path) for name, path in paths.items()}, {
+            "phase": "/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11/evidence/phase-a.json",
+            "anchor": "/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11/evidence/anchor.json",
+            "owner": "/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11/phase-a/.owner",
+            "manifest": "/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11/phase-a/input-manifest.json",
+            "approval": "/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v11/external-review/phase-a-approval-anchor.json",
+        })
+        v10_runner = V11.predecessor.load_runner()
+        self.assertEqual(
+            v10_runner.EXTERNAL_ROOT,
+            Path("/home/kayg/Developer/hermternal-issue397-phase-a-anchor-v10"),
+        )
+        failure_root = Path("/home/kayg/Developer") / FAILURE.DIRECTORY_NAME
+        self.assertEqual(failure_root.name, "hermternal-issue397-replay-failure-v10")
+        self.assertNotEqual(failure_root, root)
+
+        base = V11._load_v10()
+        v8 = base._load_v8()
+        v7 = v8._load_v7()
+        v3 = v7._load_v3()
+        for module in (base, v8, v7, v3):
+            self.assertEqual(module.load_runner().EXTERNAL_ROOT, root)
+        observed = []
+
+        def approved(_anchor_sha256, _adapter_sha256):
+            observed.append(v3.load_runner().EXTERNAL_ROOT)
+            return types.SimpleNamespace(), object()
+
+        v3.load_approved_wrapper = approved
+        v7._load_v3 = lambda: v3
+        v8._load_v7 = lambda: v7
+        base._load_v8 = lambda: v8
+        with mock.patch.object(V11, "_load_v10", return_value=base):
+            wrapper, _authority = V11.load_approved_wrapper("0" * 64, V11._adapter_sha256())
+        self.assertEqual(observed, [root])
+        self.assertEqual(wrapper.PHASE_A_RUNNER_PATH, Path(V11.__file__))
     def test_disposable_phase_anchor_and_outer_failure_load(self) -> None:
         self.assertEqual(hashlib.sha256(V11.V10_PATH.read_bytes()).hexdigest(), V11.V10_SHA256)
         self.assertFalse(WRAPPER.preflight()["execution_enabled"])

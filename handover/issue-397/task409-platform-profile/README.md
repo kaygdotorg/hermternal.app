@@ -185,6 +185,8 @@ code, and an earlier unverified `forbidden_proof` import cannot win resolution.
 canonical record, record SHA-256, and policy SHA-256 in a new create-only owner
 and evidence root. `linux_replay_failure_v10.py` uses a separate failure root.
 All older authority, Phase A, and failure evidence stays frozen.
+The v11 adapter retargets the runner and every nested outer-loader factory to
+`hermternal-issue397-phase-a-anchor-v11`; it cannot resolve the frozen v10 root.
 
 Run the disposable tests in normal and optimized Python modes:
 
