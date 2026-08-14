@@ -196,16 +196,14 @@ class OfflineGatesV3Tests(unittest.TestCase):
         self.assertTrue(all("relabel=" not in item for item in argv))
         expected_tmpfs = {
             f"type=tmpfs,destination={path},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup"
-            for path in MOD.WRITABLE_WEB_PATHS
+            for path in ("/tmp", *MOD.WRITABLE_WEB_PATHS)
         }
         self.assertEqual({item for item in argv if item.startswith("type=tmpfs,")}, expected_tmpfs)
-        self.assertEqual(argv.count("--tmpfs"), 1)
-        self.assertIn("/tmp:rw,nosuid,nodev,size=768m", argv)
+        self.assertNotIn("--tmpfs", argv)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/ms-playwright", argv)
         setup = argv[argv.index("-c") + 1]
-        for pattern in ("node_modules/*", "node_modules/.[!.]*"):
+        for pattern in ("node_modules/*", "node_modules/.[!.]*", "node_modules/..?*"):
             self.assertIn(pattern, setup)
-        self.assertNotIn("node_modules/..?*", setup)
         self.assertIn("cp -a --no-preserve=ownership --", setup)
         self.assertNotIn("node_modules/. /workspace", setup)
 

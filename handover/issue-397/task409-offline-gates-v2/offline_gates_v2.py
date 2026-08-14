@@ -303,9 +303,9 @@ def podman_argv(repository: Path, gate: Gate, pins: Pins) -> tuple[str, ...]:
     installs or downloads packages.
     """
     uid, gid = os.getuid(), os.getgid()
-    setup = "for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; exec \"$@\""
-    tmpfs = sum((("--mount", f"type=tmpfs,destination={item},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup") for item in WRITABLE_WEB_PATHS), ())
-    return ("/usr/bin/podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/workspace,ro=true", "--tmpfs", "/tmp:rw,nosuid,nodev,size=768m", *tmpfs, "--workdir", gate.workdir, *sum((("--env", f"{key}={value}") for key, value in sorted(SAFE_ENV.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
+    setup = "for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]* /opt/hermternal/node_modules/..?*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; exec \"$@\""
+    tmpfs = sum((("--mount", f"type=tmpfs,destination={item},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup") for item in ("/tmp", *WRITABLE_WEB_PATHS)), ())
+    return ("/usr/bin/podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/workspace,ro=true", *tmpfs, "--workdir", gate.workdir, *sum((("--env", f"{key}={value}") for key, value in sorted(SAFE_ENV.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
 
 
 def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run) -> None:

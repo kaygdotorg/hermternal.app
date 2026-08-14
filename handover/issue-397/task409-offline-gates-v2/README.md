@@ -58,8 +58,8 @@ read-only gate containers.
 Podman image inspection must attest Bun 1.3.14, Node 26.7.0, Playwright 1.62.1,
 and the exact locked dependency SHA-256. The image contains the browser at
 `/ms-playwright` and the immutable dependency tree already; #406 never pulls
-or installs them. Each writable web output uses a private `0700` tmpfs whose
-owner is set to the keep-id process. A child-only recursive copy moves the
+or installs them. `/tmp` and each writable web output use a private `0700`
+tmpfs whose owner is set to the keep-id process. A child-only recursive copy moves the
 dependency entries from `/opt/hermternal/node_modules` without changing the
 tmpfs mountpoint metadata. Separate tmpfs mounts cover `.svelte-kit`, `build`,
 `test-results`, and `playwright-report`, so source stays read-only while build
