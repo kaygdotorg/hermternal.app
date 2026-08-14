@@ -225,6 +225,8 @@ Run the disposable tests in normal and optimized Python modes:
 ```sh
 /usr/bin/python3 -B test_object_preservation.py
 /usr/bin/python3 -O -B test_object_preservation.py
+/usr/bin/python3 -B test_linux_retained_driver_v7_object_path.py
+/usr/bin/python3 -O -B test_linux_retained_driver_v7_object_path.py
 /usr/bin/python3 -B test_linux_phase_a_v11.py
 /usr/bin/python3 -O -B test_linux_phase_a_v11.py
 /usr/bin/python3 -B test_linux_replay_failure_v11.py
