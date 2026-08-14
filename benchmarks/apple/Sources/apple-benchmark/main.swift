@@ -14,6 +14,10 @@ struct AppleBenchmarkCLI {
             guard let sourceCommitSHA = options.sourceCommitSHA else {
                 throw AppleBenchmarkError.sourceCommitMissing
             }
+            let destinations = try CLIOutputPolicy.canonicalize(
+                evidencePath: options.outputPath,
+                tracePath: options.traceOutputPath
+            )
 
             let loaded = try WorkloadFixtureLoader.load()
             let build = ReleaseBuildMetadataFactory.current()
@@ -24,10 +28,8 @@ struct AppleBenchmarkCLI {
                 build: build
             )
             let evidenceBytes = try BenchmarkJSON.encode(result.evidence)
-            try write(evidenceBytes, to: options.outputPath)
-            if let tracePath = options.traceOutputPath {
-                try write(result.traceBytes, to: tracePath)
-            }
+            try write(result.traceBytes, to: destinations.trace)
+            try write(evidenceBytes, to: destinations.evidence)
         } catch let error as AppleBenchmarkError {
             emitFailure(error)
         } catch {
@@ -91,7 +93,7 @@ struct AppleBenchmarkCLI {
     }
 
     private static let usage = """
-    apple-benchmark --source-commit-sha <40-lowercase-hex> [--output <evidence.json>] [--trace-output <raw-trace.json>]
+    apple-benchmark --source-commit-sha <40-lowercase-hex> --trace-output <raw-trace.json> [--output <evidence.json>]
 
     Runs deterministic, offline model workloads. Build the package with -c release.
     """
