@@ -5215,8 +5215,11 @@ def _control_static_bytes_hex(node: ast.AST) -> str | None:
 
 _CONTROL_MODULE_PREFIX = "module:"
 _CONTROL_INVALID = object()
+_CONTROL_GETATTR_SELECTOR = object()
 _CONTROL_DIRECT_APIS = frozenset({"chr", "bytes", "bytearray"})
 _CONTROL_MODULES = frozenset({"builtins", "binascii", "codecs"})
+_CONTROL_DYNAMIC_SELECTORS = frozenset({"getattr"})
+_CONTROL_RESERVED_NAMES = _CONTROL_DIRECT_APIS | _CONTROL_MODULES | _CONTROL_DYNAMIC_SELECTORS
 _CONTROL_CANONICAL_APIS = frozenset({
     "chr",
     "bytes",
@@ -5268,6 +5271,8 @@ def _control_lookup_binding(
         return True, name
     if name in _CONTROL_MODULES:
         return True, f"{_CONTROL_MODULE_PREFIX}{name}"
+    if name in _CONTROL_DYNAMIC_SELECTORS:
+        return True, _CONTROL_GETATTR_SELECTOR
     return False, None
 
 
@@ -5286,6 +5291,8 @@ def _control_resolve_expression(
         return _CONTROL_INVALID
     if base == f"{_CONTROL_MODULE_PREFIX}builtins" and node.attr in _CONTROL_DIRECT_APIS:
         return node.attr
+    if base == f"{_CONTROL_MODULE_PREFIX}builtins" and node.attr in _CONTROL_DYNAMIC_SELECTORS:
+        return _CONTROL_GETATTR_SELECTOR
     if base == f"{_CONTROL_MODULE_PREFIX}binascii" and node.attr in {"unhexlify", "a2b_hex"}:
         return f"binascii.{node.attr}"
     if base == f"{_CONTROL_MODULE_PREFIX}codecs" and node.attr == "decode":
@@ -5340,7 +5347,7 @@ def _control_alias_bindings(
     for node in nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             parent_scope = _control_scope(parents, node)
-            if node.name in _CONTROL_DIRECT_APIS or node.name in _CONTROL_MODULES or (parent_scope, node.name) in bindings:
+            if node.name in _CONTROL_RESERVED_NAMES or (parent_scope, node.name) in bindings:
                 _control_bind_name(bindings, parent_scope, node.name, _CONTROL_INVALID)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 local_scope = node.name if parent_scope == "module" else f"{parent_scope}.{node.name}"
@@ -5350,20 +5357,17 @@ def _control_alias_bindings(
                 outer_scopes = _control_scope_chain(parent_scope)
                 for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
                     if (
-                        argument.arg in _CONTROL_DIRECT_APIS
-                        or argument.arg in _CONTROL_MODULES
+                        argument.arg in _CONTROL_RESERVED_NAMES
                         or any((candidate, argument.arg) in bindings for candidate in outer_scopes)
                     ):
                         _control_bind_name(bindings, local_scope, argument.arg, _CONTROL_INVALID, force=True)
                 if node.args.vararg is not None and (
-                    node.args.vararg.arg in _CONTROL_DIRECT_APIS
-                    or node.args.vararg.arg in _CONTROL_MODULES
+                    node.args.vararg.arg in _CONTROL_RESERVED_NAMES
                     or any((candidate, node.args.vararg.arg) in bindings for candidate in outer_scopes)
                 ):
                     _control_bind_name(bindings, local_scope, node.args.vararg.arg, _CONTROL_INVALID, force=True)
                 if node.args.kwarg is not None and (
-                    node.args.kwarg.arg in _CONTROL_DIRECT_APIS
-                    or node.args.kwarg.arg in _CONTROL_MODULES
+                    node.args.kwarg.arg in _CONTROL_RESERVED_NAMES
                     or any((candidate, node.args.kwarg.arg) in bindings for candidate in outer_scopes)
                 ):
                     _control_bind_name(bindings, local_scope, node.args.kwarg.arg, _CONTROL_INVALID, force=True)
@@ -5373,7 +5377,7 @@ def _control_alias_bindings(
                 bound = alias.asname or alias.name.split(".", 1)[0]
                 if alias.name in _CONTROL_MODULES:
                     _control_bind_name(bindings, scope, bound, f"{_CONTROL_MODULE_PREFIX}{alias.name}")
-                elif bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                elif bound in _CONTROL_RESERVED_NAMES:
                     _control_bind_name(bindings, scope, bound, _CONTROL_INVALID)
         elif isinstance(node, ast.ImportFrom):
             scope = _control_scope(parents, node)
@@ -5383,37 +5387,39 @@ def _control_alias_bindings(
                 canonical: object = _CONTROL_INVALID
                 if module == "builtins" and alias.name in _CONTROL_DIRECT_APIS:
                     canonical = alias.name
+                elif module == "builtins" and alias.name in _CONTROL_DYNAMIC_SELECTORS:
+                    canonical = _CONTROL_GETATTR_SELECTOR
                 elif module == "binascii" and alias.name in {"unhexlify", "a2b_hex"}:
                     canonical = f"binascii.{alias.name}"
                 elif module == "codecs" and alias.name == "decode":
                     canonical = "codecs.decode"
-                elif alias.name in _CONTROL_DIRECT_APIS or alias.name in _CONTROL_MODULES:
+                elif alias.name in _CONTROL_RESERVED_NAMES:
                     canonical = _CONTROL_INVALID
-                if canonical is not _CONTROL_INVALID or bound in _CONTROL_DIRECT_APIS or bound in _CONTROL_MODULES:
+                if canonical is not _CONTROL_INVALID or bound in _CONTROL_RESERVED_NAMES:
                     _control_bind_name(bindings, scope, bound, canonical)
         elif isinstance(node, ast.Assign):
             scope = _control_scope(parents, node)
             resolved = _control_resolve_expression(node.value, scope, bindings)
             for target in node.targets:
                 for name in _control_target_names_for_binding(target):
-                    if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                    if name in _CONTROL_RESERVED_NAMES or (scope, name) in bindings:
                         _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
-                    elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                    elif resolved is _CONTROL_GETATTR_SELECTOR or resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
                         _control_bind_name(bindings, scope, name, resolved)
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
             scope = _control_scope(parents, node)
             target = node.target if isinstance(node, ast.AnnAssign) else node.target
             resolved = _control_resolve_expression(node.value, scope, bindings) if node.value is not None else None
             for name in _control_target_names_for_binding(target):
-                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                if name in _CONTROL_RESERVED_NAMES or (scope, name) in bindings:
                     _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
-                elif resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
+                elif resolved is _CONTROL_GETATTR_SELECTOR or resolved in _CONTROL_CANONICAL_APIS or (isinstance(resolved, str) and resolved.startswith(_CONTROL_MODULE_PREFIX)):
                     _control_bind_name(bindings, scope, name, resolved)
         elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
             scope = _control_scope(parents, node)
             target = node.target
             for name in _control_target_names_for_binding(target):
-                if name in _CONTROL_DIRECT_APIS or name in _CONTROL_MODULES or (scope, name) in bindings:
+                if name in _CONTROL_RESERVED_NAMES or (scope, name) in bindings:
                     _control_bind_name(bindings, scope, name, _CONTROL_INVALID)
     return bindings
 
@@ -5509,8 +5515,13 @@ def _control_dynamic_constructor(
     name = _control_dotted_name(node.func)
     scope = _control_scope(parents, node)
     resolved = _control_resolve_expression(node.func, scope, bindings)
-    if isinstance(node.func, ast.Call) and _control_dotted_name(node.func.func) == "getattr":
-        raise ValidationError()
+    if isinstance(node.func, ast.Call):
+        selector = _control_resolve_expression(node.func.func, scope, bindings)
+        # Dynamic constructor selection cannot be proven without executing the
+        # retained source. Reject direct and statically aliased ``getattr``
+        # calls before their runtime-selected result can hide a control byte.
+        if selector is _CONTROL_GETATTR_SELECTOR or _control_dotted_name(node.func.func) == "getattr":
+            raise ValidationError()
     canonical = resolved if isinstance(resolved, str) else _CONTROL_SOURCE_APIS.get(name)
     if resolved is _CONTROL_INVALID:
         raise ValidationError()

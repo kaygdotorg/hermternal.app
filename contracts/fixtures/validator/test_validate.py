@@ -680,9 +680,12 @@ class CliTests(unittest.TestCase):
             return f"{0xF0 | (code >> 18):02x}{0x80 | ((code >> 12) & 0x3F):02x}{0x80 | ((code >> 6) & 0x3F):02x}{0x80 | (code & 0x3F):02x}"
 
         control_invalid = object()
+        control_getattr_selector = object()
         control_module_prefix = "module:"
         control_direct_apis = frozenset({"chr", "bytes", "bytearray"})
         control_modules = frozenset({"builtins", "binascii", "codecs"})
+        control_dynamic_selectors = frozenset({"getattr"})
+        control_reserved_names = control_direct_apis | control_modules | control_dynamic_selectors
         control_canonical_apis = frozenset(
             {
                 "chr",
@@ -733,6 +736,8 @@ class CliTests(unittest.TestCase):
                 return True, name
             if name in control_modules:
                 return True, control_module_prefix + name
+            if name in control_dynamic_selectors:
+                return True, control_getattr_selector
             return False, None
 
         def resolve_expression(
@@ -750,6 +755,8 @@ class CliTests(unittest.TestCase):
                 return control_invalid
             if base == control_module_prefix + "builtins" and node.attr in control_direct_apis:
                 return node.attr
+            if base == control_module_prefix + "builtins" and node.attr in control_dynamic_selectors:
+                return control_getattr_selector
             if base == control_module_prefix + "binascii" and node.attr in {"unhexlify", "a2b_hex"}:
                 return "binascii." + node.attr
             if base == control_module_prefix + "codecs" and node.attr == "decode":
@@ -797,8 +804,7 @@ class CliTests(unittest.TestCase):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     parent_scope = scope(parents, node)
                     if (
-                        node.name in control_direct_apis
-                        or node.name in control_modules
+                        node.name in control_reserved_names
                         or (parent_scope, node.name) in bindings
                     ):
                         bind_name(bindings, parent_scope, node.name, control_invalid)
@@ -807,20 +813,17 @@ class CliTests(unittest.TestCase):
                         outer_scopes = scope_chain(parent_scope)
                         for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
                             if (
-                                argument.arg in control_direct_apis
-                                or argument.arg in control_modules
+                                argument.arg in control_reserved_names
                                 or any((candidate, argument.arg) in bindings for candidate in outer_scopes)
                             ):
                                 bind_name(bindings, local_scope, argument.arg, control_invalid, force=True)
                         if node.args.vararg is not None and (
-                            node.args.vararg.arg in control_direct_apis
-                            or node.args.vararg.arg in control_modules
+                            node.args.vararg.arg in control_reserved_names
                             or any((candidate, node.args.vararg.arg) in bindings for candidate in outer_scopes)
                         ):
                             bind_name(bindings, local_scope, node.args.vararg.arg, control_invalid, force=True)
                         if node.args.kwarg is not None and (
-                            node.args.kwarg.arg in control_direct_apis
-                            or node.args.kwarg.arg in control_modules
+                            node.args.kwarg.arg in control_reserved_names
                             or any((candidate, node.args.kwarg.arg) in bindings for candidate in outer_scopes)
                         ):
                             bind_name(bindings, local_scope, node.args.kwarg.arg, control_invalid, force=True)
@@ -830,7 +833,7 @@ class CliTests(unittest.TestCase):
                         bound = imported.asname or imported.name.split(".", 1)[0]
                         if imported.name in control_modules:
                             bind_name(bindings, scope_name, bound, control_module_prefix + imported.name)
-                        elif bound in control_direct_apis or bound in control_modules:
+                        elif bound in control_reserved_names:
                             bind_name(bindings, scope_name, bound, control_invalid)
                 elif isinstance(node, ast.ImportFrom):
                     scope_name = scope(parents, node)
@@ -840,22 +843,24 @@ class CliTests(unittest.TestCase):
                         canonical: object = control_invalid
                         if module == "builtins" and imported.name in control_direct_apis:
                             canonical = imported.name
+                        elif module == "builtins" and imported.name in control_dynamic_selectors:
+                            canonical = control_getattr_selector
                         elif module == "binascii" and imported.name in {"unhexlify", "a2b_hex"}:
                             canonical = "binascii." + imported.name
                         elif module == "codecs" and imported.name == "decode":
                             canonical = "codecs.decode"
-                        elif imported.name in control_direct_apis or imported.name in control_modules:
+                        elif imported.name in control_reserved_names:
                             canonical = control_invalid
-                        if canonical is not control_invalid or bound in control_direct_apis or bound in control_modules:
+                        if canonical is not control_invalid or bound in control_reserved_names:
                             bind_name(bindings, scope_name, bound, canonical)
                 elif isinstance(node, ast.Assign):
                     scope_name = scope(parents, node)
                     resolved = resolve_expression(node.value, scope_name, bindings)
                     for target in node.targets:
                         for name in target_names_for_binding(target):
-                            if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                            if name in control_reserved_names or (scope_name, name) in bindings:
                                 bind_name(bindings, scope_name, name, control_invalid)
-                            elif resolved in control_canonical_apis or (
+                            elif resolved is control_getattr_selector or resolved in control_canonical_apis or (
                                 isinstance(resolved, str) and resolved.startswith(control_module_prefix)
                             ):
                                 bind_name(bindings, scope_name, name, resolved)
@@ -863,16 +868,16 @@ class CliTests(unittest.TestCase):
                     scope_name = scope(parents, node)
                     resolved = resolve_expression(node.value, scope_name, bindings) if node.value is not None else None
                     for name in target_names_for_binding(node.target):
-                        if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                        if name in control_reserved_names or (scope_name, name) in bindings:
                             bind_name(bindings, scope_name, name, control_invalid)
-                        elif resolved in control_canonical_apis or (
+                        elif resolved is control_getattr_selector or resolved in control_canonical_apis or (
                             isinstance(resolved, str) and resolved.startswith(control_module_prefix)
                         ):
                             bind_name(bindings, scope_name, name, resolved)
                 elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
                     scope_name = scope(parents, node)
                     for name in target_names_for_binding(node.target):
-                        if name in control_direct_apis or name in control_modules or (scope_name, name) in bindings:
+                        if name in control_reserved_names or (scope_name, name) in bindings:
                             bind_name(bindings, scope_name, name, control_invalid)
             return bindings
 
@@ -916,8 +921,16 @@ class CliTests(unittest.TestCase):
             name = dotted(node.func)
             scope_name = scope(parents, node)
             resolved = resolve_expression(node.func, scope_name, bindings)
+            if isinstance(node.func, ast.Call):
+                selector = resolve_expression(node.func.func, scope_name, bindings)
+                # Keep the independent model fail-closed with production: an
+                # aliased getattr can select a constructor only at runtime.
+                if selector is control_getattr_selector or dotted(node.func.func) == "getattr":
+                    raise validate.ValidationError()
             canonical = resolved if isinstance(resolved, str) else control_source_apis.get(name)
-            if resolved is control_invalid or canonical not in control_canonical_apis:
+            if resolved is control_invalid:
+                raise validate.ValidationError()
+            if canonical not in control_canonical_apis:
                 return None
             structural_role = role(parents, node)
             if canonical == "chr":
@@ -1150,6 +1163,29 @@ class CliTests(unittest.TestCase):
                     "connection-restoration/validate.py",
                     source,
                 )
+
+    def test_aliased_getattr_constructor_forms_reject_in_both_modes(self) -> None:
+        """Aliased dynamic selection must fail closed before constructor use."""
+
+        sources = (
+            b'import builtins\ng = getattr\ng(builtins, "chr")(0)\n',
+            b'import builtins as b\ng = b.getattr\ng(b, "chr")(0)\n',
+            b'from builtins import getattr as select\nselect(builtins, "chr")(0)\n',
+            b'import builtins\ng = getattr\nselect = g\nselect(builtins, "chr")(0)\n',
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source,
+                )
+
+    def test_non_constructor_getattr_forms_remain_allowed_in_both_modes(self) -> None:
+        source = b'import os\nvalue = getattr(os, "O_RDONLY")\n'
+        self._assert_scanner_accepts_in_both_modes(
+            "connection-restoration/validate.py",
+            source,
+        )
 
     def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
         repo_root = self._copy_fixture_repo()
