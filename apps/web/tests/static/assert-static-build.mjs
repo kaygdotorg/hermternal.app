@@ -2,6 +2,7 @@ import { access, readFile, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { cwd } from 'node:process';
 import { assertTerminalLazyBoundary } from './terminal-lazy-boundary.mjs';
+import { assertTerminalOnlyModulesRemainDynamic } from './terminal-only-manifest.mjs';
 
 const outputDirectory = join(cwd(), 'build');
 
@@ -96,14 +97,9 @@ if (rendererEdgesFromLiveRoute.length === 0) {
 // module identity and every emitted css/assets reference from the route closure.
 assertTerminalLazyBoundary(liveRouteStaticClosure, manifestEntries);
 
-for (const key of [
-  'node_modules/@wterm/dom/dist/index.js',
-  'node_modules/@wterm/ghostty/dist/index.js',
-  'node_modules/@wterm/ghostty/wasm/ghostty-vt.wasm?url'
-]) {
-  if (!manifestEntries.get(key)?.isDynamicEntry) {
-    throw new Error(`Terminal-only dependency must remain dynamic: ${key}`);
-  }
-}
+// Vite may key a dependency from an external workspace root as
+// ../../../external-root/node_modules/<package>. Compare canonical package
+// identities, not the root-relative spelling, while rejecting ambiguous aliases.
+assertTerminalOnlyModulesRemainDynamic(manifestEntries);
 
 console.log('static build evidence: index, 200.html, manifest, service worker, and lazy terminal chunk boundaries verified; no server output');

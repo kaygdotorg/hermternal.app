@@ -161,7 +161,9 @@ failure, retry, unmount, and stale-result-safe states. Cancellation retains the 
   `tests/static/assert-static-routes.mjs` verify static output, canonical Paper token parity, the
   distinct `200.html` fallback, the generated `/service-worker.js` route, raw request target
   rejection, the supported deep-link grammar, method denial, generic missing-asset 404s, and
-  reserved-path denial without a server directory.
+  reserved-path denial without a server directory. The static manifest check compares terminal-only
+  `@wterm` entries by canonical package identity, so workspace and external `node_modules` roots
+  cannot bypass the dynamic-only boundary or introduce ambiguous aliases.
 - Semantic CSS tokens, reflow rules, focus styles, minimum action height, and reduced-motion rules
   provide the narrow/desktop, zoom, keyboard, and motion regression baseline.
 - `src/lib/service-worker-runtime.test.ts` directly proves foreign same-origin caches are not
