@@ -276,6 +276,86 @@ class OfflineGatesV3Tests(unittest.TestCase):
         self.assertIn("HOME=/tmp/home", argv)
         self.assertIn("BUN_INSTALL_CACHE_DIR=/tmp/home/.bun/install/cache", argv)
 
+    def test_private_workspace_command_adapts_only_the_exact_renderer_fixture(self) -> None:
+        with MOD.workspace_archive(self.chain) as archive:
+            argv = MOD.podman_argv(
+                self.repository, archive, self.historical, MOD.GATES[6], self.pins,
+            )
+        setup = argv[argv.index("-c") + 1]
+        expected = (
+            "/workspace/apps/web/src/lib/terminal/renderer.test.ts",
+            "100644",
+            "8d489b746e2dc0f6c15b32b0174f62db58c308e3",
+            "776a517e44dd274066e97d1f26a2be17a35793d9e556fc60f1e4391a18b6512f",
+            "#!/opt/homebrew/bin/bun",
+            "#!${process.execPath}",
+            "47d78dc3e3390ae82528072af5ce09948a9c20190ec597996b5b9bcd8f7a2cce",
+        )
+        for value in expected:
+            with self.subTest(value=value):
+                self.assertIn(value, setup)
+        self.assertIn("old_count != 3", setup)
+        self.assertIn("updated.count(old) != 0", setup)
+        self.assertIn("published result changed during verified load", setup)
+        self.assertLess(setup.index("tar --no-same-owner"), setup.index("renderer.test.ts"))
+        self.assertLess(setup.index("renderer.test.ts"), setup.index("svelte-kit sync"))
+        self.assertNotIn("/source/apps/web/src/lib/terminal/renderer.test.ts", setup)
+        self.assertNotIn("/workspace-input.tar apps/web/src/lib/terminal/renderer.test.ts", setup)
+
+    def test_private_workspace_command_has_no_embedded_nul(self) -> None:
+        with MOD.workspace_archive(self.chain) as archive:
+            argv = MOD.podman_argv(
+                self.repository, archive, self.historical, MOD.GATES[6], self.pins,
+            )
+        self.assertTrue(all("\0" not in value for value in argv))
+        self.assertIn('b"\\0" + source', MOD.RENDERER_ADAPTATION_SCRIPT)
+        statement = next(
+            line for line in MOD.RENDERER_ADAPTATION_SCRIPT.splitlines()
+            if line.startswith("git_object = ")
+        )
+        scope = {"source": b"fixture"}
+        exec(compile(statement, "<renderer-adaptation-git-object>", "exec"), scope)
+        self.assertEqual(scope["git_object"], b"blob 7\0fixture")
+        self.assertEqual(hashlib.sha1(scope["git_object"]).hexdigest(),
+                         "001f1993905d81b471eeaa840432cf35aedaea61")
+
+    def test_private_workspace_adaptation_allows_reviewed_portable_literals(self) -> None:
+        old = b"#!/opt/homebrew/bin/bun"
+        new = b"#!${process.execPath}"
+        source = old + b"\n" + new + b"\n" + old + b"\n" + old
+        self.assertEqual(source.count(old), 3)
+        updated = source.replace(old, new)
+        self.assertEqual(updated.count(old), 0)
+        self.assertEqual(updated.count(new), 4)
+        self.assertNotIn("updated.count(new) != 3", MOD.RENDERER_ADAPTATION_SCRIPT)
+
+    def test_private_workspace_adaptation_rejects_contract_near_misses(self) -> None:
+        contract = MOD.RENDERER_ADAPTATION_CONTRACT
+        mutations = []
+        for index, value in enumerate(contract):
+            changed = list(contract)
+            changed[index] = value + "-near-miss"
+            mutations.append(tuple(changed))
+        mutations.extend((contract[:-1], (*contract, "/workspace/extra-path")))
+        with MOD.workspace_archive(self.chain) as archive:
+            for changed in mutations:
+                with self.subTest(contract=changed), \
+                     mock.patch.object(MOD, "RENDERER_ADAPTATION_CONTRACT", changed):
+                    with self.assertRaisesRegex(MOD.Reject, "adaptation contract differs"):
+                        MOD.podman_argv(
+                            self.repository, archive, self.historical,
+                            MOD.GATES[6], self.pins,
+                        )
+            with mock.patch.object(
+                MOD, "RENDERER_ADAPTATION_SCRIPT",
+                MOD.RENDERER_ADAPTATION_SCRIPT + "\n# near miss\n",
+            ):
+                with self.assertRaisesRegex(MOD.Reject, "adaptation program differs"):
+                    MOD.podman_argv(
+                        self.repository, archive, self.historical,
+                        MOD.GATES[6], self.pins,
+                    )
+
     def test_workspace_archive_binds_exact_tracked_allowlist(self) -> None:
         untracked = self.repository / "apps/web/ignored-secret.txt"
         untracked.write_text("must not enter archive", encoding="utf-8")
