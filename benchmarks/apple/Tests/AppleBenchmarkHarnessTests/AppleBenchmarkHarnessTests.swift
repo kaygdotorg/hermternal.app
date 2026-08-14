@@ -359,6 +359,89 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         }
     }
 
+    func testEvidenceRejectsLaneAndBuildProvenanceForgery() throws {
+        let loaded = try WorkloadFixtureLoader.load()
+        let clock = TestClock()
+        let result = try AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() }).run(
+            workload: loaded.fixture,
+            workloadBytes: loaded.bytes,
+            sourceCommitSHA: "not_collected",
+            build: ReleaseBuildMetadata(
+                mode: "release",
+                optimization: "swiftc -O",
+                compiler: "swiftc",
+                sdk: "not_recorded",
+                target: "apple-synthetic",
+                metadataStatus: "scaffold_only"
+            )
+        )
+
+        let original = result.evidence.runs[0]
+        let forgedWithoutProvenance = EvidenceRun(
+            id: original.id,
+            operationID: original.operationID,
+            platform: original.platform,
+            environment: original.environment,
+            state: .warm,
+            buildMode: original.buildMode,
+            optimization: original.optimization,
+            command: original.command,
+            repetitions: original.repetitions,
+            rawSamples: original.rawSamples,
+            sampleProvenanceSHA256: String(repeating: "0", count: 64),
+            distribution: original.distribution
+        )
+        var forgedRuns = result.evidence.runs
+        forgedRuns[0] = EvidenceRun(
+            id: forgedWithoutProvenance.id,
+            operationID: forgedWithoutProvenance.operationID,
+            platform: forgedWithoutProvenance.platform,
+            environment: forgedWithoutProvenance.environment,
+            state: forgedWithoutProvenance.state,
+            buildMode: forgedWithoutProvenance.buildMode,
+            optimization: forgedWithoutProvenance.optimization,
+            command: forgedWithoutProvenance.command,
+            repetitions: forgedWithoutProvenance.repetitions,
+            rawSamples: forgedWithoutProvenance.rawSamples,
+            sampleProvenanceSHA256: try EvidenceValidator.sampleProvenanceSHA256(
+                for: forgedWithoutProvenance
+            ),
+            distribution: forgedWithoutProvenance.distribution
+        )
+        let forgedEvidence = AppleEvidenceDocument(
+            schema: result.evidence.schema,
+            protocolSchema: result.evidence.protocolSchema,
+            evidenceID: result.evidence.evidenceID,
+            revision: result.evidence.revision,
+            metric: result.evidence.metric,
+            method: result.evidence.method,
+            build: ReleaseBuildMetadata(
+                mode: "release",
+                optimization: "swiftc -O",
+                compiler: "not-swiftc",
+                sdk: "secret-sdk-value",
+                target: "unreviewed-target",
+                metadataStatus: "observed"
+            ),
+            runs: forgedRuns,
+            artifacts: result.evidence.artifacts,
+            artifactManifestSHA256: result.evidence.artifactManifestSHA256,
+            redaction: result.evidence.redaction,
+            threshold: result.evidence.threshold,
+            budget: result.evidence.budget
+        )
+
+        XCTAssertThrowsError(
+            try EvidenceValidator.validate(
+                forgedEvidence,
+                workload: loaded.fixture,
+                fixtureSHA256: BenchmarkHash.sha256(loaded.bytes),
+                workloadBytes: loaded.bytes,
+                traceBytes: result.traceBytes
+            )
+        )
+    }
+
     func testEvidenceRejectsForgedArtifactMetadata() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()

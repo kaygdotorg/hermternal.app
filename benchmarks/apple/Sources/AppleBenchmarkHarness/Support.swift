@@ -400,8 +400,7 @@ public enum WorkloadValidator {
               fixture.build.metadataStatus == "scaffold_only",
               fixture.repetitions.cold == AppleWorkloadFixture.minimumRepetitions,
               fixture.repetitions.warm == AppleWorkloadFixture.minimumRepetitions,
-              fixture.repetitions.maximum >= fixture.repetitions.cold,
-              fixture.repetitions.maximum >= fixture.repetitions.warm
+              fixture.repetitions.maximum == EvidenceValidator.requiredMaximumRepetitions
         else {
             throw AppleBenchmarkError.workloadDrift
         }
@@ -453,6 +452,7 @@ public enum EvidenceValidator {
     public static let pinnedHermesSourceSHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
     public static let maximumArtifactCount = 2
     public static let maximumArtifactBytes = 1_048_576
+    public static let requiredMaximumRepetitions = 120
     public static let reviewedArtifactPaths = [
         "fixture/workload.json",
         "trace/raw-trace.json",
@@ -465,13 +465,16 @@ public enum EvidenceValidator {
         workloadBytes: Data? = nil,
         traceBytes: Data? = nil
     ) throws {
+        try WorkloadValidator.validate(workload)
         guard evidence.schema == AppleEvidenceDocument.schema,
               evidence.protocolSchema == AppleEvidenceDocument.protocolSchema,
               evidence.evidenceID == "apple-release-mock-workload",
               evidence.revision.fixtureID == workload.fixtureID,
               evidence.revision.fixtureVersion == workload.fixtureVersion,
+              fixtureSHA256 == WorkloadFixtureLoader.expectedWorkloadSHA256,
               evidence.revision.fixtureSHA256 == fixtureSHA256,
               evidence.revision.hermesSourceSHA == pinnedHermesSourceSHA,
+              isStrictLowerHexASCII(evidence.revision.hermesSourceSHA, length: 40),
               evidence.metric.name == "operation_duration",
               evidence.metric.unit == "ms",
               evidence.metric.clock == "monotonic",
@@ -482,6 +485,10 @@ public enum EvidenceValidator {
               evidence.method.quantiles == ["p50": 0.5, "p95": 0.95, "p99": 0.99],
               evidence.build.mode == "release",
               evidence.build.optimization == "swiftc -O",
+              evidence.build.compiler == "swiftc",
+              evidence.build.sdk == "not_recorded",
+              evidence.build.target == "apple-synthetic",
+              evidence.build.metadataStatus == "scaffold_only",
               evidence.threshold == nil,
               evidence.budget == nil,
               evidence.redaction.policy == "semantic_only",
@@ -510,34 +517,118 @@ public enum EvidenceValidator {
         )
 
         let expectedRunCount = workload.operations.count * workload.targetPlatforms.count * 2
-        guard evidence.runs.count == expectedRunCount else {
+        var expectedLanes: [
+            String: (operationID: String, platform: AppleTargetPlatform, state: BenchmarkState, repetitions: Int)
+        ] = [:]
+        for platform in workload.targetPlatforms {
+            for operation in workload.operations {
+                for state in [BenchmarkState.cold, .warm] {
+                    let id = "\(platform.rawValue)-\(state.rawValue)-\(operation.id)"
+                    expectedLanes[id] = (
+                        operationID: operation.id,
+                        platform: platform,
+                        state: state,
+                        repetitions: state == .cold ? workload.repetitions.cold : workload.repetitions.warm
+                    )
+                }
+            }
+        }
+        guard expectedLanes.count == expectedRunCount,
+              evidence.runs.count == expectedRunCount
+        else {
             throw AppleBenchmarkError.evidenceDrift
         }
 
         var seenIDs = Set<String>()
         for run in evidence.runs {
-            guard seenIDs.insert(run.id).inserted,
-                  workload.operations.contains(where: { $0.id == run.operationID }),
-                  workload.targetPlatforms.contains(run.platform),
+            guard let expected = expectedLanes[run.id],
+                  let operation = workload.operations.first(where: { $0.id == run.operationID }),
+                  seenIDs.insert(run.id).inserted,
+                  run.operationID == expected.operationID,
+                  run.platform == expected.platform,
+                  run.state == expected.state,
                   run.buildMode == "release",
                   run.optimization == "not_applicable",
+                  run.command == "offline apple mock workload \(operation.id)",
+                  run.repetitions == expected.repetitions,
                   run.repetitions == run.rawSamples.count,
                   run.repetitions >= AppleWorkloadFixture.minimumRepetitions,
-                  run.rawSamples.count <= workload.repetitions.maximum,
+                  run.repetitions <= workload.repetitions.maximum,
                   run.rawSamples.allSatisfy({ $0.isFinite && $0 > 0 }),
                   isSHA256(run.sampleProvenanceSHA256),
+                  run.distribution.min.isFinite,
+                  run.distribution.p50.isFinite,
+                  run.distribution.p95.isFinite,
+                  run.distribution.p99.isFinite,
+                  run.distribution.max.isFinite,
+                  run.distribution.mean.isFinite,
+                  run.distribution.min > 0,
                   run.distribution.min <= run.distribution.p50,
                   run.distribution.p50 <= run.distribution.p95,
                   run.distribution.p95 <= run.distribution.p99,
                   run.distribution.p99 <= run.distribution.max,
-                  run.environment.device == "not_claimed",
-                  run.environment.browser == "not_applicable",
+                  run.environment == EnvironmentMetadataFactory.syntheticHost(for: expected.platform),
                   (try? sampleProvenanceSHA256(for: run)) == run.sampleProvenanceSHA256,
                   let expectedDistribution = try? DistributionCalculator.calculate(run.rawSamples),
                   run.distribution == expectedDistribution
             else {
                 throw AppleBenchmarkError.evidenceMalformed
             }
+        }
+        guard seenIDs == Set(expectedLanes.keys),
+              let traceBytes
+        else {
+            throw AppleBenchmarkError.evidenceDrift
+        }
+        let trace = try BenchmarkJSON.decode(RawTraceDocument.self, from: traceBytes)
+        try validateTrace(trace, evidence: evidence, workload: workload, expectedLanes: expectedLanes)
+    }
+
+    private static func validateTrace(
+        _ trace: RawTraceDocument,
+        evidence: AppleEvidenceDocument,
+        workload: AppleWorkloadFixture,
+        expectedLanes: [String: (operationID: String, platform: AppleTargetPlatform, state: BenchmarkState, repetitions: Int)]
+    ) throws {
+        let expectedEnvironment = EnvironmentMetadata(
+            platform: "synthetic-apple",
+            os: "Darwin",
+            architecture: EnvironmentMetadataFactory.syntheticHost(for: .macos).architecture,
+            device: "not_claimed",
+            runtime: "swift-foundation",
+            browser: "not_applicable"
+        )
+        guard trace.schema == RawTraceDocument.schema,
+              trace.fixtureID == workload.fixtureID,
+              trace.fixtureVersion == workload.fixtureVersion,
+              trace.revision == evidence.revision,
+              trace.metric == evidence.metric,
+              trace.build == evidence.build,
+              trace.environment == expectedEnvironment,
+              trace.runs.count == expectedLanes.count
+        else {
+            throw AppleBenchmarkError.evidenceDrift
+        }
+
+        var seenIDs = Set<String>()
+        for traceRun in trace.runs {
+            guard let expected = expectedLanes[traceRun.id],
+                  let evidenceRun = evidence.runs.first(where: { $0.id == traceRun.id }),
+                  seenIDs.insert(traceRun.id).inserted,
+                  traceRun.operationID == expected.operationID,
+                  traceRun.platform == expected.platform,
+                  traceRun.state == expected.state,
+                  traceRun.samples == evidenceRun.rawSamples,
+                  traceRun.samples.count == expected.repetitions,
+                  traceRun.samples.allSatisfy({ $0.isFinite && $0 > 0 }),
+                  traceRun.warmupSamples.count == (traceRun.state == .warm ? workload.warmupRepetitions : 0),
+                  traceRun.warmupSamples.allSatisfy({ $0.isFinite && $0 > 0 })
+            else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+        }
+        guard seenIDs == Set(expectedLanes.keys) else {
+            throw AppleBenchmarkError.evidenceDrift
         }
     }
 
