@@ -310,18 +310,25 @@ public enum DistributionCalculator {
     }
 }
 
+public enum ReleaseBuildConfiguration {
+    /// `_isDebugAssertConfiguration()` catches an explicit `-Onone` even when
+    /// SwiftPM did not define `DEBUG`; the harness must not trust a claimed
+    /// release label over the compiler's actual assertion configuration.
+    public static var debugAssertionsEnabled: Bool {
+        #if DEBUG
+        true
+        #else
+        _isDebugAssertConfiguration()
+        #endif
+    }
+}
+
 public enum ReleaseBuildMetadataFactory {
     public static func current() -> ReleaseBuildMetadata {
-        #if DEBUG
-        let mode = "debug"
-        let optimization = "debug"
-        #else
-        let mode = "release"
-        let optimization = "swiftc -O"
-        #endif
+        let isDebug = ReleaseBuildConfiguration.debugAssertionsEnabled
         return ReleaseBuildMetadata(
-            mode: mode,
-            optimization: optimization,
+            mode: isDebug ? "debug" : "release",
+            optimization: isDebug ? "swiftc -Onone" : "swiftc -O",
             compiler: "swiftc",
             sdk: "not_recorded",
             target: "apple-synthetic",

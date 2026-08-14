@@ -63,10 +63,17 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         XCTAssertEqual(first.nextText(length: 48), second.nextText(length: 48))
     }
 
+    func testOnoneBuildNeverClaimsRelease() {
+        if _isDebugAssertConfiguration() {
+            XCTAssertEqual(ReleaseBuildMetadataFactory.current().mode, "debug")
+            XCTAssertNotEqual(ReleaseBuildMetadataFactory.current().optimization, "swiftc -O")
+        }
+    }
+
     func testRunnerProducesAllColdAndWarmOperationLanes() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()
-        let runner = AppleBenchmarkRunner(now: { clock.next() })
+        let runner = AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() })
         let build = ReleaseBuildMetadata(
             mode: "release",
             optimization: "swiftc -O",
@@ -104,7 +111,7 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
             target: "apple-synthetic",
             metadataStatus: "scaffold_only"
         )
-        let runner = AppleBenchmarkRunner(now: { 1 })
+        let runner = AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { 1 })
 
         XCTAssertThrowsError(
             try runner.run(
@@ -140,7 +147,7 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
     func testEvidenceRejectsDistributionAndRedactionDrift() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()
-        let runner = AppleBenchmarkRunner(now: { clock.next() })
+        let runner = AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() })
         let result = try runner.run(
             workload: loaded.fixture,
             workloadBytes: loaded.bytes,
@@ -274,7 +281,7 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
     func testEvidenceRoundTripsWithClosedSchema() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()
-        let result = try AppleBenchmarkRunner(now: { clock.next() }).run(
+        let result = try AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() }).run(
             workload: loaded.fixture,
             workloadBytes: loaded.bytes,
             sourceCommitSHA: "not_collected",
