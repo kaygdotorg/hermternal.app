@@ -689,8 +689,11 @@ public struct AppleEvidenceDocument: Codable, Equatable, Sendable {
         try c.encode(artifacts, forKey: .artifacts)
         try c.encode(artifactManifestSHA256, forKey: .artifactManifestSHA256)
         try c.encode(redaction, forKey: .redaction)
-        try c.encodeNil(forKey: .threshold)
-        try c.encodeNil(forKey: .budget)
+        // Preserve reviewed threshold and budget values. The scaffold validator
+        // rejects nonnil values until a budget contract is approved, but it must
+        // never erase caller input while serializing evidence.
+        try c.encode(threshold, forKey: .threshold)
+        try c.encode(budget, forKey: .budget)
     }
 }
 
