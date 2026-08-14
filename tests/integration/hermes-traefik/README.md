@@ -220,10 +220,14 @@ exact working-tree bytes and both Git blobs before evidence is emitted;
 evidence-only or documentation-only descendants therefore retain the same
 implementation commit, while uncommitted source drift and forged CLI provenance
 fail closed. One provenance calculation also shares a fixed monotonic
-12-second deadline and a 2,048-subprocess ceiling across traversal, tree reads,
+60-second deadline and a 2,048-subprocess ceiling across traversal, tree reads,
 and final blob checks. Each individual Git command remains limited to five
 seconds, but exhausting either aggregate budget rejects provenance instead of
-continuing through an arbitrarily large history.
+continuing through an arbitrarily large history. Repository commit and blob
+IDs are validated against `git rev-parse --show-object-format`; `sha1` and
+`sha256` repositories are supported, while an unknown object format or wrong
+OID width fails closed. The recorded `implementation_sha256` and
+`test_source_sha256` remain independent content digests for evidence integrity.
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,
