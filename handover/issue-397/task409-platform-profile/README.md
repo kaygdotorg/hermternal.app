@@ -112,8 +112,31 @@ Run:
 /usr/bin/python3 -O -B test_linux_phase_a_v6.py
 /usr/bin/python3 -B test_linux_replay_failure_v4.py
 /usr/bin/python3 -O -B test_linux_replay_failure_v4.py
+/usr/bin/python3 -B linux_anchor_authority_v2.py --prepare
+/usr/bin/python3 -B test_section_anchor_metadata.py
+/usr/bin/python3 -O -B test_section_anchor_metadata.py
+/usr/bin/python3 -B linux_replay_wrapper_v4.py
+/usr/bin/python3 -B test_linux_phase_a_v7.py
+/usr/bin/python3 -O -B test_linux_phase_a_v7.py
+/usr/bin/python3 -B test_linux_replay_failure_v5.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v5.py
 ```
 
 Do not run `--publish` again. The durable final set already exists and a second
 publication must fail. No tool in this directory executes the generated shell,
 Git replay, Hermes, network access, or credentials.
+
+## Section-anchor LF successor
+
+`section_anchor_metadata.py` is the strict reusable intake and generated-output
+invariant for `live_overlap.scripts_readme.section_anchor`. The only accepted
+decoded value is `## Disposable Caddy proof renderer` followed by one real LF.
+The visible two-character `\\n` legacy value is rejected after the one
+versioned repair. `linux_anchor_authority_v2.py` creates the separate
+`task464-candidate5-linux-v1-anchor-lf-final` authority triad. Its output and
+derived stdin have new hashes, so `linux_retained_driver_v4.py`,
+`linux_replay_wrapper_v4.py`, `linux_phase_a_v7.py`, and
+`linux_replay_failure_v5.py` bind only new authority and evidence roots.
+Earlier authority and Phase/failure roots remain frozen. Tests use mocked
+worktree identity and disposable local evidence; they do not execute replay,
+Hermes, network access, or credentials.
