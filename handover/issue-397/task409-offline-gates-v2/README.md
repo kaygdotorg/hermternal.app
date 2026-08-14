@@ -50,20 +50,39 @@ All 13 executable gates and their order are fixed in code. The first six Git
 observations use the existing local Git boundary with system/global config,
 hooks, replacement objects, lazy fetch, and protocol access disabled. The
 remaining seven web gates use only the pinned rootless Podman image with
-`--pull=never`, `--network=none`, a read-only repository bind, no host
+`--pull=never`, `--network=none`, a read-only repository bind at `/source`, no host
 credential mounts, dropped capabilities, and no-new-privileges. The bind does
 not relabel retained evidence; SELinux process labeling is disabled for these
-read-only gate containers.
+read-only gate containers. A private Podman init process reaps descendant test
+processes. This keeps bounded process-group cleanup and inherited-pipe tests
+deterministic without a host process or a retained-repository write.
 
 Podman image inspection must attest Bun 1.3.14, Node 26.7.0, Playwright 1.62.1,
-and the exact locked dependency SHA-256. The image contains the browser at
-`/ms-playwright` and the immutable dependency tree already; #406 never pulls
-or installs them. `/tmp` and each writable web output use a private `0700`
-tmpfs whose owner is set to the keep-id process. A child-only recursive copy moves the
-dependency entries from `/opt/hermternal/node_modules` without changing the
-tmpfs mountpoint metadata. Separate tmpfs mounts cover `.svelte-kit`, `build`,
-`test-results`, and `playwright-report`, so source stays read-only while build
-and browser tooling can write. Host Podman calls use the canonical real user
+the exact locked dependency SHA-256, and the exact `1001:1001` image user. The
+image contains Git, the browser at `/ms-playwright`, and the immutable
+dependency tree already; #406 never pulls or installs them.
+
+Before any web gate starts, the host creates one private mode-`0600` Git archive
+from the authenticated final tree and a closed tracked-input allowlist. Stable
+no-follow reads bind its bytes, file identity, tree, and exact member list.
+Ignored and untracked working-tree residue cannot enter the archive. The
+container extracts the read-only archive into one private `0700` `/workspace`
+tmpfs, creates SvelteKit metadata, and runs the gate there. It creates private
+Git metadata with the exact replay head. That metadata reads the retained
+object store and the Phase-v11 guarded object store through two read-only
+mounts. The runner authenticates 11 exact path states across all nine commits
+used by the selected tests. Exactly the `a7d43f` live-proof ledger parent and
+the `4c1cd7` bridge parent can be absent from the retained store; both must be
+present with their exact blobs in the Phase-bound guarded store. No object or
+ref is copied into the replay. A changed source identity, dependency list,
+commit type, path blob, or missing-object set stops all web gates. A separate private
+`0700` `/tmp` tmpfs holds temporary output. A child-only recursive copy moves
+the dependency entries from `/opt/hermternal/node_modules` without changing the
+workspace mountpoint metadata. The same child-only rule copies the image's
+hash-bound Bun cache from `/usr/local/install/cache` to the private home in
+`/tmp`. This lets the renderer rebuild the exact `d36d68` source with its
+byte-identical frozen lock and a loopback black-hole registry. No writable or nested mount exists in the
+retained repository. Host Podman calls use the canonical real user
 home, `/run/user/<uid>` runtime directory, and their private rootless graph/run
 storage. The verifier rejects a changed environment or a Podman store outside
 those exact paths. The report schema and 13-gate order are unchanged; each
@@ -82,13 +101,18 @@ not equivalent evidence.
 `toolchain/` now contains the exact Linux amd64 construction and staging
 specification. The retained staging set binds the official Bun archive, the
 Playwright Chromium headless-shell archive, the exact Node OCI child manifest,
-the signed Debian 13 snapshot index, 114 exact Debian packages, and the Linux
-dependency tree produced from the committed frozen lock. The dependency-tree
-digest is final. An authorized rootless, network-disabled build produced local
+the signed Debian 13 snapshot index, 145 exact Debian packages, and the Linux
+dependency tree produced from the committed frozen lock. It also binds the
+full Chromium tree as owner `1001:1001` and the exact offline Bun cache for
+source commit `d36d68` and lock SHA-256 `76a2e956…`. The dependency-tree
+digest is final. The signed Python 3.13 closure binds its exact package source,
+the canonical `/usr/bin/python3.13` bytes, and the byte-identical regular
+`/usr/bin/python3` selected by the archived screenshot contract. An authorized
+rootless, network-disabled build produced local
 image ID
-`sha256:a834f2f05e84c441da304939d287f0598eececbe9e6855cfb7b7cc9ac957c695`
+`sha256:790a4c88264f25f88c757f3a5210687dc891c7700ed34498653c73fcc4fba03e`
 and repository digest
-`sha256:a10cb9ee63acdd627824be448b3031bc788ee02992056fb44a9303f1904a98fc`.
+`sha256:0ebbc93b943c31c62b681b0b2b1f2415843b2150a7bcd1a6a88220e8c30c5a64`.
 These values identify the retained local image. They do not claim that the
 image exists in an external registry.
 
@@ -111,7 +135,7 @@ The authorized deterministic build used this command:
 podman build --pull=never --network=none --platform linux/amd64 \
   --timestamp=0 --omit-history --squash-all \
   --file handover/issue-397/task409-offline-gates-v2/toolchain/Containerfile \
-  --tag localhost/hermternal-offline-gates:issue-406-v1 \
+  --tag localhost/hermternal-offline-gates:issue-406-v6 \
   /tmp/<retained-private-staging-root>
 ```
 
@@ -123,8 +147,8 @@ before any replay evidence is accepted:
 ```sh
 python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/verify_staging.py \
   --root /tmp/<retained-private-staging-root> \
-  --image localhost/hermternal-offline-gates:issue-406-v1 \
-  --repo-digest sha256:a10cb9ee63acdd627824be448b3031bc788ee02992056fb44a9303f1904a98fc
+  --image localhost/hermternal-offline-gates:issue-406-v6 \
+  --repo-digest sha256:0ebbc93b943c31c62b681b0b2b1f2415843b2150a7bcd1a6a88220e8c30c5a64
 ```
 
 The minimal smoke check also uses `--pull=never`, `--network=none`, a read-only
@@ -157,3 +181,11 @@ python3 -O -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolcha
 ```
 
 This is not replay evidence or permission to update `dev` or `main`.
+
+The real gate run is held. Three Linux `web-unit` cases create an exact fixture
+whose shebang is `/opt/homebrew/bin/bun`, then execute that fixture directly.
+The pinned Linux authority forbids that macOS path. The checkpoint does not add
+an alias, change the fixture, or skip a production gate. Disposable checks pass
+for typecheck, build, privacy, accessibility, authentication, the screenshot
+contract, and all other unit cases. Independent policy approval is required
+before the three contradictory cases can change.

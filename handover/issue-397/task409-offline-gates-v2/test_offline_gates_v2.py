@@ -14,6 +14,7 @@ import os
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from dataclasses import replace
@@ -52,9 +53,27 @@ class OfflineGatesV3Tests(unittest.TestCase):
 
     def _write_checkout(self) -> None:
         files = {
+            "apps/web/.bun-version": b"1.3.14\n",
+            "apps/web/bun.lock": b"fixture lock\n",
+            "apps/web/package.json": b'{"name":"fixture","private":true}\n',
+            "apps/web/playwright.config.ts": b"export default {};\n",
+            "apps/web/playwright.live.config.ts": b"export default {};\n",
+            "apps/web/svelte.config.js": b"export default {};\n",
+            "apps/web/tsconfig.json": b'{}\n',
+            "apps/web/vite.config.ts": b"export default {};\n",
+            "apps/web/vitest.config.ts": b"export default {};\n",
             "apps/web/tests/e2e/ui-preview.spec.ts": b"import AxeBuilder from 'axe'; test('native password activation clears live values', () => { if (activation === 'click') await signIn.click(); else { await signIn.focus(); await signIn.press('Enter'); } expect(x).toHaveValue(''); expect(y).toHaveValue(''); expect(z).toHaveValue(''); expect(q).toHaveValue(''); root.outerHTML; page.screenshot(); expect(value).not.toContain(passwordValue); expect(value).not.toContain(usernameValue); /* axe violations */ });\n",
+            "apps/web/tests/setup.ts": b"// fixture\n",
+            "apps/web/tests/live/safe-reporter.mjs": b"export default class SafeReporter {}\n",
+            "apps/web/tests/static/static-host.mjs": b"// fixture\n",
+            "apps/web/tests/bench/terminal-renderer.evidence.json": b"{}\n",
+            "apps/web/static/favicon.svg": b"<svg/>\n",
             "apps/web/src/lib/live-artifact-policy.test.ts": b"const LIVE_ARTIFACT_REDACTION = 'x'; const config = \"screenshot: 'off'\";\n",
             "apps/web/src/lib/live-screenshot-contract.test.ts": b"blockedLiveScreenshotManifest({});\n",
+            "contracts/fixtures/behavioral-probe/probe-fixtures.json": b"{}\n",
+            "contracts/fixtures/compatibility-attestation/cases.json": b"{}\n",
+            "contracts/fixtures/compatibility-attestation/revision_attestation.json": b"{}\n",
+            "contracts/hermes-dashboard/manifest.md": b"# Fixture\n",
         }
         for relative, raw in files.items():
             self._write(self.repository / relative, raw, 0o644)
@@ -74,14 +93,27 @@ class OfflineGatesV3Tests(unittest.TestCase):
         descriptor = self._write(final_root / "authority-descriptor.json", b'{"schema":"fixture"}\n', 0o600)
         provenance = self._write(final_root / "provenance-manifest.json", b'{"schema":"fixture"}\n', 0o600)
         phase_schema = "hermternal.issue-397.phase-a-anchor-evidence.v11"
-        anchor_raw = (json.dumps({"schema": phase_schema}, separators=(",", ":")) + "\n").encode()
-        anchor = self.root / "anchor.json"; self._write(anchor, anchor_raw, 0o600)
+        evidence_root = self.root / "evidence"; evidence_root.mkdir(mode=0o700)
+        object_dir = (self.repository / ".git/objects").resolve()
+        def binding(path: Path) -> dict[str, int]:
+            value = os.lstat(path)
+            return {"st_dev":value.st_dev, "st_ino":value.st_ino,
+                    "st_uid":value.st_uid, "st_mode":stat.S_IMODE(value.st_mode)}
+        phase_value = {"observations":{"guarded_worktree":{
+            "path":str(self.repository), "binding":binding(self.repository),
+            "detached":True, "head":self.final_head, "tree":self.final_tree,
+            "git_object_dir":{"path":str(object_dir), "binding":binding(object_dir)},
+        }}}
+        phase_raw = (json.dumps(phase_value, separators=(",", ":")) + "\n").encode()
+        phase_path = evidence_root / "phase-a.json"; phase_sha = self._write(phase_path, phase_raw, 0o600)
+        anchor_raw = (json.dumps({"schema": phase_schema, "prior_sha256":phase_sha}, separators=(",", ":")) + "\n").encode()
+        anchor = evidence_root / "anchor.json"; anchor_sha = self._write(anchor, anchor_raw, 0o600)
         result_keys = ["schema", "phase", "lane", "phase_a_manifest_sha256", "phase_a_approval_digest", "replay_root", "replay_root_identity", "repository", "repository_identity", "head_state", "final_head", "parent", "tree", "base_commit", "base_tree", "protected_main_commit", "required_ancestors", "forbidden_ancestors"]
         completion_keys = ["schema", "completion_marker", "stderr_policy", "returncode", "result_path", "result_sha256", "driver_module_sha256", "driver_source_sha256", "markdown_sha256", "json_sha256", "shell_sha256", "provenance_sha256", "source_commit", "phase_a_evidence_path", "phase_a_evidence_sha256"]
         modules = {
             handover / "task409-platform-profile" / "profile.py": f"from types import SimpleNamespace as N\ndef load(): return N(authority_root={str(final_root)!r})\n".encode(),
             handover / "task464-candidate5-authority-successor" / "authority.py": b"from types import SimpleNamespace as N\ndef validate(*_): return N(artifacts={'shell':N(sha256='shell'),'markdown':N(sha256='markdown'),'json':N(sha256='json')})\n",
-            handover / "task409-replay-result-successor" / "wrapper.py": ("from types import SimpleNamespace as N\nRESULT_KEYS=frozenset(" + repr(result_keys) + ")\nRESULT_SCHEMA='result/v1'\nRESULT_PHASE='phase'\nRESULT_LANE='linux'\nCOMPLETION_KEYS=frozenset(" + repr(completion_keys) + ")\nCOMPLETION_SCHEMA='completion/v1'\nSUCCESS_OUTPUT=b'OK\\n'\nSTDERR_POLICY='empty'\nDRIVER_SHA256='driver'\ndef load_authority(): return N(base_commit='1'*40,base_tree='2'*40,protected_main_commit='6'*40,required_ancestors=['1'*40],forbidden_ancestors=['9'*40],source_commit='a'*40)\ndef load_phase_a_evidence(*_): return N(manifest_sha256='b'*64,approval_digest='c'*64,snapshot=N(path=" + repr(str(anchor)) + ",raw=" + repr(anchor_raw) + ",sha256='d'*64,identity=(1,2,3,384,1,1,1,1)))\n").encode(),
+            handover / "task409-replay-result-successor" / "wrapper.py": ("from types import SimpleNamespace as N\nRESULT_KEYS=frozenset(" + repr(result_keys) + ")\nRESULT_SCHEMA='result/v1'\nRESULT_PHASE='phase'\nRESULT_LANE='linux'\nCOMPLETION_KEYS=frozenset(" + repr(completion_keys) + ")\nCOMPLETION_SCHEMA='completion/v1'\nSUCCESS_OUTPUT=b'OK\\n'\nSTDERR_POLICY='empty'\nDRIVER_SHA256='driver'\ndef load_authority(): return N(base_commit='1'*40,base_tree='2'*40,protected_main_commit='6'*40,required_ancestors=['1'*40],forbidden_ancestors=['9'*40],source_commit='a'*40)\ndef load_phase_a_evidence(*_): return N(manifest_sha256='b'*64,approval_digest='c'*64,snapshot=N(path=" + repr(str(anchor)) + ",raw=" + repr(anchor_raw) + ",sha256=" + repr(anchor_sha) + ",identity=(1,2,3,384,1,1,1,1)))\n").encode(),
             handover / "task409-phase-a-anchor-successor" / "phase.py": ("EVIDENCE_SCHEMA=" + repr(phase_schema) + "\n").encode(),
         }
         hashes = {path: self._write(path, raw, 0o644) for path, raw in modules.items()}
@@ -98,6 +130,17 @@ class OfflineGatesV3Tests(unittest.TestCase):
         self.pins_path = task / "final-linux-pins.json"; self._write(self.pins_path, json.dumps(pins, sort_keys=True, separators=(",", ":")).encode(), 0o644)
         self.pins = MOD.load_pins(self.pins_path); self.result = result; self.completion = completion
         self.chain = MOD._load_chain(result, completion, self.pins)
+        object_dir = (self.repository / ".git/objects").resolve()
+        repository_metadata, object_metadata = os.lstat(self.repository), os.lstat(object_dir)
+        self.historical = MOD.HistoricalObjects(
+            self.repository,
+            (repository_metadata.st_dev, repository_metadata.st_ino, repository_metadata.st_uid,
+             stat.S_IMODE(repository_metadata.st_mode)),
+            object_dir,
+            (object_metadata.st_dev, object_metadata.st_ino, object_metadata.st_uid,
+             stat.S_IMODE(object_metadata.st_mode)),
+            self.final_head, self.final_tree,
+        )
 
     def runner(self, argv, **_: object) -> subprocess.CompletedProcess[bytes]:
         gate = next(item for item in MOD.GATES if item.command == tuple(argv[-len(item.command):]))
@@ -188,24 +231,139 @@ class OfflineGatesV3Tests(unittest.TestCase):
             self.assertIsNone(MOD.PHASE_EVIDENCE_SCHEMA_RE.fullmatch(value))
 
     def test_closed_podman_layout_and_dev_base_contract(self) -> None:
-        argv = MOD.podman_argv(self.repository, MOD.GATES[6], self.pins)
-        for item in ("--pull=never", "--network=none", "--read-only", "--userns=keep-id", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
+        with MOD.workspace_archive(self.chain) as archive:
+            argv = MOD.podman_argv(self.repository, archive, self.historical, MOD.GATES[6], self.pins)
+            MOD.verify_workspace_archive(archive)
+        for item in ("--init", "--pull=never", "--network=none", "--read-only", "--userns=keep-id", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
             self.assertIn(item, argv)
+        self.assertEqual(argv.count("--init"), 1)
+        self.assertLess(argv.index("--init"), argv.index("--rm"))
         self.assertIn("--security-opt=label=disable", argv)
-        self.assertIn("type=bind,src=" + str(self.repository) + ",dst=/workspace,ro=true", argv)
+        self.assertIn("type=bind,src=" + str(self.repository) + ",dst=/source,ro=true", argv)
+        self.assertIn("type=bind,src=" + str(self.historical.object_dir) + ",dst=/authority-objects,ro=true", argv)
+        self.assertTrue(any(item.startswith("type=bind,src=") and item.endswith(",dst=/workspace-input.tar,ro=true") for item in argv))
+        self.assertFalse(any(item.endswith(",dst=/workspace,ro=true") for item in argv))
         self.assertTrue(all("relabel=" not in item for item in argv))
         expected_tmpfs = {
             f"type=tmpfs,destination={path},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup"
-            for path in ("/tmp", *MOD.WRITABLE_WEB_PATHS)
+            for path in ("/tmp",)
         }
+        expected_tmpfs.add("type=tmpfs,destination=/workspace,tmpfs-size=4026531840,tmpfs-mode=0700,U=true,notmpcopyup")
         self.assertEqual({item for item in argv if item.startswith("type=tmpfs,")}, expected_tmpfs)
         self.assertNotIn("--tmpfs", argv)
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/ms-playwright", argv)
+        self.assertEqual(argv[argv.index("--workdir") + 1], "/workspace")
+        self.assertNotIn("--workdir=/workspace/apps/web", argv)
         setup = argv[argv.index("-c") + 1]
+        self.assertIn("tar --no-same-owner -xf /workspace-input.tar -C /workspace", setup)
+        self.assertNotIn("tar -xf /workspace-input.tar", setup)
+        self.assertIn("printf 'gitdir: /workspace/.gitdir\\n' > /workspace/.git", setup)
+        self.assertIn(self.chain.final_head, setup)
+        self.assertIn("/source/.git/objects\\n/authority-objects\\n", setup)
+        self.assertIn("/usr/local/install/cache/*", setup)
+        self.assertIn("/usr/local/install/cache/.[!.]*", setup)
+        self.assertIn("/usr/local/install/cache/..?*", setup)
+        self.assertIn("/tmp/home/.bun/install/cache/", setup)
+        self.assertIn("bun x --no-install svelte-kit sync", setup)
         for pattern in ("node_modules/*", "node_modules/.[!.]*", "node_modules/..?*"):
             self.assertIn(pattern, setup)
         self.assertIn("cp -a --no-preserve=ownership --", setup)
         self.assertNotIn("node_modules/. /workspace", setup)
+        self.assertNotIn("/source/apps/web", setup)
+        self.assertNotIn("GIT_DIR=/workspace/.gitdir", argv)
+        self.assertNotIn("GIT_WORK_TREE=/workspace", argv)
+        self.assertIn("/workspace/.gitdir/refs/heads", setup)
+        self.assertIn("HOME=/tmp/home", argv)
+        self.assertIn("BUN_INSTALL_CACHE_DIR=/tmp/home/.bun/install/cache", argv)
+
+    def test_workspace_archive_binds_exact_tracked_allowlist(self) -> None:
+        untracked = self.repository / "apps/web/ignored-secret.txt"
+        untracked.write_text("must not enter archive", encoding="utf-8")
+        with MOD.workspace_archive(self.chain) as archive:
+            self.assertEqual(archive.tree, self.chain.final_tree)
+            self.assertEqual(stat.S_IMODE(archive.snapshot.path.stat().st_mode), 0o600)
+            self.assertEqual(archive.snapshot.path.stat().st_nlink, 1)
+            with tarfile.open(archive.snapshot.path, "r:") as handle:
+                names = {item.name.rstrip("/") for item in handle.getmembers()}
+            self.assertIn("apps/web/src/lib/live-artifact-policy.test.ts", names)
+            self.assertIn("contracts/hermes-dashboard/manifest.md", names)
+            self.assertNotIn("apps/web/ignored-secret.txt", names)
+            self.assertNotIn("apps/web/README.md", names)
+            self.assertFalse(any(name.startswith("apps/web/benchmarks/") for name in names))
+            self.assertFalse(any(name == ".git" or name.startswith(".git/") for name in names))
+            MOD.verify_workspace_archive(archive)
+        self.assertFalse(archive.root.exists())
+
+        for changed in (
+            MOD.WORKSPACE_TRACKED_INPUTS[:-1],
+            (*MOD.WORKSPACE_TRACKED_INPUTS, "apps/web/README.md"),
+        ):
+            with self.subTest(paths=len(changed)), mock.patch.object(MOD, "WORKSPACE_TRACKED_INPUTS", changed):
+                with self.assertRaisesRegex(MOD.Reject, "allowlist differs"):
+                    with MOD.workspace_archive(self.chain):
+                        self.fail("changed workspace allowlist was accepted")
+        with self.assertRaisesRegex(MOD.Reject, "workspace tree inventory"):
+            with MOD.workspace_archive(replace(self.chain, final_tree="0" * 40)):
+                self.fail("wrong final tree was accepted")
+
+    def test_historical_git_dependency_set_is_closed_and_source_bound(self) -> None:
+        self.assertEqual(len(MOD.GIT_REQUIREMENTS), 11)
+        self.assertEqual(len({item.commit for item in MOD.GIT_REQUIREMENTS}), 9)
+        self.assertEqual(
+            {item.commit for item in MOD.GIT_REQUIREMENTS if item.guarded_only},
+            {
+                "a7d43f636424dcd02bf65743966db30e5aeb30f0",
+                "4c1cd74f6d703a99a29ef85a08142df45234e9f5",
+            },
+        )
+        self.assertEqual(MOD.digest(MOD._git_requirements_bytes()), MOD.GIT_REQUIREMENTS_SHA256)
+        self.assertEqual(len(MOD.GIT_DECLARATIONS), 8)
+        self.assertEqual(
+            MOD.digest(json.dumps([list(item) for item in MOD.GIT_DECLARATIONS], separators=(",", ":")).encode()),
+            MOD.GIT_DECLARATIONS_SHA256,
+        )
+
+        path = "apps/web/package.json"
+        blob = self._git("rev-parse", f"{self.final_head}:{path}")
+        requirement = MOD.GitRequirement(self.final_head, path, blob, "fixture parent")
+        requirement_bytes = json.dumps(
+            [[requirement.commit, requirement.path, requirement.blob, requirement.purpose, False]],
+            separators=(",", ":"),
+        ).encode()
+        patches = (
+            mock.patch.object(MOD, "GIT_REQUIREMENTS", (requirement,)),
+            mock.patch.object(MOD, "GIT_REQUIREMENTS_SHA256", self._sha(requirement_bytes)),
+            mock.patch.object(MOD, "GUARDED_SOURCE_HEAD", self.final_head),
+            mock.patch.object(MOD, "GUARDED_SOURCE_TREE", self.final_tree),
+            mock.patch.object(MOD, "GIT_DECLARATIONS", ()),
+            mock.patch.object(MOD, "GIT_DECLARATIONS_SHA256", self._sha(b"[]")),
+            mock.patch.object(MOD, "BENCHMARK_EVIDENCE_PATH", "apps/web/tests/bench/terminal-renderer.evidence.json"),
+            mock.patch.object(MOD, "BENCHMARK_SOURCE_COMMIT", ""),
+            mock.patch.object(MOD, "BENCHMARK_ANCHOR_COMMIT", self.final_head),
+            mock.patch.object(MOD, "BENCHMARK_EVIDENCE_BLOB", self._git("rev-parse", f"{self.final_head}:apps/web/tests/bench/terminal-renderer.evidence.json")),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+             patches[6], patches[7], patches[8], patches[9]:
+            source = MOD.historical_objects(self.chain)
+            self.assertEqual(source, self.historical)
+            MOD.verify_historical_objects(source)
+            with mock.patch.object(MOD, "GIT_REQUIREMENTS", (replace(requirement, blob="0" * 40),)), \
+                 mock.patch.object(MOD, "GIT_REQUIREMENTS_SHA256", self._sha(json.dumps(
+                     [[requirement.commit, requirement.path, "0" * 40, requirement.purpose, False]],
+                     separators=(",", ":"),
+                 ).encode())):
+                with self.assertRaisesRegex(MOD.Reject, "historical Git path differs"):
+                    MOD.historical_objects(self.chain)
+            guarded = replace(requirement, guarded_only=True)
+            with mock.patch.object(MOD, "GIT_REQUIREMENTS", (guarded,)), \
+                 mock.patch.object(MOD, "GIT_REQUIREMENTS_SHA256", self._sha(json.dumps(
+                     [[guarded.commit, guarded.path, guarded.blob, guarded.purpose, True]],
+                     separators=(",", ":"),
+                 ).encode())):
+                with self.assertRaisesRegex(MOD.Reject, "dependency set differs"):
+                    MOD.historical_objects(self.chain)
+        with self.assertRaisesRegex(MOD.Reject, "object directory changed"):
+            MOD.verify_historical_objects(replace(self.historical, object_dir_identity=(0, 0, 0, 0)))
 
     def test_gate_dispatch_splits_local_git_from_pinned_podman(self) -> None:
         git_calls: list[tuple[Path, tuple[str, ...]]] = []
@@ -237,6 +395,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
         records = MOD.run_gates(
             self.chain, self.pins, capture_environment, lambda _: None,
             local_git=local_git,
+            historical=lambda _: self.historical,
         )
         self.assertEqual([item["id"] for item in records], [gate.gate_id for gate in MOD.GATES])
         self.assertTrue(all(set(item) == {"id", "argv", "exit_code", "stdout_sha256", "stderr_sha256", "stdout_bytes", "stderr_bytes"} for item in records))
@@ -292,14 +451,16 @@ class OfflineGatesV3Tests(unittest.TestCase):
                 gate_hash = MOD.digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in changed_tuple], separators=(",", ":")).encode())
                 with mock.patch.object(MOD, "GATES", changed_tuple), mock.patch.object(MOD, "GATE_LIST_SHA256", gate_hash):
                     with self.assertRaisesRegex(MOD.Reject, "backend command"):
-                        MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=self.local_runner)
+                        MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None,
+                                      local_git=self.local_runner, historical=lambda _: self.historical)
 
         def substituted_argv(repository: Path, *args: str, stdin: bytes = b""):
             result = self.local_runner(repository, *args, stdin=stdin)
             result.args = ("/usr/bin/git", "status")
             return result
         with self.assertRaisesRegex(MOD.Reject, "git-head argv"):
-            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=substituted_argv)
+            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None,
+                          local_git=substituted_argv, historical=lambda _: self.historical)
 
     def test_dev_base_mismatch_and_pre_staged_toolchain_failure_reject(self) -> None:
         def wrong_dev(repository: Path, *args: str, stdin: bytes = b""):
@@ -308,14 +469,15 @@ class OfflineGatesV3Tests(unittest.TestCase):
                 result.stdout = ("8" * 40 + "\n").encode()
             return result
         with self.assertRaisesRegex(MOD.Reject, "git-dev-base"):
-            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=wrong_dev)
+            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None,
+                          local_git=wrong_dev, historical=lambda _: self.historical)
         def missing_bun(*args, **_: object):
             if "info" in args[0]:
                 home = Path.home().resolve()
                 runtime = Path(f"/run/user/{os.getuid()}")
                 output = f"true\n{home}/.local/share/containers/storage\n{runtime}/containers\n".encode()
                 return subprocess.CompletedProcess([], 0, output, b"")
-            return subprocess.CompletedProcess([], 0, b'[{"RepoDigests":["x@sha256:' + b"e" * 64 + b'"],"Labels":{"org.hermternal.node":"26.7.0"}}]', b"")
+            return subprocess.CompletedProcess([], 0, b'[{"RepoDigests":["x@sha256:' + b"e" * 64 + b'"],"Config":{"User":"1001:1001"},"Labels":{"org.hermternal.node":"26.7.0"}}]', b"")
         with self.assertRaisesRegex(MOD.Reject, "toolchain"):
             MOD.attest_image(self.pins, missing_bun)
 
@@ -329,7 +491,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
             if "info" in argv:
                 output = f"true\n{expected_home}/.local/share/containers/storage\n{expected_runtime}/containers\n".encode()
                 return subprocess.CompletedProcess(argv, 0, output, b"")
-            value = {"RepoDigests":["x@sha256:" + "e" * 64], "Labels": {
+            value = {"RepoDigests":["x@sha256:" + "e" * 64], "Config": {"User": f"{os.getuid()}:{os.getgid()}"}, "Labels": {
                 "org.hermternal.bun":"1.3.14", "org.hermternal.node":"26.7.0",
                 "org.hermternal.playwright":"1.62.1", "org.hermternal.dependencies-sha256":"f" * 64,
             }}
@@ -344,6 +506,17 @@ class OfflineGatesV3Tests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/tmp"}, clear=False):
             with self.assertRaisesRegex(MOD.Reject, "runtime directory"):
                 MOD.attest_image(self.pins, inspected)
+
+        def wrong_user(argv, **kwargs):
+            result = inspected(argv, **kwargs)
+            if "image" in argv:
+                value = json.loads(result.stdout)[0]
+                value["Config"]["User"] = "0:0"
+                result.stdout = json.dumps([value]).encode()
+            return result
+
+        with self.assertRaisesRegex(MOD.Reject, "image user"):
+            MOD.attest_image(self.pins, wrong_user)
 
         def wrong_store(argv, **kwargs):
             if "info" in argv:
@@ -391,7 +564,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
             return self.runner(argv, **kwargs)
         try:
             with self.assertRaisesRegex(MOD.Reject, "working bytes differ"):
-                MOD.main(["--result", str(self.result), "--completion", str(self.completion), "--report", str(self.root / "offline-gates.json")], run=mutate_after_container_boundary, attest=lambda _: None, local_git=self.local_runner)
+                MOD.main(["--result", str(self.result), "--completion", str(self.completion), "--report", str(self.root / "offline-gates.json")], run=mutate_after_container_boundary, attest=lambda _: None, local_git=self.local_runner, historical=lambda _: self.historical)
         finally:
             MOD.PINS_PATH = original
 
