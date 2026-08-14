@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.server
+import ipaddress
 import json
 import math
 import os
@@ -279,12 +280,62 @@ def _pty_query_patterns() -> tuple[str, ...]:
 PTY_QUERY_PATTERNS = _pty_query_patterns()
 
 HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$")
+# ForwardAuth receives an HTTP authority, not an arbitrary policy string. Keep
+# the syntax grammar separate from the lowercase renderer-host validator so a
+# syntactically valid uppercase or wrong DNS authority can still reach policy
+# and receive the intended 421 mismatch result.
+AUTHORITY_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?$")
+AUTHORITY_PORT_RE = re.compile(r"^[0-9]{1,5}$")
 
 
 def _validate_host(host: str) -> str:
     if type(host) is not str or not HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
         raise ValueError("host must be a concrete lowercase DNS label")
     return host
+
+
+def _validate_authority_syntax(authority: str) -> str:
+    """Validate ForwardAuth authority syntax before policy sees the value.
+
+    The policy model owns the semantic canonical-host comparison and therefore
+    must receive valid wrong authorities so it can return 421. Syntax failures
+    stay at the adapter boundary as 400: this avoids treating empty, control,
+    userinfo, bracket, or port parser inputs as a host mismatch.
+    """
+
+    if type(authority) is not str or not authority:
+        raise ValueError("ForwardAuth authority is empty")
+    try:
+        authority.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("ForwardAuth authority must be ASCII") from exc
+    if _contains_request_controls(authority) or any(character.isspace() for character in authority):
+        raise ValueError("ForwardAuth authority contains whitespace or controls")
+    if any(character in authority for character in ("/", "?", "#", "@", "\\")):
+        raise ValueError("ForwardAuth authority contains forbidden delimiters")
+
+    if authority.startswith("["):
+        closing = authority.find("]")
+        if closing <= 1 or authority[closing + 1 : closing + 2] != ":":
+            raise ValueError("ForwardAuth authority has malformed brackets")
+        host = authority[1:closing]
+        port = authority[closing + 2 :]
+        if "%" in host:
+            raise ValueError("ForwardAuth authority IPv6 zone is unsupported")
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError as exc:
+            raise ValueError("ForwardAuth authority IPv6 host is malformed") from exc
+    else:
+        if authority.count(":") != 1:
+            raise ValueError("ForwardAuth authority must contain one host port separator")
+        host, port = authority.rsplit(":", 1)
+        if not AUTHORITY_HOST_RE.fullmatch(host) or ".." in host or host.endswith("."):
+            raise ValueError("ForwardAuth authority host is malformed")
+
+    if not AUTHORITY_PORT_RE.fullmatch(port) or not 1 <= int(port) <= 65535:
+        raise ValueError("ForwardAuth authority port is malformed")
+    return authority
 
 
 def _validate_port(value: int, name: str) -> int:
@@ -966,7 +1017,7 @@ def render_manifest(
                 "static, client, and non-callback REST query mutations are model-denied",
                 "OAuth callback accepts only the reviewed code/state or provider-error query forms",
                 "standard Traefik ForwardAuth metadata is accepted: X-Forwarded-For, X-Forwarded-Host, X-Forwarded-Method, X-Forwarded-Port, X-Forwarded-Proto, and X-Forwarded-Uri",
-                "a present noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; missing, duplicate, or malformed ForwardAuth metadata is adapter-denied",
+                "a present syntactically valid noncanonical X-Forwarded-Host reaches the policy model and returns edge 421; empty, whitespace/control, malformed-authority, missing, or duplicate metadata is adapter-denied with 400",
                 "X-Forwarded-Port must equal the configured HTTPS entrypoint port",
                 "only Origin is selected as an additional original request header; the auth request Host is transport-only and not the public authority",
                 "the adapter accepts only the generated ForwardAuth set, Origin, and explicit bounded transport headers; Authorization, Cookie, and unknown headers are denied",
@@ -996,7 +1047,7 @@ def render_manifest(
                 "actual HTTP requests reach the bounded closed-contract ForwardAuth adapter",
                 "X-Forwarded-Port is checked against the configured HTTPS entrypoint port",
                 "accepted requests return ForwardAuth 200 and denied requests return bounded edge status",
-                "a present noncanonical X-Forwarded-Host returns the modeled edge 421 without an upstream request",
+                "a present syntactically valid noncanonical X-Forwarded-Host returns modeled edge 421; empty, whitespace/control, or malformed authority returns adapter 400",
                 "C0, DEL, and C1 request-target controls are denied before route matching",
                 "X-Forwarded-Uri path/query parsing is executable locally; raw-target and WebSocket handshake observation are not claimed",
                 "blocked edge and network vectors retain upstream_request=false in the annotated evidence",
@@ -2092,12 +2143,13 @@ def _forward_auth_policy_input(
 ) -> tuple[str, str, str, list[tuple[str, str]]]:
     """Extract the bounded ForwardAuth input without masking host denials.
 
-    A present, single but noncanonical ``X-Forwarded-Host`` is a valid request
-    to the policy boundary and must reach ``policy_decision`` so it returns the
-    intended edge ``421``. Missing, duplicate, or malformed metadata remains a
-    ``400`` adapter-contract failure. Keeping that distinction makes a real
-    Traefik wrong-host request behave like the retained vector instead of
-    silently replacing it with a canonical synthetic header.
+    A present, single, syntactically valid but noncanonical
+    ``X-Forwarded-Host`` is a valid request to the policy boundary and must
+    reach ``policy_decision`` so it returns the intended edge ``421``. Empty,
+    whitespace/control, malformed-authority, missing, or duplicate metadata
+    remains a ``400`` adapter-contract failure. Keeping that distinction makes
+    a real Traefik wrong-host request behave like the retained vector instead
+    of silently replacing it with a canonical synthetic header.
     """
 
     inputs = _validate_runtime_inputs(runtime_inputs)
@@ -2114,11 +2166,12 @@ def _forward_auth_policy_input(
         raise ValueError("ForwardAuth port or scheme is not canonical")
     if not required["X-Forwarded-For"]:
         raise ValueError("ForwardAuth client address is missing")
+    forwarded_host = _validate_authority_syntax(str(required["X-Forwarded-Host"]))
     method = str(required["X-Forwarded-Method"])
     path, query = _parse_forwarded_uri(str(required["X-Forwarded-Uri"]))
     origin = _single_header(headers, "Origin") or ""
     policy_headers = [
-        ("X-Forwarded-Host", str(required["X-Forwarded-Host"])),
+        ("X-Forwarded-Host", forwarded_host),
         ("X-Forwarded-Port", str(inputs["https_port"])),
         ("X-Forwarded-Proto", "https"),
         ("Origin", origin),

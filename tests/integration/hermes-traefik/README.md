@@ -42,17 +42,21 @@ that is the router matcher contract. The executable policy adapter requires the
 standard ForwardAuth metadata: exactly one `X-Forwarded-Host` value (the
 canonical authority is `traefik-92.test:19444`), `X-Forwarded-For`,
 `X-Forwarded-Method`, `X-Forwarded-Port: 19444`, `X-Forwarded-Proto: https`,
-and `X-Forwarded-Uri`. A present but noncanonical
+and `X-Forwarded-Uri`. A present, syntactically valid but noncanonical
 `X-Forwarded-Host` is passed to the policy model and returns the retained edge
-`421`; missing, duplicate, or malformed metadata is an adapter-contract `400`.
-This keeps the real wrong-host ForwardAuth request aligned with the synthetic
-vector instead of replacing it with a canonical header. Only copied `Origin`
-is permitted beside that generated set. The adapter's ordinary `Host` is an
-ignored ForwardAuth-service transport header, not the public authority.
+`421`. Empty, whitespace/control, missing-port, malformed host/port/bracket, or
+userinfo authorities are rejected at the adapter boundary with `400`; duplicate
+ForwardAuth metadata is also `400`. This keeps the real wrong-host ForwardAuth
+request aligned with the synthetic vector instead of replacing it with a
+canonical header. Only copied `Origin` is permitted beside that generated set.
+The adapter's ordinary `Host` is an ignored ForwardAuth-service transport
+header, not the public authority.
 `Content-Length`, `User-Agent`, `Accept-Encoding`, and `Connection: close` are
 explicit bounded transport exceptions; they are never policy input or upstream
-forwarding. `Authorization`, `Cookie`, unknown headers, and other connection
-tokens fail closed. The port value is checked against the configured HTTPS
+forwarding. Malformed or oversized `Content-Length` is a separate `413` framing
+denial, not an authority-metadata `400`. `Authorization`, `Cookie`, unknown
+headers, and other connection tokens fail closed. The port value is checked
+against the configured HTTPS
 entrypoint rather than trusted as arbitrary forwarded input. `X-Forwarded-Uri`
 includes the query and is parsed for the closed route grammar; it is not raw
 request-target evidence. No separate raw-target, path, query, Upgrade, or
