@@ -59,6 +59,8 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             verifier.LEGACY_AUTHORITY_PATH,
             verifier.BOOTSTRAP_AUTHORITY_PATH,
             verifier.AUTHORITY_PATH,
+            verifier.PIN_PATH,
+            verifier.BUNDLE_PATH,
             *verifier.EXPECTED_ARTIFACT_PATHS,
         )
         cls.object_repo_temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-class-repo-")
@@ -129,8 +131,9 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
         This helper intentionally does not call ``seed_protected_objects``. Its
         callers exercise missing, replaced, alternate, promisor, and packed
-        layouts, so retaining the ordinary single-branch pack keeps those
-        regressions separate from the loose-only success fixture.
+        layouts, so retaining the ordinary clone pack keeps those regressions
+        separate from the loose-only success fixture. The clone follows the
+        current exact checkout tip and does not depend on a local branch name.
         """
 
         temporary = tempfile.TemporaryDirectory(prefix="fixture-authority-object-repo-")
@@ -140,9 +143,7 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                 "git",
                 "clone",
                 "--no-local",
-                "--single-branch",
-                "--branch",
-                "fix/fixture-authority-hardened-a707",
+                "--no-tags",
                 "--quiet",
                 str(ROOT),
                 str(object_repo),
@@ -485,23 +486,23 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
 
     def test_hardened_pin_bundle_and_manifest_are_exact(self) -> None:
         pin = json.loads(HARDENED_PIN_FILE.read_text(encoding="utf-8"))
-        self.assertEqual(
-            tuple(pin),
-            ("schema", "authority_path", "authority_commit", "source_commit"),
-        )
-        self.assertEqual(pin["schema"], "hermternal.fixture-registry-authority-pin.v1")
+        self.assertEqual(tuple(pin), verifier.PIN_KEYS)
+        self.assertEqual(pin["schema"], verifier.PIN_SCHEMA)
         self.assertEqual(pin["authority_path"], verifier.AUTHORITY_PATH)
         self.assertEqual(pin["authority_commit"], verifier.EXPECTED_AUTHORITY_COMMIT)
         self.assertEqual(pin["source_commit"], verifier.EXPECTED_SOURCE_COMMIT)
+        self.assertEqual(pin["source_prefix"], verifier.EXPECTED_SOURCE_PREFIX)
+        self.assertEqual(pin["bundle_path"], verifier.BUNDLE_PATH)
+        self.assertEqual(pin["bundle_size_bytes"], verifier.EXPECTED_BUNDLE_SIZE_BYTES)
+        self.assertEqual(pin["bundle_sha256"], verifier.EXPECTED_BUNDLE_SHA256)
+        self.assertEqual(pin["closure"], verifier.EXPECTED_CLOSURE)
         self.assertEqual(
-            PROTECTED_OBJECTS[2:],
-            (
-                ("hardened-authority", verifier.EXPECTED_AUTHORITY_COMMIT),
-                ("hardened-source", verifier.EXPECTED_SOURCE_COMMIT),
-            ),
+            tuple((item["name"], item["ref"], item["object"]) for item in pin["expected_refs"]),
+            verifier.EXPECTED_REF_RECORDS,
         )
         verify_trusted_bundle()
-        trusted = verifier.load_trusted_authority(self.object_repo)
+        trusted = verifier.load_trusted_authority(self.object_repo, checkout_root=ROOT)
+        self.assertEqual(trusted["pin"], pin)
         self.assertEqual(trusted["authority_path"], pin["authority_path"])
         self.assertEqual(trusted["authority_commit"], pin["authority_commit"])
         self.assertEqual(trusted["source_commit"], pin["source_commit"])
@@ -563,28 +564,39 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
         legacy = verifier.load_legacy_authority(ROOT)
         self.assertEqual(legacy["schema"], verifier.LEGACY_AUTHORITY_SCHEMA)
 
-    def test_fc33_parent_is_stale_for_hardened_adoption(self) -> None:
+    def test_refreshed_source_parent_is_stale_for_final_adoption(self) -> None:
+        # The reviewed hardened authority is the valid immediate correction
+        # parent; its first parent remains the explicit refreshed adoption
+        # source. Keep this ancestry check pinned to reviewed objects rather
+        # than discovering authority from the current checkout HEAD.
         parent = subprocess.check_output(
-            ["git", "-C", str(ROOT), "rev-parse", "HEAD^"],
+            ["git", "-C", str(ROOT), "rev-parse", f"{verifier.EXPECTED_AUTHORITY_COMMIT}^0"],
             text=True,
         ).strip()
         self.assertEqual(parent, verifier.EXPECTED_AUTHORITY_COMMIT)
-        for relative_path in (
-            "scripts/fixture_registry_authority.v2.hardened.pin.json",
-            "scripts/fixture_registry_authority.objects.bundle",
-            "scripts/fixture_authority_test_source.py",
-        ):
-            missing = subprocess.run(
-                ["git", "-C", str(ROOT), "cat-file", "-e", f"{parent}:{relative_path}"],
-                check=False,
-                capture_output=True,
+        source_parent = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", f"{parent}^1"],
+            text=True,
+        ).strip()
+        self.assertEqual(source_parent, verifier.EXPECTED_SOURCE_COMMIT)
+        parent_pin = json.loads(
+            subprocess.check_output(
+                ["git", "-C", str(ROOT), "show", f"{source_parent}:{verifier.PIN_PATH}"],
             )
-            self.assertNotEqual(missing.returncode, 0, relative_path)
-        parent_verifier = subprocess.check_output(
-            ["git", "-C", str(ROOT), "show", f"{parent}:scripts/verify_fixture_registry_authority.py"],
         )
-        self.assertNotIn(b"fixture_registry_authority.v2.hardened.json", parent_verifier)
-        self.assertIn(b"fixture_registry_authority.v2.json", parent_verifier)
+        self.assertEqual(parent_pin["schema"], "hermternal.fixture-registry-authority-pin.v1")
+        self.assertEqual(parent_pin["authority_commit"], "fc33b1f461321f319b8c2566d9f0faf6c535b77b")
+        self.assertEqual(parent_pin["source_commit"], "a707f5af9612118d6d41450c5090e5c11c3e5c10")
+        parent_source = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{source_parent}:scripts/fixture_authority_test_source.py"],
+        )
+        self.assertIn(b"TRUSTED_BUNDLE_SIZE_BYTES = 2_986_828", parent_source)
+        self.assertIn(b"d61bf4316acbeca06863f527ffcf1cc6bce04d2ffa0261d8548c3a1867b15050", parent_source)
+        parent_verifier = subprocess.check_output(
+            ["git", "-C", str(ROOT), "show", f"{source_parent}:scripts/verify_fixture_registry_authority.py"],
+        )
+        self.assertNotIn(verifier.PIN_SCHEMA.encode("ascii"), parent_verifier)
+        self.assertIn(b"fc33b1f461321f319b8c2566d9f0faf6c535b77b", parent_verifier)
 
     def test_legacy_v1_path_and_fields_remain_readable(self) -> None:
         legacy = verifier.load_legacy_authority(ROOT)
@@ -1061,22 +1073,22 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             text=True,
         ).strip()
         self.assertEqual(first_parent, source_commit)
-        introduced = subprocess.check_output(
+        changed = subprocess.check_output(
             [
                 "git",
                 "-C",
                 str(self.object_repo),
-                "log",
-                "--format=%H",
-                "--diff-filter=A",
-                "--first-parent",
-                "HEAD",
+                "diff-tree",
+                "--no-commit-id",
+                "--name-status",
+                "-r",
+                authority_commit,
                 "--",
                 verifier.AUTHORITY_PATH,
             ],
             text=True,
         ).splitlines()
-        self.assertEqual(introduced, [authority_commit])
+        self.assertEqual(changed, [f"M\t{verifier.AUTHORITY_PATH}"])
         for record in trusted["artifact_manifest"]:
             object_bytes = subprocess.check_output(
                 ["git", "-C", str(self.object_repo), "show", f"{source_commit}:{record['path']}"],
@@ -1280,19 +1292,10 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
                         self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
                     continue
                 elif variant == "ref":
-                    # Create a deterministic loose ref instead of assuming
-                    # the caller checkout has a symbolic HEAD. This keeps the
-                    # race regression valid for detached exact-SHA checkouts.
-                    ref_name = "refs/heads/authority-race"
-                    target = git_dir / ref_name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(
-                        subprocess.check_output(
-                            ["git", "-C", str(object_repo), "rev-parse", "HEAD"],
-                            text=True,
-                        ),
-                        encoding="ascii",
-                    )
+                    # Replace an existing protected ref only after the private
+                    # snapshot has been walked. The source mutation must not
+                    # alter the descriptor-anchored snapshot.
+                    target = git_dir / "refs/fixture-authority/hardened-source"
                     backup = target.with_name(target.name + ".saved")
                     outside.write_text("0" * 40 + "\n", encoding="ascii")
                     mutate = lambda: (target.rename(backup), target.symlink_to(outside))
@@ -1419,6 +1422,98 @@ class FixtureRegistryAuthorityTests(unittest.TestCase):
             text=True,
         )
         self.assert_bounded_failure(completed)
+
+    def test_active_pin_mutations_fail_closed_in_both_modes(self) -> None:
+        mutations = ("schema", "authority_commit", "source_commit", "source_prefix", "bundle_path", "bundle_sha256", "bundle_size_bytes", "closure", "expected_refs", "verifier")
+        for field in mutations:
+            with self.subTest(field=field):
+                with self.copy_checkout() as temporary:
+                    checkout = Path(temporary)
+                    pin_path = checkout / verifier.PIN_PATH
+                    pin = json.loads(pin_path.read_text(encoding="utf-8"))
+                    if field == "closure":
+                        pin[field]["object_count"] += 1
+                    elif field == "expected_refs":
+                        pin[field].append(dict(pin[field][0]))
+                    elif field == "verifier":
+                        pin[field]["max_git_output_bytes"] += 1
+                    elif field == "bundle_size_bytes":
+                        pin[field] += 1
+                    elif field == "schema":
+                        pin[field] = "hermternal.fixture-registry-authority-pin.v1"
+                    elif field == "bundle_path":
+                        pin[field] = "scripts/other.bundle"
+                    else:
+                        pin[field] = "0" * (64 if field == "bundle_sha256" else 40)
+                    pin_path.write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
+                    self.assert_pair_failure(checkout)
+
+    def test_snapshot_ref_set_is_exact_and_loose(self) -> None:
+        variants = ("unexpected", "missing", "symbolic", "packed", "peeled")
+        for variant in variants:
+            with self.subTest(variant=variant):
+                object_temporary, object_repo = self.copy_success_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                refs = object_repo / ".git/refs"
+                if variant == "unexpected":
+                    target = refs / "heads/unexpected"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(verifier.EXPECTED_AUTHORITY_COMMIT + "\n", encoding="ascii")
+                elif variant == "missing":
+                    (refs / "fixture-authority/hardened-source").unlink()
+                elif variant == "symbolic":
+                    (refs / "fixture-authority/hardened-source").write_text(
+                        "ref: refs/fixture-authority/hardened-authority\n", encoding="ascii"
+                    )
+                else:
+                    (object_repo / ".git/packed-refs").write_text(
+                        "# pack-refs with: peeled fully-peeled\n"
+                        f"{verifier.EXPECTED_AUTHORITY_COMMIT} refs/tags/peeled\n"
+                        "^0000000000000000000000000000000000000000\n",
+                        encoding="ascii",
+                    )
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_snapshot_fallback_metadata_is_rejected(self) -> None:
+        variants = (
+            "objects/info/multi-pack-index",
+            "objects/info/commit-graph",
+            "objects/info/alternates",
+            "objects/info/http-alternates",
+            "objects/info/promisor",
+            "objects/pack/pack-test.pack",
+            "objects/pack/pack-test.idx",
+            "objects/pack/pack-test.promisor",
+        )
+        for relative in variants:
+            with self.subTest(relative=relative):
+                object_temporary, object_repo = self.copy_success_object_repo()
+                self.addCleanup(object_temporary.cleanup)
+                target = object_repo / ".git" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"fallback\n")
+                with self.copy_checkout() as checkout_temporary:
+                    self.assert_pair_failure(Path(checkout_temporary), object_repo=object_repo)
+
+    def test_unpinned_loader_and_introduction_arguments_fail_closed(self) -> None:
+        with self.assertRaises(verifier.AuthorityError):
+            verifier.load_trusted_authority(
+                self.object_repo,
+                checkout_root=ROOT,
+                expected_authority_commit=None,
+            )
+        with self.assertRaises(verifier.AuthorityError):
+            verifier.load_trusted_authority(
+                self.object_repo,
+                checkout_root=ROOT,
+                expected_source_commit=None,
+            )
+        with self.assertRaises(verifier.AuthorityError):
+            verifier._authority_introduction_commit(
+                self.object_repo,
+                expected_commit=None,
+            )
 
 
 if __name__ == "__main__":
