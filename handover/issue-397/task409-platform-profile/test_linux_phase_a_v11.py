@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -54,10 +55,20 @@ class PhaseAV11Tests(unittest.TestCase):
             phase_snapshot = runner.stable_read(
                 runner.EXTERNAL_ROOT / "evidence" / runner.PHASE_A_RECORD, "phase"
             )
-            owner_snapshot = runner.stable_read(
-                runner.EXTERNAL_ROOT / "phase-a" / ".owner", "Phase A owner", mode=0o600
-            )
+            owner_path = runner.EXTERNAL_ROOT / "phase-a" / ".owner"
+            owner_snapshot = runner.stable_read(owner_path, "Phase A owner")
+            owner_state = os.lstat(owner_path)
+            self.assertTrue(stat.S_ISREG(owner_state.st_mode))
+            self.assertEqual(stat.S_IMODE(owner_state.st_mode), 0o600)
+            self.assertEqual(owner_state.st_nlink, 1)
+            self.assertEqual(dict(owner_snapshot.identity), runner._identity(owner_state))
+            self.assertEqual(owner_snapshot, runner.stable_read(owner_path, "Phase A owner repeat"))
+            self.assertEqual(owner_snapshot.sha256, hashlib.sha256(owner_snapshot.raw).hexdigest())
             owner = json.loads(owner_snapshot.raw)
+            self.assertEqual(
+                owner_snapshot.raw,
+                (json.dumps(owner, sort_keys=True, separators=(",", ":")) + "\n").encode(),
+            )
             anchor = runner.anchor(
                 modules, repository_root=runner.REPOSITORY_ROOT,
                 external_root=runner.EXTERNAL_ROOT,
