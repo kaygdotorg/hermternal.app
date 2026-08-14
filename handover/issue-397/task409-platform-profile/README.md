@@ -180,7 +180,14 @@ twice with `O_NOFOLLOW`. It checks full file identity and SHA-256, then compiles
 and executes those exact buffers. A pathname reopen cannot select different
 code, and an earlier unverified `forbidden_proof` import cannot win resolution.
 
-`linux_retained_driver_v7.py` changes only the generated clone predicate.
+`linux_retained_driver_v7.py` keeps the reviewed local-pack preservation step
+and corrects the generated replay invariants found by the disposable core run.
+It resolves relative Git object paths from the replay repository, carries the
+exact authenticated post-state for each active range, semantic, matrix, and
+README-merge operation into the commit gate, and ignores shared `/tmp` link
+count churn while it still binds directory device, inode, owner, mode, and
+canonical path. It disables Git's optional reverse-index sidecar for the final
+retained pack, so the verified output stays an exact pack/index pair.
 `linux_replay_wrapper_v7.py` stays disabled. `linux_phase_a_v11.py` binds the
 canonical record, record SHA-256, and policy SHA-256 in a new create-only owner
 and evidence root. `linux_replay_failure_v10.py` uses a separate failure root.
@@ -200,6 +207,10 @@ successor also binds that nested loader to the already authenticated v7
 wrapper. Thus, the final public stdin has exactly one local-pack preservation
 call before clean-primary validation. The regression compares the public stdin
 with independently derived v7 bytes; it does not execute that stdin.
+`test_linux_retained_driver_v7_object_path.py` also enumerates all 79 commit
+operations in the frozen matrix. It requires one exact post-state for every
+path in each active operation and proves that the generated commit gate does
+not call the old global path-state inference.
 The successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
 bytes. It uses the separate, create-only
 `hermternal-issue397-replay-failure-v11` root only if a later approved replay
