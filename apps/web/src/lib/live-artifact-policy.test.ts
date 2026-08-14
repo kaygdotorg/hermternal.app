@@ -20,6 +20,10 @@ import {
   removeLiveArtifacts,
   scrubLivePage
 } from '../../tests/live/live-artifact-policy.mjs';
+import {
+  createLivePlaywrightConfig,
+  getLivePlaywrightPaths
+} from '../../tests/live/live-playwright-config.mjs';
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -52,6 +56,7 @@ async function runSyntheticPlaywright(
   specSource: string,
   options: {
     runnerDebug?: string;
+    pwDebug?: string;
     retries?: number;
     reportOutputRoot?: boolean;
   } = {}
@@ -141,6 +146,8 @@ export default defineConfig({
   };
   if (options.runnerDebug === undefined) delete childEnvironment.PW_RUNNER_DEBUG;
   else childEnvironment.PW_RUNNER_DEBUG = options.runnerDebug;
+  if (options.pwDebug === undefined) delete childEnvironment.PWDEBUG;
+  else childEnvironment.PWDEBUG = options.pwDebug;
   if (options.reportOutputRoot) childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT = '1';
   else delete childEnvironment.SYNTHETIC_REPORT_OUTPUT_ROOT;
 
@@ -277,11 +284,31 @@ describe('live Playwright artifact policy', () => {
     expect(liveCredentialValues({})).toContain('hermternal-test');
   });
 
-  it('rejects Playwright debug mode before the live worker can start', () => {
+  it('rejects Playwright runner and UI debug modes before the live worker can start', () => {
     expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: '1' })).toThrow(
       'PW_RUNNER_DEBUG is incompatible with the credential-redacted live lane'
     );
-    expect(() => assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined })).not.toThrow();
+    expect(() => assertLiveRunnerDebugDisabled({ PWDEBUG: '1' })).toThrow(
+      'PWDEBUG is incompatible with the deterministic headless live lane'
+    );
+    expect(() =>
+      assertLiveRunnerDebugDisabled({ PW_RUNNER_DEBUG: undefined, PWDEBUG: undefined })
+    ).not.toThrow();
+  });
+
+  it('captures only explicitly credential-bearing inherited values', () => {
+    const values = liveCredentialValues({
+      HERMES_TEST_USERNAME: 'synthetic-user',
+      HERMES_TEST_PASSWORD: 'synthetic-password',
+      NODE_OPTIONS: '--require=/tmp/untrusted.cjs',
+      AWS_SECRET_ACCESS_KEY: 'unrelated-secret',
+      PW_RUNNER_DEBUG: '1',
+      PWDEBUG: '1'
+    });
+
+    expect(values).toEqual(['hermternal-test', 'synthetic-user', 'synthetic-password']);
+    expect(values).not.toContain('--require=/tmp/untrusted.cjs');
+    expect(values).not.toContain('unrelated-secret');
   });
 
   it('structurally redacts textarea and select bodies and fails closed on malformed forms', () => {
@@ -1099,6 +1126,21 @@ test('debug mode must be rejected', async () => {
     expect(output).not.toContain('TEST:');
   }, 30_000);
 
+  it('rejects PWDEBUG before a live worker can start', async () => {
+    const result = await runSyntheticPlaywright(`
+import { test } from ${JSON.stringify(playwrightEntryUrl)};
+const secret = 'synthetic-password';
+test('UI debug mode must be rejected', async () => {
+  throw new Error(secret);
+});
+`, { pwDebug: '1' });
+    const output = result.stdout + result.stderr;
+    expect(result.code).not.toBe(0);
+    expect(output).not.toContain('synthetic-password');
+    expect(output).toContain('PWDEBUG is incompatible with the deterministic headless live lane');
+    expect(output).not.toContain('TEST:');
+  }, 30_000);
+
   it('runs attachment and output cleanup before propagating a redaction failure', async () => {
     const outputRoot = liveArtifactOutputDirectory();
     const testOutput = join(outputRoot, 'redaction-failure');
@@ -1450,29 +1492,64 @@ test('sequential test sees the same root', async ({}, testInfo) => {
   it('pins the live config to no media artifacts, no retained output, and safe reporting', async () => {
     const config = await readFile(resolve(appRoot, 'playwright.live.config.ts'), 'utf8');
 
-    expect(config).toContain('outputDir: livePlaywrightOutputDirectory');
-    expect(config).toContain("join(liveOutputDirectory, '.playwright-output')");
+    expect(config).toContain('createLivePlaywrightConfig');
+    expect(config).toContain('outputDirectory: liveOutputDirectory');
+    const configFactory = await readFile(resolve(appRoot, 'tests/live/live-playwright-config.mjs'), 'utf8');
+    expect(configFactory).toContain("outputDir: join(outputDirectory, '.playwright-output')");
+    const paths = getLivePlaywrightPaths(
+      pathToFileURL(resolve(appRoot, 'playwright.live.config.ts')).href
+    );
+    const generatedConfig = createLivePlaywrightConfig({
+      paths,
+      port: 4187,
+      outputDirectory: join(tmpdir(), 'hermternal-live-artifact-policy-config'),
+      launchOptions: {},
+      desktopChrome: {}
+    });
+    expect(generatedConfig.outputDir).toBe(
+      join(tmpdir(), 'hermternal-live-artifact-policy-config', '.playwright-output')
+    );
+    expect(generatedConfig.preserveOutput).toBe('never');
+    expect(generatedConfig.reporter).toEqual([[paths.safeReporterFile]]);
+    expect(generatedConfig.globalTeardown).toBe(paths.teardownFile);
+    expect(generatedConfig.use).toMatchObject({
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      colorScheme: 'light',
+      locale: 'en-US',
+      timezoneId: 'UTC'
+    });
+    expect(generatedConfig.use.contextOptions).toEqual({ reducedMotion: 'reduce' });
+    expect(generatedConfig.use.viewport).toEqual({ width: 1440, height: 960 });
+    expect(generatedConfig.use.deviceScaleFactor).toBe(1);
+    expect(generatedConfig.projects).toHaveLength(1);
+    expect(generatedConfig.projects[0].use).toMatchObject({
+      trace: 'off',
+      video: 'off',
+      screenshot: 'off',
+      colorScheme: 'light',
+      locale: 'en-US',
+      timezoneId: 'UTC',
+      viewport: { width: 1440, height: 960 },
+      deviceScaleFactor: 1,
+      contextOptions: { reducedMotion: 'reduce' }
+    });
     expect(config).toContain('PLAYWRIGHT_LIVE_OUTPUT_TOKEN');
-    expect(config).toContain("preserveOutput: 'never'");
-    expect(config).toContain("reporter: [['./tests/live/safe-reporter.mjs']]");
-    expect(config).toContain("globalTeardown: './tests/live/live-artifact-teardown.mjs'");
-    expect(config).toContain("process.env.PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = '/dev/null'");
-    expect(config).toContain('live-ipc-guard.cjs');
+    expect(config).toContain('PLAYWRIGHT_LAST_RUN_OUTPUT_FILE = devNull');
+    expect(configFactory).toContain("ipcGuardFile: join(liveTestsDirectory, 'live-ipc-guard.cjs')");
     expect(config).toContain('assertLiveRunnerDebugDisabled');
     expect(config).toContain('NODE_OPTIONS');
-    expect(config).toContain("trace: 'off'");
-    expect(config).toContain("video: 'off'");
-    expect(config).toContain("screenshot: 'off'");
-    expect(config).toContain("reducedMotion: 'reduce'");
-    expect(config).toContain("locale: 'en-US'");
-    expect(config).toContain("timezoneId: 'UTC'");
-    expect(config).toContain('viewport: { width: 1440, height: 960 }');
-    expect(config).toContain('deviceScaleFactor: 1');
-    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
-    expect(capture).toContain("route: '/'");
-    expect(capture).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
+    const captureContract = await readFile(resolve(appRoot, 'tests/live/live-screenshot-contract.mjs'), 'utf8');
+    expect(captureContract).toContain("route: '/'");
+    expect(captureContract).toContain("capture_state: LIVE_SCREENSHOT_CAPTURE_STATE");
+    // Screenshot options live in the proof-bound in-memory helper; the
+    // declarative contract must not reintroduce the removed raw-file path.
+    const capture = await readFile(resolve(appRoot, 'tests/live/live-screenshot-capture.mjs'), 'utf8');
+    expect(capture).toContain('captureLocator.screenshot({');
     expect(capture).toContain("fullPage: false");
     expect(capture).toContain("animations: 'disabled'");
     expect(capture).toContain("caret: 'hide'");
+    expect(capture).not.toContain('page.screenshot');
   });
 });

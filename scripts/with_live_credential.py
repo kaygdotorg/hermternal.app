@@ -7,7 +7,9 @@ exact caller-selected marker path, loads it without selecting a candidate, and
 revalidates the pinned credential identity immediately before reading through a
 non-following file descriptor. The password is never printed or written by this
 helper; it exists only in the child process environment as
-``HERMES_TEST_PASSWORD``.
+``HERMES_TEST_PASSWORD``. The child environment is rebuilt from an explicit
+reviewed allowlist, so inherited passwords, preload hooks, proxy settings, and
+unrelated secrets do not cross the credential boundary.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Mapping, NoReturn, Sequence
@@ -43,6 +46,42 @@ MAX_PROOF_OPTIONS_BYTES = (
     + sum(len(key.encode("utf-8")) for key in _PROOF_OPTION_KEYS)
 )
 LIVE_RUNNER_DEBUG_ENV = "PW_RUNNER_DEBUG"
+LIVE_RUNNER_UI_DEBUG_ENV = "PWDEBUG"
+LIVE_RUNNER_DEBUG_ENVS = (LIVE_RUNNER_DEBUG_ENV, LIVE_RUNNER_UI_DEBUG_ENV)
+SAFE_CHILD_ENV_NAMES = (
+    "PATH",
+    "HERMES_LIVE_TARGET",
+    "HERMES_TEST_USERNAME",
+    "PLAYWRIGHT_LIVE_PORT",
+    "HERMTERNAL_LIVE_RECONCILIATION",
+    # Screenshot capture reads these proof-bound gates in the child process.
+    "HERMTERNAL_LIVE_SCREENSHOT_CAPTURE",
+    "HERMTERNAL_PAPER_PARITY_APPROVED",
+    "HERMTERNAL_LIVE_SCREENSHOT_CLIENT_SHA",
+    "HERMTERNAL_LIVE_SCREENSHOT_RETAIN",
+    "HERMTERNAL_LIVE_SCREENSHOT_REVIEW",
+    "HERMTERNAL_LIVE_SCREENSHOT_DESTINATION",
+)
+
+# The live proof accepts only the two reviewed command forms documented by the
+# handoff contract. Bare names are resolved from this fixed list; ambient PATH
+# lookup is never used. Homebrew's stable bin links are accepted only after
+# their final canonical target and every parent directory pass the same trust
+# checks as a direct system executable.
+TRUSTED_EXECUTABLE_CANDIDATES = {
+    "bun": (
+        "/opt/homebrew/bin/bun",
+        "/usr/local/bin/bun",
+        "/usr/bin/bun",
+        "/opt/local/bin/bun",
+    ),
+    "node": (
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+        "/opt/local/bin/node",
+    ),
+}
 
 
 class LiveProofCredentialError(Exception):
@@ -293,6 +332,90 @@ def read_credential_file(
                 pass
 
 
+def _trusted_directory_chain(path: Path) -> None:
+    """Require every fixed executable parent to be a private real directory."""
+
+    if not path.is_absolute():
+        raise LiveProofCredentialError("live_proof_command_invalid")
+    current = Path(path.anchor)
+    try:
+        components = path.relative_to(current).parts
+    except ValueError:
+        raise LiveProofCredentialError("live_proof_command_invalid") from None
+    current_uid = getattr(os, "getuid", lambda: None)()
+    for component in components:
+        current /= component
+        try:
+            info = current.lstat()
+        except OSError:
+            raise LiveProofCredentialError("live_proof_command_invalid") from None
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or (info.st_mode & 0o022) != 0
+            or (current_uid is not None and info.st_uid not in {0, current_uid})
+        ):
+            raise LiveProofCredentialError("live_proof_command_invalid")
+
+
+def _validate_trusted_executable(candidate: str) -> str:
+    """Return a canonical fixed executable after ownership/mode checks."""
+
+    path = Path(candidate)
+    if not path.is_absolute() or str(path) != candidate:
+        raise LiveProofCredentialError("live_proof_command_invalid")
+    try:
+        lexical = path.lstat()
+        _trusted_directory_chain(path.parent)
+        canonical = path.resolve(strict=True)
+        _trusted_directory_chain(canonical.parent)
+        target = canonical.lstat()
+        current_uid = getattr(os, "getuid", lambda: None)()
+        if (
+            not stat.S_ISREG(target.st_mode)
+            or (target.st_mode & 0o111) == 0
+            or (target.st_mode & 0o022) != 0
+            or (current_uid is not None and target.st_uid not in {0, current_uid})
+            or canonical != canonical.resolve(strict=True)
+        ):
+            raise LiveProofCredentialError("live_proof_command_invalid")
+        # A final stable bin link is acceptable, but its target is what execve
+        # receives. The lexical entry itself must still be a file or symlink;
+        # parent validation above prevents a writable link directory.
+        if not (stat.S_ISREG(lexical.st_mode) or stat.S_ISLNK(lexical.st_mode)):
+            raise LiveProofCredentialError("live_proof_command_invalid")
+        if not os.access(canonical, os.X_OK):
+            raise LiveProofCredentialError("live_proof_command_invalid")
+    except LiveProofCredentialError:
+        raise
+    except (OSError, RuntimeError, ValueError):
+        raise LiveProofCredentialError("live_proof_command_invalid") from None
+    return str(canonical)
+
+
+def _resolve_trusted_executable(command: str) -> str:
+    """Resolve only a reviewed bare name or an exact fixed candidate path."""
+
+    if type(command) is not str or not command:
+        raise LiveProofCredentialError("live_proof_command_invalid")
+    candidates = TRUSTED_EXECUTABLE_CANDIDATES.get(command)
+    if candidates is None:
+        candidates = tuple(
+            candidate
+            for entries in TRUSTED_EXECUTABLE_CANDIDATES.values()
+            for candidate in entries
+            if candidate == command
+        )
+    if not candidates:
+        raise LiveProofCredentialError("live_proof_command_invalid")
+    for candidate in candidates:
+        try:
+            return _validate_trusted_executable(candidate)
+        except LiveProofCredentialError:
+            continue
+    raise LiveProofCredentialError("live_proof_command_invalid")
+
+
 def run_with_credential(
     marker_path: Path,
     *,
@@ -305,7 +428,9 @@ def run_with_credential(
 
     if not command:
         raise LiveProofCredentialError("command_missing")
-    if os.environ.get(LIVE_RUNNER_DEBUG_ENV):
+    # Both Playwright debug modes bypass the detached, redacted live-proof
+    # boundary; reject them before marker access or child startup.
+    if any(os.environ.get(name) for name in LIVE_RUNNER_DEBUG_ENVS):
         raise LiveProofCredentialError("live_runner_debug_incompatible")
     password = read_credential_file(
         marker_path,
@@ -313,13 +438,20 @@ def run_with_credential(
         credential_file=credential_file,
         credential_identity=credential_identity,
     )
-    environment = os.environ.copy()
+    executable = _resolve_trusted_executable(command[0])
+    # Do not inherit ambient credentials, preload hooks, proxy settings, or
+    # unrelated secrets. The validated password is the only newly injected key.
+    environment = {
+        name: os.environ[name]
+        for name in SAFE_CHILD_ENV_NAMES
+        if name in os.environ
+    }
     environment["HERMES_TEST_PASSWORD"] = password
     try:
-        os.execvpe(command[0], list(command), environment)
+        os.execve(executable, [executable, *list(command[1:])], environment)
     except OSError:
         raise LiveProofCredentialError("live_proof_command_failed") from None
-    raise AssertionError("os.execvpe returned")
+    raise AssertionError("os.execve returned")
 
 
 def _proof_json(raw: str) -> object:
