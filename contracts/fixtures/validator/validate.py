@@ -136,7 +136,7 @@ BASELINE_REPETITIONS = 30
 # canonicalizer omits only this validator's own manifest digest and derived byte
 # total, which would otherwise create a self-referential hash cycle.
 BASELINE_SELF_MANIFEST_PATH = "contracts/fixtures/validator/validate.py"
-BASELINE_CANONICAL_SHA256 = "71ea8ffd7a7fc57f3f3140d0b8e2adb1fc9381b5385a8ebb9320720d33759351"
+BASELINE_CANONICAL_SHA256 = "3b9078ce4d311b53d0493613b308402e4e2c2434d0582aa00f591803d003be02"
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -248,6 +248,30 @@ STRUCTURAL_SENSITIVE_MARKERS = frozenset({
     "session=secret",
     "sid=qwertyui",
     "super-secret-value",
+})
+# These exact negative-test values are retained only in the named source
+# artifacts below. Path-scoping prevents the aggregate scanner from learning a
+# global provider-token or Basic-auth exemption from one domain fixture.
+TEST_NEGATIVE_BASIC_AUTH_CANDIDATE = "QWxhZGRpbjpvcGVuIHNlc2FtZQ" + "=="
+TEST_NEGATIVE_BASIC_AUTH_CANDIDATES = frozenset({TEST_NEGATIVE_BASIC_AUTH_CANDIDATE})
+TEST_NEGATIVE_BASIC_AUTH_PATHS = frozenset({
+    "deployment-security/external-allowlist/test_validate.py",
+})
+SYNTHETIC_FULL_VALUE_ALLOWANCES = {
+    "chat-stream-completion/test_validate.py": frozenset({
+        "ghp_abcdefghijk",
+    }),
+    "uncertain-delivery/test_validate.py": frozenset({
+        "api_key=sk_test_123456789",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+        "ghp_1234567890abcdefghijk",
+        "sk-proj-1234567890abcdef",
+    }),
+}
+# This review anchor has its own authority record. It is deliberately not a
+# fixture root, but every other unindexed artifact must remain a hard failure.
+INTENTIONALLY_SEPARATE_ARTIFACTS = frozenset({
+    "review-anchors/deep-link-resolution.sha256",
 })
 
 SAFE_ERROR_MESSAGE = "fixture registry input rejected"
@@ -470,24 +494,30 @@ def _validate_text_value(
     allow_nul: bool = False,
     check_assignments: bool = True,
     allow_synthetic_markers: bool = False,
+    allowed_basic_auth_candidates: frozenset[str] = frozenset(),
+    allowed_synthetic_full_values: frozenset[str] = frozenset(),
 ) -> None:
     if not allow_nul:
         require("\x00" not in value, "text contains an embedded NUL")
+    exact_full_allowance = value in allowed_synthetic_full_values
     private_key = PRIVATE_KEY_PATTERN.search(value)
     require(
         private_key is None
+        or exact_full_allowance
         or (allow_synthetic_markers and _is_explicit_synthetic_marker(value)),
         "private key material is not allowed",
     )
     provider_key = AWS_KEY_PATTERN.search(value)
     require(
         provider_key is None
+        or exact_full_allowance
         or (allow_synthetic_markers and _is_placeholder(provider_key.group(0), allow_synthetic_markers=True)),
         "provider key material is not allowed",
     )
     provider_token = PROVIDER_TOKEN_PATTERN.search(value)
     require(
         provider_token is None
+        or exact_full_allowance
         or (allow_synthetic_markers and _is_placeholder(provider_token.group(0), allow_synthetic_markers=True)),
         "provider token material is not allowed",
     )
@@ -499,8 +529,14 @@ def _validate_text_value(
         if match is None:
             continue
         candidate = match.group(1) if match.lastindex else match.group(0)
+        exact_basic_allowance = (
+            pattern is BASIC_VALUE_PATTERN
+            and candidate in allowed_basic_auth_candidates
+        )
         require(
-            _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
+            exact_basic_allowance
+            or exact_full_allowance
+            or _is_placeholder(candidate, allow_synthetic_markers=allow_synthetic_markers),
             "credential-shaped value is not allowed",
         )
     _validate_url_hosts(value, allow_synthetic_markers=allow_synthetic_markers)
@@ -536,14 +572,226 @@ def _validate_text_file(path: Path) -> None:
     _validate_text_value(text, check_assignments=False)
 
 
-def _validate_python_file(path: Path) -> None:
-    """Scan Python source while allowing explicit negative-test markers.
+# Regex metadata is source input, not executable code. Keep structural parsing
+# bounded so a malformed group cannot hide a URL from the fixture scanner.
+REGEX_SCHEME_CANDIDATES = ("https://", "http://", "wss://", "ws://")
+MAX_REGEX_SCHEME_SOURCE_LENGTH = 64
+# Use the explicit ASCII intersection of Python and ECMAScript group names;
+# accepting arbitrary header text could hide a URL or unknown regex escape.
+REGEX_GROUP_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+MAX_REGEX_GROUP_SOURCE_LENGTH = 128
+
+
+def _regex_group_body_start(text: str, index: int) -> tuple[int | None, int, bool]:
+    """Return the bounded group body, assertion mode, and recognition status."""
+
+    if not text.startswith("(", index):
+        return None, 0, False
+    if text.startswith("(?:", index) or text.startswith("(?>", index):
+        return index + 3, 0, True
+    if text.startswith("(?=", index):
+        return index + 3, 1, True
+    if text.startswith("(?!", index):
+        return index + 3, -1, True
+    if text.startswith("(?<=", index):
+        return index + 4, 1, True
+    if text.startswith("(?<!", index):
+        return index + 4, -1, True
+    if text.startswith("(?P<", index):
+        header_start = index + 4
+    elif text.startswith("(?<", index):
+        header_start = index + 3
+    else:
+        header_start = None
+    if header_start is not None:
+        limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+        closing = text.find(">", header_start, limit)
+        require(closing >= 0, "named regex group header is incomplete")
+        name = text[header_start:closing]
+        require(REGEX_GROUP_NAME_PATTERN.fullmatch(name) is not None, "named regex group header is malformed")
+        return closing + 1, 0, True
+    if text.startswith("(?", index):
+        limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+        colon = text.find(":", index + 2, limit)
+        if colon >= 0:
+            flags = text[index + 2:colon]
+            if flags and all(character.isalpha() or character == "-" for character in flags):
+                return colon + 1, 0, True
+        return None, 0, False
+    return index + 1, 0, True
+
+
+def _regex_bounded_group_span(text: str, index: int) -> tuple[int, bool]:
+    """Return a group span without searching beyond the structural budget."""
+
+    limit = min(len(text), index + MAX_REGEX_GROUP_SOURCE_LENGTH)
+    depth = 0
+    in_class = False
+    cursor = index
+    while cursor < limit:
+        character = text[cursor]
+        if character == "\\":
+            cursor = min(limit, cursor + 2)
+            continue
+        if in_class:
+            if character == "]":
+                in_class = False
+            cursor += 1
+            continue
+        if character == "[":
+            in_class = True
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth <= 0:
+                return cursor + 1, True
+        cursor += 1
+    return limit, False
+
+
+def _regex_group_end(text: str, index: int) -> int:
+    return _regex_bounded_group_span(text, index)[0]
+
+
+def _regex_decoded_host(source: str) -> str:
+    """Decode only deterministic host escapes needed for policy checks."""
+
+    decoded: list[str] = []
+    index = 0
+    while index < len(source):
+        if source[index] != "\\":
+            decoded.append(source[index])
+            index += 1
+            continue
+        if index + 1 >= len(source):
+            raise ValidationError()
+        marker = source[index + 1]
+        if marker == "x" and index + 3 < len(source):
+            digits = source[index + 2:index + 4]
+            require(re.fullmatch(r"[0-9A-Fa-f]{2}", digits) is not None, "regex escape is invalid")
+            decoded.append(chr(int(digits, 16)))
+            index += 4
+            continue
+        require(marker in {".", "-", "/", ":", "?", "#", "@", "%"}, "regex host is uncertain")
+        decoded.append(marker)
+        index += 2
+    return "".join(decoded)
+
+
+def _regex_literal_host_is_allowed(host: str) -> bool:
+    lowered = host.casefold().rstrip(".")
+    return (
+        lowered.endswith((".test", ".example", ".example.com"))
+        or lowered in ALLOWED_URL_HOSTS
+        or lowered in {"synthetic.invalid", "hermternal.invalid"}
+    )
+
+
+def _regex_literal_authorities(text: str) -> None:
+    """Reject concrete or dynamic authorities that regex syntax can hide."""
+
+    scheme = re.compile(r"(?i)(?:https?|wss?)://")
+    for match in scheme.finditer(text):
+        remainder = text[match.end():]
+        authority = re.split(r"[/#?\s<>'\"]", remainder, maxsplit=1)[0]
+        if not authority:
+            continue
+        if any(marker in authority for marker in "[](){}?+*|"):
+            literal_suffix = authority.replace(r"\.", ".")
+            if any(suffix in literal_suffix.casefold() for suffix in (".test", ".example", ".example.com")):
+                continue
+            raise ValidationError()
+        decoded = _regex_decoded_host(authority)
+        if "@" in decoded:
+            userinfo, decoded = decoded.rsplit("@", 1)
+            if ":" in userinfo:
+                raise ValidationError()
+        if ":" in decoded:
+            host, port = decoded.rsplit(":", 1)
+            require(port.isdigit() and 1 <= int(port) <= 65535, "regex URL port is invalid")
+        else:
+            host = decoded
+        require(_regex_literal_host_is_allowed(host), "regex URL host is not allowed")
+
+    # Any regex construct in a scheme prefix is ambiguous when it reaches a
+    # concrete authority. Keep scheme inference bounded at 64 source bytes.
+    dynamic = re.compile(r"(?i)(?<![A-Za-z])(?:h|w)[^\\s<>'\"]{0,63}://")
+    for match in dynamic.finditer(text):
+        prefix = match.group(0)
+        if not any(candidate.casefold() in prefix.casefold() for candidate in REGEX_SCHEME_CANDIDATES):
+            remainder = text[match.end():]
+            authority = re.split(r"[/#?\s<>'\"]", remainder, maxsplit=1)[0]
+            if authority:
+                raise ValidationError()
+
+
+def _validate_regex_literal(value: str) -> None:
+    """Validate bounded group metadata before scanning regex authorities."""
+
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character == "[":
+            closing = value.find("]", index + 1, min(len(value), index + MAX_REGEX_SCHEME_SOURCE_LENGTH + 1))
+            require(closing >= 0, "regex character class is incomplete")
+            index = closing + 1
+            continue
+        if character != "(":
+            index += 1
+            continue
+        body_start, _assertion_mode, recognized = _regex_group_body_start(value, index)
+        end, complete = _regex_bounded_group_span(value, index)
+        if not complete and recognized and body_start is not None:
+            body_prefix = value[body_start:min(len(value), index + MAX_REGEX_GROUP_SOURCE_LENGTH)]
+            require(
+                any(marker in body_prefix for marker in "([\\\\|*+?{"),
+                "regex group exceeds structural bound",
+            )
+        if complete:
+            group = value[index:end]
+            if len(group) > MAX_REGEX_GROUP_SOURCE_LENGTH and re.fullmatch(
+                r"(?:\(\?:|\(\?P<[A-Za-z_][A-Za-z0-9_]*>|\(\?<[^>]+>)[A-Za-z0-9_.-]+\)",
+                group,
+            ):
+                raise ValidationError()
+        if value.startswith("(?P<", index) or (
+            value.startswith("(?<", index)
+            and not value.startswith("(?<=", index)
+            and not value.startswith("(?<!", index)
+        ):
+            require(recognized and body_start is not None, "named regex group header is incomplete")
+            header_start = index + (4 if value.startswith("(?P<", index) else 3)
+            closing = value.find(">", header_start, min(len(value), index + MAX_REGEX_GROUP_SOURCE_LENGTH))
+            require(closing >= 0, "named regex group header is incomplete")
+            require(REGEX_GROUP_NAME_PATTERN.fullmatch(value[header_start:closing]) is not None, "named regex group header is malformed")
+        index += 1
+    _regex_literal_authorities(value)
+
+
+def _validate_python_file(
+    path: Path,
+    *,
+    allow_test_negative_basic_auth: bool = False,
+    allowed_synthetic_full_values: frozenset[str] = frozenset(),
+) -> None:
+    """Scan Python source while allowing exact, path-routed test vocabulary.
 
     Fixture tests intentionally contain credential-shaped inputs to prove that
     their domain validators reject them. Parse source literals instead of
     scanning detector regex definitions as if they were retained credentials;
-    unmarked bearer, provider, key, JWT, and URL values still fail closed.
+    unmarked bearer, provider, key, JWT, and URL values still fail closed. The
+    Basic-token and complete-value allowances are supplied by the manifest path,
+    never inferred from a value's synthetic wording.
     """
+    allowed_basic_auth_candidates = (
+        TEST_NEGATIVE_BASIC_AUTH_CANDIDATES
+        if allow_test_negative_basic_auth
+        else frozenset()
+    )
     data = _read_bounded_bytes(path, MAX_ARTIFACT_BYTES)
     try:
         text = data.decode("utf-8")
@@ -558,14 +806,18 @@ def _validate_python_file(path: Path) -> None:
             continue
         if node.func.attr != "compile" or not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"re", "regex"}:
             continue
-        for child in ast.walk(node):
-            if isinstance(child, ast.Constant) and type(child.value) is str:
-                regex_literals.add(id(child))
+        pattern = node.args[0] if node.args else None
+        if isinstance(pattern, ast.Constant) and type(pattern.value) is str:
+            regex_literals.add(id(pattern))
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes} or id(node) in regex_literals:
+        if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes}:
             continue
         value = node.value
+        if id(node) in regex_literals:
+            if type(value) is str:
+                _validate_regex_literal(value)
+            continue
         if type(value) is bytes:
             try:
                 value = value.decode("utf-8")
@@ -578,6 +830,8 @@ def _validate_python_file(path: Path) -> None:
             allow_nul=True,
             check_assignments=True,
             allow_synthetic_markers=True,
+            allowed_basic_auth_candidates=allowed_basic_auth_candidates,
+            allowed_synthetic_full_values=allowed_synthetic_full_values,
         )
     # Comments document detector rules and may contain source-shaped examples;
     # scan them too, but permit only the same explicit synthetic markers.
@@ -588,6 +842,8 @@ def _validate_python_file(path: Path) -> None:
                     token.string,
                     check_assignments=True,
                     allow_synthetic_markers=True,
+                    allowed_basic_auth_candidates=allowed_basic_auth_candidates,
+                    allowed_synthetic_full_values=allowed_synthetic_full_values,
                 )
     except tokenize.TokenError as exc:
         raise ValidationError() from exc
@@ -702,12 +958,17 @@ def _validate_manifest_file(
     require(digest == hashlib.sha256(data).hexdigest(), "artifact digest changed")
     total_bytes[0] += len(data)
     require(total_bytes[0] <= MAX_TOTAL_ARTIFACT_BYTES, "fixture artifacts exceed aggregate byte limit")
+    relative_path = actual.relative_to(fixtures_root).as_posix()
     if actual.suffix.casefold() == ".json":
         document = load_json(actual, require_object=False, limit=MAX_ARTIFACT_BYTES, reject_nul=False)
         _validate_redaction_tree(document)
         _reject_live_claims(document)
     elif actual.suffix.casefold() == ".py":
-        _validate_python_file(actual)
+        _validate_python_file(
+            actual,
+            allow_test_negative_basic_auth=relative_path in TEST_NEGATIVE_BASIC_AUTH_PATHS,
+            allowed_synthetic_full_values=SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset()),
+        )
     elif actual.suffix.casefold() in {".md", ".txt"}:
         _validate_text_file(actual)
     return path
@@ -899,13 +1160,18 @@ def _validate_index_document(document: dict[str, Any], repo_root: Path) -> tuple
         require(any(item["status"] != "ready" for item in document["coverage"]), "partial index has no blocked coverage")
 
     all_owned_candidates: set[str] = set()
+    separate_artifacts: set[str] = set()
     for path in fixtures_root.rglob("*"):
         if not path.is_file() or path.is_symlink() or path.name == ".DS_Store" or "__pycache__" in path.parts or path.suffix.casefold() == ".pyc":
             continue
         relative = path.relative_to(fixtures_root).as_posix()
+        if relative in INTENTIONALLY_SEPARATE_ARTIFACTS:
+            separate_artifacts.add(relative)
+            continue
         if relative in {"README.md", "index.json", "schema.json"} or relative.startswith("validator/"):
             continue
         all_owned_candidates.add(relative)
+    require(separate_artifacts == INTENTIONALLY_SEPARATE_ARTIFACTS, "separate authority artifact inventory changed")
     require(all_owned_candidates == owned_files, "unindexed fixture artifact exists")
     return len(fixture_statuses), len(coverage_ids)
 

@@ -226,6 +226,220 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["live_claim"])
             self.assertEqual(payload["evidence_status"], "blocked")
 
+    def _run_scanner(self, artifact: Path, *, optimized: bool) -> subprocess.CompletedProcess[str]:
+        command = [sys.executable]
+        if optimized:
+            command.append("-O")
+        fixtures_root = next(parent for parent in artifact.parents if parent.name == "fixtures")
+        relative_path = artifact.relative_to(fixtures_root).as_posix()
+        command.extend([
+            "-c",
+            (
+                "import sys; from pathlib import Path; "
+                "sys.path.insert(0, sys.argv[1]); import validate; "
+                "relative_path = sys.argv[3]; "
+                "validate._validate_python_file("
+                "Path(sys.argv[2]), "
+                "allow_test_negative_basic_auth=("
+                "relative_path in validate.TEST_NEGATIVE_BASIC_AUTH_PATHS), "
+                "allowed_synthetic_full_values=("
+                "validate.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())"
+                "))"
+            ),
+            str(fixtures_root / "validator"),
+            str(artifact),
+            relative_path,
+        ])
+        environment = dict(os.environ)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            command,
+            cwd=artifact.parents[2],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    def _assert_scanner_rejects_in_both_modes(self, relative_path: str, source: bytes) -> None:
+        repo_root = self._copy_fixture_repo()
+        artifact = repo_root / "contracts/fixtures" / relative_path
+        artifact.write_bytes(source)
+        for optimized in (False, True):
+            completed = self._run_scanner(artifact, optimized=optimized)
+            self.assertNotEqual(completed.returncode, 0)
+
+    def _assert_scanner_accepts_in_both_modes(self, relative_path: str, source: bytes) -> None:
+        repo_root = self._copy_fixture_repo()
+        artifact = repo_root / "contracts/fixtures" / relative_path
+        artifact.write_bytes(source)
+        for optimized in (False, True):
+            completed = self._run_scanner(artifact, optimized=optimized)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_scoped_negative_values_are_exact_and_path_bound(self) -> None:
+        scoped = (
+            (
+                "deployment-security/external-allowlist/test_validate.py",
+                'VALUE = "Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="\n',
+            ),
+            (
+                "chat-stream-completion/test_validate.py",
+                'VALUE = "ghp_abcdefghijk"\n',
+            ),
+            (
+                "uncertain-delivery/test_validate.py",
+                'VALUE = "api_key=sk_test_123456789"\n',
+            ),
+            (
+                "uncertain-delivery/test_validate.py",
+                'VALUE = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"\n',
+            ),
+            (
+                "uncertain-delivery/test_validate.py",
+                'VALUE = "ghp_1234567890abcdefghijk"\n',
+            ),
+            (
+                "uncertain-delivery/test_validate.py",
+                'VALUE = "sk-proj-1234567890abcdef"\n',
+            ),
+        )
+        for relative_path, source in scoped:
+            with self.subTest(relative_path=relative_path, source=source):
+                self._assert_scanner_accepts_in_both_modes(relative_path, source.encode())
+
+        for relative_path in (
+            "deployment-security/external-allowlist/test_validate.py",
+            "chat-stream-completion/test_validate.py",
+            "uncertain-delivery/test_validate.py",
+        ):
+            with self.subTest(actual_source=relative_path):
+                self._assert_scanner_accepts_in_both_modes(
+                    relative_path,
+                    (validate.FIXTURES_ROOT / relative_path).read_bytes(),
+                )
+
+        for source in (
+            scoped[0][1],
+            scoped[1][1],
+            scoped[2][1],
+            scoped[3][1],
+            scoped[4][1],
+            scoped[5][1],
+        ):
+            with self.subTest(unscoped_source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source.encode(),
+                )
+
+        # An exact allowance cannot authorize a larger source literal that adds
+        # another credential-shaped value after the reviewed negative sample.
+        self._assert_scanner_rejects_in_both_modes(
+            "uncertain-delivery/test_validate.py",
+            b'VALUE = "api_key=sk_test_123456789; api_key=unredacted-secret-value"\n',
+        )
+
+    def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        fixtures_root = repo_root / "contracts/fixtures"
+        index = json.loads((fixtures_root / "index.json").read_text(encoding="utf-8"))
+        listed = {
+            record["path"]
+            for fixture in index["fixture_roots"]
+            for record in fixture["files"]
+        }
+        for artifact in sorted(fixtures_root.rglob("*"), reverse=True):
+            if not artifact.is_file():
+                continue
+            relative = artifact.relative_to(fixtures_root).as_posix()
+            if (
+                relative not in listed
+                and relative not in {"README.md", "index.json", "schema.json", "review-anchors/deep-link-resolution.sha256"}
+                and not relative.startswith("validator/")
+            ):
+                artifact.unlink()
+        validate._validate_index_document(index, repo_root)
+
+        anchor = fixtures_root / "review-anchors/deep-link-resolution.sha256"
+        anchor.unlink()
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+        anchor.write_text("synthetic anchor\n", encoding="utf-8")
+        extra = fixtures_root / "review-anchors/other.sha256"
+        extra.write_text("unindexed\n", encoding="utf-8")
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+    def test_malformed_named_group_headers_fail_closed_in_both_modes(self) -> None:
+        """Do not let malformed group metadata hide schemes or authorities."""
+
+        slash = chr(92)
+        host = ".".join(("api", "live", "invalid"))
+        schemes = ("http", "https", "ws", "wss")
+        port_variants = ("abc", "0", "65536")
+        for opener in ("(?P<", "(?<"):
+            for width in (64, 65, 127, 128, 129):
+                for scheme in schemes:
+                    pattern = opener + ("x" * width) + scheme + "://" + host + "/x>safe)"
+                    with self.subTest(opener=opener, width=width, scheme=scheme):
+                        self._assert_scanner_rejects_in_both_modes(
+                            "connection-restoration/validate.py",
+                            ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                        )
+                for port in port_variants:
+                    pattern = opener + ("x" * width) + "https://" + host + ":" + port + "/x>safe)"
+                    with self.subTest(opener=opener, width=width, port=port):
+                        self._assert_scanner_rejects_in_both_modes(
+                            "connection-restoration/validate.py",
+                            ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                        )
+                dynamic = opener + ("x" * width) + "h(?:t|T)tps://" + host + "/x>safe)"
+                with self.subTest(opener=opener, width=width, dynamic=True):
+                    self._assert_scanner_rejects_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + dynamic + "')\n").encode("utf-8"),
+                    )
+                unknown = opener + ("x" * width) + slash + "Q>safe)"
+                with self.subTest(opener=opener, width=width, unknown_escape=True):
+                    self._assert_scanner_rejects_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + unknown + "')\n").encode("utf-8"),
+                    )
+
+    def test_valid_named_groups_and_structural_boundaries_remain_bounded(self) -> None:
+        """Keep valid names and exact 64/65/127/128/129 group boundaries."""
+
+        host = ".".join(("synthetic", "invalid"))
+        for opener in ("(?P<", "(?<"):
+            pattern = opener + "url>" + host + ")"
+            with self.subTest(named_opener=opener):
+                self._assert_scanner_accepts_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
+        for opener in ("(?:", "(?P<n>", "(?<n>"):
+            for total_length in (64, 65, 127, 128):
+                body_length = total_length - len(opener) - 1
+                pattern = opener + ("x" * body_length) + ")"
+                with self.subTest(opener=opener, total_length=total_length):
+                    self._assert_scanner_accepts_in_both_modes(
+                        "connection-restoration/validate.py",
+                        ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                    )
+            total_length = 129
+            body_length = total_length - len(opener) - 1
+            pattern = opener + ("x" * body_length) + ")"
+            with self.subTest(opener=opener, total_length=total_length):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    ("re.compile(r'" + pattern + "')\n").encode("utf-8"),
+                )
+
     @staticmethod
     def _distribution(samples: list[float]) -> dict[str, float]:
         ordered = sorted(samples)
@@ -255,8 +469,8 @@ class CliTests(unittest.TestCase):
             completed = self._run(optimized=optimized, repo_root=repo_root)
             self.assertEqual(completed.returncode, 0)
             payload = json.loads(completed.stdout)
-            self.assertEqual(payload["fixture_count"], 22)
-            self.assertEqual(payload["coverage_count"], 22)
+            self.assertEqual(payload["fixture_count"], 30)
+            self.assertEqual(payload["coverage_count"], 29)
             self.assertEqual(payload["evidence_status"], "partial")
             self.assertEqual(completed.stderr, "")
 
