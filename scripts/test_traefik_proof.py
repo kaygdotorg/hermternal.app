@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -1713,7 +1714,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
-            linked = Path(temporary) / "linked"
+            linked = root / "linked"
             root.mkdir()
             _implementation, _tests, source_commit = _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "linked", str(linked))
@@ -1804,7 +1805,7 @@ class TraefikEvidenceContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "repo"
-            linked = Path(temporary) / "linked"
+            linked = root / "linked"
             root.mkdir()
             _create_parser_repo(root)
             _run_git(root, "worktree", "add", "--quiet", "-b", "relative-linked", str(linked))
@@ -1820,6 +1821,73 @@ class TraefikEvidenceContractTests(unittest.TestCase):
             marker.write_text("gitdir: ../outside-gitdir\n", encoding="ascii")
             with self.assertRaises(ValueError):
                 traefik_proof._current_parser_provenance(linked)
+
+    def test_external_common_copy_is_rejected_even_when_git_accepts_it(self) -> None:
+        """Copied common metadata outside the trusted ancestor cannot authorize ancestry."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            root = sandbox / "repo"
+            linked = root / "linked"
+            root.mkdir()
+            _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "external-common", str(linked))
+            marker = linked / ".git"
+            original = marker.read_text(encoding="ascii").strip()
+            original_git_dir = Path(original.split(":", 1)[1].strip()).resolve()
+            external_common = sandbox / "external-common"
+            shutil.copytree(root / ".git", external_common)
+            evil = external_common / "worktrees" / "evil"
+            shutil.copytree(original_git_dir, evil)
+            (evil / "commondir").write_text("../..\n", encoding="ascii")
+            (evil / "gitdir").write_text(os.path.relpath(marker, start=evil) + "\n", encoding="ascii")
+            marker.write_text(f"gitdir: {os.path.relpath(evil, start=marker.parent)}\n", encoding="ascii")
+
+            self.assertEqual(_run_git(linked, "rev-parse", "--show-toplevel"), str(linked.resolve()))
+            self.assertEqual(Path(_run_git(linked, "rev-parse", "--git-common-dir")).resolve(), external_common.resolve())
+            with self.assertRaisesRegex(ValueError, "trusted repository metadata root|outside"):
+                traefik_proof._current_parser_provenance(linked)
+
+    def test_relative_gitdir_symlink_escape_fails_closed(self) -> None:
+        """Git metadata references cannot follow a relative symlink redirect."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            linked = root / "linked"
+            root.mkdir()
+            _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "relative-symlink", str(linked))
+            marker = linked / ".git"
+            original = marker.read_text(encoding="ascii").strip()
+            target = Path(original.split(":", 1)[1].strip()).resolve()
+            (linked / "redirect").symlink_to(target, target_is_directory=True)
+            marker.write_text("gitdir: redirect\n", encoding="ascii")
+
+            self.assertEqual(_run_git(linked, "rev-parse", "--show-toplevel"), str(linked.resolve()))
+            with self.assertRaisesRegex(ValueError, "symlinked path component"):
+                traefik_proof._current_parser_provenance(linked)
+
+    def test_separate_git_dir_is_explicitly_unsupported(self) -> None:
+        """A standalone separate-git-dir checkout has no trusted ancestor metadata root."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sandbox = Path(temporary)
+            root = sandbox / "repo"
+            metadata = sandbox / "separate.git"
+            root.mkdir()
+            scripts_root = root / "scripts"
+            scripts_root.mkdir()
+            (scripts_root / "traefik_proof.py").write_bytes((ROOT / traefik_proof.PARSER_IMPLEMENTATION_PATH).read_bytes())
+            (scripts_root / "test_traefik_proof.py").write_bytes((ROOT / traefik_proof.PARSER_TEST_PATH).read_bytes())
+            _run_git(sandbox, "init", "--quiet", f"--separate-git-dir={metadata}", str(root))
+            _run_git(root, "config", "user.name", "Hermternal test")
+            _run_git(root, "config", "user.email", "hermternal-test@example.invalid")
+            _run_git(root, "add", "scripts")
+            _run_git(root, "commit", "--quiet", "-m", "parser source")
+
+            self.assertEqual(_run_git(root, "rev-parse", "--show-toplevel"), str(root.resolve()))
+            with self.assertRaisesRegex(ValueError, "trusted repository metadata root|unsupported"):
+                traefik_proof._current_parser_provenance(root)
 
     def test_git_metadata_indirections_fail_closed(self) -> None:
         """Repository-local indirection and partial-clone markers cannot authorize ancestry."""
