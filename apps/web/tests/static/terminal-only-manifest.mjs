@@ -65,23 +65,52 @@ export function canonicalizeTerminalModuleKey(manifestKey) {
   return canonicalKey && TERMINAL_ONLY_MODULE_IDENTITIES.includes(canonicalKey) ? canonicalKey : null;
 }
 
+// Inspection deliberately decodes only to find aliases. Canonicalization stays
+// strict; an unsafe spelling that reaches a terminal package boundary is rejected
+// instead of disappearing from duplicate and static/shared checks.
+function decodePathForInspection(manifestKey) {
+  let inspectedPath = manifestKey.replaceAll('\\', '/');
+  for (let pass = 0; pass < 2; pass += 1) {
+    try {
+      const decodedPath = decodeURIComponent(inspectedPath).replaceAll('\\', '/');
+      if (decodedPath === inspectedPath) break;
+      inspectedPath = decodedPath;
+    } catch {
+      break;
+    }
+  }
+  return inspectedPath.split('/');
+}
+
+function isUnsafeInspectionSegment(segment) {
+  return segment === '.' || segment === '..' || segment.includes('%');
+}
+
+function claimsTerminalBoundary(pathSegments, identity) {
+  const identitySegments = identity.split('/').slice(1);
+  const packageSegments = identitySegments.slice(0, -1);
+  const terminalSegment = identitySegments.at(-1);
+  for (let index = 0; index <= pathSegments.length - packageSegments.length; index += 1) {
+    if (!packageSegments.every((segment, offset) => pathSegments[index + offset] === segment)) {
+      continue;
+    }
+
+    const suffix = pathSegments.slice(index + packageSegments.length);
+    const terminalIndex = suffix.findIndex((segment) => segment.startsWith(terminalSegment));
+    if (terminalIndex < 0) continue;
+    if (terminalIndex === 0 || suffix.slice(0, terminalIndex).some(isUnsafeInspectionSegment)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function looksLikeTerminalModuleKey(manifestKey) {
   if (typeof manifestKey !== 'string') return false;
-  const slashSeparatedKey = manifestKey
-    .replaceAll('\\', '/')
-    .replace(/%2f/gi, '/')
-    .replace(/%5c/gi, '/');
-  return TERMINAL_ONLY_MODULE_IDENTITIES.some((identity) => {
-    const packagePath = identity.slice('node_modules/'.length);
-    return (
-      slashSeparatedKey === identity ||
-      slashSeparatedKey.startsWith(identity) ||
-      slashSeparatedKey.includes(`/${identity}`) ||
-      slashSeparatedKey === packagePath ||
-      slashSeparatedKey.startsWith(packagePath) ||
-      slashSeparatedKey.includes(`/${packagePath}`)
-    );
-  });
+  const pathSegments = decodePathForInspection(manifestKey);
+  return TERMINAL_ONLY_MODULE_IDENTITIES.some((identity) =>
+    claimsTerminalBoundary(pathSegments, identity)
+  );
 }
 
 export function indexTerminalOnlyManifestEntries(manifestEntries) {

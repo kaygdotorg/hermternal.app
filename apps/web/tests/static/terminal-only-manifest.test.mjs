@@ -90,6 +90,23 @@ test('rejects a malformed terminal lookalike even beside a valid dynamic entry',
   );
 });
 
+test('rejects traversal and encoded aliases at the manifest acceptance assertion', () => {
+  for (const alias of [
+    `${externalRoot}/node_modules/@wterm/dom/dist/x/../index.js`,
+    `${externalRoot}/node_modules/@wterm/dom/dist/../index.js`,
+    `${externalRoot}/node_modules/@wterm/dom/dist/%2e%2e/index.js`,
+    `${externalRoot}/node_modules/@wterm/dom/dist/%5cx%5c..%5cindex.js`
+  ]) {
+    const manifestEntries = terminalManifest();
+    manifestEntries.set(alias, { isDynamicEntry: false });
+
+    assert.throws(
+      () => assertTerminalOnlyModulesRemainDynamic(manifestEntries),
+      /invalid terminal dependency identity/
+    );
+  }
+});
+
 test('does not substitute a non-node_modules path for a terminal dependency', () => {
   const manifestEntries = terminalManifest();
   manifestEntries.delete(`${externalRoot}/node_modules/@wterm/dom/dist/index.js`);
