@@ -48,11 +48,49 @@ files have stable bytes that match the exact `100644` blob in the replay final
 tree. This is different from authority, replay, and report evidence, which
 remains mode `0600`.
 
-This repository does not yet contain the exact image construction and staging
-specification. Thus, the image name, repository digest, and dependency-tree
-digest stay null. Do not derive them from the lock file alone. #406 stays
-fail-closed until a reviewed image specification defines the exact contents,
-digest algorithm, local staging procedure, and required attestation labels.
+`toolchain/` now contains the exact Linux amd64 construction and staging
+specification. The retained staging set binds the official Bun archive, the
+Playwright Chromium headless-shell archive, the exact Node OCI child manifest,
+the signed Debian 13 snapshot index, 114 exact Debian packages, and the Linux
+dependency tree produced from the committed frozen lock. The dependency-tree
+digest is final. The image name and repository digest stay null because this
+lane did not build or publish an image.
+
+The staging verifier reads only local files and the local Podman store. It
+requires a private owner directory, rootless amd64 Podman, the exact base
+RepoDigest, the signed Debian `InRelease`, all package hashes from its signed
+`Packages.xz`, epoch-normalized context metadata, and the shared dependency
+tree identity function. It runs its signature check in the pinned base with
+`--pull=never`, `--network=none`, a read-only staging mount, dropped
+capabilities, and a small tmpfs:
+
+```sh
+python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/verify_staging.py \
+  --root /tmp/<retained-private-staging-root>
+```
+
+A separate authorization is still required to build and place the image in a
+local repository. The deterministic build command is:
+
+```sh
+podman build --pull=never --network=none --platform linux/amd64 \
+  --timestamp=0 --omit-history --squash-all \
+  --file handover/issue-397/task409-offline-gates-v2/toolchain/Containerfile \
+  --tag localhost/hermternal-offline-gates:issue-406-v1 \
+  /tmp/<retained-private-staging-root>
+```
+
+Do not fill `image` or `repo_digest` from a tag or an image ID. Fill them only
+after an approved local repository step makes `podman image inspect` report
+the exact `RepoDigest`. Verify every image label and that exact local
+`RepoDigest` before any replay evidence is accepted:
+
+```sh
+python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/verify_staging.py \
+  --root /tmp/<retained-private-staging-root> \
+  --image localhost/hermternal-offline-gates:issue-406-v1 \
+  --repo-digest sha256:<exact-local-repository-manifest-digest>
+```
 
 Run only after independent review authorizes the real retained replay result:
 
@@ -72,6 +110,8 @@ discovery boundary:
 python3 -m py_compile handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
 python3 -B handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
 python3 -O -B handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
+python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolchain_spec.py
+python3 -O -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolchain_spec.py
 ```
 
 This is not replay evidence or permission to update `dev` or `main`.
