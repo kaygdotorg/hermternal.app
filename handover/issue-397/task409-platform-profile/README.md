@@ -188,6 +188,15 @@ All older authority, Phase A, and failure evidence stays frozen.
 The v11 adapter retargets the runner and every nested outer-loader factory to
 `hermternal-issue397-phase-a-anchor-v11`; it cannot resolve the frozen v10 root.
 
+`linux_replay_failure_v11.py` is the public-loader successor. It authenticates
+the exact failure-v10 and Phase-v11 buffers before it executes either buffer.
+It then gives each fresh nested evidence validator the v11 schema and root.
+This lets the public outer loader authenticate the approved v11 anchor. The
+successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
+bytes. It uses the separate, create-only
+`hermternal-issue397-replay-failure-v11` root only if a later approved replay
+calls the boundary.
+
 Run the disposable tests in normal and optimized Python modes:
 
 ```sh
@@ -195,4 +204,6 @@ Run the disposable tests in normal and optimized Python modes:
 /usr/bin/python3 -O -B test_object_preservation.py
 /usr/bin/python3 -B test_linux_phase_a_v11.py
 /usr/bin/python3 -O -B test_linux_phase_a_v11.py
+/usr/bin/python3 -B test_linux_replay_failure_v11.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v11.py
 ```
