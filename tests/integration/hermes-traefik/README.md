@@ -211,23 +211,43 @@ before making that runtime claim.
 - the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
 
 The generator walks a bounded, full `HEAD` commit topology for the parser and
-focused test paths. It treats the implementation/test blob pair as the source
-identity, ignores mode-only commits and descendants that do not change that pair,
-and requires one unique maximal source-changing candidate. A merge or
-cherry-pick that exposes incomparable equal-byte candidates fails closed instead
-of inheriting Git log order. The selected commit is then checked against the
-exact working-tree bytes and both Git blobs before evidence is emitted;
-evidence-only or documentation-only descendants therefore retain the same
-implementation commit, while uncommitted source drift and forged CLI provenance
-fail closed. One provenance calculation also shares a fixed monotonic
-60-second deadline and a 2,048-subprocess ceiling across traversal, tree reads,
-and final blob checks. Each individual Git command remains limited to five
-seconds, but exhausting either aggregate budget rejects provenance instead of
-continuing through an arbitrarily large history. Repository commit and blob
-IDs are validated against `git rev-parse --show-object-format`; `sha1` and
-`sha256` repositories are supported, while an unknown object format or wrong
-OID width fails closed. The recorded `implementation_sha256` and
-`test_source_sha256` remain independent content digests for evidence integrity.
+focused test paths. Shallow repositories and incomplete parent output fail closed
+before a source predecessor can be selected. The preflight also rejects grafts,
+replacement refs, local or HTTP alternates, promisor/partial-clone metadata,
+lazy-fetch controls, and unsafe Git indirection. Normal repositories and validated
+linked worktrees are supported; their common directory, object directory, gitfile,
+and worktree metadata must resolve inside the expected repository context.
+
+It treats the implementation/test blob pair as the source identity, ignores
+mode-only commits (`100644` versus `100755`) and descendants that do not change
+that pair, and requires one unique maximal source-changing candidate. Symlink and
+other non-regular source modes fail closed. A merge or cherry-pick that exposes
+incomparable equal-byte candidates fails closed instead of inheriting Git log
+order. The selected commit is then checked against the exact working-tree bytes
+and both Git blobs before evidence is emitted; the source and focused test files
+are reread after traversal so a concurrent mutation cannot be reported as the
+historical source.
+
+Topology is read once with bounded `git log` output. Unique source subtrees are
+resolved with one `cat-file --batch-check` and one `cat-file --batch` operation,
+so the declared 4,096-commit history bound is reachable without one subprocess
+per commit and remains below the 2,048-subprocess ceiling. One provenance
+calculation shares a fixed monotonic 60-second deadline across source reads,
+Git calls, parsing, candidate scans, ancestry traversal, and final rereads.
+Each individual Git command remains limited to five seconds; stdout and stderr
+are streamed under caps, and timeout, overflow, or failure kills and reaps the
+whole Git process group. Exhausting either aggregate budget rejects provenance
+instead of continuing through an arbitrarily large history.
+
+Repository commit and blob IDs are validated against
+`git rev-parse --show-object-format`; `sha1` and `sha256` repositories are
+supported, while an unknown object format or wrong OID width fails closed. The
+recorded `implementation_sha256` and `test_source_sha256` remain independent
+content digests for evidence integrity. `product.build_commit` and browser
+`provenance.build_sha` are different from parser-repository provenance: they are
+external product/Hermes build identities and accept lowercase SHA-1 (40 hex
+characters) or SHA-256 (64 hex characters). They are not resolved against this
+parser repository.
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,
@@ -235,9 +255,13 @@ The browser state is `blocked_provider` with only the fixed
 claimed. A successful browser completion must be collected separately with
 complete provenance before the status can change.
 
-The evidence digest is stored in
-`traefik-proof-evidence-sha256.txt`. The aggregate fixture registry is not
-modified by this unit; registering a new fixture root is deferred until the
+The retained JSON and its SHA-256 anchor are preserved byte-for-byte by this
+correction. The regression suite binds their product build identity, parser
+predecessor/blob/content digests, browser provenance, runtime-input digest, and
+parity-fixture digests to reviewed constants; changing both the JSON and its
+self-hash therefore cannot self-authorize new evidence. The evidence digest is
+stored in `traefik-proof-evidence-sha256.txt`. The aggregate fixture registry is
+not modified by this unit; registering a new fixture root is deferred until the
 shared registry ownership and DEP-03 blocker are resolved.
 
 ## Verification
