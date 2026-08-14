@@ -196,7 +196,11 @@ exact prior object or absence. An unlisted local cache change is rejected. It
 then gives each fresh
 nested evidence validator the v11 schema and root.
 This lets the public outer loader authenticate the approved v11 anchor. The
-successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
+successor also binds that nested loader to the already authenticated v7
+wrapper. Thus, the final public stdin has exactly one local-pack preservation
+call before clean-primary validation. The regression compares the public stdin
+with independently derived v7 bytes; it does not execute that stdin.
+The successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
 bytes. It uses the separate, create-only
 `hermternal-issue397-replay-failure-v11` root only if a later approved replay
 calls the boundary.
@@ -210,4 +214,6 @@ Run the disposable tests in normal and optimized Python modes:
 /usr/bin/python3 -O -B test_linux_phase_a_v11.py
 /usr/bin/python3 -B test_linux_replay_failure_v11.py
 /usr/bin/python3 -O -B test_linux_replay_failure_v11.py
+/usr/bin/python3 -B test_linux_replay_failure_v11_ordering.py
+/usr/bin/python3 -O -B test_linux_replay_failure_v11_ordering.py
 ```

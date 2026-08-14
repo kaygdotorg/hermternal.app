@@ -27,6 +27,13 @@ PHASE_ROOT_NAME = "hermternal-issue397-phase-a-anchor-v11"
 PHASE_EXTERNAL_ROOT = Path("/home/kayg/Developer") / PHASE_ROOT_NAME
 SCHEMA = "hermternal.issue-397.replay-failure.v11"
 DIRECTORY_NAME = "hermternal-issue397-replay-failure-v11"
+WRAPPER_V6_SHA256 = "c8887fd0449ad6af3cfdebb721cf14ef9c91840f4d9b35e53f47b150f9821331"
+WRAPPER_V7_SHA256 = "b192429bcb98b4a022d72ad7cf207a7da6c271b52b297168814f3d2007decce4"
+V10_DISABLED_BOUNDARY = b'    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("Phase A v10 authority is not installed"))\n'
+V11_DISABLED_BOUNDARY = b'''    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("Phase A v11 authority is not installed")
+    )
+'''
 DEPENDENCY_PINS = (
     ("forbidden_proof", "95009c152eb9dbd04cdef58a5c1dddcce8f79365b22a8aca60ab272266a100b6"),
     ("git_config_policy", "ecc9c1e8e3b98a989c19b15b4c9c8bce535d97a02d5c31b79d227785d7f057fa"),
@@ -222,10 +229,44 @@ def _retarget_runner(runner, dependencies: dict[str, types.ModuleType]):
     return runner
 
 
+def _bind_v7_public_wrapper(
+    module: types.ModuleType, dependencies: dict[str, types.ModuleType]
+) -> None:
+    """Bind the fresh v3 public boundary to the authenticated v7 wrapper.
+
+    Phase v11 bound v7 for evidence creation, but the inherited public loader
+    still closed over wrapper v6. Only the v3 boundary function contains this
+    exact v10 disabled literal, so other lifecycle factories stay unchanged.
+    """
+    function = module.__dict__.get("load_approved_wrapper")
+    if function is None:
+        return
+    constants = function.__code__.co_consts
+    count = constants.count(V10_DISABLED_BOUNDARY)
+    if count == 0:
+        return
+    if count != 1 or constants.count(V11_DISABLED_BOUNDARY) != 0:
+        raise RuntimeError("Phase v11 public wrapper boundary differs")
+    globals_value = function.__globals__
+    if globals_value.get("LINUX_WRAPPER_ADAPTER_SHA256") != WRAPPER_V6_SHA256:
+        raise RuntimeError("Phase v11 predecessor wrapper binding differs")
+    globals_value["linux_replay_wrapper"] = dependencies["linux_replay_wrapper_v7"]
+    globals_value["LINUX_WRAPPER_ADAPTER_SHA256"] = WRAPPER_V7_SHA256
+    replaced = tuple(
+        V11_DISABLED_BOUNDARY if value == V10_DISABLED_BOUNDARY else value
+        for value in constants
+    )
+    module.load_approved_wrapper = types.FunctionType(
+        function.__code__.replace(co_consts=replaced), globals_value,
+        function.__name__, function.__defaults__, function.__closure__,
+    )
+
+
 def _retarget_phase_factory(
     module: types.ModuleType, dependencies: dict[str, types.ModuleType]
 ) -> types.ModuleType:
     """Retarget fresh nested modules made by the reviewed public loader."""
+    _bind_v7_public_wrapper(module, dependencies)
     for name in tuple(module.__dict__):
         if name.endswith("_ROOT_NAME"):
             module.__dict__[name] = PHASE_ROOT_NAME
