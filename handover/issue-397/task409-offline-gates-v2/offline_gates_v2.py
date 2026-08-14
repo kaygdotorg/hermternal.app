@@ -33,7 +33,7 @@ OID_RE = re.compile(r"[0-9a-f]{40}\Z")
 PHASE_EVIDENCE_SCHEMA_RE = re.compile(
     r"hermternal\.issue-397\.phase-a-anchor-evidence\.v[1-9][0-9]*\Z"
 )
-SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/opt/hermternal/playwright-browsers", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
+SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
 LOCAL_GIT_ENV = {**SAFE_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
 PODMAN_INFO_FORMAT = "{{.Host.Security.Rootless}}\n{{.Store.GraphRoot}}\n{{.Store.RunRoot}}"
 
@@ -266,6 +266,8 @@ class Gate:
 
 GATES = (Gate("git-head", "/workspace", ("git", "rev-parse", "HEAD^{commit}")), Gate("git-tree", "/workspace", ("git", "rev-parse", "HEAD^{tree}")), Gate("git-main", "/workspace", ("git", "rev-parse", "refs/remotes/origin/main^{commit}")), Gate("git-dev-base", "/workspace", ("git", "rev-parse", "refs/remotes/origin/dev^{commit}")), Gate("git-clean", "/workspace", ("git", "status", "--porcelain=v1", "--untracked-files=all")), Gate("git-fsck", "/workspace", ("git", "fsck", "--full", "--strict")), Gate("web-typecheck", "/workspace/apps/web", ("bun", "x", "--no-install", "svelte-check", "--tsconfig", "./tsconfig.json")), Gate("web-unit", "/workspace/apps/web", ("bun", "x", "--no-install", "vitest", "run")), Gate("web-build", "/workspace/apps/web", ("bun", "x", "--no-install", "vite", "build")), Gate("privacy-redaction", "/workspace/apps/web", ("bun", "x", "--no-install", "vitest", "run", "src/lib/live-artifact-policy.test.ts", "src/lib/live-screenshot-contract.test.ts")), Gate("accessibility", "/workspace/apps/web", ("bun", "run", "--no-install", "test:a11y")), Gate("no-network-browser", "/workspace/apps/web", ("bun", "run", "--no-install", "test:no-network")), Gate("auth-click-enter", "/workspace/apps/web", ("bun", "x", "--no-install", "playwright", "test", "tests/e2e/ui-preview.spec.ts", "--grep", "native password activation clears live values")))
 GATE_LIST_SHA256 = digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in GATES], separators=(",", ":")).encode())
+LOCAL_GIT_GATE_IDS = ("git-head", "git-tree", "git-main", "git-dev-base", "git-clean", "git-fsck")
+PODMAN_GATE_IDS = ("web-typecheck", "web-unit", "web-build", "privacy-redaction", "accessibility", "no-network-browser", "auth-click-enter")
 WRITABLE_WEB_PATHS = ("/workspace/apps/web/node_modules", "/workspace/apps/web/.svelte-kit", "/workspace/apps/web/build", "/workspace/apps/web/test-results", "/workspace/apps/web/playwright-report")
 
 
@@ -301,9 +303,9 @@ def podman_argv(repository: Path, gate: Gate, pins: Pins) -> tuple[str, ...]:
     installs or downloads packages.
     """
     uid, gid = os.getuid(), os.getgid()
-    setup = "mkdir -p /workspace/apps/web/node_modules; cp -a /opt/hermternal/node_modules/. /workspace/apps/web/node_modules/; exec \"$@\""
-    tmpfs = sum((("--tmpfs", f"{item}:rw,nosuid,nodev,size=768m") for item in ("/tmp", *WRITABLE_WEB_PATHS)), ())
-    return ("/usr/bin/podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--mount", f"type=bind,src={repository},dst=/workspace,ro=true,relabel=private", *tmpfs, "--workdir", gate.workdir, *sum((("--env", f"{key}={value}") for key, value in sorted(SAFE_ENV.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
+    setup = "for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; exec \"$@\""
+    tmpfs = sum((("--mount", f"type=tmpfs,destination={item},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup") for item in WRITABLE_WEB_PATHS), ())
+    return ("/usr/bin/podman", "run", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/workspace,ro=true", "--tmpfs", "/tmp:rw,nosuid,nodev,size=768m", *tmpfs, "--workdir", gate.workdir, *sum((("--env", f"{key}={value}") for key, value in sorted(SAFE_ENV.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
 
 
 def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run) -> None:
@@ -344,16 +346,28 @@ SEMANTIC_PATHS = {
 }
 
 
-def _local_git(repository: Path, *args: str, stdin: bytes = b"") -> bytes:
-    """Read only local Git objects with every config and fetch path disabled."""
-    command = ("/usr/bin/git", "-C", os.fspath(repository), "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", *args)
+def local_git_argv(repository: Path, *args: str) -> tuple[str, ...]:
+    """Return the only permitted host-Git command boundary."""
+    return ("/usr/bin/git", "-C", os.fspath(repository), "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", *args)
+
+
+def _run_local_git(repository: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+    """Capture one bounded local Git result without losing stderr or status."""
+    command = local_git_argv(repository, *args)
     try:
         result = subprocess.run(command, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(LOCAL_GIT_ENV), cwd="/", timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise Reject("semantic Git binding is unavailable") from error
     stdout, stderr = bytes(result.stdout or b""), bytes(result.stderr or b"")
-    require(result.returncode == 0 and len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT, "semantic Git binding differs")
-    return stdout
+    require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT, "semantic Git binding differs")
+    return subprocess.CompletedProcess(command, result.returncode, stdout, stderr)
+
+
+def _local_git(repository: Path, *args: str, stdin: bytes = b"") -> bytes:
+    """Read only local Git objects with every config and fetch path disabled."""
+    result = _run_local_git(repository, *args, stdin=stdin)
+    require(result.returncode == 0, "semantic Git binding differs")
+    return bytes(result.stdout or b"")
 
 
 def semantic_evidence(chain: Chain) -> dict[str, Any]:
@@ -394,25 +408,43 @@ def semantic_evidence(chain: Chain) -> dict[str, Any]:
 
 
 Run = Callable[..., subprocess.CompletedProcess[bytes]]
+LocalGit = Callable[..., subprocess.CompletedProcess[bytes]]
 
 
-def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image) -> list[dict[str, Any]]:
+def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image, *, local_git: LocalGit = _run_local_git) -> list[dict[str, Any]]:
+    """Run six hermetic host-Git observations, then seven isolated web gates."""
     require(digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in GATES], separators=(",", ":")).encode()) == GATE_LIST_SHA256, "immutable gate list differs")
+    require(tuple(gate.gate_id for gate in GATES[:6]) == LOCAL_GIT_GATE_IDS
+            and tuple(gate.gate_id for gate in GATES[6:]) == PODMAN_GATE_IDS,
+            "gate backend partition differs")
+    require(all(gate.workdir == "/workspace" and gate.command[0] == "git" for gate in GATES[:6])
+            and all(gate.workdir == "/workspace/apps/web" and gate.command[0] == "bun" for gate in GATES[6:]),
+            "gate backend command differs")
     require(_identity(os.lstat(chain.repository)) == chain.repository_identity, "retained repository changed before gates")
     attest(pins)
     podman_environment = rootless_podman_environment()
     records: list[dict[str, Any]] = []
     expected = {"git-head": chain.final_head, "git-tree": chain.final_tree, "git-main": chain.protected_main, "git-dev-base": chain.expected_dev_base, "git-clean": ""}
     for gate in GATES:
-        try:
-            result = run(podman_argv(chain.repository, gate, pins), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=podman_environment, cwd="/", timeout=900, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise Reject(f"{gate.gate_id} was unavailable") from error
-        stdout, stderr = bytes(result.stdout or b""), bytes(result.stderr or b"")
-        require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT and result.returncode == 0, f"{gate.gate_id} failed")
+        if gate.gate_id in LOCAL_GIT_GATE_IDS:
+            argv = local_git_argv(chain.repository, *gate.command[1:])
+            try:
+                result = local_git(chain.repository, *gate.command[1:])
+            except Reject as error:
+                raise Reject(f"{gate.gate_id} failed") from error
+            require(tuple(result.args) == argv, f"{gate.gate_id} argv differs")
+            stdout, stderr, returncode = bytes(result.stdout or b""), bytes(result.stderr or b""), result.returncode
+        else:
+            argv = podman_argv(chain.repository, gate, pins)
+            try:
+                result = run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=podman_environment, cwd="/", timeout=900, check=False)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise Reject(f"{gate.gate_id} was unavailable") from error
+            stdout, stderr, returncode = bytes(result.stdout or b""), bytes(result.stderr or b""), result.returncode
+        require(len(stdout) <= MAX_OUTPUT and len(stderr) <= MAX_OUTPUT and returncode == 0, f"{gate.gate_id} failed")
         if gate.gate_id in expected:
             require(stdout.decode("utf-8", "strict").strip() == expected[gate.gate_id], f"{gate.gate_id} output differs")
-        records.append({"id": gate.gate_id, "argv": list(podman_argv(chain.repository, gate, pins)), "exit_code": result.returncode, "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr), "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
+        records.append({"id": gate.gate_id, "argv": list(argv), "exit_code": returncode, "stdout_sha256": digest(stdout), "stderr_sha256": digest(stderr), "stdout_bytes": len(stdout), "stderr_bytes": len(stderr)})
     return records
 
 
@@ -430,10 +462,10 @@ def write_report(path: Path, chain: Chain, gates: list[dict[str, Any]], semantic
     return report
 
 
-def main(argv: Sequence[str] | None = None, *, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image) -> int:
-    """Run the real CLI, with only its container boundary injectable for tests."""
+def main(argv: Sequence[str] | None = None, *, run: Run = subprocess.run, attest: Callable[[Pins], None] = attest_image, local_git: LocalGit = _run_local_git) -> int:
+    """Run the real CLI with only its two process boundaries injectable."""
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("--result", type=Path, required=True); parser.add_argument("--completion", type=Path, required=True); parser.add_argument("--report", type=Path, required=True); args = parser.parse_args(argv)
-    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain); gates = run_gates(chain, pins, run, attest); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain)
+    pins = load_pins(); chain = _load_chain(args.result, args.completion, pins); before_semantic = semantic_evidence(chain); gates = run_gates(chain, pins, run, attest, local_git=local_git); final_chain = _load_chain(args.result, args.completion, pins); final_semantic = semantic_evidence(final_chain)
     require(chain == final_chain and before_semantic == final_semantic, "replay repository or semantic evidence changed during offline gates")
     write_report(args.report, final_chain, gates, final_semantic)
     return 0

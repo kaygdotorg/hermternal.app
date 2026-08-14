@@ -46,19 +46,29 @@ descriptor or rewriting frozen authority bytes. Result and completion remain
 runtime CLI arguments, but both arguments must equal the pinned paths and both
 stable file hashes must equal the pinned publication hashes before parsing.
 
-All executable gates are fixed in code. They run only in rootless Podman with
-a locally staged image digest, `--pull=never`, `--network=none`, a read-only
-repository bind, no host credential mounts, dropped capabilities, and
-no-new-privileges. Podman image inspection must attest Bun 1.3.14, Node 26.7.0,
-Playwright 1.62.1, and the exact locked dependency SHA-256. The image must
-contain the browser and immutable dependency tree already; #406 never pulls or
-installs them. It copies that tree from `/opt/hermternal/node_modules` into a
-dedicated tmpfs. Separate tmpfs mounts cover `.svelte-kit`, `build`,
+All 13 executable gates and their order are fixed in code. The first six Git
+observations use the existing local Git boundary with system/global config,
+hooks, replacement objects, lazy fetch, and protocol access disabled. The
+remaining seven web gates use only the pinned rootless Podman image with
+`--pull=never`, `--network=none`, a read-only repository bind, no host
+credential mounts, dropped capabilities, and no-new-privileges. The bind does
+not relabel retained evidence; SELinux process labeling is disabled for these
+read-only gate containers.
+
+Podman image inspection must attest Bun 1.3.14, Node 26.7.0, Playwright 1.62.1,
+and the exact locked dependency SHA-256. The image contains the browser at
+`/ms-playwright` and the immutable dependency tree already; #406 never pulls
+or installs them. Each writable web output uses a private `0700` tmpfs whose
+owner is set to the keep-id process. A child-only recursive copy moves the
+dependency entries from `/opt/hermternal/node_modules` without changing the
+tmpfs mountpoint metadata. Separate tmpfs mounts cover `.svelte-kit`, `build`,
 `test-results`, and `playwright-report`, so source stays read-only while build
 and browser tooling can write. Host Podman calls use the canonical real user
 home, `/run/user/<uid>` runtime directory, and their private rootless graph/run
 storage. The verifier rejects a changed environment or a Podman store outside
-those exact paths. The report records stable privacy, accessibility,
+those exact paths. The report schema and 13-gate order are unchanged; each
+gate's existing `argv` field records the backend that actually ran it. The
+report records stable privacy, accessibility,
 click/Enter, input-clearing, and screenshot/DOM-redaction source evidence
 before and after the gates. Those tracked source files are physically private,
 owner-owned, single-link regular files at mode `0600`. Their stable bytes must
