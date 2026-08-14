@@ -1748,6 +1748,79 @@ class TraefikEvidenceContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "synthetic Git failure"):
                     traefik_proof._current_parser_provenance(root)
 
+    def test_topology_mutation_after_initial_preflight_fails_closed(self) -> None:
+        """Forbidden topology added after preflight is caught by the final snapshot."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            real_output = traefik_proof._git_output
+            show_count = 0
+
+            def mutate_after_preflight(project: Path, *arguments: str, **kwargs: object) -> bytes:
+                nonlocal show_count
+                result = real_output(project, *arguments, **kwargs)
+                if arguments and arguments[0] == "show":
+                    show_count += 1
+                    if show_count == 2:
+                        (root / ".git" / "shallow").write_text("0" * 40 + "\n", encoding="ascii")
+                return result
+
+            with mock.patch.object(traefik_proof, "_git_output", side_effect=mutate_after_preflight):
+                with self.assertRaisesRegex(ValueError, "shallow|topology changed"):
+                    traefik_proof._current_parser_provenance(root)
+
+    def test_pack_metadata_entry_bound_fails_closed(self) -> None:
+        """A huge objects/pack directory cannot consume unbounded scan time."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repo_with_evidence(root)
+            pack_dir = root / ".git" / "objects" / "pack"
+            pack_dir.mkdir(parents=True, exist_ok=True)
+            for index in range(10_000):
+                (pack_dir / f"entry-{index:05d}").touch()
+            with self.assertRaisesRegex(ValueError, "pack metadata exceeds"):
+                traefik_proof._current_parser_provenance(root)
+
+    def test_source_ancestor_symlink_escape_fails_closed(self) -> None:
+        """A source ancestor symlink cannot redirect reads outside the repository."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            outside = Path(temporary) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            implementation, test_source, _source_commit = _create_parser_repo(root)
+            (outside / "traefik_proof.py").write_bytes(implementation)
+            (outside / "test_traefik_proof.py").write_bytes(test_source)
+            (root / "scripts").rename(root / "scripts-real")
+            (root / "scripts").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlinked path component"):
+                traefik_proof._current_parser_provenance(root)
+
+    def test_relative_linked_worktree_gitdir_is_supported_and_escape_rejected(self) -> None:
+        """Linked-worktree gitdir paths resolve relative to the .git file parent."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "repo"
+            linked = Path(temporary) / "linked"
+            root.mkdir()
+            _create_parser_repo(root)
+            _run_git(root, "worktree", "add", "--quiet", "-b", "relative-linked", str(linked))
+            marker = linked / ".git"
+            original = marker.read_text(encoding="ascii").strip()
+            absolute_git_dir = Path(original.split(":", 1)[1].strip()).resolve()
+            relative_git_dir = os.path.relpath(absolute_git_dir, start=marker.parent.resolve())
+            marker.write_text(f"gitdir: {relative_git_dir}\n", encoding="ascii")
+            self.assertEqual(_run_git(linked, "rev-parse", "--show-toplevel"), str(linked.resolve()))
+            provenance = traefik_proof._current_parser_provenance(linked)
+            self.assertEqual(len(provenance["implementation_commit"]), 40)
+
+            marker.write_text("gitdir: ../outside-gitdir\n", encoding="ascii")
+            with self.assertRaises(ValueError):
+                traefik_proof._current_parser_provenance(linked)
+
     def test_git_metadata_indirections_fail_closed(self) -> None:
         """Repository-local indirection and partial-clone markers cannot authorize ancestry."""
 
