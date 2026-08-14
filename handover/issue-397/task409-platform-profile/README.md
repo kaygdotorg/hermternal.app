@@ -26,6 +26,18 @@ or testing the adapter does not run replay.
 Its old dependency pins now fail closed. Keep its source and durable evidence
 as historical authority; use v4 for new approval work.
 
+## Parent-binding v9 boundary successor
+
+`linux_phase_a_v8.py` proved its disposable Phase A-to-anchor lifecycle but
+did not call `load_approved_wrapper`. Its inherited v3 method still searched
+for the old v3 disabled-boundary literal while the frozen v5 wrapper correctly
+uses the v8 literal. `linux_phase_a_v9.py` authenticates and executes exact v8
+bytes, then replaces only that one loaded v3 code constant. The existing
+preserved-method replacement remains unchanged. It has a new v9 schema, owner
+pin, and create-only evidence root. `linux_replay_failure_v7.py` retains the
+same one-shot failure interface against the v9 adapter in a separate v7 root.
+Neither successor regenerates authority or runs replay.
+
 `linux_phase_a_v4.py` verified-loads the unchanged v3 adapter. It binds only
 the corrected Linux driver and wrapper bytes, the v4 evidence schema, and the
 new `hermternal-issue397-phase-a-anchor-v4` root. The v1-v3 evidence stays
