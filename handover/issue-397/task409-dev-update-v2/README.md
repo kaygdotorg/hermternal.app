@@ -2,13 +2,13 @@
 
 This is the final small consumer of one exact #406 v3 PASS report. It does
 not accept the old v1 report, a report from another path, a changed report, or
-a partial gate result. `final-offline-report-pin.json` is deliberately
-`deferred` until the reviewed #406 run exists. There is no fallback.
+a partial gate result. `final-offline-report-pin.json` is final and binds the
+reviewed #406 report to its canonical private path and SHA-256 value. There is
+no fallback.
 
-After independent review, finalize that one pin with the canonical private
-paths and SHA-256 values for the #406 report and its #405 result and completion
-records. It must also pin the final candidate commit, tree, and completion
-source commit.
+The pin also binds the #405 result and completion records to their canonical
+private paths and SHA-256 values. It pins the final candidate commit and tree,
+and the completion source commit.
 
 The plan command validates the complete v3 report schema, result/completion
 chain, current clean candidate checkout, ancestry from the fixed `origin/dev`
