@@ -156,7 +156,7 @@
       "SPA fallback maps only canonical client deep links to /200.html",
       "the synthetic __Host- cookie canary requires Secure, HttpOnly, SameSite=Lax, Path=/, and no Domain",
       "WebSocket tickets are single-use with a 30-second TTL and retained request material is redacted",
-      "PTY detach is followed by eventual 30-minute TTL cleanup without retaining input bytes",
+      "PTY reattach rejects elapsed time beyond the 30-minute TTL before periodic cleanup, while reap deletes the stale handle after the boundary without retaining input bytes",
       "Chat and PTY WebSocket retries are disabled",
       "the required Hermes boundary is private non-loopback TCP 9119 with no public exposure",
       "blocked edge and direct-port vectors retain upstream_request=false"
@@ -484,6 +484,7 @@
     "boundary_reattach": "reattached",
     "detach": "detached",
     "expired_elapsed_seconds": 1801,
+    "expired_reattach_before_reap": "rejected",
     "host_requirement": "posix_or_wsl",
     "input": "forwarded",
     "kill": "not_claimed",

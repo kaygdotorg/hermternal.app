@@ -115,12 +115,13 @@ and PTY upgrade retries are explicitly `disabled`; this does not claim that a
 live Traefik runtime has exercised a retry path.
 
 The synthetic PTY lifecycle models POSIX/WSL attach, input forwarding without
-retaining bytes, detach, no cleanup before the 30-minute detached TTL, and
-one eventual TTL reap. The model keeps a detached handle reconnectable at
-exactly 30 minutes and reaps only after the boundary, at elapsed 30 minutes
-plus one second. It deliberately does not claim immediate PTY kill or
-replay-before-live ordering. These are lifecycle contract labels, not a live
-Hermes process observation.
+retaining bytes, detach, and the strict 30-minute detached TTL. A detached
+handle remains eligible for reattach through exactly 30 minutes; `reattach()`
+rejects elapsed time beyond that boundary even if periodic cleanup has not run.
+The periodic `reap()` deletes the stale detached handle only after the boundary,
+at elapsed 30 minutes plus one second. It deliberately does not claim immediate
+PTY kill or replay-before-live ordering. These are lifecycle contract labels,
+not a live Hermes process observation.
 
 The annotated negative evidence includes an explicit no-upstream summary. All
 edge-denied and direct-private-port vectors retain `upstream_request=false`.
