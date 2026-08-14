@@ -159,3 +159,33 @@ derived stdin have new hashes, so `linux_retained_driver_v4.py`,
 Earlier authority and Phase/failure roots remain frozen. Tests use mocked
 worktree identity and disposable local evidence; they do not execute replay,
 Hermes, network access, or credentials.
+
+## Local object-preservation successor
+
+`object_preservation.py` fixes only object availability after the reviewed
+heads-only clone. It exports one complete, non-thin local pack from the exact
+11 independent authority tips. It does not create refs, fetch, use alternates,
+or change the source repository. The disposable clean-primary imports the pack
+with `index-pack` without `--fix-thin`.
+
+The policy authenticates the 563 typed authority objects, 17 present forbidden
+commits, and five missing-proved commits as one record. It then requires strict
+`fsck`, all-ref closure, and each of the 11 root closures in the source and the
+disposable clone. Pack bytes, file identity, mode, and SHA-256 stay stable
+before and after import. The temporary pack is private and is removed after the
+check. No durable replay result is made by this step.
+
+`linux_retained_driver_v7.py` changes only the generated clone predicate.
+`linux_replay_wrapper_v7.py` stays disabled. `linux_phase_a_v11.py` binds the
+canonical record, record SHA-256, and policy SHA-256 in a new create-only owner
+and evidence root. `linux_replay_failure_v10.py` uses a separate failure root.
+All older authority, Phase A, and failure evidence stays frozen.
+
+Run the disposable tests in normal and optimized Python modes:
+
+```sh
+/usr/bin/python3 -B test_object_preservation.py
+/usr/bin/python3 -O -B test_object_preservation.py
+/usr/bin/python3 -B test_linux_phase_a_v11.py
+/usr/bin/python3 -O -B test_linux_phase_a_v11.py
+```
