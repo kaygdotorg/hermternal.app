@@ -13,10 +13,12 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import os
 import re
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -918,6 +920,368 @@ class CaddyProofInputBoundaryTests(unittest.TestCase):
                             limit=caddy_proof.BROWSER_EVIDENCE_MAX_BYTES,
                             label="browser evidence",
                         )
+
+
+class CaddyProofJsonBudgetTests(unittest.TestCase):
+    """Keep parser resource limits independent from the outer byte cap."""
+
+    def _budget(self, name: str) -> int:
+        value = getattr(caddy_proof, name, None)
+        self.assertIsInstance(value, int, f"caddy_proof must expose {name}")
+        self.assertGreater(value, 0, f"caddy_proof.{name} must be positive")
+        return value
+
+    def _assert_rejected_under_byte_cap(self, raw: bytes, message: str) -> None:
+        self.assertLess(len(raw), caddy_proof.BROWSER_EVIDENCE_MAX_BYTES)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.json"
+            path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, message):
+                caddy_proof._load_bounded_json(
+                    path,
+                    limit=caddy_proof.BROWSER_EVIDENCE_MAX_BYTES,
+                    label="browser evidence",
+                )
+
+    def test_parse_float_rejects_positive_and_negative_exponent_overflow(self) -> None:
+        for raw in (b"1e999", b"-1e999"):
+            with self.subTest(raw=raw):
+                self._assert_rejected_under_byte_cap(raw, "finite|overflow|number")
+
+    def test_json_depth_budget_is_enforced_below_byte_cap(self) -> None:
+        depth = self._budget("JSON_MAX_DEPTH")
+        value: object = 0
+        for _ in range(depth + 1):
+            value = {"x": value}
+        raw = json.dumps(value, separators=(",", ":")).encode("ascii")
+        self._assert_rejected_under_byte_cap(raw, "depth|nesting")
+
+    def test_json_total_node_budget_is_enforced_below_byte_cap(self) -> None:
+        node_limit = self._budget("JSON_MAX_NODES")
+        key_limit = self._budget("JSON_MAX_OBJECT_KEYS")
+        array_limit = self._budget("JSON_MAX_ARRAY_LENGTH")
+        keys = min(key_limit, 8)
+        width = min(array_limit, max(1, (node_limit // keys) + 1))
+        value = {f"k{index}": [0] * width for index in range(keys)}
+        node_count = 1 + sum(1 + width for _ in range(keys))
+        self.assertGreater(node_count, node_limit)
+        raw = json.dumps(value, separators=(",", ":")).encode("ascii")
+        self._assert_rejected_under_byte_cap(raw, "node|budget")
+
+    def test_json_object_key_budget_is_enforced_below_byte_cap(self) -> None:
+        key_limit = self._budget("JSON_MAX_OBJECT_KEYS")
+        value = {f"k{index}": 0 for index in range(key_limit + 1)}
+        raw = json.dumps(value, separators=(",", ":")).encode("ascii")
+        self._assert_rejected_under_byte_cap(raw, "object key|keys|budget")
+
+    def test_json_array_length_budget_is_enforced_below_byte_cap(self) -> None:
+        array_limit = self._budget("JSON_MAX_ARRAY_LENGTH")
+        raw = json.dumps([0] * (array_limit + 1), separators=(",", ":")).encode("ascii")
+        self._assert_rejected_under_byte_cap(raw, "array|length|budget")
+
+    def test_json_string_budget_is_enforced_below_byte_cap(self) -> None:
+        string_limit = self._budget("JSON_MAX_STRING_BYTES")
+        raw = json.dumps("x" * (string_limit + 1), separators=(",", ":")).encode("ascii")
+        self._assert_rejected_under_byte_cap(raw, "string|length|budget")
+
+
+class CaddyProofStaticDigestBoundaryTests(unittest.TestCase):
+    """Keep static-tree hashing finite and regular-file-only."""
+
+    def _write(self, root: Path, relative: str, content: bytes = b"x") -> Path:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
+    def _limit(self, name: str) -> int:
+        value = getattr(caddy_proof, name, None)
+        self.assertIsInstance(value, int, f"caddy_proof must expose {name}")
+        self.assertGreater(value, 0, f"caddy_proof.{name} must be positive")
+        return value
+
+    def test_static_digest_rejects_file_count_overflow(self) -> None:
+        self._limit("STATIC_BUILD_MAX_FILES")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            with mock.patch.object(caddy_proof, "STATIC_BUILD_MAX_FILES", 2):
+                for index in range(3):
+                    self._write(root, f"file-{index}")
+                with self.assertRaisesRegex(ValueError, "file|count|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_per_file_and_aggregate_byte_overflow(self) -> None:
+        self._limit("STATIC_BUILD_MAX_FILE_BYTES")
+        self._limit("STATIC_BUILD_MAX_TOTAL_BYTES")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            with mock.patch.object(caddy_proof, "STATIC_BUILD_MAX_FILE_BYTES", 4):
+                self._write(root, "oversized", b"12345")
+                with self.assertRaisesRegex(ValueError, "file|bytes|budget"):
+                    caddy_proof._build_static_digest(root)
+
+            for child in root.iterdir():
+                child.unlink()
+            with mock.patch.object(caddy_proof, "STATIC_BUILD_MAX_TOTAL_BYTES", 8):
+                self._write(root, "first", b"12345")
+                self._write(root, "second", b"67890")
+                with self.assertRaisesRegex(ValueError, "aggregate|total|bytes|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_depth_overflow(self) -> None:
+        self._limit("STATIC_BUILD_MAX_DEPTH")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            with mock.patch.object(caddy_proof, "STATIC_BUILD_MAX_DEPTH", 2):
+                self._write(root, "one/two/three/file.txt")
+                with self.assertRaisesRegex(ValueError, "depth|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_aborts_after_deadline(self) -> None:
+        self._limit("STATIC_BUILD_DEADLINE_SECONDS")
+        self.assertTrue(hasattr(caddy_proof, "time"), "static digest must expose its monotonic clock")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            self._write(root, "file.txt")
+            ticks = iter((0.0, 1.0))
+            with (
+                mock.patch.object(caddy_proof, "STATIC_BUILD_DEADLINE_SECONDS", 0.5),
+                mock.patch.object(caddy_proof.time, "monotonic", side_effect=lambda: next(ticks, 1.0)),
+            ):
+                with self.assertRaisesRegex(ValueError, "deadline|timed out|budget"):
+                    caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_fifo_and_unix_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            fifo = root / "pipe"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(ValueError, "special|regular|FIFO|file"):
+                caddy_proof._build_static_digest(root)
+
+            fifo.unlink()
+            unix_socket = root / "socket"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(listener.close)
+            listener.bind(str(unix_socket))
+            with self.assertRaisesRegex(ValueError, "special|regular|socket|file"):
+                caddy_proof._build_static_digest(root)
+
+    def test_static_digest_rejects_character_device_entry(self) -> None:
+        """Use a lstat seam when an unprivileged runner cannot create a device node."""
+
+        self.assertTrue(hasattr(caddy_proof, "os"), "static digest must inspect lstat metadata")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "site"
+            root.mkdir()
+            device = self._write(root, "device")
+            real_rglob = Path.rglob
+            real_lstat = os.lstat
+            fake_mode = stat.S_IFCHR | 0o600
+            fake_stat = os.stat_result((fake_mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+
+            def fake_rglob(path: Path, pattern: str):
+                if path == root:
+                    return iter((device,))
+                return real_rglob(path, pattern)
+
+            def fake_lstat(path: os.PathLike[str] | str, *args: object, **kwargs: object):
+                if Path(path) == device:
+                    return fake_stat
+                return real_lstat(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "rglob", side_effect=fake_rglob),
+                mock.patch.object(caddy_proof.os, "lstat", side_effect=fake_lstat),
+            ):
+                with self.assertRaisesRegex(ValueError, "special|regular|device|file"):
+                    caddy_proof._build_static_digest(root)
+
+
+class CaddyProofRetainedPathBoundaryTests(unittest.TestCase):
+    """Keep the retained evidence trust root lexical and race-resistant."""
+
+    def _assert_rejected(self, path: Path) -> None:
+        with self.assertRaisesRegex(ValueError, "canonical|retained|resolved|path"):
+            caddy_proof._canonical_retained_path(path)
+
+    def test_canonical_retained_path_rejects_lexical_parent_components(self) -> None:
+        lexical_parent = EVIDENCE_PATH.parent / ".." / EVIDENCE_PATH.parent.name / EVIDENCE_PATH.name
+        self.assertIn("..", lexical_parent.parts)
+        self._assert_rejected(lexical_parent)
+
+    def test_canonical_retained_path_rejects_symlinked_parent_and_final_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_link = root / "parent-link"
+            parent_link.symlink_to(EVIDENCE_PATH.parent, target_is_directory=True)
+            self._assert_rejected(parent_link / EVIDENCE_PATH.name)
+
+            final_link = root / "evidence-link.json"
+            final_link.symlink_to(EVIDENCE_PATH)
+            self._assert_rejected(final_link)
+
+    def test_canonical_retained_path_rejects_hardlink_and_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            hardlink = root / "evidence-hardlink.json"
+            os.link(EVIDENCE_PATH, hardlink)
+            self._assert_rejected(hardlink)
+
+            copied = root / "evidence-copy.json"
+            shutil.copyfile(EVIDENCE_PATH, copied)
+            self._assert_rejected(copied)
+
+    def test_verified_retained_read_rejects_replacement_after_path_precheck(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / "evidence.json"
+            anchor = root / "evidence.sha256"
+            original = b'{"trusted":true}\n'
+            replacement = root / "replacement.json"
+            evidence.write_bytes(original)
+            anchor.write_text(caddy_proof.digest_bytes(original) + "\n", encoding="ascii")
+            canonical = caddy_proof._canonical_retained_path
+
+            def replace_after_precheck(path: Path) -> Path:
+                resolved = canonical(path)
+                replacement.write_bytes(b'{"trusted":false}\n')
+                os.replace(replacement, resolved)
+                return resolved
+
+            with (
+                mock.patch.object(caddy_proof, "RETAINED_EVIDENCE_PATH", evidence),
+                mock.patch.object(caddy_proof, "RETAINED_EVIDENCE_ANCHOR_PATH", anchor),
+                mock.patch.object(caddy_proof, "RETAINED_EVIDENCE_ANCHOR", caddy_proof.digest_bytes(original)),
+                mock.patch.object(caddy_proof, "_canonical_retained_path", side_effect=replace_after_precheck),
+            ):
+                with self.assertRaisesRegex(ValueError, "anchor|changed|race|retained"):
+                    caddy_proof._read_verified_retained_bytes(evidence)
+
+
+class CaddyProofGitBoundaryTests(unittest.TestCase):
+    """Keep Git provenance local, deterministic, and non-fetching."""
+
+    def _strict_git_environment(self) -> dict[str, str]:
+        helper = getattr(caddy_proof, "_strict_git_environment", None)
+        self.assertTrue(callable(helper), "implementation must expose _strict_git_environment")
+        value = helper()
+        self.assertIsInstance(value, dict)
+        return value
+
+    def test_git_text_rejects_none_stderr_as_malformed(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 0, stdout=(b"0" * 40) + b"\n", stderr=None
+        )
+        with mock.patch.object(caddy_proof.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(ValueError, "stderr|diagnostics|malformed"):
+                caddy_proof._git_text(ROOT, "rev-parse", "HEAD")
+
+    def test_git_environment_removes_fake_path_config_and_object_redirects(self) -> None:
+        hostile = {
+            "PATH": "/tmp/fake-git-bin",
+            "GIT_CONFIG_NOSYSTEM": "0",
+            "GIT_CONFIG_GLOBAL": "/tmp/hostile-global",
+            "GIT_CONFIG_SYSTEM": "/tmp/hostile-system",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": "/tmp/hostile-alternates",
+            "GIT_OBJECT_DIRECTORY": "/tmp/hostile-objects",
+            "GIT_GRAFT_FILE": "/tmp/hostile-grafts",
+            "GIT_REPLACE_REF_BASE": "refs/replace-hostile",
+            "GIT_NO_REPLACE_OBJECTS": "0",
+            "GIT_NO_LAZY_FETCH": "0",
+        }
+        with mock.patch.dict(os.environ, hostile, clear=False):
+            environment = self._strict_git_environment()
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(environment["GIT_CONFIG_SYSTEM"], os.devnull)
+        self.assertNotEqual(environment["PATH"], hostile["PATH"])
+        for variable in (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_GRAFT_FILE",
+            "GIT_REPLACE_REF_BASE",
+        ):
+            self.assertNotIn(variable, environment)
+
+    def test_git_commands_disable_replace_and_lazy_fetch(self) -> None:
+        reader = getattr(caddy_proof, "_git", None)
+        runner = getattr(caddy_proof, "_run_bounded_git", None)
+        self.assertTrue(callable(reader), "implementation must expose _git")
+        self.assertTrue(callable(runner), "implementation must expose _run_bounded_git")
+        with mock.patch.object(
+            caddy_proof,
+            "_run_bounded_git",
+            return_value=(0, (b"0" * 40) + b"\n", b""),
+        ) as run:
+            reader(ROOT, "rev-parse", "--verify", "HEAD^{commit}")
+        call = run.call_args
+        command = call.args[0] if call.args else call.kwargs["command"]
+        environment = call.args[1] if len(call.args) > 1 else call.kwargs["environment"]
+        self.assertIn("--no-replace-objects", command)
+        self.assertIn("--no-lazy-fetch", command)
+        self.assertIn("--no-optional-locks", command)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
+
+    def test_fake_path_cannot_intercept_git_provenance(self) -> None:
+        expected = caddy_proof._git_head(ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            marker = root / "fake-git-used"
+            shim = fake_bin / "git"
+            shim.write_text(
+                f"#!/bin/sh\nprintf used > '{marker}'\nprintf '%040d\\n' 0\n",
+                encoding="ascii",
+            )
+            shim.chmod(0o755)
+            with mock.patch.dict(
+                os.environ,
+                {"PATH": str(fake_bin), "GIT_CONFIG_NOSYSTEM": "0"},
+                clear=False,
+            ):
+                try:
+                    observed = caddy_proof._git_head(ROOT)
+                except ValueError:
+                    observed = None
+            self.assertFalse(marker.exists())
+            if observed is not None:
+                self.assertEqual(observed, expected)
+
+    def test_shallow_repository_is_rejected_by_git_trust_check(self) -> None:
+        verifier = getattr(caddy_proof, "_verify_git_repository", None)
+        if verifier is None:
+            verifier = getattr(caddy_proof, "_verify_git_repository_integrity", None)
+        self.assertTrue(callable(verifier), "implementation must expose a repository trust check")
+        with tempfile.TemporaryDirectory() as directory:
+            shallow = Path(directory) / "shallow"
+            subprocess.run(
+                ["git", "clone", "--no-local", "--depth", "1", "--quiet", ROOT.as_uri(), str(shallow)],
+                check=True,
+                capture_output=True,
+            )
+            self.assertTrue((shallow / ".git" / "shallow").is_file())
+            with self.assertRaisesRegex(ValueError, "shallow|history|repository"):
+                verifier(shallow)
+
+
+class CaddyBlackBoxToolAvailabilityTests(unittest.TestCase):
+    """Do not turn missing black-box binaries into a green skipped suite."""
+
+    def test_caddy_black_box_tools_are_available_without_skip(self) -> None:
+        missing = [tool for tool in ("caddy", "openssl") if shutil.which(tool) is None]
+        self.assertEqual(missing, [], f"Caddy black-box tools are unavailable: {missing}")
+        self.assertFalse(getattr(CaddyBlackBoxTests, "__unittest_skip__", False))
 
 
 def _free_tcp_port() -> int:
