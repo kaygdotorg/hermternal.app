@@ -167,7 +167,14 @@ def local_image(image: str, repo_digest: str, manifest: dict[str, Any]) -> None:
     values = json.loads(result.stdout)
     require(isinstance(values, list) and len(values) == 1, "toolchain image inspection differs")
     value = values[0]
-    require(value.get("Architecture") == "amd64" and f"{image}@{repo_digest}" in value.get("RepoDigests", []), "toolchain image RepoDigest differs")
+    # OCI repository digests bind a repository name, not its mutable tag.
+    # Remove only a tag in the final path component so registry ports stay valid.
+    prefix, separator, leaf = image.rpartition("/")
+    repository = f"{prefix}{separator}{leaf.rsplit(':', 1)[0]}"
+    expected_output = manifest["image_output"]
+    require(image == expected_output["image"] and repo_digest == expected_output["repo_digest"], "toolchain image output pin differs")
+    require(str(value.get("Id", "")).removeprefix("sha256:") == expected_output["image_id"].removeprefix("sha256:"), "toolchain image ID differs")
+    require(value.get("Architecture") == "amd64" and f"{repository}@{repo_digest}" in value.get("RepoDigests", []), "toolchain image RepoDigest differs")
     labels = value.get("Labels") or value.get("Config", {}).get("Labels") or {}
     expected = {
         "org.hermternal.bun": manifest["bun"]["version"],

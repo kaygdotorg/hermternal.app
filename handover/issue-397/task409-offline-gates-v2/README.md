@@ -6,9 +6,10 @@ Hermes, a network command, or a gate during its tests.
 The tool accepts only the real Linux #405 `replay-result.json` and
 `replay-completion.json`. `final-linux-pins.json` already pins the approved
 shared Linux profile, #401 authority module, and Linux authority root. It
-remains intentionally deferred for the final Phase A and #405 wrapper bytes,
-expected `dev` base, and local toolchain digest. It rejects until those final
-values are written. It has no macOS or `/private/tmp` fallback.
+remains intentionally deferred for the final Phase A and #405 wrapper bytes
+and expected `dev` base. The local toolchain digest is now pinned. It rejects
+until the remaining final values are written. It has no macOS or `/private/tmp`
+fallback.
 
 After finalization, it loads and pins:
 
@@ -53,8 +54,13 @@ specification. The retained staging set binds the official Bun archive, the
 Playwright Chromium headless-shell archive, the exact Node OCI child manifest,
 the signed Debian 13 snapshot index, 114 exact Debian packages, and the Linux
 dependency tree produced from the committed frozen lock. The dependency-tree
-digest is final. The image name and repository digest stay null because this
-lane did not build or publish an image.
+digest is final. An authorized rootless, network-disabled build produced local
+image ID
+`sha256:a834f2f05e84c441da304939d287f0598eececbe9e6855cfb7b7cc9ac957c695`
+and repository digest
+`sha256:a10cb9ee63acdd627824be448b3031bc788ee02992056fb44a9303f1904a98fc`.
+These values identify the retained local image. They do not claim that the
+image exists in an external registry.
 
 The staging verifier reads only local files and the local Podman store. It
 requires a private owner directory, rootless amd64 Podman, the exact base
@@ -69,8 +75,7 @@ python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/verify_staging.
   --root /tmp/<retained-private-staging-root>
 ```
 
-A separate authorization is still required to build and place the image in a
-local repository. The deterministic build command is:
+The authorized deterministic build used this command:
 
 ```sh
 podman build --pull=never --network=none --platform linux/amd64 \
@@ -80,17 +85,22 @@ podman build --pull=never --network=none --platform linux/amd64 \
   /tmp/<retained-private-staging-root>
 ```
 
-Do not fill `image` or `repo_digest` from a tag or an image ID. Fill them only
-after an approved local repository step makes `podman image inspect` report
-the exact `RepoDigest`. Verify every image label and that exact local
-`RepoDigest` before any replay evidence is accepted:
+The tag is only the local inspection handle. The committed image reference uses
+the exact `RepoDigest`, and the staging manifest records the separate immutable
+image ID. Verify the image ID, every label, and the exact local `RepoDigest`
+before any replay evidence is accepted:
 
 ```sh
 python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/verify_staging.py \
   --root /tmp/<retained-private-staging-root> \
   --image localhost/hermternal-offline-gates:issue-406-v1 \
-  --repo-digest sha256:<exact-local-repository-manifest-digest>
+  --repo-digest sha256:a10cb9ee63acdd627824be448b3031bc788ee02992056fb44a9303f1904a98fc
 ```
+
+The minimal smoke check also uses `--pull=never`, `--network=none`, a read-only
+root filesystem, no capabilities, no-new-privileges, and a bounded `/tmp`
+tmpfs. It confirms Bun, Node, Playwright, Chromium, and `dpkg --audit` without
+running an application gate.
 
 Run only after independent review authorizes the real retained replay result:
 

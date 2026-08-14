@@ -70,9 +70,10 @@
     }
   },
   "image_output": {
-    "image": null,
-    "repo_digest": null,
-    "status": "deferred-until-authorized-build"
+    "image": "localhost/hermternal-offline-gates:issue-406-v1",
+    "image_id": "sha256:a834f2f05e84c441da304939d287f0598eececbe9e6855cfb7b7cc9ac957c695",
+    "repo_digest": "sha256:a10cb9ee63acdd627824be448b3031bc788ee02992056fb44a9303f1904a98fc",
+    "status": "verified-local-build"
   },
   "playwright": {
     "browser_version": "151.0.7922.34",
