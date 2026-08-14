@@ -210,11 +210,16 @@ before making that runtime claim.
 - the synthetic cookie, ticket, PTY, no-retry, and no-upstream model outputs; and
 - the fixed synthetic proof-run boundary (`live_run=false`, `compatible=false`).
 
-The generator walks the current `HEAD` history for the parser and focused test
-paths, selects the newest commit containing the exact current source bytes, and
-verifies both Git blobs before emitting evidence. Evidence-only or documentation
--only descendants therefore retain the same implementation commit; uncommitted
-source drift and forged CLI provenance fail closed.
+The generator walks a bounded, full `HEAD` commit topology for the parser and
+focused test paths. It treats the implementation/test blob pair as the source
+identity, ignores mode-only commits and descendants that do not change that pair,
+and requires one unique maximal source-changing candidate. A merge or
+cherry-pick that exposes incomparable equal-byte candidates fails closed instead
+of inheriting Git log order. The selected commit is then checked against the
+exact working-tree bytes and both Git blobs before evidence is emitted;
+evidence-only or documentation-only descendants therefore retain the same
+implementation commit, while uncommitted source drift and forged CLI provenance
+fail closed.
 
 The browser state is `blocked_provider` with only the fixed
 `provider_unavailable` blocker. No `gateway.ready`, `session.resume`,
