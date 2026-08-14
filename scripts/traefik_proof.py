@@ -1579,13 +1579,29 @@ class SyntheticPtyLifecycle:
         self._states[attach_id] = float(now)
         return "detached"
 
+    def reattach(self, attach_id: str, *, now: float) -> str:
+        """Reattach a detached PTY that has not crossed the strict TTL boundary."""
+
+        if type(attach_id) is not str or not re.fullmatch(PTY_ATTACH_VALUE_PATTERN, attach_id):
+            raise ValueError("PTY attach identity is malformed")
+        if type(now) not in {int, float} or isinstance(now, bool):
+            raise ValueError("PTY timestamp is malformed")
+        if attach_id not in self._states:
+            raise ValueError("PTY attachment has been reaped")
+        if self._states[attach_id] is None:
+            return "already_attached"
+        self._states[attach_id] = None
+        return "reattached"
+
     def reap(self, *, now: float) -> int:
         if type(now) not in {int, float} or isinstance(now, bool):
             raise ValueError("PTY timestamp is malformed")
         expired = [
             attach_id
             for attach_id, detached_at in self._states.items()
-            if detached_at is not None and float(now) - detached_at >= self.ttl_seconds
+            # Keep the handle reattachable at exactly the retention boundary;
+            # cleanup begins only after the full TTL has elapsed.
+            if detached_at is not None and float(now) - detached_at > self.ttl_seconds
         ]
         for attach_id in expired:
             del self._states[attach_id]
@@ -1598,16 +1614,27 @@ def synthetic_pty_lifecycle_observation() -> dict[str, object]:
     lifecycle = SyntheticPtyLifecycle()
     attached = lifecycle.attach("fixtureAttach", now=0)
     forwarded = lifecycle.send_input("fixtureAttach", b"synthetic-input")
-    detached = lifecycle.detach("fixtureAttach", now=1)
-    before_ttl = lifecycle.reap(now=PTY_DETACHED_TTL_SECONDS)
-    after_ttl = lifecycle.reap(now=PTY_DETACHED_TTL_SECONDS + 1)
+    detached = lifecycle.detach("fixtureAttach", now=0)
+    # Probe the exact boundary rather than an offset timestamp: the handle
+    # remains present and can reconnect at 1800 seconds, then a separate
+    # detached handle proves cleanup at 1801 seconds.
+    boundary_reap = lifecycle.reap(now=PTY_DETACHED_TTL_SECONDS)
+    boundary_reattach = lifecycle.reattach("fixtureAttach", now=PTY_DETACHED_TTL_SECONDS)
+    expired = SyntheticPtyLifecycle()
+    expired.attach("fixtureExpired", now=0)
+    expired.detach("fixtureExpired", now=0)
+    after_ttl = expired.reap(now=PTY_DETACHED_TTL_SECONDS + 1)
     return {
         "status": "synthetic_observed",
         "host_requirement": "posix_or_wsl",
         "attach": attached,
         "input": forwarded,
         "detach": detached,
-        "before_ttl_reap": before_ttl,
+        "boundary_elapsed_seconds": PTY_DETACHED_TTL_SECONDS,
+        "boundary_reap": boundary_reap,
+        "boundary_reattach": boundary_reattach,
+        "expired_elapsed_seconds": PTY_DETACHED_TTL_SECONDS + 1,
+        "before_ttl_reap": boundary_reap,
         "ttl_reap": after_ttl,
         "retry": UPGRADE_RETRY_POLICY["pty"],
         "kill": "not_claimed",
