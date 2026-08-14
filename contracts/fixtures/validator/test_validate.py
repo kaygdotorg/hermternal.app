@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -63,6 +64,17 @@ class StrictJsonTests(unittest.TestCase):
     def test_nul_is_rejected_in_registry_documents(self) -> None:
         with self.assertRaises(validate.ValidationError):
             validate.load_json(self._write(b'{"value":"\\u0000"}'))
+        with self.assertRaises(validate.ValidationError):
+            validate.load_json(self._write(b'{"bad\\u0000key":false}'))
+
+    def test_nul_values_are_rejected_by_fixture_redaction_scans(self) -> None:
+        document = validate._parse_json_bytes(b'{"value":"\\u0000"}', reject_nul=False)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_redaction_tree(
+                document,
+                allowed_assignment_values=frozenset(),
+                allowed_structural_urls=frozenset(),
+            )
 
 
 class RegistryTests(unittest.TestCase):
@@ -73,17 +85,23 @@ class RegistryTests(unittest.TestCase):
         cls.baseline = validate.load_json(validate.BASELINE_PATH)
 
     def test_checked_in_registry_is_valid_and_partial_is_not_success(self) -> None:
-        fixture_count, coverage_count = validate.validate_all(
-            self.index,
-            self.schema,
-            self.baseline,
-            repo_root=validate.REPO_ROOT,
-            baseline_path=validate.BASELINE_PATH,
-        )
+        # Source-only validator corrections intentionally leave the checked-in
+        # benchmark manifest frozen until evidence rotation is authorized. Keep
+        # registry/artifact validation green independently, then require the
+        # complete path to report the stale evidence boundary.
+        fixture_count, coverage_count = validate._validate_index_document(self.index, validate.REPO_ROOT)
         self.assertEqual(fixture_count, len(self.index["fixture_roots"]))
         self.assertEqual(coverage_count, len(self.index["coverage"]))
         self.assertEqual(self.index["evidence_status"], "partial")
         self.assertFalse(self.index["live_claim"])
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_all(
+                self.index,
+                self.schema,
+                self.baseline,
+                repo_root=validate.REPO_ROOT,
+                baseline_path=validate.BASELINE_PATH,
+            )
 
     def test_digest_mutation_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.index)
@@ -109,6 +127,57 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_index_document(mutated, validate.REPO_ROOT)
 
+    def test_invalid_unicode_live_claim_key_fails_before_normalization(self) -> None:
+        with self.assertRaises(validate.ValidationError):
+            validate._reject_live_claims({"live​_claim": False})
+        with self.assertRaises(validate.ValidationError):
+            validate._reject_live_claims({"live_claim\x00": False})
+
+    def test_validate_all_binds_caller_documents_to_canonical_files(self) -> None:
+        mutated_index = copy.deepcopy(self.index)
+        mutated_index["live_claim"] = False
+        mutated_index["evidence_status"] = "complete"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_all(
+                mutated_index,
+                self.schema,
+                self.baseline,
+                repo_root=validate.REPO_ROOT,
+                baseline_path=validate.BASELINE_PATH,
+            )
+
+        mutated_schema = copy.deepcopy(self.schema)
+        mutated_schema["title"] = "forged schema"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_all(
+                self.index,
+                mutated_schema,
+                self.baseline,
+                repo_root=validate.REPO_ROOT,
+                baseline_path=validate.BASELINE_PATH,
+            )
+
+        mutated_baseline = copy.deepcopy(self.baseline)
+        mutated_baseline["notes"] = "forged evidence"
+        with self.assertRaises(validate.ValidationError):
+            validate.validate_all(
+                self.index,
+                self.schema,
+                mutated_baseline,
+                repo_root=validate.REPO_ROOT,
+                baseline_path=validate.BASELINE_PATH,
+            )
+
+    def test_stable_reader_rejects_final_symlink(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="fixture-stable-reader-") as temporary:
+            root = Path(temporary)
+            target = root / "target.txt"
+            target.write_text("synthetic", encoding="utf-8")
+            link = root / "link.txt"
+            link.symlink_to(target)
+            with self.assertRaises(validate.ValidationError):
+                validate._stable_file_bytes(root, "link.txt", validate.MAX_ARTIFACT_BYTES)
+
     def test_redaction_mutation_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.index)
         mutated["redaction"]["contains_credentials"] = True
@@ -129,8 +198,9 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(validate.ValidationError):
             validate._validate_baseline(mutated, validate.REPO_ROOT, validate.BASELINE_PATH)
 
-    def test_canonical_baseline_anchor_matches_checked_in_content(self) -> None:
-        self.assertEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
+    def test_canonical_baseline_anchor_reports_source_only_staleness(self) -> None:
+        # The source-only correction must not rotate reviewed benchmark evidence.
+        self.assertNotEqual(validate._canonical_baseline_digest(self.baseline), validate.BASELINE_CANONICAL_SHA256)
 
 
 class CliTests(unittest.TestCase):
@@ -240,15 +310,28 @@ class CliTests(unittest.TestCase):
                 "relative_path = sys.argv[3]; "
                 "validate._validate_python_file("
                 "Path(sys.argv[2]), "
+                "allow_synthetic_markers=("
+                "relative_path in validate.SYNTHETIC_MARKER_PATHS), "
                 "allow_test_negative_basic_auth=("
                 "relative_path in validate.TEST_NEGATIVE_BASIC_AUTH_PATHS), "
+                "allow_test_negative_rfc7617_token=("
+                "relative_path in validate.TEST_NEGATIVE_RFC7617_TOKEN_PATHS), "
+                "allowed_assignment_values=("
+                "validate.EXACT_ASSIGNMENT_ALLOWANCES.get(relative_path, frozenset())), "
                 "allowed_synthetic_full_values=("
-                "validate.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())"
-                "))"
+                "validate.SYNTHETIC_FULL_VALUE_ALLOWANCES.get(relative_path, frozenset())), "
+                "allowed_structural_urls=("
+                "validate.STRUCTURAL_URL_ALLOWANCES.get(relative_path, frozenset())), "
+                "allowed_empty_assignment_values=("
+                "validate.EXACT_EMPTY_ASSIGNMENT_VALUES.get(relative_path, frozenset())), "
+                "control_policy_path=relative_path, "
+                "control_policy_root=Path(sys.argv[4])"
+                ")"
             ),
             str(fixtures_root / "validator"),
             str(artifact),
             relative_path,
+            str(fixtures_root),
         ])
         environment = dict(os.environ)
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -342,6 +425,366 @@ class CliTests(unittest.TestCase):
             b'VALUE = "api_key=sk_test_123456789; api_key=unredacted-secret-value"\n',
         )
 
+    def test_empty_bare_assignments_fail_closed_but_annotations_remain_text(self) -> None:
+        for source in (b'VALUE = "api_key="\n', b'VALUE = "token="\n'):
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source,
+                )
+        self._assert_scanner_accepts_in_both_modes(
+            "connection-restoration/validate.py",
+            b"token: str\n",
+        )
+        for key in ("api_key", "token"):
+            with self.subTest(exact_full_allowance=key):
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_text_value(
+                        f"{key}=",
+                        allowed_synthetic_full_values=frozenset({f"{key}="}),
+                    )
+
+    def test_retained_markdown_and_text_scan_empty_assignments(self) -> None:
+        for suffix in (".md", ".txt"):
+            with self.subTest(suffix=suffix):
+                handle = tempfile.NamedTemporaryFile(
+                    prefix="fixture-retained-",
+                    suffix=suffix,
+                    delete=False,
+                    mode="w",
+                    encoding="utf-8",
+                )
+                path = Path(handle.name)
+                try:
+                    handle.write("api_key=\n")
+                    handle.close()
+                except Exception:
+                    handle.close()
+                    path.unlink(missing_ok=True)
+                    raise
+                self.addCleanup(lambda path=path: path.unlink(missing_ok=True))
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_text_file(path)
+
+    def test_empty_assignment_exceptions_are_exactly_path_and_value_bound(self) -> None:
+        route_line = next(iter(validate.EXACT_EMPTY_ASSIGNMENT_LINES["route-allowlist/README.md"]))
+        route_path = validate.FIXTURES_ROOT / "route-allowlist/README.md"
+        validate._validate_text_file(
+            route_path,
+            allowed_empty_assignment_lines=validate.EXACT_EMPTY_ASSIGNMENT_LINES["route-allowlist/README.md"],
+        )
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_text_file(route_path)
+
+        repo_root = self._copy_fixture_repo()
+        fixtures_root = (repo_root / "contracts/fixtures").resolve()
+        index = json.loads((fixtures_root / "index.json").read_text(encoding="utf-8"))
+        route_record = next(
+            record
+            for fixture in index["fixture_roots"]
+            for record in fixture["files"]
+            if record["path"] == "route-allowlist/README.md"
+        )
+        original_path = fixtures_root / route_record["path"]
+        total_bytes = [0]
+        self.assertEqual(
+            validate._validate_manifest_file(
+                route_record,
+                fixtures_root=fixtures_root,
+                fixture_relative_root="route-allowlist",
+                total_bytes=total_bytes,
+            ),
+            "route-allowlist/README.md",
+        )
+
+        changed_path = fixtures_root / "route-allowlist/changed.md"
+        changed_text = original_path.read_text(encoding="utf-8").replace(
+            route_line,
+            route_line + " changed",
+            1,
+        )
+        changed_path.write_text(changed_text, encoding="utf-8")
+        changed_record = copy.deepcopy(route_record)
+        changed_record["path"] = "route-allowlist/changed.md"
+        changed_data = changed_path.read_bytes()
+        changed_record["size_bytes"] = len(changed_data)
+        changed_record["sha256"] = hashlib.sha256(changed_data).hexdigest()
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_manifest_file(
+                changed_record,
+                fixtures_root=fixtures_root,
+                fixture_relative_root="route-allowlist",
+                total_bytes=[0],
+            )
+
+        copied_path = fixtures_root / "route-allowlist/copied.md"
+        copied_path.write_text(route_line + "\n", encoding="utf-8")
+        copied_record = copy.deepcopy(route_record)
+        copied_record["path"] = "route-allowlist/copied.md"
+        copied_data = copied_path.read_bytes()
+        copied_record["size_bytes"] = len(copied_data)
+        copied_record["sha256"] = hashlib.sha256(copied_data).hexdigest()
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_manifest_file(
+                copied_record,
+                fixtures_root=fixtures_root,
+                fixture_relative_root="route-allowlist",
+                total_bytes=[0],
+            )
+
+        exact_value = "?ticket=<single-use>"
+        validate._validate_text_value(
+            exact_value,
+            allowed_empty_assignment_values=validate.EXACT_EMPTY_ASSIGNMENT_VALUES[
+                "route-allowlist/test_route_allowlist.py"
+            ],
+        )
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_text_value(
+                exact_value + "-changed",
+                allowed_empty_assignment_values=validate.EXACT_EMPTY_ASSIGNMENT_VALUES[
+                    "route-allowlist/test_route_allowlist.py"
+                ],
+            )
+
+    def test_python_control_policy_matches_an_independent_fixture_inventory(self) -> None:
+        """Lock paths, typed values, roles, constructors, and ordinals independently."""
+        def dotted(node: ast.AST) -> str:
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                left = dotted(node.value)
+                return f"{left}.{node.attr}" if left else node.attr
+            return type(node).__name__
+
+        def target_name(node: ast.AST) -> str:
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                return dotted(node)
+            if isinstance(node, ast.Subscript):
+                return dotted(node)
+            if isinstance(node, (ast.Tuple, ast.List)):
+                return "[" + ",".join(target_name(child) for child in node.elts) + "]"
+            return type(node).__name__
+
+        def parent_map(tree: ast.AST) -> dict[int, tuple[ast.AST, str, int | None]]:
+            result: dict[int, tuple[ast.AST, str, int | None]] = {}
+            for parent in ast.walk(tree):
+                for field, child in ast.iter_fields(parent):
+                    if isinstance(child, ast.AST):
+                        result[id(child)] = (parent, field, None)
+                    elif isinstance(child, list):
+                        for index, item in enumerate(child):
+                            if isinstance(item, ast.AST):
+                                result[id(item)] = (parent, field, index)
+            return result
+
+        def path_from(
+            parents: dict[int, tuple[ast.AST, str, int | None]],
+            node: ast.AST,
+            ancestor: ast.AST,
+        ) -> list[str] | None:
+            steps: list[str] = []
+            current = node
+            while current is not ancestor:
+                relation = parents.get(id(current))
+                if relation is None:
+                    return None
+                _parent, field, index = relation
+                steps.append(f"{field}[{index}]" if index is not None else field)
+                current = _parent
+            return list(reversed(steps))
+
+        def scope(
+            parents: dict[int, tuple[ast.AST, str, int | None]],
+            node: ast.AST,
+        ) -> str:
+            current = node
+            while id(current) in parents:
+                parent, _field, _index = parents[id(current)]
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return parent.name
+                current = parent
+            return "module"
+
+        def role(
+            parents: dict[int, tuple[ast.AST, str, int | None]],
+            node: ast.AST,
+        ) -> str:
+            function = scope(parents, node)
+            current = node
+            while id(current) in parents:
+                parent, _field, _index = parents[id(current)]
+                if isinstance(parent, ast.Call):
+                    path = path_from(parents, node, parent) or []
+                    if path and path[0].startswith("args["):
+                        argument = path[0].split("[", 1)[1].rstrip("]")
+                        return f"fn:{function}|call:{dotted(parent.func)}|arg:{argument}|path:{'/'.join(path[1:]) or 'direct'}"
+                    if path and path[0].startswith("keywords["):
+                        keyword_index = int(path[0].split("[", 1)[1].rstrip("]"))
+                        keyword = parent.keywords[keyword_index]
+                        return f"fn:{function}|call:{dotted(parent.func)}|kw:{keyword.arg or '**'}|path:{'/'.join(path[1:]) or 'direct'}"
+                current = parent
+
+            current = node
+            while id(current) in parents:
+                parent, _field, _index = parents[id(current)]
+                if isinstance(parent, ast.Assign):
+                    path = path_from(parents, node, parent) or []
+                    return f"fn:{function}|assign:{','.join(target_name(item) for item in parent.targets)}|path:{'/'.join(path)}"
+                if isinstance(parent, ast.AnnAssign):
+                    path = path_from(parents, node, parent) or []
+                    return f"fn:{function}|annassign:{target_name(parent.target)}|path:{'/'.join(path)}"
+                if isinstance(parent, ast.NamedExpr):
+                    path = path_from(parents, node, parent) or []
+                    return f"fn:{function}|namedexpr:{target_name(parent.target)}|path:{'/'.join(path)}"
+                current = parent
+
+            current = node
+            while id(current) in parents:
+                parent, _field, _index = parents[id(current)]
+                if isinstance(parent, (ast.Dict, ast.List, ast.Tuple, ast.Set)):
+                    path = path_from(parents, node, parent) or []
+                    return f"fn:{function}|container:{type(parent).__name__}|path:{'/'.join(path)}"
+                if isinstance(parent, ast.Compare):
+                    path = path_from(parents, node, parent) or []
+                    operators = ",".join(type(operator).__name__ for operator in parent.ops)
+                    return f"fn:{function}|compare:{operators}|path:{'/'.join(path)}"
+                if isinstance(parent, ast.Assert):
+                    path = path_from(parents, node, parent) or []
+                    return f"fn:{function}|assert|path:{'/'.join(path)}"
+                current = parent
+            return f"fn:{function}|module-path"
+
+        def static_int(node: ast.AST) -> int | None:
+            return node.value if isinstance(node, ast.Constant) and type(node.value) is int else None
+
+        def static_byte_hex(node: ast.AST) -> str | None:
+            if isinstance(node, ast.Constant) and type(node.value) is bytes:
+                return node.value.hex()
+            if isinstance(node, (ast.List, ast.Tuple)):
+                values = [static_int(child) for child in node.elts]
+                if all(value is not None and 0 <= value <= 255 for value in values):
+                    return "".join(f"{value:02x}" for value in values if value is not None)
+            return None
+
+        def utf8_hex(code: int) -> str:
+            if code <= 0x7F:
+                return f"{code:02x}"
+            if code <= 0x7FF:
+                return f"{0xC0 | (code >> 6):02x}{0x80 | (code & 0x3F):02x}"
+            if code <= 0xFFFF:
+                return f"{0xE0 | (code >> 12):02x}{0x80 | ((code >> 6) & 0x3F):02x}{0x80 | (code & 0x3F):02x}"
+            return f"{0xF0 | (code >> 18):02x}{0x80 | ((code >> 12) & 0x3F):02x}{0x80 | ((code >> 6) & 0x3F):02x}{0x80 | (code & 0x3F):02x}"
+
+        def construction(
+            node: ast.AST,
+            parents: dict[int, tuple[ast.AST, str, int | None]],
+        ) -> tuple[str, str, str, str] | tuple[str, str] | None:
+            if not isinstance(node, ast.Call):
+                return None
+            name = dotted(node.func)
+            encoded: str | None = None
+            controls: set[int] = set()
+            kind: str | None = None
+            if name == "chr" and len(node.args) == 1 and not node.keywords:
+                code = static_int(node.args[0])
+                if code is None:
+                    return ("unknown", name)
+                if 0 <= code <= 0x10FFFF:
+                    encoded = utf8_hex(code)
+                    controls = {code} if code < 32 or code == 127 else set()
+                    kind = "str"
+            elif name in {"bytes", "bytearray"} and len(node.args) == 1 and not node.keywords:
+                encoded = static_byte_hex(node.args[0])
+                if encoded is None:
+                    return ("unknown", name)
+                controls = {
+                    byte
+                    for index in range(0, len(encoded), 2)
+                    for byte in (int(encoded[index:index + 2], 16),)
+                    if byte < 32 or byte == 127
+                }
+                kind = "bytes"
+            elif name in {"bytes.fromhex", "bytearray.fromhex"} and len(node.args) == 1 and not node.keywords:
+                argument = node.args[0]
+                if isinstance(argument, ast.Constant) and type(argument.value) is str:
+                    compact = "".join(argument.value.split())
+                    if len(compact) % 2 or any(digit not in "0123456789abcdefABCDEF" for digit in compact):
+                        return ("unknown", name)
+                    encoded = compact.lower()
+                    controls = {
+                        byte
+                        for index in range(0, len(encoded), 2)
+                        for byte in (int(encoded[index:index + 2], 16),)
+                        if byte < 32 or byte == 127
+                    }
+                    kind = "bytes"
+                else:
+                    return ("unknown", name)
+            else:
+                return None
+            if not encoded or not controls or controls == {10}:
+                return None
+            return kind, encoded, name, role(parents, node)  # type: ignore[return-value]
+
+        generated_literals: list[tuple[str, str, str, str, int]] = []
+        generated_dynamic: list[tuple[str, str, str, str, str, int]] = []
+        for path in sorted(validate.FIXTURES_ROOT.rglob("*.py")):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
+            except (OSError, UnicodeError, SyntaxError):
+                continue
+            relative = path.relative_to(validate.FIXTURES_ROOT).as_posix()
+            parents = parent_map(tree)
+            occurrences: dict[tuple[str, str, str], int] = {}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or type(node.value) not in {str, bytes}:
+                    continue
+                value = node.value
+                controls = (
+                    {item for item in value if item < 32 or item == 127}
+                    if isinstance(value, bytes)
+                    else {ord(item) for item in value if ord(item) < 32 or ord(item) == 127}
+                )
+                if not controls or controls == {10}:
+                    continue
+                kind = "bytes" if isinstance(value, bytes) else "str"
+                encoded = value.hex() if isinstance(value, bytes) else value.encode("utf-8").hex()
+                structural_role = role(parents, node)
+                key = (kind, encoded, structural_role)
+                ordinal = occurrences.get(key, 0)
+                occurrences[key] = ordinal + 1
+                generated_literals.append((relative, kind, encoded, structural_role, ordinal))
+            for node in ast.walk(tree):
+                result = construction(node, parents)
+                if result is None:
+                    continue
+                if result[0] == "unknown":
+                    _kind, constructor = result
+                    key = (_kind, constructor, role(parents, node))
+                    ordinal = occurrences.get(key, 0)
+                    occurrences[key] = ordinal + 1
+                    generated_dynamic.append((relative, "unknown", "", constructor, key[2], ordinal))
+                    continue
+                kind, encoded, constructor, structural_role = result
+                key = (kind, encoded, structural_role)
+                ordinal = occurrences.get(key, 0)
+                occurrences[key] = ordinal + 1
+                generated_dynamic.append((relative, kind, encoded, constructor, structural_role, ordinal))
+
+        self.assertEqual(
+            tuple(sorted(generated_literals)),
+            tuple(sorted(validate._PYTHON_CONTROL_LITERAL_ROWS)),
+        )
+        self.assertEqual(
+            tuple(sorted(generated_dynamic)),
+            tuple(sorted(validate._PYTHON_CONTROL_CONSTRUCTION_ROWS)),
+        )
+        self.assertEqual(len(generated_literals), len(set(generated_literals)))
+        self.assertEqual(len(generated_dynamic), len(set(generated_dynamic)))
+
     def test_review_anchor_is_the_only_separate_inventory_exception(self) -> None:
         repo_root = self._copy_fixture_repo()
         fixtures_root = repo_root / "contracts/fixtures"
@@ -371,6 +814,111 @@ class CliTests(unittest.TestCase):
         anchor.write_text("synthetic anchor\n", encoding="utf-8")
         extra = fixtures_root / "review-anchors/other.sha256"
         extra.write_text("unindexed\n", encoding="utf-8")
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+    def test_central_validator_inventory_is_exact(self) -> None:
+        for missing in ("validate.py", "test_validate.py", "validation-baseline.json"):
+            with self.subTest(missing=missing):
+                repo_root = self._copy_fixture_repo()
+                (repo_root / "contracts/fixtures/validator" / missing).unlink()
+                index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        extra = repo_root / "contracts/fixtures/validator/extra-reviewed-artifact.py"
+        extra.write_text("synthetic extra\n", encoding="utf-8")
+        index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+    def test_special_and_deep_fixture_entries_fail_closed(self) -> None:
+        for kind in ("hidden", "symlink", "fifo"):
+            with self.subTest(kind=kind):
+                repo_root = self._copy_fixture_repo()
+                validator_root = repo_root / "contracts/fixtures/validator"
+                path = validator_root / {
+                    "hidden": ".unreviewed-artifact",
+                    "symlink": "unreviewed-link.py",
+                    "fifo": "unreviewed-pipe",
+                }[kind]
+                if kind == "hidden":
+                    path.write_text("hidden\n", encoding="utf-8")
+                elif kind == "symlink":
+                    path.symlink_to(validator_root / "validate.py")
+                else:
+                    os.mkfifo(path)
+                index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        current = repo_root / "contracts/fixtures/validator"
+        for index in range(validate.MAX_FIXTURE_TRAVERSAL_DEPTH + 1):
+            current = current / f"nested-{index}"
+            current.mkdir()
+        index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+    def test_canonical_index_and_schema_paths_are_required(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        alternate_index = repo_root / "alternate-index.json"
+        alternate_schema = repo_root / "alternate-schema.json"
+        shutil.copy2(repo_root / "contracts/fixtures/index.json", alternate_index)
+        shutil.copy2(repo_root / "contracts/fixtures/schema.json", alternate_schema)
+        self._assert_blocked_in_both_modes(repo_root, "--index", str(alternate_index))
+        self._assert_blocked_in_both_modes(repo_root, "--schema", str(alternate_schema))
+
+    def test_historical_nul_parser_inputs_are_exactly_scoped(self) -> None:
+        repo_root = self._copy_fixture_repo()
+        index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+        # These are the two retained negative inputs named by the canonical
+        # path/pointer/value policy; the unchanged indexed corpus must pass.
+        validate._validate_index_document(index, repo_root)
+
+        nul = chr(0)
+        expected = "../unsafe name" + nul + ".png"
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/attachment-policy/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["unreviewed_copy"] = expected
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/connection-restoration/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["unreviewed_copy"] = "atlas" + nul
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
+        with self.assertRaises(validate.ValidationError):
+            validate._validate_index_document(index, repo_root)
+
+        for replacement in (
+            "x/../unsafe name" + nul + ".png",
+            "../unsafe name" + nul + ".png.extra",
+            "../unsafe name" + nul + nul + ".png",
+        ):
+            with self.subTest(replacement=repr(replacement)):
+                repo_root = self._copy_fixture_repo()
+                document_path = repo_root / "contracts/fixtures/attachment-policy/cases.json"
+                document = json.loads(document_path.read_text(encoding="utf-8"))
+                document["cases"][10]["request"]["filename"] = replacement
+                document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                index, _ = self._rebind_copy(repo_root)
+                with self.assertRaises(validate.ValidationError):
+                    validate._validate_index_document(index, repo_root)
+
+        repo_root = self._copy_fixture_repo()
+        document_path = repo_root / "contracts/fixtures/attachment-policy/cases.json"
+        document = json.loads(document_path.read_text(encoding="utf-8"))
+        document["bad" + nul + "key"] = False
+        document_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        index, _ = self._rebind_copy(repo_root)
         with self.assertRaises(validate.ValidationError):
             validate._validate_index_document(index, repo_root)
 
@@ -419,14 +967,14 @@ class CliTests(unittest.TestCase):
         """Static aliases must receive the same bounded regex policy."""
 
         sources = (
-            'import re as regex_module\nregex_module.compile(r"h(?:x)://live.example.net/x")\n',
-            'from re import compile as regex_compile\nregex_compile(r"h(?:x)://live.example.net/x")\n',
-            'import re\nregex_module = re\nregex_compile = regex_module.compile\nregex_compile(r"h(?:x)://live.example.net/x")\n',
-            'import re\nregex_compile = getattr(re, "compile")\nregex_compile(r"h(?:x)://live.example.net/x")\n',
-            'import re\ngetattr(re, "compile")(r"h(?:x)://live.example.net/x")\n',
-            'import re\npattern = r"h(?:x)://"\nhost = "live.example.net/x"\nre.compile(pattern + host)\n',
-            'import re\nre.compile(pattern=r"h(?:x)://live.example.net/x")\n',
-            'import re\nre.compile(rb"h(?:x)://live.example.net/x")\n',
+            'import re as regex_module\nregex_module.compile(r"h(?:t|T)tps://live.example.net/x")\n',
+            'from re import compile as regex_compile\nregex_compile(r"h(?:t|T)tps://live.example.net/x")\n',
+            'import re\nregex_module = re\nregex_compile = regex_module.compile\nregex_compile(r"h(?:t|T)tps://live.example.net/x")\n',
+            'import re\nregex_compile = getattr(re, "compile")\nregex_compile(r"h(?:t|T)tps://live.example.net/x")\n',
+            'import re\ngetattr(re, "compile")(r"h(?:t|T)tps://live.example.net/x")\n',
+            'import re\npattern = r"h(?:t|T)tps://"\nhost = "live.example.net/x"\nre.compile(pattern + host)\n',
+            'import re\nre.compile(pattern=r"h(?:t|T)tps://live.example.net/x")\n',
+            'import re\nre.compile(rb"h(?:t|T)tps://live.example.net/x")\n',
         )
         for source in sources:
             with self.subTest(source=source):
@@ -434,6 +982,36 @@ class CliTests(unittest.TestCase):
                     "connection-restoration/validate.py",
                     source.encode("utf-8"),
                 )
+
+    def test_uncompiled_regex_literals_are_scanned_in_both_modes(self) -> None:
+        """Plain retained regex-shaped literals cannot hide live authorities."""
+
+        sources = (
+            'VALUE = r"h(?:x)://live.example.net/x"\n',
+            'VALUE = r"h\\Qttps://live.example.net/x"\n',
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_scanner_rejects_in_both_modes(
+                    "connection-restoration/validate.py",
+                    source.encode("utf-8"),
+                )
+
+    def test_regex_protocol_prefix_branch_has_no_authority(self) -> None:
+        """A detector branch ending at ``://`` must not absorb its sibling."""
+
+        source = (
+            'VALUE = r"(?:bearer\\s+|basic\\s+|https?://|'
+            '(?:password|secret|token)\\s*[:=])"\n'
+        )
+        self._assert_scanner_accepts_in_both_modes(
+            "connection-restoration/validate.py",
+            source.encode("utf-8"),
+        )
+        self._assert_scanner_rejects_in_both_modes(
+            "connection-restoration/validate.py",
+            b'VALUE = r"https?://live.example.net/x"\n',
+        )
 
     def test_malformed_named_group_headers_fail_closed_in_both_modes(self) -> None:
         """Do not let malformed group metadata hide schemes or authorities."""
@@ -514,25 +1092,37 @@ class CliTests(unittest.TestCase):
             "mean": statistics.mean(samples),
         }
 
-    def test_normal_and_optimized_success_have_same_boundary(self) -> None:
+    def test_normal_and_optimized_blocked_modes_have_same_boundary(self) -> None:
         normal = self._run()
         optimized = self._run(optimized=True)
-        self.assertEqual(normal.returncode, 0)
-        self.assertEqual(optimized.returncode, 0)
-        self.assertEqual(json.loads(normal.stdout), json.loads(optimized.stdout))
-        self.assertFalse(json.loads(normal.stdout)["compatible"])
+        self.assertEqual(normal.returncode, 1)
+        self.assertEqual(optimized.returncode, 1)
+        normal_payload = json.loads(normal.stdout)
+        optimized_payload = json.loads(optimized.stdout)
+        self.assertEqual(normal_payload, optimized_payload)
+        self.assertFalse(normal_payload["ok"])
+        self.assertFalse(normal_payload["live_claim"])
+        self.assertEqual(normal_payload["evidence_status"], "blocked")
+        self.assertEqual(normal_payload["error"]["code"], "fixture_index_invalid")
         self.assertEqual(normal.stderr, "")
         self.assertEqual(optimized.stderr, "")
 
     def test_every_owned_file_is_indexed_without_weakening_unknown_file_detection(self) -> None:
         repo_root = self._copy_fixture_repo()
+        index = json.loads((repo_root / "contracts/fixtures/index.json").read_text(encoding="utf-8"))
+        fixture_count, coverage_count = validate._validate_index_document(index, repo_root)
+        self.assertEqual(fixture_count, 30)
+        self.assertEqual(coverage_count, 29)
+        # The copied source has the same intentionally frozen baseline, so the
+        # complete CLI must remain blocked rather than claim refreshed evidence.
         for optimized in (False, True):
             completed = self._run(optimized=optimized, repo_root=repo_root)
-            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.returncode, 1)
             payload = json.loads(completed.stdout)
-            self.assertEqual(payload["fixture_count"], 30)
-            self.assertEqual(payload["coverage_count"], 29)
-            self.assertEqual(payload["evidence_status"], "partial")
+            self.assertFalse(payload["ok"])
+            self.assertFalse(payload["live_claim"])
+            self.assertEqual(payload["evidence_status"], "blocked")
+            self.assertEqual(payload["error"]["code"], "fixture_index_invalid")
             self.assertEqual(completed.stderr, "")
 
         unknown = repo_root / "contracts/fixtures/pty-detach-race/unregistered-artifact.txt"
