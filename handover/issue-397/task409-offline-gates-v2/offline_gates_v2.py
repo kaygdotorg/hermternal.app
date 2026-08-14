@@ -148,16 +148,19 @@ try:
         if not block:
             break
         published += block
+    trailing = os.read(descriptor, 1)
     published_after = os.fstat(descriptor)
 finally:
     os.close(descriptor)
 published_final = os.lstat(path)
 if identity(published_before) != identity(published_after) or identity(published_after) != identity(published_final):
     stop("published result changed during verified load")
+if published_final.st_size != len(updated) or trailing != b"":
+    stop("published result size differs")
 if published != updated or hashlib.sha256(published).hexdigest() != after_sha:
     stop("published result differs")
 """
-RENDERER_ADAPTATION_SCRIPT_SHA256 = "5be59b27edbc33cf1d7c7d8eee0ebc914cbe96fc7bc1551714f8ed3aff396311"
+RENDERER_ADAPTATION_SCRIPT_SHA256 = "94ac1f3390c58cffaf4c6c27815fbdef05d29c3ce5ec9c821b5854b04fac0d91"
 
 
 class Reject(Exception):
