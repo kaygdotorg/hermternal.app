@@ -191,7 +191,9 @@ The v11 adapter retargets the runner and every nested outer-loader factory to
 `linux_replay_failure_v11.py` is the public-loader successor. It authenticates
 the exact failure-v10, Phase-v11, and closed local import buffers before it
 executes any of them. It installs the exact imports only while a bound loader
-call runs, then restores the prior module cache. It then gives each fresh
+call runs, then restores every changed local and synthetic module name to its
+exact prior object or absence. An unlisted local cache change is rejected. It
+then gives each fresh
 nested evidence validator the v11 schema and root.
 This lets the public outer loader authenticate the approved v11 anchor. The
 successor does not change Phase-v11, failure-v10, driver, wrapper, or authority

@@ -54,6 +54,52 @@ DEPENDENCY_PINS = (
     ("linux_replay_wrapper_v7", "b192429bcb98b4a022d72ad7cf207a7da6c271b52b297168814f3d2007decce4"),
     ("linux_phase_a_v10", PHASE_A_V10_SHA256),
 )
+SYNTHETIC_MODULE_NAMES = frozenset({
+    "issue397_linux_phase_a_v11_failure_v11_verified",
+    "issue397_linux_replay_failure_v11_base",
+    "issue397_linux_phase_a_v3_base",
+    "issue397_linux_phase_a_v3_wrapper_derivation",
+    "issue397_linux_phase_a_v5_base",
+    "issue397_linux_phase_a_v6_base",
+    "issue397_linux_phase_a_v7_base",
+    "issue397_linux_phase_a_v8_base",
+    "issue397_linux_phase_a_v9_base",
+    "issue397_linux_phase_a_v10_base",
+    "issue397_linux_replay_failure_v2_base",
+    "issue397_linux_replay_failure_v3_base",
+    "issue397_linux_replay_failure_v4_base",
+    "issue397_linux_replay_failure_v5_base",
+    "issue397_linux_replay_failure_v6_base",
+    "issue397_linux_replay_failure_v7_base",
+    "issue397_linux_replay_failure_v8_base",
+    "issue397_linux_replay_failure_v9_base",
+    "issue397_linux_replay_failure_v10_base",
+    "issue397_linux_git_config_base",
+    "issue397_linux_replay_wrapper_v2_base",
+    "issue397_linux_wrapper_base",
+    "issue397_linux_driver_adapter_pin",
+    "issue397_linux_retained_driver_v2_base",
+    "issue397_linux_retained_driver_base",
+    "issue397_linux_retained_driver_authority",
+    "issue397_linux_git_authority",
+    "candidate5_final_framing",
+    "candidate5_frozen_git_reviewer_for_successor",
+    "issue397_lifecycle_genuine_anchor",
+    "issue397_lifecycle_genuine_phase_a",
+    "issue397_lifecycle_genuine_phase_b",
+    "issue397_phase_a_anchor_approved_lifecycle",
+    "issue397_phase_a_anchor_final_tool",
+    "issue397_phase_a_anchor_genuine_anchor",
+    "issue397_phase_a_anchor_genuine_phase_a",
+    "issue397_phase_a_anchor_git_hardening",
+    "linux_profile_authority",
+    "linux_profile_orchestrator",
+    "linux_profile_publication",
+    "linux_phase_a_v5",
+    "linux_phase_a_v6",
+    "linux_phase_a_v7",
+})
+TRACKED_MODULE_NAMES = frozenset(name for name, _digest in DEPENDENCY_PINS) | SYNTHETIC_MODULE_NAMES
 _MISSING = object()
 
 
@@ -96,18 +142,50 @@ def _exec_verified(raw: bytes, path: Path, name: str) -> types.ModuleType:
     return module
 
 
+def _is_local_module(name: str, value: object) -> bool:
+    if name.startswith("issue397_"):
+        return True
+    path = getattr(value, "__file__", None)
+    if path is None:
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(HERE.parent.resolve())
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _with_verified_cache(modules: dict[str, types.ModuleType], function):
-    """Expose exact local imports only while one bound Phase factory runs."""
-    previous = {name: sys.modules.get(name, _MISSING) for name in modules}
+    """Run with one closed local cache, then restore every changed local name."""
+    before = dict(sys.modules)
+    result = None
+    failure = None
     try:
         sys.modules.update(modules)
-        return function()
-    finally:
-        for name, prior in previous.items():
-            if prior is _MISSING:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = prior
+        result = function()
+    except BaseException as error:  # Restore cache state before propagating.
+        failure = error
+    after = dict(sys.modules)
+    changed = {
+        name for name in before.keys() | after.keys()
+        if before.get(name, _MISSING) is not after.get(name, _MISSING)
+    }
+    local_changed = {
+        name for name in changed
+        if name in TRACKED_MODULE_NAMES
+        or _is_local_module(name, after.get(name, before.get(name)))
+    }
+    unexpected = sorted(local_changed - TRACKED_MODULE_NAMES)
+    for name in local_changed:
+        prior = before.get(name, _MISSING)
+        if prior is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = prior
+    if unexpected:
+        raise RuntimeError(f"unexpected local module cache delta: {unexpected}") from failure
+    if failure is not None:
+        raise failure
+    return result
 
 
 def _retarget_runner(runner, dependencies: dict[str, types.ModuleType]):
@@ -202,12 +280,7 @@ def _load_authenticated() -> tuple[types.ModuleType, types.ModuleType]:
         name: _stable_bytes(HERE / f"{name}.py", digest, name)
         for name, digest in DEPENDENCY_PINS
     }
-    cache_names = tuple(name for name, _digest in DEPENDENCY_PINS) + (
-        "issue397_linux_phase_a_v11_failure_v11_verified",
-        "issue397_linux_replay_failure_v11_base",
-    )
-    previous = {name: sys.modules.get(name, _MISSING) for name in cache_names}
-    try:
+    def bind_authenticated_modules():
         # This order is the closed local import graph, from leaves to Phase v10.
         # A poisoned prior cache entry cannot provide any imported dependency.
         dependencies = {}
@@ -250,12 +323,8 @@ def _load_authenticated() -> tuple[types.ModuleType, types.ModuleType]:
 
         module.load_approved_wrapper = load_with_verified_failure_dependencies
         return module, phase
-    finally:
-        for name, prior in previous.items():
-            if prior is _MISSING:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = prior
+
+    return _with_verified_cache({}, bind_authenticated_modules)
 
 
 def _load_v10() -> types.ModuleType:

@@ -73,25 +73,24 @@ from pathlib import Path
 import linux_replay_failure_v11 as failure
 from test_linux_phase_a_v11 import PhaseAV11Tests
 
-poison = types.ModuleType("issue397_linux_phase_a_v11_failure_v11_verified")
-sys.modules[poison.__name__] = poison
-dependency_poisons = {}
-for dependency_name, _digest in failure.DEPENDENCY_PINS:
+module_poisons = {}
+for dependency_name in failure.TRACKED_MODULE_NAMES:
     dependency_poison = types.ModuleType(dependency_name)
     def reject_attribute(_name, dependency=dependency_name):
         raise RuntimeError("POISON_DEPENDENCY_EXECUTED:" + dependency)
     dependency_poison.__getattr__ = reject_attribute
-    dependency_poisons[dependency_name] = dependency_poison
+    module_poisons[dependency_name] = dependency_poison
     sys.modules[dependency_name] = dependency_poison
 _probe_outer, probe_phase = failure._load_authenticated()
 probe_runner = probe_phase.load_runner()
-assert all(sys.modules[name] is value for name, value in dependency_poisons.items())
+assert all(sys.modules[name] is value for name, value in module_poisons.items())
 with tempfile.TemporaryDirectory(
     prefix=".failure-v11-phase-", dir=probe_runner.REPOSITORY_ROOT.parent
 ) as parent:
     failure.PHASE_EXTERNAL_ROOT = Path(parent) / "external"
     outer, phase = failure._load_authenticated()
-    assert phase is not poison
+    assert phase is not module_poisons["issue397_linux_phase_a_v11_failure_v11_verified"]
+    assert all(sys.modules[name] is value for name, value in module_poisons.items())
     runner = phase.load_runner()
     assert runner.EXTERNAL_ROOT == failure.PHASE_EXTERNAL_ROOT
     verifier = lambda: PhaseAV11Tests().guarded(runner)
@@ -119,6 +118,7 @@ with tempfile.TemporaryDirectory(
         values = getattr(nested, name).__globals__
         assert values["SCHEMA"] == failure.PHASE_SCHEMA
         assert values["EVIDENCE_SCHEMA"] == failure.PHASE_EVIDENCE_SCHEMA
+    assert all(sys.modules[name] is value for name, value in module_poisons.items())
     print(json.dumps({
         "phase_schema": phase_record["schema"],
         "anchor_prior": anchor_record["prior_sha256"],
