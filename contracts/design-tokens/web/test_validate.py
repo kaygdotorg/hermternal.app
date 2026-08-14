@@ -85,9 +85,9 @@ class ManifestMutationTests(unittest.TestCase):
 
     def test_checked_in_manifest_is_exactly_complete(self) -> None:
         counts = validate.validate_manifest(copy.deepcopy(self.manifest))
-        self.assertEqual(counts, (15, 7, 7))
-        self.assertEqual(len(self.manifest["states"]), 29)
-        self.assertEqual(sum(len(state["variants"]) for state in self.manifest["states"]), 102)
+        self.assertEqual(counts, (23, 0, 7))
+        self.assertEqual(len(self.manifest["states"]), 30)
+        self.assertEqual(sum(len(state["variants"]) for state in self.manifest["states"]), 120)
         self.assertEqual(len(self.manifest["paper_tokens"]), 84)
         self.assertEqual(len(self.manifest["terminal"]["states"]), 15)
         self.assertEqual(sum(len(state["boards"]) for state in self.manifest["terminal"]["states"]), 78)
@@ -170,9 +170,11 @@ class ManifestMutationTests(unittest.TestCase):
         mutated["states"][0]["variants"].pop()
         self._assert_cli_failure(mutated)
 
-    def test_missing_blocked_variant_must_be_documented(self) -> None:
+    def test_missing_authentication_record_fails_closed(self) -> None:
         mutated = copy.deepcopy(self.manifest)
-        mutated["states"][11]["missing_variants"] = []
+        states = mutated["states"]
+        parent = next(state for state in states if state["id"] == "auth.password-sign-in")
+        states.remove(parent)
         self._assert_cli_failure(mutated)
 
     def test_deferred_state_cannot_be_claimed_for_v0_0_1(self) -> None:
