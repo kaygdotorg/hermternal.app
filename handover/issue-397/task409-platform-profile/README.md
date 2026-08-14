@@ -189,8 +189,10 @@ The v11 adapter retargets the runner and every nested outer-loader factory to
 `hermternal-issue397-phase-a-anchor-v11`; it cannot resolve the frozen v10 root.
 
 `linux_replay_failure_v11.py` is the public-loader successor. It authenticates
-the exact failure-v10 and Phase-v11 buffers before it executes either buffer.
-It then gives each fresh nested evidence validator the v11 schema and root.
+the exact failure-v10, Phase-v11, and closed local import buffers before it
+executes any of them. It installs the exact imports only while a bound loader
+call runs, then restores the prior module cache. It then gives each fresh
+nested evidence validator the v11 schema and root.
 This lets the public outer loader authenticate the approved v11 anchor. The
 successor does not change Phase-v11, failure-v10, driver, wrapper, or authority
 bytes. It uses the separate, create-only

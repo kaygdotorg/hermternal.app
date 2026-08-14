@@ -11,6 +11,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, os.fspath(HERE))
@@ -28,12 +29,14 @@ class FailureV11Tests(unittest.TestCase):
             hashlib.sha256(FAILURE.PHASE_A_V11_PATH.read_bytes()).hexdigest(),
             FAILURE.PHASE_A_V11_SHA256,
         )
+        for name, digest in FAILURE.DEPENDENCY_PINS:
+            self.assertEqual(hashlib.sha256((HERE / f"{name}.py").read_bytes()).hexdigest(), digest)
         self.assertEqual(FAILURE.DIRECTORY_NAME, FAILURE_V11_ROOT.name)
         self.assertNotEqual(FAILURE_V10_ROOT, FAILURE_V11_ROOT)
         self.assertFalse(FAILURE_V10_ROOT.exists())
         self.assertFalse(FAILURE_V11_ROOT.exists())
 
-    def test_stable_reader_rejects_symlink_and_wrong_digest(self) -> None:
+    def test_stable_reader_rejects_symlink_digest_and_path_replacement(self) -> None:
         with tempfile.TemporaryDirectory(prefix=".failure-v11-reader-") as parent:
             root = Path(parent)
             source = root / "source.py"
@@ -45,6 +48,17 @@ class FailureV11Tests(unittest.TestCase):
                 FAILURE._stable_bytes(link, digest, "linked source")
             with self.assertRaisesRegex(RuntimeError, "SHA-256 differs"):
                 FAILURE._stable_bytes(source, "0" * 64, "changed source")
+            replacement = root / "replacement.py"
+            replacement.write_bytes(source.read_bytes())
+            real_lstat = os.lstat
+
+            def replace_before_identity(path):
+                os.replace(replacement, source)
+                return real_lstat(path)
+
+            with mock.patch.object(FAILURE.os, "lstat", side_effect=replace_before_identity):
+                with self.assertRaisesRegex(RuntimeError, "changed during read"):
+                    FAILURE._stable_bytes(source, digest, "replaced source")
 
     def test_fresh_process_disposable_phase_anchor_public_load(self) -> None:
         script = r'''
@@ -61,8 +75,17 @@ from test_linux_phase_a_v11 import PhaseAV11Tests
 
 poison = types.ModuleType("issue397_linux_phase_a_v11_failure_v11_verified")
 sys.modules[poison.__name__] = poison
+dependency_poisons = {}
+for dependency_name, _digest in failure.DEPENDENCY_PINS:
+    dependency_poison = types.ModuleType(dependency_name)
+    def reject_attribute(_name, dependency=dependency_name):
+        raise RuntimeError("POISON_DEPENDENCY_EXECUTED:" + dependency)
+    dependency_poison.__getattr__ = reject_attribute
+    dependency_poisons[dependency_name] = dependency_poison
+    sys.modules[dependency_name] = dependency_poison
 _probe_outer, probe_phase = failure._load_authenticated()
 probe_runner = probe_phase.load_runner()
+assert all(sys.modules[name] is value for name, value in dependency_poisons.items())
 with tempfile.TemporaryDirectory(
     prefix=".failure-v11-phase-", dir=probe_runner.REPOSITORY_ROOT.parent
 ) as parent:
