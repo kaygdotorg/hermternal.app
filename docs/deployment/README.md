@@ -60,7 +60,9 @@ The proxy strips all inbound `Forwarded`, `X-Forwarded-*`, and `X-Real-IP`
 headers before rebuilding trusted public metadata. The black-box test runs only
 locally with Caddy and a recording mock upstream, and asserts the actual
 upstream path, body, prefix, query policy, and rebuilt headers. It does not
-contact the disposable VM during correction work.
+contact the disposable VM during correction work. Local Caddy plus the recording
+mock proves the edge/upstream boundary only; it does not prove live Hermes or
+browser execution.
 
 The official launcher intentionally publishes Hermes only on VM loopback. The
 browser proof has two explicit input workflows. A standalone browser map is a
@@ -72,19 +74,25 @@ root must contain `index.html`, `200.html`, `manifest.webmanifest`, and
 `service-worker.js`, and the temporary browser map must remain outside that
 root so it cannot alter the bytes being hashed.
 
-The retained workflow instead accepts the complete committed evidence file
-explicitly. It verifies the file's `caddy-proof-evidence-sha256.txt` anchor,
-checks the historical build pair, and reconstructs the deterministic runtime
-inputs; it does not require the historical static build to exist locally. The
-fixed browser schema binds either workflow's status to the verified build,
-static manifest, rendered Caddyfile, and runtime-input digests. Browser JSON is
+The retained workflow must use the complete evidence file at the canonical
+committed path `tests/integration/hermes-caddy/caddy-proof-evidence.json`. It
+verifies the exact committed anchor bytes in
+`tests/integration/hermes-caddy/caddy-proof-evidence-sha256.txt`, checks the
+historical build pair, and reconstructs the deterministic runtime inputs; it
+does not require the historical static build to exist locally. The fixed browser
+schema binds either workflow's declared status to the verified build, static
+manifest, rendered Caddyfile, and runtime-input digests. Browser JSON is
 bounded to 4096 bytes, requires UTF-8, and rejects duplicate object keys at
-every nesting level. The current retained map is `blocked_provider` with only
-`provider_unavailable`; no browser event payload or provider payload is
-retained. Passed, blocked-empty-session, and failed statuses each require
-their matching validated evidence, and missing, stale, mismatched, malformed,
-oversized, or extra-key maps fail closed. No preview URL is valid. This lane
-does not implement or attest Traefik.
+every nesting level. These caller-authored standalone and retained JSON maps
+are historical/non-execution observations, not browser execution attestations;
+they cannot satisfy `browser_journey=passed`. Passed release proof requires a
+verifier-controlled browser harness or a separately trusted signed attestation;
+neither is present in this no-live-VM/Hermes lane. The current retained map is
+`blocked_provider` with only `provider_unavailable`; no browser event payload or
+provider payload is retained. Passed, blocked-empty-session, and failed
+statuses each require their matching validated evidence, and missing, stale,
+mismatched, malformed, oversized, or extra-key maps fail closed. No preview URL
+is valid. This lane does not implement or attest Traefik.
 
 The local Caddy/mock-upstream proof emits no `Set-Cookie`. Its renderer test
 covers only the configured `Secure` rewrite; `HttpOnly`, `SameSite`, and `Path`
