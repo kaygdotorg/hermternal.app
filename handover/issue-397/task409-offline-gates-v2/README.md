@@ -21,19 +21,24 @@ does not trust a pre-existing Python module cache entry.
 
 After finalization, it loads and pins:
 
-- the shared immutable Linux platform profile;
+- the #406 compatibility adapter as the profile, publication, and Phase seam;
 - the final Linux authority descriptor, provenance, and authority module;
-- the final Linux Phase A and #405 wrapper modules;
+- the exact v11 owner and anchor plus the verified result/completion schema
+  source bytes;
 - the pre-update `dev` base. `dev` must still equal that base, not the replay
   final head; #407 is the only later normal update to the final head.
 
-It accepts a positive, unpadded version in the exact Phase A evidence schema
-namespace. It then requires the anchor record to use the exact schema exported
-by the hash-pinned Phase A module. It uses the actual #405 closed schemas,
-completion bindings, and #404 anchor validator. It then repeats the complete
+It accepts only the exact v11 Phase evidence schema, owner hash, anchor path,
+anchor hash, manifest hash, and approval digest. It uses the verified closed
+result/completion schemas and the pinned result/completion paths and hashes. It
+does not call or claim the #404 anchor validator. It then repeats the complete
 chain after the final gate and before the create-only report write. The report
 has mode `0600`, uses `O_EXCL`, fsyncs the file and directory, and has three
 stable no-follow rereads.
+
+The adapter intentionally has its own small stable-read and strict-JSON
+primitives. Importing the offline-gate module for those operations would make
+the authenticated dependency trust its caller before its own bytes are bound.
 
 The v3 authority is intentionally path-bound to its approved root-shape
 directory. The pin records that exact absolute root instead of relocating its
