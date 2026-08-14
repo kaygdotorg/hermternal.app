@@ -16,6 +16,12 @@ base, tracked `origin/dev` commit and tree, tracked `origin/main`, and an
 initial remote readback. It writes a private create-only plan. It does not
 push.
 
+Each semantic source record must also bind its private evidence to one exact
+Git object. The consumer accepts only `path`, `sha256`, `identity`,
+`git_mode`, and `git_blob`; `git_mode` must be `100644`, and `git_blob` must
+be one lowercase 40-hex object ID. Missing, extra, or changed fields fail
+before a plan exists.
+
 ```sh
 /usr/bin/python3 -B dev_update_v2.py plan --pin /absolute/final-pin.json \
   --repository /absolute/retained-repository --plan /private/plan.json
