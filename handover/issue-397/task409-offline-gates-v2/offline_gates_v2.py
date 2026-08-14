@@ -17,6 +17,7 @@ import json
 import os
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -39,6 +40,124 @@ PHASE_EVIDENCE_SCHEMA_RE = re.compile(
 SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/ms-playwright", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
 LOCAL_GIT_ENV = {**SAFE_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
 PODMAN_INFO_FORMAT = "{{.Host.Security.Rootless}}\n{{.Store.GraphRoot}}\n{{.Store.RunRoot}}"
+RENDERER_ADAPTATION_CONTRACT = (
+    "/workspace/apps/web/src/lib/terminal/renderer.test.ts",
+    "100644",
+    "8d489b746e2dc0f6c15b32b0174f62db58c308e3",
+    "776a517e44dd274066e97d1f26a2be17a35793d9e556fc60f1e4391a18b6512f",
+    "#!/opt/homebrew/bin/bun",
+    "#!${process.execPath}",
+    "47d78dc3e3390ae82528072af5ce09948a9c20190ec597996b5b9bcd8f7a2cce",
+)
+RENDERER_ADAPTATION_CONTRACT_SHA256 = "7efa9ccaf939ea3fe1debc6e252d9dc368cbc65b0c820b268d221fd33c2df293"
+RENDERER_ADAPTATION_SCRIPT = """import hashlib
+import os
+import stat
+import sys
+
+def stop(message):
+    raise SystemExit("renderer adaptation: " + message)
+
+if len(sys.argv) != 8:
+    stop("argument set differs")
+path, git_mode, git_blob, before_sha, old_text, new_text, after_sha = sys.argv[1:]
+if path != "/workspace/apps/web/src/lib/terminal/renderer.test.ts":
+    stop("path differs")
+if git_mode != "100644" or git_blob != "8d489b746e2dc0f6c15b32b0174f62db58c308e3":
+    stop("final Git mode or blob differs")
+if before_sha != "776a517e44dd274066e97d1f26a2be17a35793d9e556fc60f1e4391a18b6512f":
+    stop("source SHA-256 differs")
+if old_text != "#!/opt/homebrew/bin/bun" or new_text != "#!${process.execPath}":
+    stop("literal contract differs")
+if after_sha != "47d78dc3e3390ae82528072af5ce09948a9c20190ec597996b5b9bcd8f7a2cce":
+    stop("result SHA-256 differs")
+if os.path.realpath(path) != path:
+    stop("path is not canonical")
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+descriptor = os.open(path, flags)
+try:
+    before = os.fstat(descriptor)
+    raw = bytearray()
+    while True:
+        block = os.read(descriptor, 131072)
+        if not block:
+            break
+        raw.extend(block)
+        if len(raw) > 8 * 1024 * 1024:
+            stop("source exceeds byte limit")
+    after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+final = os.lstat(path)
+identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, stat.S_IMODE(value.st_mode), value.st_size, value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+if identity(before) != identity(after) or identity(after) != identity(final):
+    stop("source changed during verified load")
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o644 or before.st_nlink != 1:
+    stop("source metadata differs")
+source = bytes(raw)
+if hashlib.sha256(source).hexdigest() != before_sha:
+    stop("source SHA-256 differs")
+git_object = b"blob " + str(len(source)).encode("ascii") + b"\\0" + source
+if hashlib.sha1(git_object).hexdigest() != git_blob:
+    stop("final Git blob differs")
+old = old_text.encode("utf-8")
+new = new_text.encode("utf-8")
+old_count = source.count(old)
+if old_count != 3:
+    stop("literal count differs")
+updated = source.replace(old, new)
+if updated.count(old) != 0:
+    stop("replacement count differs")
+if hashlib.sha256(updated).hexdigest() != after_sha:
+    stop("result SHA-256 differs")
+temporary = path + ".hermternal-linux-adaptation"
+output = -1
+try:
+    output = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), 0o600)
+    view = memoryview(updated)
+    while view:
+        written = os.write(output, view)
+        if written <= 0:
+            stop("result write failed")
+        view = view[written:]
+    os.fchmod(output, 0o644)
+    os.fsync(output)
+    result = os.fstat(output)
+    if not stat.S_ISREG(result.st_mode) or stat.S_IMODE(result.st_mode) != 0o644 or result.st_nlink != 1 or result.st_size != len(updated):
+        stop("result metadata differs")
+    os.close(output)
+    output = -1
+    os.replace(temporary, path)
+except BaseException:
+    if output >= 0:
+        os.close(output)
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+result = os.lstat(path)
+if not stat.S_ISREG(result.st_mode) or stat.S_IMODE(result.st_mode) != 0o644 or result.st_nlink != 1:
+    stop("published result metadata differs")
+descriptor = os.open(path, flags)
+try:
+    published_before = os.fstat(descriptor)
+    published = b""
+    while len(published) < len(updated):
+        block = os.read(descriptor, len(updated) - len(published))
+        if not block:
+            break
+        published += block
+    published_after = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+published_final = os.lstat(path)
+if identity(published_before) != identity(published_after) or identity(published_after) != identity(published_final):
+    stop("published result changed during verified load")
+if published != updated or hashlib.sha256(published).hexdigest() != after_sha:
+    stop("published result differs")
+"""
+RENDERER_ADAPTATION_SCRIPT_SHA256 = "5be59b27edbc33cf1d7c7d8eee0ebc914cbe96fc7bc1551714f8ed3aff396311"
 
 
 class Reject(Exception):
@@ -389,13 +508,31 @@ def podman_argv(repository: Path, archive: WorkspaceArchive, historical: Histori
     Phase-v11 guarded object store even when a test removes inherited Git
     environment variables. Both stores are read-only. No object or ref enters
     the replay repository, and no package install or download is permitted.
+    One verified private-workspace adaptation replaces the three reviewed
+    macOS Bun shebang literals with the portable process executable literal.
+    It binds the final-tree mode, blob, source bytes, count, and result bytes.
+    The archive, retained checkout, and object stores remain unchanged.
     The private init process reaps descendant test processes after bounded
     process-group cleanup. Without it, closed inherited pipes can remain held
     by container zombies and turn the reviewed timeout result into a false
     cleanup-timeout failure.
     """
     uid, gid = os.getuid(), os.getgid()
-    setup = "tar --no-same-owner -xf /workspace-input.tar -C /workspace; umask 077; mkdir -m 0700 /workspace/.gitdir /workspace/.gitdir/objects /workspace/.gitdir/objects/info /workspace/.gitdir/refs /workspace/.gitdir/refs/heads /tmp/home; mkdir -m 0700 -p /tmp/home/.bun/install/cache; printf 'gitdir: /workspace/.gitdir\\n' > /workspace/.git; printf '[core]\\n\\trepositoryformatversion = 0\\n\\tbare = false\\n\\tworktree = /workspace\\n' > /workspace/.gitdir/config; printf '%s\\n' '" + archive.head + "' > /workspace/.gitdir/HEAD; printf '/source/.git/objects\\n/authority-objects\\n' > /workspace/.gitdir/objects/info/alternates; for cache_source in /usr/local/install/cache/* /usr/local/install/cache/.[!.]* /usr/local/install/cache/..?*; do { [ -e \"$cache_source\" ] || [ -L \"$cache_source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$cache_source\" /tmp/home/.bun/install/cache/; done; mkdir -m 0700 /workspace/apps/web/node_modules; for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]* /opt/hermternal/node_modules/..?*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; cd /workspace/apps/web; bun x --no-install svelte-kit sync; exec \"$@\""
+    require(
+        digest(b"\0".join(value.encode("utf-8") for value in RENDERER_ADAPTATION_CONTRACT))
+        == RENDERER_ADAPTATION_CONTRACT_SHA256,
+        "renderer adaptation contract differs",
+    )
+    require(
+        digest(RENDERER_ADAPTATION_SCRIPT.encode("utf-8"))
+        == RENDERER_ADAPTATION_SCRIPT_SHA256,
+        "renderer adaptation program differs",
+    )
+    adaptation = shlex.join((
+        "/usr/bin/python3", "-c", RENDERER_ADAPTATION_SCRIPT,
+        *RENDERER_ADAPTATION_CONTRACT,
+    ))
+    setup = "tar --no-same-owner -xf /workspace-input.tar -C /workspace; umask 077; mkdir -m 0700 /workspace/.gitdir /workspace/.gitdir/objects /workspace/.gitdir/objects/info /workspace/.gitdir/refs /workspace/.gitdir/refs/heads /tmp/home; mkdir -m 0700 -p /tmp/home/.bun/install/cache; printf 'gitdir: /workspace/.gitdir\\n' > /workspace/.git; printf '[core]\\n\\trepositoryformatversion = 0\\n\\tbare = false\\n\\tworktree = /workspace\\n' > /workspace/.gitdir/config; printf '%s\\n' '" + archive.head + "' > /workspace/.gitdir/HEAD; printf '/source/.git/objects\\n/authority-objects\\n' > /workspace/.gitdir/objects/info/alternates; " + adaptation + "; for cache_source in /usr/local/install/cache/* /usr/local/install/cache/.[!.]* /usr/local/install/cache/..?*; do { [ -e \"$cache_source\" ] || [ -L \"$cache_source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$cache_source\" /tmp/home/.bun/install/cache/; done; mkdir -m 0700 /workspace/apps/web/node_modules; for source in /opt/hermternal/node_modules/* /opt/hermternal/node_modules/.[!.]* /opt/hermternal/node_modules/..?*; do { [ -e \"$source\" ] || [ -L \"$source\" ]; } || continue; cp -a --no-preserve=ownership -- \"$source\" /workspace/apps/web/node_modules/; done; cd /workspace/apps/web; bun x --no-install svelte-kit sync; exec \"$@\""
     container_environment = {**SAFE_ENV, "HOME": "/tmp/home", "BUN_INSTALL_CACHE_DIR": "/tmp/home/.bun/install/cache", "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
     return ("/usr/bin/podman", "run", "--init", "--rm", "--pull=never", "--network=none", "--userns=keep-id", "--user", f"{uid}:{gid}", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=label=disable", "--mount", f"type=bind,src={repository},dst=/source,ro=true", "--mount", f"type=bind,src={historical.object_dir},dst=/authority-objects,ro=true", "--mount", f"type=bind,src={archive.snapshot.path},dst=/workspace-input.tar,ro=true", "--mount", "type=tmpfs,destination=/workspace,tmpfs-size=4026531840,tmpfs-mode=0700,U=true,notmpcopyup", "--mount", "type=tmpfs,destination=/tmp,tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup", "--workdir", "/workspace", *sum((("--env", f"{key}={value}") for key, value in sorted(container_environment.items())), ()), "--entrypoint", "/bin/sh", pins.image, "-eu", "-c", setup, "--", *gate.command)
 

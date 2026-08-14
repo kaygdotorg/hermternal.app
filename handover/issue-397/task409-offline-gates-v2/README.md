@@ -183,9 +183,19 @@ python3 -O -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolcha
 This is not replay evidence or permission to update `dev` or `main`.
 
 The real gate run is held. Three Linux `web-unit` cases create an exact fixture
-whose shebang is `/opt/homebrew/bin/bun`, then execute that fixture directly.
-The pinned Linux authority forbids that macOS path. The checkpoint does not add
-an alias, change the fixture, or skip a production gate. Disposable checks pass
-for typecheck, build, privacy, accessibility, authentication, the screenshot
-contract, and all other unit cases. Independent policy approval is required
-before the three contradictory cases can change.
+whose reviewed source shebang is `/opt/homebrew/bin/bun`, then execute that
+fixture directly. The Linux runner now resolves this platform difference only
+inside its private extracted `/workspace`. Before it changes bytes, it requires
+the exact final-tree path, Git mode `100644`, blob
+`8d489b746e2dc0f6c15b32b0174f62db58c308e3`, source SHA-256
+`776a517e44dd274066e97d1f26a2be17a35793d9e556fc60f1e4391a18b6512f`,
+and exactly three literal `#!/opt/homebrew/bin/bun` values. It replaces only
+those values with literal `#!${process.execPath}` and requires result SHA-256
+`47d78dc3e3390ae82528072af5ce09948a9c20190ec597996b5b9bcd8f7a2cce`
+and zero old literals. A same-directory atomic replacement and stable post-read
+complete the adaptation before SvelteKit setup. A wrong path, mode, blob, hash,
+count, result, program, or extra argument stops the gate. The command evidence
+records this exact hash-closed adaptation in the existing `argv` field. The
+report ABI and gate list do not change. The archive, retained checkout,
+candidate image, and object stores stay unchanged. This checkpoint does not
+run a real gate or create a report.
