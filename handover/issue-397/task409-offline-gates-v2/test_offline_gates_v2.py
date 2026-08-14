@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("offline_gates_v2", HERE / "offline_gates_v2.py")
@@ -51,7 +52,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
 
     def _write_checkout(self) -> None:
         files = {
-            "apps/web/tests/e2e/ui-preview.spec.ts": b"import AxeBuilder from 'axe'; test('native password activation clears live values', () => { if (activation === 'click') signIn.click(); if (activation === 'enter') password.press('Enter'); expect(x).toHaveValue(''); expect(y).toHaveValue(''); expect(z).toHaveValue(''); expect(q).toHaveValue(''); root.outerHTML; page.screenshot(); expect(value).not.toContain(passwordValue); expect(value).not.toContain(usernameValue); /* axe violations */ });\n",
+            "apps/web/tests/e2e/ui-preview.spec.ts": b"import AxeBuilder from 'axe'; test('native password activation clears live values', () => { if (activation === 'click') await signIn.click(); else { await signIn.focus(); await signIn.press('Enter'); } expect(x).toHaveValue(''); expect(y).toHaveValue(''); expect(z).toHaveValue(''); expect(q).toHaveValue(''); root.outerHTML; page.screenshot(); expect(value).not.toContain(passwordValue); expect(value).not.toContain(usernameValue); /* axe violations */ });\n",
             "apps/web/src/lib/live-artifact-policy.test.ts": b"const LIVE_ARTIFACT_REDACTION = 'x'; const config = \"screenshot: 'off'\";\n",
             "apps/web/src/lib/live-screenshot-contract.test.ts": b"blockedLiveScreenshotManifest({});\n",
         }
@@ -60,6 +61,10 @@ class OfflineGatesV3Tests(unittest.TestCase):
         subprocess.run(("/usr/bin/git", "-C", str(self.repository), "init", "--quiet"), check=True)
         subprocess.run(("/usr/bin/git", "-C", str(self.repository), "add", "."), check=True)
         subprocess.run(("/usr/bin/git", "-C", str(self.repository), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture"), check=True)
+        # The retained replay checkout protects physical source bytes while Git
+        # keeps the executable-independent source mode in the committed tree.
+        for relative in files:
+            os.chmod(self.repository / relative, 0o600)
         self.final_head = self._git("rev-parse", "HEAD^{commit}")
         self.final_tree = self._git("rev-parse", "HEAD^{tree}")
 
@@ -99,14 +104,54 @@ class OfflineGatesV3Tests(unittest.TestCase):
         output = {"git-head": self.chain.final_head, "git-tree": self.chain.final_tree, "git-main": self.chain.protected_main, "git-dev-base": self.chain.expected_dev_base, "git-clean": ""}.get(gate.gate_id, "PASS")
         return subprocess.CompletedProcess(argv, 0, (output + "\n").encode(), b"")
 
-    def test_real_0644_checkout_semantic_binding(self) -> None:
+    def test_private_checkout_keeps_git_semantic_binding(self) -> None:
         evidence = MOD.semantic_evidence(self.chain)
         self.assertTrue(all(item["git_mode"] == "100644" and len(item["git_blob"]) == 40 for item in evidence["sources"].values()))
         auth = self.repository / MOD.SEMANTIC_PATHS["auth"]
-        self.assertEqual(stat.S_IMODE(auth.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(auth.stat().st_mode), 0o600)
         auth.write_bytes(auth.read_bytes() + b"// unstaged replacement\n")
         with self.assertRaisesRegex(MOD.Reject, "working bytes differ"):
             MOD.semantic_evidence(self.chain)
+
+    def test_semantic_sources_reject_unsafe_physical_modes(self) -> None:
+        auth = self.repository / MOD.SEMANTIC_PATHS["auth"]
+        for unsafe in (0o400, 0o640, 0o644, 0o660):
+            with self.subTest(mode=oct(unsafe)):
+                os.chmod(auth, unsafe)
+                with self.assertRaisesRegex(MOD.Reject, "metadata differs"):
+                    MOD.semantic_evidence(self.chain)
+        os.chmod(auth, 0o600)
+        extra_link = self.root / "auth-hard-link"
+        os.link(auth, extra_link)
+        try:
+            with self.assertRaisesRegex(MOD.Reject, "metadata differs"):
+                MOD.semantic_evidence(self.chain)
+        finally:
+            extra_link.unlink()
+
+    def test_direct_enter_semantic_binding_rejects_near_misses(self) -> None:
+        auth = self.repository / MOD.SEMANTIC_PATHS["auth"]
+        approved = auth.read_bytes()
+        changes = {
+            "password field": approved.replace(
+                b"await signIn.focus(); await signIn.press('Enter');",
+                b"await password.focus(); await password.press('Enter');",
+            ),
+            "wrong key": approved.replace(b"signIn.press('Enter')", b"signIn.press('Space')"),
+        }
+        for label, raw in changes.items():
+            with self.subTest(change=label):
+                auth.write_bytes(raw)
+                subprocess.run(("/usr/bin/git", "-C", str(self.repository), "add", str(auth)), check=True)
+                subprocess.run(("/usr/bin/git", "-C", str(self.repository), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", label), check=True)
+                os.chmod(auth, 0o600)
+                chain = replace(
+                    self.chain,
+                    final_head=self._git("rev-parse", "HEAD^{commit}"),
+                    final_tree=self._git("rev-parse", "HEAD^{tree}"),
+                )
+                with self.assertRaisesRegex(MOD.Reject, "semantic privacy"):
+                    MOD.semantic_evidence(chain)
 
     def test_real_verified_loaders_parse_linux_and_405_fixtures(self) -> None:
         chain = MOD._load_chain(self.result, self.completion, self.pins)
@@ -135,8 +180,14 @@ class OfflineGatesV3Tests(unittest.TestCase):
         self.assertIn("type=bind,src=" + str(self.repository) + ",dst=/workspace,ro=true,relabel=private", argv)
         for path in MOD.WRITABLE_WEB_PATHS:
             self.assertIn(path + ":rw,nosuid,nodev,size=768m", argv)
-        records = MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None)
+        environments: list[dict[str, str]] = []
+        def capture_environment(argv, **kwargs):
+            environments.append(kwargs["env"])
+            return self.runner(argv, **kwargs)
+        records = MOD.run_gates(self.chain, self.pins, capture_environment, lambda _: None)
         self.assertEqual([item["id"] for item in records], [gate.gate_id for gate in MOD.GATES])
+        self.assertTrue(environments)
+        self.assertTrue(all(environment == MOD.rootless_podman_environment() for environment in environments))
 
     def test_dev_base_mismatch_and_pre_staged_toolchain_failure_reject(self) -> None:
         def wrong_dev(argv, **kwargs):
@@ -147,10 +198,47 @@ class OfflineGatesV3Tests(unittest.TestCase):
         with self.assertRaisesRegex(MOD.Reject, "git-dev-base"):
             MOD.run_gates(self.chain, self.pins, wrong_dev, lambda _: None)
         def missing_bun(*args, **_: object):
-            if "info" in args[0]: return subprocess.CompletedProcess([], 0, b"true\n", b"")
+            if "info" in args[0]:
+                home = Path.home().resolve()
+                runtime = Path(f"/run/user/{os.getuid()}")
+                output = f"true\n{home}/.local/share/containers/storage\n{runtime}/containers\n".encode()
+                return subprocess.CompletedProcess([], 0, output, b"")
             return subprocess.CompletedProcess([], 0, b'[{"RepoDigests":["x@sha256:' + b"e" * 64 + b'"],"Labels":{"org.hermternal.node":"26.7.0"}}]', b"")
         with self.assertRaisesRegex(MOD.Reject, "toolchain"):
             MOD.attest_image(self.pins, missing_bun)
+
+    def test_podman_uses_exact_rootless_user_storage(self) -> None:
+        expected_home = str(Path.home().resolve())
+        expected_runtime = f"/run/user/{os.getuid()}"
+        calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
+
+        def inspected(argv, **kwargs):
+            calls.append((tuple(argv), kwargs["env"]))
+            if "info" in argv:
+                output = f"true\n{expected_home}/.local/share/containers/storage\n{expected_runtime}/containers\n".encode()
+                return subprocess.CompletedProcess(argv, 0, output, b"")
+            value = {"RepoDigests":["x@sha256:" + "e" * 64], "Labels": {
+                "org.hermternal.bun":"1.3.14", "org.hermternal.node":"26.7.0",
+                "org.hermternal.playwright":"1.62.1", "org.hermternal.dependencies-sha256":"f" * 64,
+            }}
+            return subprocess.CompletedProcess(argv, 0, json.dumps([value]).encode(), b"")
+
+        MOD.attest_image(self.pins, inspected)
+        self.assertTrue(all(set(env) == {"PATH", "HOME", "XDG_RUNTIME_DIR", "LANG", "LC_ALL"} for _, env in calls))
+        self.assertTrue(all(env["HOME"] == expected_home and env["XDG_RUNTIME_DIR"] == expected_runtime for _, env in calls))
+        with mock.patch.dict(os.environ, {"HOME": "/nonexistent"}, clear=False):
+            with self.assertRaisesRegex(MOD.Reject, "Podman HOME"):
+                MOD.attest_image(self.pins, inspected)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/tmp"}, clear=False):
+            with self.assertRaisesRegex(MOD.Reject, "runtime directory"):
+                MOD.attest_image(self.pins, inspected)
+
+        def wrong_store(argv, **kwargs):
+            if "info" in argv:
+                return subprocess.CompletedProcess(argv, 0, b"true\n/tmp/wrong-graph\n/tmp/wrong-run\n", b"")
+            return inspected(argv, **kwargs)
+        with self.assertRaisesRegex(MOD.Reject, "storage boundary"):
+            MOD.attest_image(self.pins, wrong_store)
 
     def test_final_linux_pins_bind_real_publication(self) -> None:
         pins = MOD.load_pins(HERE / "final-linux-pins.json")

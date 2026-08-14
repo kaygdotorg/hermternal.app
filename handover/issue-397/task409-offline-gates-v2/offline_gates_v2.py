@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -34,6 +35,7 @@ PHASE_EVIDENCE_SCHEMA_RE = re.compile(
 )
 SAFE_ENV = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C", "LC_ALL": "C", "CI": "1", "NO_COLOR": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD": "1", "PLAYWRIGHT_BROWSERS_PATH": "/opt/hermternal/playwright-browsers", "BUN_INSTALL_CACHE_DIR": "/tmp/bun-cache"}
 LOCAL_GIT_ENV = {**SAFE_ENV, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+PODMAN_INFO_FORMAT = "{{.Host.Security.Rootless}}\n{{.Store.GraphRoot}}\n{{.Store.RunRoot}}"
 
 
 class Reject(Exception):
@@ -267,6 +269,30 @@ GATE_LIST_SHA256 = digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] fo
 WRITABLE_WEB_PATHS = ("/workspace/apps/web/node_modules", "/workspace/apps/web/.svelte-kit", "/workspace/apps/web/build", "/workspace/apps/web/test-results", "/workspace/apps/web/playwright-report")
 
 
+def rootless_podman_environment(environment: dict[str, str] | None = None) -> dict[str, str]:
+    """Bind Podman to this account's canonical private storage boundary."""
+    source = os.environ if environment is None else environment
+    uid = os.getuid()
+    home = Path(pwd.getpwuid(uid).pw_dir)
+    runtime = Path(f"/run/user/{uid}")
+    require(source.get("HOME") == os.fspath(home), "Podman HOME differs from the real user home")
+    require(source.get("XDG_RUNTIME_DIR") == os.fspath(runtime), "Podman runtime directory differs")
+    for path, label in (
+        (home, "Podman HOME"),
+        (runtime, "Podman runtime directory"),
+        (home / ".local/share/containers/storage", "Podman graph storage"),
+        (runtime / "containers", "Podman run storage"),
+    ):
+        metadata = os.lstat(path)
+        require(path.is_absolute() and os.path.realpath(path) == os.fspath(path), f"{label} is not canonical")
+        require(stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == uid and stat.S_IMODE(metadata.st_mode) == 0o700,
+                f"{label} privacy differs")
+    return {
+        "PATH": "/usr/bin:/bin", "HOME": os.fspath(home),
+        "XDG_RUNTIME_DIR": os.fspath(runtime), "LANG": "C", "LC_ALL": "C",
+    }
+
+
 def podman_argv(repository: Path, gate: Gate, pins: Pins) -> tuple[str, ...]:
     """Run a fixed gate with source read-only and all tool output in tmpfs.
 
@@ -282,12 +308,28 @@ def podman_argv(repository: Path, gate: Gate, pins: Pins) -> tuple[str, ...]:
 
 def attest_image(pins: Pins, run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run) -> None:
     """Inspect a local image only. Exact labels prevent a tag from being trust."""
+    environment = rootless_podman_environment()
+    home = Path(environment["HOME"])
+    runtime = Path(environment["XDG_RUNTIME_DIR"])
     try:
-        rootless = run(("/usr/bin/podman", "info", "--format", "{{.Host.Security.Rootless}}"), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(SAFE_ENV), cwd="/", timeout=30, check=False)
-        result = run(("/usr/bin/podman", "image", "inspect", pins.image), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(SAFE_ENV), cwd="/", timeout=30, check=False)
+        rootless = run(("/usr/bin/podman", "info", "--format", PODMAN_INFO_FORMAT), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, cwd="/", timeout=30, check=False)
+        result = run(("/usr/bin/podman", "image", "inspect", pins.image), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, cwd="/", timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise Reject("pre-staged Podman image is unavailable") from error
-    require(rootless.returncode == 0 and bytes(rootless.stdout or b"").strip() == b"true", "Podman is not rootless")
+    try:
+        store_lines = bytes(rootless.stdout or b"").decode("utf-8", "strict").strip().splitlines()
+    except UnicodeDecodeError as error:
+        raise Reject("Podman rootless storage boundary differs") from error
+    expected_graph = home / ".local/share/containers/storage"
+    expected_run = runtime / "containers"
+    require(rootless.returncode == 0 and len(store_lines) == 3 and store_lines[0] == "true",
+            "Podman rootless storage boundary differs")
+    require(all(os.path.isabs(item) for item in store_lines[1:]), "Podman rootless storage boundary differs")
+    # Podman can retain a former home-directory symlink spelling in its store
+    # metadata. Resolve it, then require the exact current account-owned store.
+    require(os.path.realpath(store_lines[1]) == os.fspath(expected_graph)
+            and os.path.realpath(store_lines[2]) == os.fspath(expected_run),
+            "Podman rootless storage boundary differs")
     require(result.returncode == 0 and len(result.stdout or b"") <= MAX_OUTPUT, "pre-staged Podman image is unavailable")
     value = strict_json(bytes(result.stdout).strip().removeprefix(b"[").removesuffix(b"]"), "Podman image inspection")
     digests = value.get("RepoDigests"); labels = value.get("Labels") or value.get("Config", {}).get("Labels")
@@ -315,21 +357,20 @@ def _local_git(repository: Path, *args: str, stdin: bytes = b"") -> bytes:
 
 
 def semantic_evidence(chain: Chain) -> dict[str, Any]:
-    """Bind normal immutable source files to the approved final Git tree.
+    """Bind private immutable source files to the approved final Git tree.
 
-    Evidence records stay private at mode 0600. Source is different: Git tracks
-    reviewed application files at mode 0644. We accept only that exact owner,
-    regular-file, single-link mode, then bind its stable bytes to the final tree
-    mode and blob. This rejects an unstaged replacement without making a normal
-    retained checkout impossible to read.
+    The replay protects physical source files at mode 0600. Git independently
+    tracks the reviewed application blobs at mode 100644. Both bindings must
+    hold: the private checkout prevents another local account from changing the
+    evidence, while the tree mode proves the intended source-file semantics.
     """
     repository = chain.repository.resolve()
     require(repository == chain.repository and repository.is_absolute() and os.path.realpath(repository) == os.fspath(repository), "semantic repository path differs")
     paths = {name: repository / relative for name, relative in SEMANTIC_PATHS.items()}
     for name, path in paths.items():
         metadata = os.lstat(path)
-        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o644 and metadata.st_nlink == 1, f"semantic {name} metadata differs")
-    sources = {name: stable_read(path.resolve(), f"semantic {name}", 2 * 1024 * 1024, 0o644) for name, path in paths.items()}
+        require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and stat.S_IMODE(metadata.st_mode) == 0o600 and metadata.st_nlink == 1, f"semantic {name} metadata differs")
+    sources = {name: stable_read(path.resolve(), f"semantic {name}", 2 * 1024 * 1024, 0o600) for name, path in paths.items()}
     bindings: dict[str, dict[str, str]] = {}
     for name, source in sources.items():
         relative = SEMANTIC_PATHS[name]
@@ -342,7 +383,12 @@ def semantic_evidence(chain: Chain) -> dict[str, Any]:
         require(calculated == blob, f"semantic {name} working bytes differ from final Git blob")
         bindings[name] = {"git_mode": "100644", "git_blob": blob}
     auth, privacy, screenshots = (sources["auth"].raw.decode("utf-8"), sources["privacy"].raw.decode("utf-8"), sources["screenshots"].raw.decode("utf-8"))
-    checks = {"click": "activation === 'click'" in auth and ".click()" in auth, "enter": "activation === 'enter'" in auth and ".press('Enter')" in auth, "clearing": auth.count("toHaveValue('')") >= 4 and "outerHTML" in auth, "redaction": "page.screenshot()" in auth and "not.toContain(passwordValue)" in auth and "not.toContain(usernameValue)" in auth, "accessibility": "AxeBuilder" in auth and "axe violations" in auth, "privacy_policy": "LIVE_ARTIFACT_REDACTION" in privacy and "screenshot: 'off'" in privacy, "screenshot_contract": "blockedLiveScreenshotManifest" in screenshots}
+    direct_enter = re.search(
+        r"if \(activation === 'click'\) await signIn\.click\(\);\s*"
+        r"else \{\s*await signIn\.focus\(\);\s*await signIn\.press\('Enter'\);\s*\}",
+        auth,
+    ) is not None
+    checks = {"click": "activation === 'click'" in auth and ".click()" in auth, "enter": direct_enter, "clearing": auth.count("toHaveValue('')") >= 4 and "outerHTML" in auth, "redaction": "page.screenshot()" in auth and "not.toContain(passwordValue)" in auth and "not.toContain(usernameValue)" in auth, "accessibility": "AxeBuilder" in auth and "axe violations" in auth, "privacy_policy": "LIVE_ARTIFACT_REDACTION" in privacy and "screenshot: 'off'" in privacy, "screenshot_contract": "blockedLiveScreenshotManifest" in screenshots}
     require(all(checks.values()), "semantic privacy, accessibility, or authentication evidence is incomplete")
     return {"checks": checks, "sources": {name: {"path": os.fspath(item.path), "sha256": item.sha256, "identity": list(item.identity), **bindings[name]} for name, item in sources.items()}}
 
@@ -354,11 +400,12 @@ def run_gates(chain: Chain, pins: Pins, run: Run = subprocess.run, attest: Calla
     require(digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in GATES], separators=(",", ":")).encode()) == GATE_LIST_SHA256, "immutable gate list differs")
     require(_identity(os.lstat(chain.repository)) == chain.repository_identity, "retained repository changed before gates")
     attest(pins)
+    podman_environment = rootless_podman_environment()
     records: list[dict[str, Any]] = []
     expected = {"git-head": chain.final_head, "git-tree": chain.final_tree, "git-main": chain.protected_main, "git-dev-base": chain.expected_dev_base, "git-clean": ""}
     for gate in GATES:
         try:
-            result = run(podman_argv(chain.repository, gate, pins), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(SAFE_ENV), cwd="/", timeout=900, check=False)
+            result = run(podman_argv(chain.repository, gate, pins), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=podman_environment, cwd="/", timeout=900, check=False)
         except (OSError, subprocess.TimeoutExpired) as error:
             raise Reject(f"{gate.gate_id} was unavailable") from error
         stdout, stderr = bytes(result.stdout or b""), bytes(result.stderr or b"")

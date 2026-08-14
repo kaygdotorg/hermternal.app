@@ -55,13 +55,19 @@ contain the browser and immutable dependency tree already; #406 never pulls or
 installs them. It copies that tree from `/opt/hermternal/node_modules` into a
 dedicated tmpfs. Separate tmpfs mounts cover `.svelte-kit`, `build`,
 `test-results`, and `playwright-report`, so source stays read-only while build
-and browser tooling can write. The report records stable privacy,
-accessibility, click/Enter, input-clearing, and screenshot/DOM-redaction source
-evidence before and after the gates. Those tracked source files use normal Git
-mode `0644`; they are accepted only when owner-owned, single-link regular
-files have stable bytes that match the exact `100644` blob in the replay final
-tree. This is different from authority, replay, and report evidence, which
-remains mode `0600`.
+and browser tooling can write. Host Podman calls use the canonical real user
+home, `/run/user/<uid>` runtime directory, and their private rootless graph/run
+storage. The verifier rejects a changed environment or a Podman store outside
+those exact paths. The report records stable privacy, accessibility,
+click/Enter, input-clearing, and screenshot/DOM-redaction source evidence
+before and after the gates. Those tracked source files are physically private,
+owner-owned, single-link regular files at mode `0600`. Their stable bytes must
+independently match an exact Git `100644` blob in the replay final tree.
+Physical privacy and Git source semantics are separate requirements.
+The authentication source must also keep the reviewed direct activation shape:
+the click branch clicks `signIn`, and its `else` branch focuses `signIn` and
+presses Enter on that same control. A password-field Enter or another key is
+not equivalent evidence.
 
 `toolchain/` now contains the exact Linux amd64 construction and staging
 specification. The retained staging set binds the official Bun archive, the
