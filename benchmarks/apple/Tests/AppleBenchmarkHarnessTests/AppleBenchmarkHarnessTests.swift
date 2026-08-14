@@ -278,6 +278,66 @@ final class AppleBenchmarkHarnessTests: XCTestCase {
         )
     }
 
+    func testEvidenceRejectsForgedArtifactMetadata() throws {
+        let loaded = try WorkloadFixtureLoader.load()
+        let clock = TestClock()
+        let result = try AppleBenchmarkRunner(enforceReleaseConfiguration: false, now: { clock.next() }).run(
+            workload: loaded.fixture,
+            workloadBytes: loaded.bytes,
+            sourceCommitSHA: "not_collected",
+            build: ReleaseBuildMetadata(
+                mode: "release",
+                optimization: "swiftc -O",
+                compiler: "swiftc",
+                sdk: "not_recorded",
+                target: "apple-synthetic",
+                metadataStatus: "scaffold_only"
+            )
+        )
+
+        let first = result.evidence.artifacts[0]
+        let forgedArtifacts: [[ArtifactMetadata]] = [
+            [
+                ArtifactMetadata(path: "../fixture/workload.json", bytes: first.bytes, sha256: first.sha256),
+                result.evidence.artifacts[1],
+            ],
+            [
+                ArtifactMetadata(path: "fixture\\\\workload.json", bytes: first.bytes, sha256: first.sha256),
+                result.evidence.artifacts[1],
+            ],
+            [
+                ArtifactMetadata(path: first.path, bytes: -1, sha256: first.sha256),
+                result.evidence.artifacts[1],
+            ],
+            [first, first],
+        ]
+
+        for artifacts in forgedArtifacts {
+            let forged = AppleEvidenceDocument(
+                schema: result.evidence.schema,
+                protocolSchema: result.evidence.protocolSchema,
+                evidenceID: result.evidence.evidenceID,
+                revision: result.evidence.revision,
+                metric: result.evidence.metric,
+                method: result.evidence.method,
+                build: result.evidence.build,
+                runs: result.evidence.runs,
+                artifacts: artifacts,
+                artifactManifestSHA256: EvidenceValidator.artifactManifestDigest(artifacts),
+                redaction: result.evidence.redaction,
+                threshold: result.evidence.threshold,
+                budget: result.evidence.budget
+            )
+            XCTAssertThrowsError(
+                try EvidenceValidator.validate(
+                    forged,
+                    workload: loaded.fixture,
+                    fixtureSHA256: BenchmarkHash.sha256(loaded.bytes)
+                )
+            )
+        }
+    }
+
     func testEvidenceRoundTripsWithClosedSchema() throws {
         let loaded = try WorkloadFixtureLoader.load()
         let clock = TestClock()

@@ -197,7 +197,13 @@ public struct AppleBenchmarkRunner: Sendable {
             threshold: nil,
             budget: nil
         )
-        try EvidenceValidator.validate(evidence, workload: workload, fixtureSHA256: fixtureSHA256)
+        try EvidenceValidator.validate(
+            evidence,
+            workload: workload,
+            fixtureSHA256: fixtureSHA256,
+            workloadBytes: workloadBytes,
+            traceBytes: traceBytes
+        )
         return BenchmarkRunResult(evidence: evidence, trace: trace, traceBytes: traceBytes)
     }
 

@@ -51,10 +51,22 @@ public enum BenchmarkHash {
     }
 }
 
+func isStrictLowerHexASCII(_ value: String, length: Int) -> Bool {
+    let bytes = Array(value.utf8)
+    guard bytes.count == length else {
+        return false
+    }
+    return bytes.allSatisfy { byte in
+        (byte >= 0x30 && byte <= 0x39) ||
+        (byte >= 0x61 && byte <= 0x66)
+    }
+}
+
 public enum WorkloadFixtureLoader {
     // This pins the bytes used by the scaffold. A changed fixture requires an
     // intentional review of the operation inventory, seed, and evidence shape.
     public static let expectedWorkloadSHA256 = "192b63346cf71e05f6955cfcdfcca398fbf85387c7adf3226fa61fdef59a907d"
+    public static let expectedWorkloadByteCount = 1_308
 
     public static func load(from data: Data? = nil) throws -> (fixture: AppleWorkloadFixture, bytes: Data) {
         let bytes: Data
@@ -144,11 +156,19 @@ public enum WorkloadValidator {
 
 public enum EvidenceValidator {
     public static let pinnedHermesSourceSHA = "f5be9236e00ddf2f2a412697f267078fc4ee068e"
+    public static let maximumArtifactCount = 2
+    public static let maximumArtifactBytes = 1_048_576
+    public static let reviewedArtifactPaths = [
+        "fixture/workload.json",
+        "trace/raw-trace.json",
+    ]
 
     public static func validate(
         _ evidence: AppleEvidenceDocument,
         workload: AppleWorkloadFixture,
-        fixtureSHA256: String
+        fixtureSHA256: String,
+        workloadBytes: Data? = nil,
+        traceBytes: Data? = nil
     ) throws {
         guard evidence.schema == AppleEvidenceDocument.schema,
               evidence.protocolSchema == AppleEvidenceDocument.protocolSchema,
@@ -182,12 +202,17 @@ public enum EvidenceValidator {
 
         guard isSHA256(evidence.revision.fixtureSHA256),
               isSHA256(evidence.artifactManifestSHA256),
-              isCommitOrNotCollected(evidence.revision.sourceCommitSHA),
-              evidence.artifacts.isEmpty == false,
-              evidence.artifactManifestSHA256 == artifactManifestDigest(evidence.artifacts)
+              isCommitOrNotCollected(evidence.revision.sourceCommitSHA)
         else {
             throw AppleBenchmarkError.evidenceMalformed
         }
+        try validateArtifacts(
+            evidence.artifacts,
+            artifactManifestSHA256: evidence.artifactManifestSHA256,
+            fixtureSHA256: fixtureSHA256,
+            workloadBytes: workloadBytes,
+            traceBytes: traceBytes
+        )
 
         let expectedRunCount = workload.operations.count * workload.targetPlatforms.count * 2
         guard evidence.runs.count == expectedRunCount else {
@@ -224,17 +249,90 @@ public enum EvidenceValidator {
         return BenchmarkHash.sha256(try BenchmarkJSON.canonicalData(payload))
     }
 
+    private static func validateArtifacts(
+        _ artifacts: [ArtifactMetadata],
+        artifactManifestSHA256: String,
+        fixtureSHA256: String,
+        workloadBytes: Data?,
+        traceBytes: Data?
+    ) throws {
+        guard artifacts.count == reviewedArtifactPaths.count,
+              artifacts.count <= maximumArtifactCount,
+              artifactManifestSHA256 == artifactManifestDigest(artifacts),
+              fixtureSHA256 == WorkloadFixtureLoader.expectedWorkloadSHA256,
+              let workloadBytes,
+              let traceBytes
+        else {
+            throw AppleBenchmarkError.evidenceMalformed
+        }
+
+        var seen = Set<String>()
+        for (index, artifact) in artifacts.enumerated() {
+            let expectedPath = reviewedArtifactPaths[index]
+            guard artifact.path == expectedPath,
+                  seen.insert(artifact.path).inserted,
+                  isPortableRelativePath(artifact.path),
+                  artifact.bytes > 0,
+                  artifact.bytes <= maximumArtifactBytes,
+                  isStrictLowerHexASCII(artifact.sha256, length: 64)
+            else {
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+
+            switch artifact.path {
+            case "fixture/workload.json":
+                guard artifact.bytes == WorkloadFixtureLoader.expectedWorkloadByteCount,
+                      artifact.sha256 == WorkloadFixtureLoader.expectedWorkloadSHA256,
+                      workloadBytes.count == artifact.bytes,
+                      BenchmarkHash.sha256(workloadBytes) == artifact.sha256
+                else {
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+            case "trace/raw-trace.json":
+                guard traceBytes.count == artifact.bytes,
+                      BenchmarkHash.sha256(traceBytes) == artifact.sha256
+                else {
+                    throw AppleBenchmarkError.evidenceMalformed
+                }
+            default:
+                throw AppleBenchmarkError.evidenceMalformed
+            }
+        }
+    }
+
+    private static func isPortableRelativePath(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard !bytes.isEmpty,
+              bytes.count <= 256,
+              !value.hasPrefix("/"),
+              !value.hasSuffix("/"),
+              !bytes.contains(0x5C),
+              !bytes.contains(where: { $0 < 0x20 || $0 > 0x7E }),
+              !value.split(separator: "/", omittingEmptySubsequences: false).contains(where: {
+                  $0.isEmpty || $0 == "." || $0 == ".."
+              })
+        else {
+            return false
+        }
+        return bytes.allSatisfy { byte in
+            (byte >= 0x30 && byte <= 0x39) ||
+            (byte >= 0x41 && byte <= 0x5A) ||
+            (byte >= 0x61 && byte <= 0x7A) ||
+            byte == 0x2E || byte == 0x2F || byte == 0x2D || byte == 0x5F
+        }
+    }
+
     public static func artifactManifestDigest(_ artifacts: [ArtifactMetadata]) -> String {
         let payload = artifacts.map { "\($0.path)|\($0.bytes)|\($0.sha256)" }.joined(separator: "\n")
         return BenchmarkHash.sha256(Data(payload.utf8))
     }
 
     private static func isSHA256(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isHexDigit && $0.isLowercase || $0.isNumber }
+        isStrictLowerHexASCII(value, length: 64)
     }
 
     private static func isCommitOrNotCollected(_ value: String) -> Bool {
-        value == "not_collected" || (value.count == 40 && value.allSatisfy { $0.isHexDigit && $0.isLowercase || $0.isNumber })
+        value == "not_collected" || isStrictLowerHexASCII(value, length: 40)
     }
 }
 
