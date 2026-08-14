@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -64,7 +65,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
 
     def _write_authority_contract(self) -> None:
         handover = self.root / "handover" / "issue-397"
-        final_root = handover / "task464-candidate5-linux-v1-final"; final_root.mkdir(parents=True, mode=0o700)
+        final_root = handover / "task464-candidate5-linux-v3-root-shape-final"; final_root.mkdir(parents=True, mode=0o700)
         descriptor = self._write(final_root / "authority-descriptor.json", b'{"schema":"fixture"}\n', 0o600)
         provenance = self._write(final_root / "provenance-manifest.json", b'{"schema":"fixture"}\n', 0o600)
         phase_schema = "hermternal.issue-397.phase-a-anchor-evidence.v11"
@@ -80,15 +81,15 @@ class OfflineGatesV3Tests(unittest.TestCase):
         }
         hashes = {path: self._write(path, raw, 0o644) for path, raw in modules.items()}
         replay_root = self.root / "replay-root"; replay_root.mkdir(mode=0o700)
-        result = self.root / "replay-result.json"
+        result = replay_root / "replay-result.json"
         result_value = {"schema":"result/v1", "phase":"phase", "lane":"linux", "phase_a_manifest_sha256":"b" * 64, "phase_a_approval_digest":"c" * 64, "replay_root":str(replay_root), "replay_root_identity":{}, "repository":str(self.repository), "repository_identity":{}, "head_state":"detached", "final_head":self.final_head, "parent":"3" * 40, "tree":self.final_tree, "base_commit":"1" * 40, "base_tree":"2" * 40, "protected_main_commit":"6" * 40, "required_ancestors":["1" * 40], "forbidden_ancestors":["9" * 40]}
         self._write(result, json.dumps(result_value, sort_keys=True).encode(), 0o600)
-        completion = self.root / "replay-completion.json"
+        completion = replay_root / "replay-completion.json"
         result_snapshot = MOD.stable_read(result, "fixture result", mode=0o600)
         completion_value = {"schema":"completion/v1", "completion_marker":"OK", "stderr_policy":"empty", "returncode":0, "result_path":str(result), "result_sha256":result_snapshot.sha256, "driver_module_sha256":"driver", "driver_source_sha256":"shell", "markdown_sha256":"markdown", "json_sha256":"json", "shell_sha256":"shell", "provenance_sha256":provenance, "source_commit":"a" * 40, "phase_a_evidence_path":str(anchor), "phase_a_evidence_sha256":"d" * 64}
-        self._write(completion, json.dumps(completion_value, sort_keys=True).encode(), 0o600)
+        completion_sha256 = self._write(completion, json.dumps(completion_value, sort_keys=True).encode(), 0o600)
         task = handover / "task409-offline-gates-v2"; task.mkdir(mode=0o755)
-        pins = {"schema":MOD.PINS_SCHEMA, "status":"final", "platform_profile":{"path":"../task409-platform-profile/profile.py", "sha256":hashes[handover / "task409-platform-profile" / "profile.py"]}, "linux_authority":{"root":"../task464-candidate5-linux-v1-final", "module_path":"../task464-candidate5-authority-successor/authority.py", "module_sha256":hashes[handover / "task464-candidate5-authority-successor" / "authority.py"]}, "replay":{"wrapper_path":"../task409-replay-result-successor/wrapper.py", "wrapper_sha256":hashes[handover / "task409-replay-result-successor" / "wrapper.py"], "phase_a_path":"../task409-phase-a-anchor-successor/phase.py", "phase_a_sha256":hashes[handover / "task409-phase-a-anchor-successor" / "phase.py"]}, "expected_dev_base":self.final_head, "toolchain":{"image":"example.invalid/hermternal@sha256:" + "e" * 64, "repo_digest":"e" * 64, "bun":"1.3.14", "node":"26.7.0", "playwright":"1.62.1", "dependencies_sha256":"f" * 64}}
+        pins = {"schema":MOD.PINS_SCHEMA, "status":"final", "platform_profile":{"path":"../task409-platform-profile/profile.py", "sha256":hashes[handover / "task409-platform-profile" / "profile.py"]}, "linux_authority":{"root":"../task464-candidate5-linux-v3-root-shape-final", "module_path":"../task464-candidate5-authority-successor/authority.py", "module_sha256":hashes[handover / "task464-candidate5-authority-successor" / "authority.py"]}, "replay":{"wrapper_path":"../task409-replay-result-successor/wrapper.py", "wrapper_sha256":hashes[handover / "task409-replay-result-successor" / "wrapper.py"], "phase_a_path":"../task409-phase-a-anchor-successor/phase.py", "phase_a_sha256":hashes[handover / "task409-phase-a-anchor-successor" / "phase.py"]}, "publication":{"result_path":str(result), "result_sha256":result_snapshot.sha256, "completion_path":str(completion), "completion_sha256":completion_sha256}, "expected_dev_base":self.final_head, "toolchain":{"image":"example.invalid/hermternal@sha256:" + "e" * 64, "repo_digest":"e" * 64, "bun":"1.3.14", "node":"26.7.0", "playwright":"1.62.1", "dependencies_sha256":"f" * 64}}
         self.pins_path = task / "final-linux-pins.json"; self._write(self.pins_path, json.dumps(pins, sort_keys=True, separators=(",", ":")).encode(), 0o644)
         self.pins = MOD.load_pins(self.pins_path); self.result = result; self.completion = completion
         self.chain = MOD._load_chain(result, completion, self.pins)
@@ -151,9 +152,32 @@ class OfflineGatesV3Tests(unittest.TestCase):
         with self.assertRaisesRegex(MOD.Reject, "toolchain"):
             MOD.attest_image(self.pins, missing_bun)
 
-    def test_deferred_pins_reject_without_mac_fallback(self) -> None:
-        with self.assertRaisesRegex(MOD.Reject, "not finalized"):
-            MOD.load_pins(HERE / "final-linux-pins.json")
+    def test_final_linux_pins_bind_real_publication(self) -> None:
+        pins = MOD.load_pins(HERE / "final-linux-pins.json")
+        self.assertEqual(pins.expected_dev_base, "729f2613af2b78d58b07918478e9102d5716f367")
+        self.assertEqual(pins.result_sha256, "533f63f7a35681043fa1b1240ff83fd206965e0e8aadafd38ed4221f9cb97a13")
+        self.assertEqual(pins.completion_sha256, "13a3bf9fbd4338fe44ced2123100e2cacd35bef013a0ecbeda4df21ddaf2aab9")
+        self.assertEqual(pins.authority_root.name, "task464-candidate5-linux-v3-root-shape-final")
+
+    def test_runtime_publication_must_equal_final_pins(self) -> None:
+        wrong_path = self.result.with_name("other-result.json")
+        with self.assertRaisesRegex(MOD.Reject, "runtime publication paths"):
+            MOD._load_chain(wrong_path, self.completion, self.pins)
+        with self.assertRaisesRegex(MOD.Reject, "publication SHA-256"):
+            MOD._load_chain(
+                self.result, self.completion,
+                replace(self.pins, result_sha256="0" * 64),
+            )
+        with self.assertRaisesRegex(MOD.Reject, "publication SHA-256"):
+            MOD._load_chain(
+                self.result, self.completion,
+                replace(self.pins, completion_sha256="0" * 64),
+            )
+        with self.assertRaisesRegex(MOD.Reject, "v3 root-shape"):
+            MOD._authority_root(
+                "../task464-candidate5-linux-v2-parent-binding-final",
+                self.pins_path, self.pins_path.parents[1],
+            )
 
     def test_main_rereads_real_chain_and_semantic_sources(self) -> None:
         original = MOD.PINS_PATH; MOD.PINS_PATH = self.pins_path

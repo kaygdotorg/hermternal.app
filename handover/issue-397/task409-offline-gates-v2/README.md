@@ -4,12 +4,20 @@ This successor replaces the rejected #406 v2 design. It does not run replay,
 Hermes, a network command, or a gate during its tests.
 
 The tool accepts only the real Linux #405 `replay-result.json` and
-`replay-completion.json`. `final-linux-pins.json` already pins the approved
-shared Linux profile, #401 authority module, and Linux authority root. It
-remains intentionally deferred for the final Phase A and #405 wrapper bytes
-and expected `dev` base. The local toolchain digest is now pinned. It rejects
-until the remaining final values are written. It has no macOS or `/private/tmp`
+`replay-completion.json`. `final-linux-pins.json` binds their exact canonical
+paths and SHA-256 values, the approved v3 root-shape authority, the #406-only
+Linux publication compatibility adapter, the pre-update `dev` base, and the
+local toolchain digest. These added publication fields use the closed
+`offline-gates/v4-final-linux-pins` schema. It has no macOS or `/private/tmp`
 fallback.
+
+The compatibility adapter is not a replay wrapper and does not create a new
+replay or Phase version. It verified-loads the approved result-schema source
+bytes, authenticates the v11 Phase owner and anchor, and exposes only the
+closed result/completion, authority, profile, and Phase-evidence interface that
+the offline gate needs. The same hash-pinned adapter path is loaded separately
+for those roles. Each load authenticates its dependencies before execution and
+does not trust a pre-existing Python module cache entry.
 
 After finalization, it loads and pins:
 
@@ -27,10 +35,11 @@ chain after the final gate and before the create-only report write. The report
 has mode `0600`, uses `O_EXCL`, fsyncs the file and directory, and has three
 stable no-follow rereads.
 
-The current Linux replay adapters configure the final #405 wrapper only in
-memory. No final source file currently exposes both that configured authority
-and the closed #405 result API that this gate loads. Thus, the wrapper path and
-digest stay null until the replay lane supplies one reviewed load boundary.
+The v3 authority is intentionally path-bound to its approved root-shape
+directory. The pin records that exact absolute root instead of relocating its
+descriptor or rewriting frozen authority bytes. Result and completion remain
+runtime CLI arguments, but both arguments must equal the pinned paths and both
+stable file hashes must equal the pinned publication hashes before parsing.
 
 All executable gates are fixed in code. They run only in rootless Podman with
 a locally staged image digest, `--pull=never`, `--network=none`, a read-only
@@ -106,9 +115,9 @@ Run only after independent review authorizes the real retained replay result:
 
 ```sh
 python3 -B handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py \
-  --result /tmp/<approved-retained-run>/replay-root/replay-result.json \
-  --completion /tmp/<approved-retained-run>/replay-root/replay-completion.json \
-  --report /tmp/<approved-retained-run>/replay-root/offline-gates.json
+  --result /tmp/hermternal-task409-final-replay.3226927/replay-root/replay-result.json \
+  --completion /tmp/hermternal-task409-final-replay.3226927/replay-root/replay-completion.json \
+  --report /tmp/hermternal-task409-final-replay.3226927/replay-root/offline-gates.json
 ```
 
 Offline checks use a real controlled Git checkout, real hash-bound Linux and
@@ -117,9 +126,11 @@ create-only report writer. They replace only the Podman subprocess and image
 discovery boundary:
 
 ```sh
-python3 -m py_compile handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
+python3 -m py_compile handover/issue-397/task409-offline-gates-v2/offline_gates_v2.py handover/issue-397/task409-offline-gates-v2/linux_publication_compat.py handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py handover/issue-397/task409-offline-gates-v2/test_linux_publication_compat.py
 python3 -B handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
 python3 -O -B handover/issue-397/task409-offline-gates-v2/test_offline_gates_v2.py
+python3 -B handover/issue-397/task409-offline-gates-v2/test_linux_publication_compat.py
+python3 -O -B handover/issue-397/task409-offline-gates-v2/test_linux_publication_compat.py
 python3 -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolchain_spec.py
 python3 -O -B handover/issue-397/task409-offline-gates-v2/toolchain/test_toolchain_spec.py
 ```

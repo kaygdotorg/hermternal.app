@@ -24,7 +24,7 @@ from typing import Any, Callable, Sequence
 
 PINS_PATH = Path(__file__).resolve().with_name("final-linux-pins.json")
 REPORT_SCHEMA = "hermternal.issue-397.offline-gates/v3"
-PINS_SCHEMA = "hermternal.issue-397.offline-gates/v3-final-linux-pins"
+PINS_SCHEMA = "hermternal.issue-397.offline-gates/v4-final-linux-pins"
 MAX_OUTPUT = 2 * 1024 * 1024
 MAX_FILE = 8 * 1024 * 1024
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -126,6 +126,10 @@ class Pins:
     wrapper_sha256: str
     phase_a_module: Path
     phase_a_sha256: str
+    result_path: Path
+    result_sha256: str
+    completion_path: Path
+    completion_sha256: str
     expected_dev_base: str
     image: str
     image_digest: str
@@ -139,27 +143,53 @@ def _pin_path(value: Any, label: str, pins_path: Path, base: Path) -> Path:
     return path
 
 
+def _publication_path(value: Any, name: str, label: str) -> Path:
+    """Bind one real create-only publication path without a fallback root."""
+    require(isinstance(value, str) and value and os.path.isabs(value), f"{label} path differs")
+    path = Path(value)
+    require(os.fspath(path) == os.path.realpath(path), f"{label} path is not canonical")
+    require(path.name == name and path.parent.name == "replay-root", f"{label} placement differs")
+    return path
+
+
+def _authority_root(value: Any, pins_path: Path, base: Path) -> Path:
+    """Accept only the path-bound approved v3 root-shape authority."""
+    require(isinstance(value, str) and value, "Linux authority root differs")
+    root = Path(value) if os.path.isabs(value) else (pins_path.parent / value).resolve()
+    require(os.fspath(root) == os.path.realpath(root), "Linux authority root is not canonical")
+    require(root.name == "task464-candidate5-linux-v3-root-shape-final",
+            "Linux authority is not the approved v3 root-shape boundary")
+    if not os.path.isabs(value):
+        require(root.is_relative_to(base), "Linux authority root escapes handover")
+    return root
+
+
 def load_pins(path: Path | None = None) -> Pins:
     """Load the one finalization file; deferred values are an execution stop."""
     pins_path = Path(path or PINS_PATH).resolve()
     base = pins_path.parents[1]
     raw = stable_read(pins_path, "final Linux pins", 64 * 1024, 0o644)
     value = strict_json(raw.raw, "final Linux pins")
-    required = {"schema", "status", "platform_profile", "linux_authority", "replay", "expected_dev_base", "toolchain"}
+    required = {"schema", "status", "platform_profile", "linux_authority", "replay", "publication", "expected_dev_base", "toolchain"}
     require(set(value) == required and value.get("schema") == PINS_SCHEMA, "final Linux pins schema differs")
     require(value.get("status") == "final", "final Linux pins are not finalized")
-    profile, authority, replay, toolchain = value["platform_profile"], value["linux_authority"], value["replay"], value["toolchain"]
+    profile, authority, replay = value["platform_profile"], value["linux_authority"], value["replay"]
+    publication, toolchain = value["publication"], value["toolchain"]
     require(isinstance(profile, dict) and set(profile) == {"path", "sha256"}, "platform profile pins differ")
     require(isinstance(authority, dict) and set(authority) == {"root", "module_path", "module_sha256"}, "Linux authority pins differ")
     require(isinstance(replay, dict) and set(replay) == {"wrapper_path", "wrapper_sha256", "phase_a_path", "phase_a_sha256"}, "Linux replay pins differ")
+    require(isinstance(publication, dict) and set(publication) == {"result_path", "result_sha256", "completion_path", "completion_sha256"}, "Linux publication pins differ")
     require(isinstance(toolchain, dict) and set(toolchain) == {"image", "repo_digest", "bun", "node", "playwright", "dependencies_sha256"}, "toolchain pins differ")
-    strings = [(profile["sha256"], "profile SHA-256"), (authority["module_sha256"], "authority SHA-256"), (replay["wrapper_sha256"], "wrapper SHA-256"), (replay["phase_a_sha256"], "Phase A SHA-256"), (toolchain["repo_digest"], "image digest"), (toolchain["dependencies_sha256"], "dependency SHA-256")]
+    strings = [(profile["sha256"], "profile SHA-256"), (authority["module_sha256"], "authority SHA-256"), (replay["wrapper_sha256"], "wrapper SHA-256"), (replay["phase_a_sha256"], "Phase A SHA-256"), (publication["result_sha256"], "result SHA-256"), (publication["completion_sha256"], "completion SHA-256"), (toolchain["repo_digest"], "image digest"), (toolchain["dependencies_sha256"], "dependency SHA-256")]
     require(all(isinstance(item, str) and SHA_RE.fullmatch(item) for item, _ in strings), "final Linux pin digest differs")
     require(isinstance(value["expected_dev_base"], str) and OID_RE.fullmatch(value["expected_dev_base"]), "expected dev base differs")
     require(isinstance(toolchain["image"], str) and "@sha256:" in toolchain["image"] and toolchain["image"].endswith(toolchain["repo_digest"]), "toolchain image differs")
     require(toolchain["bun"] == "1.3.14" and toolchain["node"] == "26.7.0" and toolchain["playwright"] == "1.62.1", "toolchain version pins differ")
-    root = _pin_path(authority["root"], "Linux authority root", pins_path, base)
-    return Pins(_pin_path(profile["path"], "platform profile", pins_path, base), profile["sha256"], root, _pin_path(authority["module_path"], "Linux authority", pins_path, base), authority["module_sha256"], _pin_path(replay["wrapper_path"], "Linux wrapper", pins_path, base), replay["wrapper_sha256"], _pin_path(replay["phase_a_path"], "Linux Phase A", pins_path, base), replay["phase_a_sha256"], value["expected_dev_base"], toolchain["image"], toolchain["repo_digest"], toolchain["dependencies_sha256"])
+    root = _authority_root(authority["root"], pins_path, base)
+    result_path = _publication_path(publication["result_path"], "replay-result.json", "result")
+    completion_path = _publication_path(publication["completion_path"], "replay-completion.json", "completion")
+    require(result_path.parent == completion_path.parent, "publication paths have different replay roots")
+    return Pins(_pin_path(profile["path"], "platform profile", pins_path, base), profile["sha256"], root, _pin_path(authority["module_path"], "Linux authority", pins_path, base), authority["module_sha256"], _pin_path(replay["wrapper_path"], "Linux wrapper", pins_path, base), replay["wrapper_sha256"], _pin_path(replay["phase_a_path"], "Linux Phase A", pins_path, base), replay["phase_a_sha256"], result_path, publication["result_sha256"], completion_path, publication["completion_sha256"], value["expected_dev_base"], toolchain["image"], toolchain["repo_digest"], toolchain["dependencies_sha256"])
 
 
 @dataclass(frozen=True)
@@ -184,6 +214,10 @@ def _require_oid(value: Any, label: str) -> str:
 def _load_chain(result_path: Path, completion_path: Path, pins: Pins | None = None) -> Chain:
     """Validate only the final Linux #403 → #404 → #405 contract."""
     pins = pins or load_pins()
+    result_path = Path(result_path).resolve()
+    completion_path = Path(completion_path).resolve()
+    require(result_path == pins.result_path and completion_path == pins.completion_path,
+            "runtime publication paths differ from final Linux pins")
     profile = verified_module(pins.profile_path, pins.profile_sha256, "issue397_offline_platform_profile")
     loaded_profile = profile.load()
     require(Path(loaded_profile.authority_root) == pins.authority_root, "profile authority root differs")
@@ -196,8 +230,10 @@ def _load_chain(result_path: Path, completion_path: Path, pins: Pins | None = No
     provenance = stable_read(pins.authority_root / "provenance-manifest.json", "Linux provenance", mode=0o600)
     validated = authority.validate(descriptor.path, pins.authority_root, descriptor.sha256)
     replay_authority = wrapper.load_authority()
-    result = stable_read(Path(result_path).resolve(), "#405 result", mode=0o600)
-    completion = stable_read(Path(completion_path).resolve(), "#405 completion", mode=0o600)
+    result = stable_read(result_path, "#405 result", mode=0o600)
+    completion = stable_read(completion_path, "#405 completion", mode=0o600)
+    require(result.sha256 == pins.result_sha256 and completion.sha256 == pins.completion_sha256,
+            "runtime publication SHA-256 differs from final Linux pins")
     result_value, completion_value = strict_json(result.raw, "#405 result"), strict_json(completion.raw, "#405 completion")
     require(set(result_value) == set(wrapper.RESULT_KEYS) and result_value.get("schema") == wrapper.RESULT_SCHEMA and result_value.get("phase") == wrapper.RESULT_PHASE and result_value.get("lane") == wrapper.RESULT_LANE, "#405 result schema differs")
     require(set(completion_value) == set(wrapper.COMPLETION_KEYS) and completion_value.get("schema") == wrapper.COMPLETION_SCHEMA and completion_value.get("completion_marker") == wrapper.SUCCESS_OUTPUT.decode("ascii").strip() and completion_value.get("stderr_policy") == wrapper.STDERR_POLICY and completion_value.get("returncode") == 0, "#405 completion state differs")
