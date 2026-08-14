@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Offline-gate v3 checks with a real controlled Git and authority fixture.
 
-Only the Podman subprocess and image discovery boundaries are replaced. The
-pin parser, verified source loaders, #405 record parser, semantic Git binding,
-and create-only report writer run against ordinary on-disk fixture bytes.
+Only the host-Git, Podman, and image-discovery process boundaries are replaced.
+The pin parser, verified source loaders, #405 record parser, semantic Git
+binding, gate dispatcher, and create-only report writer use real fixture bytes.
 """
 from __future__ import annotations
 
@@ -104,6 +104,20 @@ class OfflineGatesV3Tests(unittest.TestCase):
         output = {"git-head": self.chain.final_head, "git-tree": self.chain.final_tree, "git-main": self.chain.protected_main, "git-dev-base": self.chain.expected_dev_base, "git-clean": ""}.get(gate.gate_id, "PASS")
         return subprocess.CompletedProcess(argv, 0, (output + "\n").encode(), b"")
 
+    def local_runner(self, repository: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+        self.assertEqual(repository, self.repository)
+        self.assertEqual(stdin, b"")
+        output = {
+            ("rev-parse", "HEAD^{commit}"): self.chain.final_head,
+            ("rev-parse", "HEAD^{tree}"): self.chain.final_tree,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): self.chain.protected_main,
+            ("rev-parse", "refs/remotes/origin/dev^{commit}"): self.chain.expected_dev_base,
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("fsck", "--full", "--strict"): "",
+        }[args]
+        stdout = (output + ("\n" if output else "")).encode()
+        return subprocess.CompletedProcess(MOD.local_git_argv(repository, *args), 0, stdout, b"")
+
     def test_private_checkout_keeps_git_semantic_binding(self) -> None:
         evidence = MOD.semantic_evidence(self.chain)
         self.assertTrue(all(item["git_mode"] == "100644" and len(item["git_blob"]) == 40 for item in evidence["sources"].values()))
@@ -174,29 +188,129 @@ class OfflineGatesV3Tests(unittest.TestCase):
             self.assertIsNone(MOD.PHASE_EVIDENCE_SCHEMA_RE.fullmatch(value))
 
     def test_closed_podman_layout_and_dev_base_contract(self) -> None:
-        argv = MOD.podman_argv(self.repository, MOD.GATES[0], self.pins)
+        argv = MOD.podman_argv(self.repository, MOD.GATES[6], self.pins)
         for item in ("--pull=never", "--network=none", "--read-only", "--userns=keep-id", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
             self.assertIn(item, argv)
-        self.assertIn("type=bind,src=" + str(self.repository) + ",dst=/workspace,ro=true,relabel=private", argv)
-        for path in MOD.WRITABLE_WEB_PATHS:
-            self.assertIn(path + ":rw,nosuid,nodev,size=768m", argv)
+        self.assertIn("--security-opt=label=disable", argv)
+        self.assertIn("type=bind,src=" + str(self.repository) + ",dst=/workspace,ro=true", argv)
+        self.assertTrue(all("relabel=" not in item for item in argv))
+        expected_tmpfs = {
+            f"type=tmpfs,destination={path},tmpfs-size=805306368,tmpfs-mode=0700,U=true,notmpcopyup"
+            for path in MOD.WRITABLE_WEB_PATHS
+        }
+        self.assertEqual({item for item in argv if item.startswith("type=tmpfs,")}, expected_tmpfs)
+        self.assertEqual(argv.count("--tmpfs"), 1)
+        self.assertIn("/tmp:rw,nosuid,nodev,size=768m", argv)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/ms-playwright", argv)
+        setup = argv[argv.index("-c") + 1]
+        for pattern in ("node_modules/*", "node_modules/.[!.]*"):
+            self.assertIn(pattern, setup)
+        self.assertNotIn("node_modules/..?*", setup)
+        self.assertIn("cp -a --no-preserve=ownership --", setup)
+        self.assertNotIn("node_modules/. /workspace", setup)
+
+    def test_gate_dispatch_splits_local_git_from_pinned_podman(self) -> None:
+        git_calls: list[tuple[Path, tuple[str, ...]]] = []
+        podman_calls: list[tuple[str, ...]] = []
+        expected = {
+            ("rev-parse", "HEAD^{commit}"): self.chain.final_head,
+            ("rev-parse", "HEAD^{tree}"): self.chain.final_tree,
+            ("rev-parse", "refs/remotes/origin/main^{commit}"): self.chain.protected_main,
+            ("rev-parse", "refs/remotes/origin/dev^{commit}"): self.chain.expected_dev_base,
+            ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("fsck", "--full", "--strict"): "",
+        }
+
+        def local_git(repository: Path, *args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(stdin, b"")
+            git_calls.append((repository, args))
+            stdout = (expected[args] + ("\n" if expected[args] else "")).encode()
+            stderr = b"fsck observation\n" if args == ("fsck", "--full", "--strict") else b""
+            return subprocess.CompletedProcess(MOD.local_git_argv(repository, *args), 0, stdout, stderr)
+
+        def container(argv, **kwargs):
+            podman_calls.append(tuple(argv))
+            return self.runner(argv, **kwargs)
+
         environments: list[dict[str, str]] = []
         def capture_environment(argv, **kwargs):
             environments.append(kwargs["env"])
-            return self.runner(argv, **kwargs)
-        records = MOD.run_gates(self.chain, self.pins, capture_environment, lambda _: None)
+            return container(argv, **kwargs)
+        records = MOD.run_gates(
+            self.chain, self.pins, capture_environment, lambda _: None,
+            local_git=local_git,
+        )
         self.assertEqual([item["id"] for item in records], [gate.gate_id for gate in MOD.GATES])
+        self.assertTrue(all(set(item) == {"id", "argv", "exit_code", "stdout_sha256", "stderr_sha256", "stdout_bytes", "stderr_bytes"} for item in records))
+        self.assertEqual([args for _, args in git_calls], [gate.command[1:] for gate in MOD.GATES[:6]])
+        self.assertTrue(all(repository == self.repository for repository, _ in git_calls))
+        self.assertEqual(len(podman_calls), 7)
+        self.assertTrue(all(tuple(call[-len(gate.command):]) == gate.command for call, gate in zip(podman_calls, MOD.GATES[6:])))
+        self.assertTrue(all("--pull=never" in call and "--network=none" in call and "--read-only" in call for call in podman_calls))
+        self.assertTrue(all(call[-len(MOD.GATES[0].command):] != MOD.GATES[0].command for call in podman_calls))
         self.assertTrue(environments)
         self.assertTrue(all(environment == MOD.rootless_podman_environment() for environment in environments))
+        self.assertEqual(records[5]["stderr_bytes"], len(b"fsck observation\n"))
+        self.assertEqual(records[5]["stderr_sha256"], self._sha(b"fsck observation\n"))
+        self.assertEqual(records[0]["argv"], list(MOD.local_git_argv(self.repository, "rev-parse", "HEAD^{commit}")))
+
+    def test_local_git_process_boundary_preserves_bounded_observation(self) -> None:
+        expected_argv = MOD.local_git_argv(self.repository, "status", "--porcelain=v1")
+        observed: dict[str, object] = {}
+
+        def process(argv, **kwargs):
+            observed["argv"] = tuple(argv)
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(argv, 7, b"raw stdout\n", b"raw stderr\n")
+
+        with mock.patch.object(MOD.subprocess, "run", process):
+            result = MOD._run_local_git(self.repository, "status", "--porcelain=v1", stdin=b"input")
+        self.assertEqual((result.args, result.returncode, result.stdout, result.stderr),
+                         (expected_argv, 7, b"raw stdout\n", b"raw stderr\n"))
+        self.assertEqual(observed, {
+            "argv": expected_argv,
+            "input": b"input",
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": MOD.LOCAL_GIT_ENV,
+            "cwd": "/",
+            "timeout": 30,
+            "check": False,
+        })
+
+        with mock.patch.object(MOD.subprocess, "run", side_effect=subprocess.TimeoutExpired(expected_argv, 30)):
+            with self.assertRaisesRegex(MOD.Reject, "semantic Git binding is unavailable"):
+                MOD._run_local_git(self.repository, "status", "--porcelain=v1")
+
+    def test_gate_dispatch_rejects_backend_near_misses(self) -> None:
+        cases = (
+            (0, MOD.Gate("git-head", "/workspace/apps/web", ("bun", "rev-parse", "HEAD^{commit}"))),
+            (6, MOD.Gate("web-typecheck", "/workspace", ("git", "status"))),
+        )
+        for index, replacement in cases:
+            with self.subTest(gate=replacement.gate_id):
+                changed = list(MOD.GATES); changed[index] = replacement
+                changed_tuple = tuple(changed)
+                gate_hash = MOD.digest(json.dumps([[g.gate_id, g.workdir, list(g.command)] for g in changed_tuple], separators=(",", ":")).encode())
+                with mock.patch.object(MOD, "GATES", changed_tuple), mock.patch.object(MOD, "GATE_LIST_SHA256", gate_hash):
+                    with self.assertRaisesRegex(MOD.Reject, "backend command"):
+                        MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=self.local_runner)
+
+        def substituted_argv(repository: Path, *args: str, stdin: bytes = b""):
+            result = self.local_runner(repository, *args, stdin=stdin)
+            result.args = ("/usr/bin/git", "status")
+            return result
+        with self.assertRaisesRegex(MOD.Reject, "git-head argv"):
+            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=substituted_argv)
 
     def test_dev_base_mismatch_and_pre_staged_toolchain_failure_reject(self) -> None:
-        def wrong_dev(argv, **kwargs):
-            result = self.runner(argv, **kwargs)
-            if tuple(argv[-len(MOD.GATES[3].command):]) == MOD.GATES[3].command:
+        def wrong_dev(repository: Path, *args: str, stdin: bytes = b""):
+            result = self.local_runner(repository, *args, stdin=stdin)
+            if args == MOD.GATES[3].command[1:]:
                 result.stdout = ("8" * 40 + "\n").encode()
             return result
         with self.assertRaisesRegex(MOD.Reject, "git-dev-base"):
-            MOD.run_gates(self.chain, self.pins, wrong_dev, lambda _: None)
+            MOD.run_gates(self.chain, self.pins, self.runner, lambda _: None, local_git=wrong_dev)
         def missing_bun(*args, **_: object):
             if "info" in args[0]:
                 home = Path.home().resolve()
@@ -279,7 +393,7 @@ class OfflineGatesV3Tests(unittest.TestCase):
             return self.runner(argv, **kwargs)
         try:
             with self.assertRaisesRegex(MOD.Reject, "working bytes differ"):
-                MOD.main(["--result", str(self.result), "--completion", str(self.completion), "--report", str(self.root / "offline-gates.json")], run=mutate_after_container_boundary, attest=lambda _: None)
+                MOD.main(["--result", str(self.result), "--completion", str(self.completion), "--report", str(self.root / "offline-gates.json")], run=mutate_after_container_boundary, attest=lambda _: None, local_git=self.local_runner)
         finally:
             MOD.PINS_PATH = original
 
