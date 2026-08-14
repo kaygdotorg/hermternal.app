@@ -26,9 +26,9 @@ class PhaseAV9Tests(unittest.TestCase):
         return {"path": str(runner.REPOSITORY_ROOT), "binding": binding, "parent_binding": {**binding, "st_ino": 5}, "head": runner.FROZEN_COMMIT, "tree": runner.FROZEN_TREE, "detached": True, "source_repository": {"path": str(runner.SOURCE_REPOSITORY_ROOT), "binding": {**binding, "st_ino": 6}}, "git_common_dir": {"path": str(runner.GIT_COMMON_DIR), "binding": {**binding, "st_ino": 7}}, "git_object_dir": {"path": str(runner.GIT_OBJECT_DIR), "binding": {**binding, "st_ino": 8}}, "git_worktree_dir": {"path": str(runner.GIT_WORKTREE_DIR), "binding": {**binding, "st_ino": 9}}}
 
     def test_disposable_phase_anchor_enables_frozen_v5_boundary(self):
-        self.assertEqual(hashlib.sha256(V9.V8_PATH.read_bytes()).hexdigest(), V9.V8_SHA256)
-        self.assertEqual(hashlib.sha256(Path(WRAPPER.__file__).read_bytes()).hexdigest(), V9.LINUX_WRAPPER_ADAPTER_SHA256)
-        self.assertEqual(hashlib.sha256(DRIVER.V4_PATH.read_bytes()).hexdigest(), DRIVER.V4_SHA256)
+        self.assertEqual(hashlib.sha256(V9._stable_bytes(V9.V8_PATH, V9.V8_SHA256, "v8")).hexdigest(), V9.V8_SHA256)
+        self.assertEqual(hashlib.sha256(V9._stable_bytes(V9.WRAPPER_V5_PATH, V9.LINUX_WRAPPER_ADAPTER_SHA256, "wrapper")).hexdigest(), V9.LINUX_WRAPPER_ADAPTER_SHA256)
+        self.assertEqual(hashlib.sha256(V9._stable_bytes(V9.DRIVER_V5_PATH, V9.LINUX_DRIVER_ADAPTER_SHA256, "driver")).hexdigest(), V9.LINUX_DRIVER_ADAPTER_SHA256)
         self.assertEqual(WRAPPER.DERIVED_STDIN_SHA256, "df9a71fafdf1263e032644180b5211c4dd70771c624461e2e6a3a2b1e89d911c")
         self.assertEqual(DRIVER.HASHES["parent-binding-adaptation-manifest.json"], "43e2b9fa72214d730fe83cdeebb2cab977c50d43ad9b52e1432028028ffb735f")
         self.assertFalse(WRAPPER.preflight()["execution_enabled"])
@@ -69,7 +69,22 @@ class PhaseAV9Tests(unittest.TestCase):
             V9._replace_v3_boundary(types.FunctionType(function.__code__.replace(co_consts=wrong_target), function.__globals__, function.__name__, function.__defaults__, function.__closure__))
         with mock.patch.object(V9, "V8_PATH", HERE / "swapped-v8.py"):
             with self.assertRaisesRegex(RuntimeError, "path"):
-                V9._stable_v8_bytes()
+                V9._load_v8()
+
+    def test_fd_reader_rejects_symlink_and_after_read_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trusted = root / "trusted.py"; trusted.write_bytes(b"marker = 'trusted'\n")
+            replacement = root / "replacement.py"; replacement.write_bytes(b"raise RuntimeError('replacement executed')\n")
+            digest = hashlib.sha256(trusted.read_bytes()).hexdigest()
+            link = root / "linked.py"; link.symlink_to(trusted)
+            with self.assertRaises(OSError):
+                V9._stable_bytes(link, digest, "symlink")
+            def swap():
+                os.replace(replacement, trusted)
+            with self.assertRaisesRegex(RuntimeError, "changed during read"):
+                V9._stable_bytes(trusted, digest, "replacement", after_read=swap)
+            self.assertIn(b"replacement executed", trusted.read_bytes())
 
 
 if __name__ == "__main__":

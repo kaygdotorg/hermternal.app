@@ -10,17 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import types
 from pathlib import Path
 from typing import Sequence
 
-import linux_replay_wrapper_v5
-import linux_retained_driver_v5
-
 HERE = Path(__file__).resolve().parent
 FROZEN_V8_PATH = HERE / "linux_phase_a_v8.py"
 V8_PATH = FROZEN_V8_PATH
+WRAPPER_V5_PATH = HERE / "linux_replay_wrapper_v5.py"
+DRIVER_V5_PATH = HERE / "linux_retained_driver_v5.py"
 V8_SHA256 = "140be86d9f597ca529991c6e8755960ab5f83ee627044ae093b6d392c3b88a3f"
 LINUX_WRAPPER_ADAPTER_SHA256 = "83b9dd0fecb26889ddaa0de78a146ad1af22c3e991f4d4bcf56f7900b01c1968"
 LINUX_DRIVER_ADAPTER_SHA256 = "0510d5f7ff5e011cb1875378ede3649222c8383ecb702978af8d791a408400e7"
@@ -32,18 +32,54 @@ DISABLED_V8 = b'    wrapper.execute_and_publish = lambda *_args, **_kwargs: (_ f
 PRESERVED_METHOD = b"    wrapper._phase_a_v3_predecessor_execute_and_publish = wrapper.execute_and_publish\n"
 
 
-def _adapter_sha256() -> str:
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-
-
-def _stable_v8_bytes(path: Path = V8_PATH) -> bytes:
-    """Load only the fixed v8 pathname, so a matching swapped file cannot run."""
-    if path != FROZEN_V8_PATH or V8_PATH != FROZEN_V8_PATH:
-        raise RuntimeError("Phase A v8 adapter path differs")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != V8_SHA256:
-        raise RuntimeError("Phase A v8 adapter SHA-256 differs")
+def _stable_bytes(path: Path, digest: str | None, label: str, after_read=None) -> bytes:
+    """Return one authenticated fd buffer and reject path replacement races."""
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise RuntimeError(f"{label} is not a single-link regular file")
+        raw = b""
+        while len(raw) < before.st_size:
+            block = os.read(descriptor, before.st_size - len(raw))
+            if not block:
+                raise RuntimeError(f"{label} read ended early")
+            raw += block
+        if os.read(descriptor, 1):
+            raise RuntimeError(f"{label} grew during read")
+        if after_read is not None:
+            after_read()
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode, value.st_size, value.st_nlink, value.st_mtime_ns, value.st_ctime_ns)
+    if identity(before) != identity(after) or identity(before) != identity(current):
+        raise RuntimeError(f"{label} changed during read")
+    if digest is not None and hashlib.sha256(raw).hexdigest() != digest:
+        raise RuntimeError(f"{label} SHA-256 differs")
     return raw
+
+
+def _adapter_sha256() -> str:
+    """Return the loader-authenticated v9 digest without reopening this path."""
+    return _AUTHENTICATED_SELF_SHA256
+
+
+def _load_verified_module(path: Path, digest: str, name: str, label: str) -> types.ModuleType:
+    raw = _stable_bytes(path, digest, label)
+    module = types.ModuleType(name)
+    module.__file__ = os.fspath(path)
+    sys.modules[name] = module
+    exec(compile(raw, os.fspath(path), "exec", dont_inherit=True), module.__dict__)
+    return module
+
+
+def _load_v5_dependencies() -> tuple[types.ModuleType, types.ModuleType]:
+    """Authenticate v5 modules before v8 source resolves their imports."""
+    driver = _load_verified_module(DRIVER_V5_PATH, LINUX_DRIVER_ADAPTER_SHA256, "linux_retained_driver_v5", "Linux retained-driver v5")
+    wrapper = _load_verified_module(WRAPPER_V5_PATH, LINUX_WRAPPER_ADAPTER_SHA256, "linux_replay_wrapper_v5", "Linux replay wrapper v5")
+    return wrapper, driver
 
 
 def _replace_v3_boundary(function):
@@ -62,7 +98,10 @@ def _replace_v3_boundary(function):
 
 def _load_v8() -> types.ModuleType:
     """Install v9 data pins on authenticated v8 bytes and its loaded v3 method."""
-    raw = _stable_v8_bytes()
+    if V8_PATH != FROZEN_V8_PATH:
+        raise RuntimeError("Phase A v8 adapter path differs")
+    raw = _stable_bytes(V8_PATH, V8_SHA256, "Phase A v8 adapter")
+    _wrapper_v5, driver_v5 = _load_v5_dependencies()
     module = types.ModuleType("issue397_linux_phase_a_v9_base")
     module.__file__ = os.fspath(Path(__file__).resolve())
     sys.modules[module.__name__] = module
@@ -73,7 +112,7 @@ def _load_v8() -> types.ModuleType:
     module.V8_EVIDENCE_SCHEMA = V9_EVIDENCE_SCHEMA
     module.V8_ROOT_NAME = V9_ROOT_NAME
     module._adapter_sha256 = _adapter_sha256
-    module.FINAL_PINS = dict(linux_retained_driver_v5.HASHES)
+    module.FINAL_PINS = dict(driver_v5.HASHES)
     module.FINAL_NAMES = tuple(module.FINAL_PINS)
     predecessor_load_v7 = module._load_v7
 
@@ -92,6 +131,13 @@ def _load_v8() -> types.ModuleType:
     module._load_v7 = load_v9_mechanism
     module._EXPORT_RUNNER = module.load_runner()
     return module
+
+
+_AUTHENTICATED_SELF_SHA256 = globals().get("_AUTHENTICATED_SELF_SHA256")
+if _AUTHENTICATED_SELF_SHA256 is None:
+    _AUTHENTICATED_SELF_SHA256 = hashlib.sha256(
+        _stable_bytes(Path(__file__).resolve(), None, "Phase A v9 adapter")
+    ).hexdigest()
 
 
 def load_runner():
