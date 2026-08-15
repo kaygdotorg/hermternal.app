@@ -260,6 +260,7 @@
 <div class="workspace-preview-container">
   <section
     aria-label="Hermternal runtime workspace preview"
+    class:terminal-active={mode === 'terminal'}
     class="workspace-preview"
     data-appearance={appearance}
     data-mode-source={dataMode}
@@ -640,7 +641,9 @@
     overflow: hidden;
     flex-direction: column;
     border-radius: var(--radius-glass);
-    background: color-mix(in srgb, var(--surface) 22%, transparent);
+    /* Paper keeps the conversation column on the canvas. The floating header,
+       timeline, and composer provide the only raised surfaces in this column. */
+    background: var(--canvas);
   }
 
   .conversation-body {
@@ -1178,6 +1181,123 @@
 
     .mobile-toolbar {
       padding-inline: 16px;
+    }
+
+    /* The approved narrow resting board shows only the title island and the
+       trailing Workspace action. Keep the shared mode controls in the DOM so
+       keyboard and terminal recovery paths stay available, then reveal the
+       same controls when Terminal owns the active presentation. Opacity keeps
+       the pointer and focus contract intact without adding a third visible
+       island to the Paper board. */
+    .workspace-preview:not(.terminal-active) .mobile-mode-selector {
+      opacity: 0;
+    }
+
+    .workspace-preview.terminal-active .mobile-mode-selector {
+      opacity: 1;
+    }
+  }
+
+  /* Desktop Paper header controls are floating islands inside a 72px header.
+     These parent rules keep the shared child components unchanged while the
+     shell owns the exact reference geometry. */
+  @container workspace-preview (min-width: 1440px) {
+    .conversation-panel :global(.conversation-header) {
+      position: relative;
+      box-sizing: border-box;
+      height: 72px;
+      min-height: 72px;
+      gap: 0;
+      padding: 16px 8px 16px 12px;
+      border-bottom: 0;
+    }
+
+    .conversation-panel :global(.conversation-header .title-region) {
+      width: 160px;
+      min-width: 160px;
+      flex: 0 0 160px;
+    }
+
+    .conversation-panel :global(.conversation-header .title-region .pill) {
+      width: 160px;
+      min-width: 160px;
+      height: 44px;
+      min-height: 44px;
+      border: 0;
+      background: var(--surface);
+      box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 10%, transparent);
+    }
+
+    .conversation-panel :global(.conversation-header .mode-controls) {
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      width: 92px;
+      height: 44px;
+      transform: translateX(-50%);
+    }
+
+    .conversation-panel :global(.conversation-header .mode-controls::before) {
+      top: 2px;
+      left: 2px;
+      width: 88px;
+      height: 40px;
+      border: 0;
+      background: var(--surface);
+      box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 10%, transparent);
+    }
+
+    .conversation-panel :global(.conversation-header .mode-controls .pill) {
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      min-height: 44px;
+      padding-inline: 8px;
+      border: 0;
+    }
+
+    .conversation-panel :global(.conversation-header > .pill) {
+      position: absolute;
+      top: 14px;
+      right: 8px;
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      min-height: 44px;
+      padding-inline: 8px;
+      border: 0;
+      background: var(--surface);
+      box-shadow: 0 8px 18px color-mix(in srgb, var(--ink) 10%, transparent);
+    }
+
+    .conversation-panel :global(.conversation-header .header-model) {
+      display: none;
+    }
+
+    .conversation-panel :global(.composer) {
+      right: 36px;
+      bottom: 32px;
+      left: 36px;
+      height: 112px;
+      min-height: 112px;
+      padding: 8px;
+      background: var(--composer-surface);
+      box-shadow: var(--composer-shadow);
+      backdrop-filter: blur(18px) saturate(150%);
+    }
+  }
+
+  @container workspace-preview (max-width: 1439px) {
+    .conversation-panel :global(.composer) {
+      right: 16px;
+      bottom: 16px;
+      left: 16px;
+      height: 100px;
+      min-height: 100px;
+      padding: 6px;
+      background: var(--composer-surface);
+      box-shadow: var(--composer-shadow);
+      backdrop-filter: blur(18px) saturate(150%);
     }
   }
 

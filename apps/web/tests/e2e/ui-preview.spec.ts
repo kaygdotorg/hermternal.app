@@ -143,12 +143,18 @@ test('Paper desktop geometry keeps the fixed three-column workspace and composer
   const conversationBox = await workspace.locator('.conversation-panel').boundingBox();
   const inspectorBox = await workspace.locator('.desktop-inspector').boundingBox();
   const composerBox = await workspace.getByRole('form', { name: 'Message composer' }).boundingBox();
+  const titleIslandBox = await workspace.locator('.conversation-header .title-region .pill').boundingBox();
+  const modeIslandBox = await workspace.locator('.conversation-header .mode-controls').boundingBox();
+  const shareBox = await workspace.getByRole('button', { name: 'Workspace options' }).boundingBox();
   expect(workspaceBox).not.toBeNull();
   expect(gridBox).not.toBeNull();
   expect(sidebarBox).not.toBeNull();
   expect(conversationBox).not.toBeNull();
   expect(inspectorBox).not.toBeNull();
   expect(composerBox).not.toBeNull();
+  expect(titleIslandBox).not.toBeNull();
+  expect(modeIslandBox).not.toBeNull();
+  expect(shareBox).not.toBeNull();
 
   expect(workspaceBox?.width).toBe(1440);
   expect(workspaceBox?.height).toBe(960);
@@ -169,7 +175,29 @@ test('Paper desktop geometry keeps the fixed three-column workspace and composer
   expect(conversationBox?.height).toBe(928);
   expect(inspectorBox?.height).toBe(928);
   expect(composerBox?.height).toBe(112);
+  expect(composerBox?.x).toBe((workspaceBox?.x ?? 0) + 344);
+  expect(composerBox?.width).toBe(648);
   expect(Math.abs((composerBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 800))).toBeLessThanOrEqual(1);
+  expect(titleIslandBox).toMatchObject({
+    x: (workspaceBox?.x ?? 0) + 320,
+    y: (workspaceBox?.y ?? 0) + 30,
+    width: 160,
+    height: 44
+  });
+  expect(modeIslandBox).toMatchObject({
+    x: (workspaceBox?.x ?? 0) + 622,
+    y: (workspaceBox?.y ?? 0) + 30,
+    width: 92,
+    height: 44
+  });
+  expect(shareBox).toMatchObject({
+    x: (workspaceBox?.x ?? 0) + 976,
+    y: (workspaceBox?.y ?? 0) + 30,
+    width: 44,
+    height: 44
+  });
+  await expect(workspace.locator('.conversation-header')).toHaveCSS('border-bottom-width', '0px');
+  await expect(workspace.locator('.conversation-panel')).toHaveCSS('background-color', 'rgb(243, 245, 248)');
 
   const computedGrid = await workspace.locator('.workspace-grid').evaluate((element) => {
     const style = getComputedStyle(element);
@@ -199,15 +227,21 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   const toolbar = workspace.locator('.mobile-toolbar');
   const conversation = workspace.locator('.conversation-panel');
   const composer = page.getByRole('form', { name: 'Message composer' });
+  const titleIsland = workspace.locator('.mobile-title-island');
+  const workspaceTrigger = workspace.getByRole('button', { name: 'Open workspace' });
   const workspaceStatusBox = await statusBar.boundingBox();
   const toolbarBox = await toolbar.boundingBox();
   const conversationBox = await conversation.boundingBox();
   const composerBox = await composer.boundingBox();
+  const titleIslandBox = await titleIsland.boundingBox();
+  const workspaceTriggerBox = await workspaceTrigger.boundingBox();
   expect(workspaceBox).not.toBeNull();
   expect(workspaceStatusBox).not.toBeNull();
   expect(toolbarBox).not.toBeNull();
   expect(conversationBox).not.toBeNull();
   expect(composerBox).not.toBeNull();
+  expect(titleIslandBox).not.toBeNull();
+  expect(workspaceTriggerBox).not.toBeNull();
   expect(workspaceBox?.width).toBe(390);
   expect(workspaceBox?.height).toBe(844);
   expect(workspaceStatusBox?.x).toBe(workspaceBox?.x);
@@ -224,6 +258,22 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   expect(conversationBox?.height).toBe(718);
   expect(composerBox?.y).toBe((workspaceBox?.y ?? 0) + 728);
   expect(composerBox?.height).toBe(100);
+  expect(titleIslandBox).toMatchObject({
+    x: (workspaceBox?.x ?? 0) + 16,
+    y: (workspaceBox?.y ?? 0) + 72,
+    width: 198,
+    height: 44
+  });
+  expect(workspaceTriggerBox).toMatchObject({
+    x: (workspaceBox?.x ?? 0) + 330,
+    y: (workspaceBox?.y ?? 0) + 72,
+    width: 44,
+    height: 44
+  });
+  // The resting Paper board has no visible mode island in the narrow Chat
+  // header. The live Terminal state keeps this shared selector available and
+  // exposes it again; the workspace unit test covers that state transition.
+  await expect(workspace.locator('.mobile-mode-selector')).toHaveCount(0);
   await expect(workspace.locator('.workspace-grid .desktop-inspector')).toBeHidden();
 
   const conversations = page.getByRole('button', { name: 'Open conversations' });
@@ -260,8 +310,8 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(sessionDrawer).toBeHidden();
   await expect(conversations).toBeFocused();
 
-  const workspaceTrigger = page.getByRole('button', { name: 'Open workspace' });
-  await workspaceTrigger.click();
+  const workspaceDrawerTrigger = page.getByRole('button', { name: 'Open workspace' });
+  await workspaceDrawerTrigger.click();
   const workspaceDrawer = page.getByTestId('mobile-workspace-drawer');
   const workspaceAfterSessionBox = await workspace.boundingBox();
   const workspaceDrawerBox = await workspaceDrawer.boundingBox();
@@ -275,7 +325,7 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(workspaceDrawer.locator('.inspector')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(workspaceDrawer).toBeHidden();
-  await expect(workspaceTrigger).toBeFocused();
+  await expect(workspaceDrawerTrigger).toBeFocused();
 
   await composer.getByRole('textbox', { name: 'Message Hermes' }).fill('Pointer fixture');
   await page.getByRole('button', { name: 'Send message' }).click();
@@ -490,9 +540,11 @@ test('Paper mode overlays clear adjacent controls and preserve long localized fo
   expect(stacking?.modeWidth).toBe(92);
   expect(stacking?.terminalWidth).toBe(44);
   expect(stacking?.copyWidth).toBeGreaterThan(44);
-  expect(stacking?.copyRight).toBeGreaterThan(stacking?.optionsLeft ?? 0);
-  expect(stacking?.overlapX).toBeGreaterThan(0);
-  expect(stacking?.overlapY).toBeGreaterThan(0);
+  // The Paper desktop header leaves a clear gap between the centered mode
+  // island and the trailing Workspace options action. The reveal must stay in
+  // that gap, so it cannot cover the adjacent action's hit target.
+  expect(stacking?.copyRight).toBeLessThan(stacking?.optionsLeft ?? 0);
+  expect(stacking?.overlapX).toBeLessThanOrEqual(0);
   expect(stacking?.modeZIndex).toBeGreaterThan(stacking?.optionsZIndex ?? 0);
   expect(stacking?.copyOpacity).toBe('1');
   // The label is pointer-transparent, so the adjacent control remains the
