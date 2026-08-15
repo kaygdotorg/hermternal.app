@@ -8,10 +8,10 @@ const deferredControls = [
   'Kanban',
   'Open profile',
   'Open settings',
-  'Open utilities',
-  'Context usage 62 percent',
-  'Record a voice message'
+  'Open utilities'
 ];
+
+const identityTooltipControls = ['Context usage 62 percent', 'Record a voice message'];
 
 describe('WorkspacePreview', () => {
   it('renders a stopped response, gates approval, and keeps the composer available', () => {
@@ -201,6 +201,13 @@ describe('WorkspacePreview', () => {
       const control = screen.getByRole('button', { name });
       expect(control).toBeDisabled();
       expect(control).toHaveAttribute('title', expect.stringMatching(/deferred/i));
+      fireEvent.click(control);
+    }
+
+    for (const name of identityTooltipControls) {
+      const control = screen.getByRole('button', { name });
+      expect(control).toBeDisabled();
+      expect(control).toHaveAttribute('title', name);
       fireEvent.click(control);
     }
 
