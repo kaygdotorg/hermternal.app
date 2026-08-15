@@ -368,7 +368,12 @@
      of repeating the Hermes header. Keep the model metadata in the DOM for
      assistive technology while matching that quieter visual state. */
   .assistant-row:has(.draft-label) .assistant-header {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
   .assistant-row:has(.draft-label) .assistant-copy {

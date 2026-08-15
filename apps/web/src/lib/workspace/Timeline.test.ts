@@ -79,6 +79,26 @@ describe('Timeline', () => {
     expect(screen.getByRole('article', { name: 'Live Hermes response' })).toHaveAttribute('aria-live', 'polite');
   });
 
+  it('keeps the compact follow-up Hermes metadata available to assistive technology', () => {
+    const item: TimelineItem = {
+      kind: 'assistant-message',
+      id: 'draft-test',
+      model: 'Atlas · balanced',
+      status: 'draft',
+      text: 'Follow-up response'
+    };
+
+    const view = render(Timeline, { items: [item] });
+    const header = view.container.querySelector('.assistant-header');
+    expect(header).toBeInTheDocument();
+    expect(getComputedStyle(header as HTMLElement).display).not.toBe('none');
+    expect(getComputedStyle(header as HTMLElement).position).toBe('absolute');
+    expect(getComputedStyle(header as HTMLElement).width).toBe('1px');
+    expect(screen.getByText('Hermes')).toBeInTheDocument();
+    expect(screen.getByText('Atlas · balanced')).toBeInTheDocument();
+    expect(screen.getByText('Draft')).toBeInTheDocument();
+  });
+
   it('never mounts caller-provided image sources in the local preview', () => {
     const sources = ['https://example.com/image.png', '/same-origin.png', 'data:image/png;base64,ZmFrZQ=='];
 
