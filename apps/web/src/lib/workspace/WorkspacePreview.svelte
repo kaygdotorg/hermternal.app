@@ -756,9 +756,10 @@
       justify-content: space-between;
       padding: 21px 24px 19px;
       color: var(--ink);
-      font-size: 12px;
+      font-family: system-ui, sans-serif;
+      font-size: 17px;
       font-weight: 600;
-      line-height: 16px;
+      line-height: 22px;
     }
 
     .status-system {
@@ -850,6 +851,7 @@
     .mobile-title-island :global(.pill:last-child .pill-label) {
       overflow: visible;
       font-size: 15px;
+      font-weight: 600;
       line-height: 20px;
       text-overflow: clip;
     }

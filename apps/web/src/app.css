@@ -1,6 +1,11 @@
-/* Paper uses Dancing Script for the Hermternal wordmark. Keep this single
-   Latin 600 face self-hosted and subsetted; the product does not fetch fonts
-   from a runtime network boundary. */
+/* Paper uses these self-hosted Latin faces for the prototype. Keep only the
+   four Instrument Sans weights used by the desktop and narrow boards plus the
+   single Dancing Script wordmark face; the product does not fetch fonts from a
+   runtime network boundary. */
+@import '@fontsource/instrument-sans/latin-400.css';
+@import '@fontsource/instrument-sans/latin-500.css';
+@import '@fontsource/instrument-sans/latin-600.css';
+@import '@fontsource/instrument-sans/latin-700.css';
 @import '@fontsource/dancing-script/latin-600.css';
 
 :root {

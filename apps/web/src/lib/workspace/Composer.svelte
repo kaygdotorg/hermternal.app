@@ -390,8 +390,9 @@
     background: transparent;
     color: transparent;
     font: inherit;
-    font-size: 12px;
-    line-height: 16px;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 18px;
     opacity: 0;
     cursor: pointer;
   }
@@ -399,10 +400,16 @@
   .model-short {
     display: inline;
     color: var(--ink);
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 16px;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 18px;
     pointer-events: none;
+  }
+
+  /* Paper gives Restricted the medium control role while the neighboring
+     attachment action keeps the shared semibold pill label. */
+  .composer-action-island :global(.pill:nth-child(2) .pill-label) {
+    font-weight: 500;
   }
 
   .model-control select:disabled {
@@ -522,6 +529,17 @@
 
     .message-field textarea {
       transform: translateY(-6px);
+    }
+
+    .message-field textarea {
+      line-height: 22px;
+    }
+
+    .model-control select,
+    .model-short {
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 18px;
     }
 
     .composer-controls {

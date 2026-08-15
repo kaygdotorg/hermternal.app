@@ -269,11 +269,17 @@
   }
 
   .user-message p,
-  .assistant-copy,
-  .approval-card p {
+  .assistant-copy {
     margin: 0;
     font-size: 15px;
     line-height: 23px;
+  }
+
+  .approval-card > p {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 19px;
   }
 
   .inline-attachments {
@@ -326,9 +332,10 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--signal) 12%, var(--surface));
     color: var(--signal);
+    font-family: system-ui, sans-serif;
     font-size: 13px;
-    font-weight: 600;
-    line-height: 18px;
+    font-weight: 700;
+    line-height: 16px;
   }
 
   .assistant-name,
@@ -341,14 +348,21 @@
   .assistant-name {
     color: var(--ink);
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 700;
   }
 
-  .assistant-model,
+  .assistant-model {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 16px;
+  }
+
   .draft-label,
   .streaming-label {
     color: var(--muted);
     font-size: 12px;
+    font-weight: 400;
   }
 
   .draft-label {
@@ -443,6 +457,16 @@
     line-height: 18px;
   }
 
+  .step-copy strong {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 19px;
+  }
+
+  .approval-header strong {
+    font-weight: 700;
+  }
+
   .step-copy span,
   .approval-header span,
   .clarification-heading span,
@@ -452,6 +476,12 @@
     color: var(--muted);
     font-size: 12px;
     line-height: 16px;
+  }
+
+  .step-copy span {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 19px;
   }
 
   .step-status,
@@ -729,6 +759,30 @@
       left: 0;
       top: 0;
       position: static;
+    }
+
+    .user-message p,
+    .assistant-copy {
+      line-height: 22px;
+    }
+
+    .approval-card > p {
+      font-size: 14px;
+      line-height: 20px;
+    }
+
+    .assistant-avatar {
+      font-family: var(--font-ui), ui-sans-serif, system-ui, sans-serif;
+      font-weight: 600;
+      line-height: 16px;
+    }
+
+    .assistant-name {
+      font-weight: 600;
+    }
+
+    .approval-header strong {
+      font-weight: 600;
     }
 
     .user-message {

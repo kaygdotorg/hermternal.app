@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@fontsource/dancing-script": "5.3.0",
+    "@fontsource/instrument-sans": "5.3.0",
     "@wterm/dom": "0.3.2",
     "@wterm/ghostty": "0.3.2"
   }

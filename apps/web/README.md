@@ -15,6 +15,8 @@ The `/ui-preview` route renders the approved D-15W Runtime and Authentication st
 
 The Paper-approved Chat workspace uses exactly two responsive families. The desktop family preserves the sidebar and Workspace inspector at the 1440 × 960 reference geometry: 276px sidebar, 720px conversation cap, 380px inspector, and 16px outer insets and gaps. The mobile family uses the 390 × 844 shell with a 62px status bar, 64px header, 100px composer, conversation drawer, Workspace drawer, and title-edit state. The breakpoint follows effective preview width; desktop never substitutes top tabs for the sidebar. All workspace content on `/ui-preview` is local fixture data. It does not contact Hermes, load remote artifacts, retain credentials, or mirror a transcript.
 
+Workspace typography follows the inspected Paper boards. Instrument Sans is self-hosted as Latin 400, 500, 600, and 700 faces for the UI roles; Dancing Script Latin 600 is self-hosted for the wordmark. No runtime font request is part of this prototype. Geist Mono remains a local fallback for the web-only terminal because the inspected workspace boards do not render a mono role.
+
 The canonical artboard-to-implementation manifest is `../../contracts/design-tokens/web/artboards.json`. The preview consumes the matching semantic presentation tokens and implements the approved desktop and narrow state inventory, including fail-closed compatibility gates. Runtime behavior that Paper cannot prove remains covered by local component and browser tests.
 
 The planned chat surface has one profile, provider-neutral discovery, session restore, streaming, approvals, clarification, interruption, images only for attachments, and no transcript mirror.

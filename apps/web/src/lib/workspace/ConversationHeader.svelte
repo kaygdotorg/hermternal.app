@@ -160,6 +160,15 @@
     padding-inline: 16px;
   }
 
+  /* Paper's resting desktop title is a 15px/600/20px role. The shared pill
+     keeps the 44px target and its state behavior; only the title copy needs
+     this larger conversation-heading treatment. */
+  .title-region :global(.pill-label) {
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 20px;
+  }
+
   .title-region :global(.pill .icon-slot:empty) {
     display: none;
   }

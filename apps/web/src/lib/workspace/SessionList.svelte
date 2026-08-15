@@ -273,8 +273,9 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--signal) 12%, var(--surface));
     color: var(--signal);
-    font-size: 14px;
-    font-weight: 600;
+    font-family: system-ui, sans-serif;
+    font-size: 16px;
+    font-weight: 700;
     line-height: 20px;
   }
 
@@ -282,7 +283,8 @@
     flex: 1 1 auto;
     min-width: 0;
     color: var(--muted);
-    font-size: 14px;
+    font-size: 13px;
+    font-weight: 600;
     line-height: 18px;
   }
 

@@ -100,7 +100,7 @@
         <div class="hub-bar"><span class="bar bar-one"></span><span>FRA</span></div>
         <div class="hub-bar"><span class="bar bar-two"></span><span>AMS</span></div>
         <div class="hub-bar"><span class="bar bar-three"></span><span>LHR</span></div>
-        <div class="hub-bar"><span class="bar bar-four"></span><span>RTM</span></div>
+        <div class="hub-bar"><span class="bar bar-four"></span><span class="hub-label-strong">RTM</span></div>
       </div>
       <p class="thumbnail-note">Delay signal · 12% · synthetic fixture</p>
     </figure>
@@ -188,6 +188,13 @@
     line-height: 20px;
   }
 
+  .inspector-header h2 {
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.014em;
+    line-height: 22px;
+  }
+
   .inspector-tabs {
     display: flex;
     gap: 2px;
@@ -212,6 +219,7 @@
     color: var(--muted);
     font: inherit;
     font-size: 13px;
+    font-weight: 500;
     line-height: 18px;
     cursor: pointer;
   }
@@ -238,7 +246,9 @@
 
   .tab-count {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 18px;
   }
 
   .artifact-card {
@@ -293,6 +303,8 @@
   .artifact-title h3 {
     overflow: hidden;
     font-size: 14px;
+    font-weight: 700;
+    line-height: 18px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -343,8 +355,13 @@
     justify-content: flex-end;
     gap: 6px;
     color: var(--muted);
-    font-size: 10px;
+    font-size: 11px;
+    font-weight: 400;
     line-height: 14px;
+  }
+
+  .hub-label-strong {
+    font-weight: 600;
   }
 
   .bar {

@@ -9,6 +9,23 @@ const [css, manifestText] = await Promise.all([
   readFile(appCssPath, 'utf8'),
   readFile(manifestPath, 'utf8')
 ]);
+
+const requiredLocalFontImports = [
+  "@import '@fontsource/instrument-sans/latin-400.css';",
+  "@import '@fontsource/instrument-sans/latin-500.css';",
+  "@import '@fontsource/instrument-sans/latin-600.css';",
+  "@import '@fontsource/instrument-sans/latin-700.css';",
+  "@import '@fontsource/dancing-script/latin-600.css';"
+];
+for (const fontImport of requiredLocalFontImports) {
+  if (!css.includes(fontImport)) {
+    throw new Error(`Missing self-hosted Paper font import: ${fontImport}`);
+  }
+}
+if (/https?:\/\//.test(css)) {
+  throw new Error('CSS must not request runtime network fonts.');
+}
+
 const manifest = JSON.parse(manifestText);
 const presentationTokenSetIds = new Set(['runtime', 'runtime-gate', 'auth']);
 const runtimeTokenNames = new Set(
