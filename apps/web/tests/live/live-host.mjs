@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { createServer, request as createRequest } from 'node:http';
+import { STATUS_CODES, createServer, request as createRequest } from 'node:http';
 import { connect as createConnection, isIP } from 'node:net';
 import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,14 @@ const MAX_UPGRADE_RESPONSE_LENGTH = 64 * 1024;
 const HTTP_CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
 const SAFE_OPAQUE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/u;
 const WEBSOCKET_ACCEPT_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const SPOOFABLE_FORWARDING_HEADERS = new Set([
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-origin',
+  'x-forwarded-port',
+  'x-forwarded-proto'
+]);
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
   'keep-alive',
@@ -106,14 +114,86 @@ function hasWebSocketUpgrade(request) {
 /**
  * @param {import('node:stream').Duplex} socket
  * @param {number} statusCode
- * @param {string} statusMessage
  * @param {Record<string, string>} [headers]
  */
-function denyUpgrade(socket, statusCode, statusMessage, headers = {}) {
-  const lines = [`HTTP/1.1 ${statusCode} ${statusMessage}`];
+function denyUpgrade(socket, statusCode, headers = {}) {
+  const lines = [`HTTP/1.1 ${statusCode} ${STATUS_CODES[statusCode] ?? 'Bad Gateway'}`];
   for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
   lines.push('Connection: close', '', '');
   socket.end(lines.join('\r\n'));
+}
+
+/**
+ * Validate the configured public edge authority. A missing pair means that
+ * the host derives the public loopback authority from its bound socket.
+ *
+ * @param {string | undefined} publicHost
+ * @param {string | undefined} publicOrigin
+ * @returns {{host: string, origin: string} | undefined}
+ */
+function validatePublicEndpoint(publicHost, publicOrigin) {
+  if (publicHost === undefined && publicOrigin === undefined) return undefined;
+  if (typeof publicHost !== 'string' || typeof publicOrigin !== 'string') {
+    throw new Error('The public Host and Origin must be configured together.');
+  }
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(publicOrigin);
+  } catch {
+    throw new Error('The public Origin must be a canonical HTTP or HTTPS origin.');
+  }
+  if (
+    (parsedOrigin.protocol !== 'http:' && parsedOrigin.protocol !== 'https:') ||
+    parsedOrigin.username ||
+    parsedOrigin.password ||
+    parsedOrigin.pathname !== '/' ||
+    parsedOrigin.search ||
+    parsedOrigin.hash ||
+    publicOrigin !== parsedOrigin.origin ||
+    parsedOrigin.host !== publicHost
+  ) {
+    throw new Error('The public Host and Origin must describe one canonical public origin.');
+  }
+  return Object.freeze({ host: publicHost, origin: publicOrigin });
+}
+
+/**
+ * Resolve the public endpoint without trusting request headers. The default
+ * is the loopback address and port that accepted the request.
+ *
+ * @param {import('node:http').IncomingMessage} request
+ * @param {{host: string, origin: string} | undefined} configured
+ * @returns {{host: string, origin: string} | undefined}
+ */
+function publicEndpointFor(request, configured) {
+  if (configured) return configured;
+  const address = request.socket.localAddress;
+  const port = request.socket.localPort;
+  if (
+    (address !== '127.0.0.1' && address !== '::1') ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535
+  ) {
+    return undefined;
+  }
+  const host = address === '::1' ? `[${address}]` : address;
+  return { host: `${host}:${port}`, origin: `http://${host}:${port}` };
+}
+
+/**
+ * Validate the public edge headers before forwarding a request.
+ *
+ * @param {import('node:http').IncomingMessage} request
+ * @param {{host: string, origin: string} | undefined} endpoint
+ * @param {boolean} requireOrigin
+ * @returns {number | undefined} HTTP status when the request must be denied
+ */
+function publicHeaderFailure(request, endpoint, requireOrigin) {
+  if (!endpoint || request.headers.host !== endpoint.host) return 421;
+  const origin = request.headers.origin;
+  if ((requireOrigin || origin !== undefined) && origin !== endpoint.origin) return 403;
+  return undefined;
 }
 
 /**
@@ -221,7 +301,7 @@ function isWebSocketUpgradeResponse(response, requestHeaders) {
 }
 
 /**
- * @param {{statusCode: number, statusMessage: string, rawHeaders: string[]}} response
+ * @param {{statusCode: number, rawHeaders: string[]}} response
  * @returns {string}
  */
 function serializedUpgradeResponse(response) {
@@ -230,7 +310,8 @@ function serializedUpgradeResponse(response) {
     return separator > 0 && !HOP_BY_HOP_HEADERS.has(line.slice(0, separator).toLowerCase());
   });
   headers.push('Connection: Upgrade', 'Upgrade: websocket');
-  return `HTTP/1.1 ${response.statusCode} ${response.statusMessage}\r\n${headers.join('\r\n')}\r\n\r\n`;
+  const reason = STATUS_CODES[response.statusCode] ?? 'Switching Protocols';
+  return `HTTP/1.1 ${response.statusCode} ${reason}\r\n${headers.join('\r\n')}\r\n\r\n`;
 }
 
 /** @param {string} pathname @returns {string} */
@@ -254,10 +335,37 @@ function proxyHeaders(headers, target) {
   /** @type {import('node:http').OutgoingHttpHeaders} */
   const forwarded = {};
   for (const [name, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && value !== undefined) forwarded[name] = value;
+    const lowerName = name.toLowerCase();
+    if (
+      !HOP_BY_HOP_HEADERS.has(lowerName) &&
+      !SPOOFABLE_FORWARDING_HEADERS.has(lowerName) &&
+      lowerName !== 'host' &&
+      lowerName !== 'origin' &&
+      value !== undefined
+    ) {
+      forwarded[name] = value;
+    }
   }
-  forwarded.host = target.host;
+  // Map the validated public authority to the private Hermes authority. The
+  // target port is explicit here because URL objects omit HTTP port 80.
+  forwarded.host = targetAuthority(target);
+  if (headers.origin !== undefined) forwarded.origin = target.origin;
   return forwarded;
+}
+
+/** @param {URL} target @returns {string} */
+function targetPort(target) {
+  return target.port || (target.protocol === 'https:' ? '443' : '80');
+}
+
+/** @param {URL} target @returns {string} */
+function targetHostname(target) {
+  return target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
+}
+
+/** @param {URL} target @returns {string} */
+function targetAuthority(target) {
+  return `${target.hostname}:${targetPort(target)}`;
 }
 
 /**
@@ -281,15 +389,17 @@ function proxyHttp(request, response, target) {
   const upstream = createRequest(
     {
       protocol: target.protocol,
-      hostname: target.hostname,
-      port: target.port,
+      hostname: targetHostname(target),
+      port: targetPort(target),
       method: request.method,
       path: request.url,
       headers: proxyHeaders(request.headers, target)
     },
     (upstreamResponse) => {
       response.statusCode = upstreamResponse.statusCode ?? 502;
-      if (upstreamResponse.statusMessage) response.statusMessage = upstreamResponse.statusMessage;
+      // Keep reason phrases local. Upstream text is not part of the proof
+      // contract and must never be reflected into an edge response.
+      response.statusMessage = STATUS_CODES[response.statusCode] ?? 'Bad Gateway';
       copyResponseHeaders(upstreamResponse.headers, response);
       upstreamResponse.pipe(response);
     }
@@ -313,33 +423,43 @@ function proxyHttp(request, response, target) {
  * @param {import('node:stream').Duplex} socket
  * @param {Buffer} head
  * @param {URL} target
+ * @param {{host: string, origin: string} | undefined} configuredPublicEndpoint
  */
-function proxyUpgrade(request, socket, head, target) {
+function proxyUpgrade(request, socket, head, target, configuredPublicEndpoint) {
+  const publicFailure = publicHeaderFailure(
+    request,
+    publicEndpointFor(request, configuredPublicEndpoint),
+    true
+  );
+  if (publicFailure !== undefined) {
+    denyUpgrade(socket, publicFailure);
+    return;
+  }
   const rawTarget = request.url ?? '';
   const parsed = parseRawRequestTarget(rawTarget);
   if (!parsed) {
-    denyUpgrade(socket, 400, 'Bad Request');
+    denyUpgrade(socket, 400);
     return;
   }
   if (request.method !== 'GET') {
-    denyUpgrade(socket, 405, 'Method Not Allowed', { Allow: 'GET' });
+    denyUpgrade(socket, 405, { Allow: 'GET' });
     return;
   }
   if (!hasWebSocketUpgrade(request)) {
-    denyUpgrade(socket, 426, 'Upgrade Required', { Upgrade: 'websocket' });
+    denyUpgrade(socket, 426, { Upgrade: 'websocket' });
     return;
   }
 
   const isPtyTarget = parsed.pathname === PTY_WEBSOCKET_PATH;
   const ptyTarget = isPtyTarget ? parsePtyUpgradeTarget(rawTarget) : undefined;
   if (isPtyTarget && ptyTarget === undefined) {
-    denyUpgrade(socket, 400, 'Bad Request');
+    denyUpgrade(socket, 400);
     return;
   }
   if (!isPtyTarget && parsed.pathname !== CHAT_WEBSOCKET_PATH) {
     // Keep /api/ws as the reviewed Chat route, while refusing every other
     // upgrade before any credentialed upstream request is created.
-    denyUpgrade(socket, 404, 'Not Found');
+    denyUpgrade(socket, 404);
     return;
   }
 
@@ -353,34 +473,64 @@ function proxyUpgrade(request, socket, head, target) {
   };
   const serializedRequestHeaders = serializeUpgradeRequestHeaders(requestHeaders);
   if (serializedRequestHeaders === undefined) {
-    denyUpgrade(socket, 400, 'Bad Request');
+    denyUpgrade(socket, 400);
     return;
   }
-  const upstreamHost = target.hostname.startsWith('[') ? target.hostname.slice(1, -1) : target.hostname;
-  const upstream = createConnection({ host: upstreamHost, port: Number(target.port) });
+  const upstream = createConnection({ host: targetHostname(target), port: Number(targetPort(target)) });
   let responseBytes = Buffer.alloc(0);
   let responseHandled = false;
-  const fail = (statusCode = 502, statusMessage = 'Bad Gateway') => {
-    if (responseHandled) return;
+  let clientClosed = false;
+  const fail = (statusCode = 502) => {
+    responseBytes = Buffer.alloc(0);
+    if (responseHandled || clientClosed) {
+      upstream.destroy();
+      return;
+    }
     responseHandled = true;
-    denyUpgrade(socket, statusCode, statusMessage);
+    // Never copy an upstream reason phrase into the local response. The local
+    // status table provides a fixed phrase for every response code.
+    denyUpgrade(socket, statusCode);
     upstream.destroy();
   };
 
+  // An abandoned browser upgrade must not keep a private socket alive until
+  // the handshake timeout. This listener remains active after 101 so either
+  // side closing the raw tunnel closes the other side as well.
+  const closeUpstreamForClient = () => {
+    clientClosed = true;
+    upstream.destroy();
+  };
+  socket.once('close', closeUpstreamForClient);
+  socket.once('end', closeUpstreamForClient);
+  socket.once('error', closeUpstreamForClient);
   upstream.setTimeout(30_000, () => fail());
   upstream.on('error', () => fail());
   upstream.on('close', () => fail());
   upstream.on('connect', () => {
+    if (clientClosed) {
+      upstream.destroy();
+      return;
+    }
     upstream.write(
       `GET ${rawTarget} HTTP/1.1\r\n${serializedRequestHeaders.join('\r\n')}\r\n\r\n`
     );
   });
   upstream.on('data', (chunk) => {
-    if (responseHandled) return;
-    responseBytes = Buffer.concat([responseBytes, Buffer.from(chunk)]);
+    if (responseHandled || clientClosed) {
+      upstream.destroy();
+      return;
+    }
+    const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (
+      incoming.length > MAX_UPGRADE_RESPONSE_LENGTH ||
+      responseBytes.length > MAX_UPGRADE_RESPONSE_LENGTH - incoming.length
+    ) {
+      fail();
+      return;
+    }
+    responseBytes = Buffer.concat([responseBytes, incoming]);
     const parsedResponse = parseUpgradeResponseHead(responseBytes);
     if (parsedResponse === undefined) {
-      if (responseBytes.length > MAX_UPGRADE_RESPONSE_LENGTH) fail();
       return;
     }
     if (parsedResponse === null) {
@@ -394,9 +544,9 @@ function proxyUpgrade(request, socket, head, target) {
     responseHandled = true;
     if (!isWebSocketUpgradeResponse(parsedResponse, request.headers)) {
       if (parsedResponse.statusCode !== 101) {
-        denyUpgrade(socket, parsedResponse.statusCode, parsedResponse.statusMessage || 'Upgrade Failed');
+        denyUpgrade(socket, parsedResponse.statusCode);
       } else {
-        denyUpgrade(socket, 502, 'Bad Gateway');
+        denyUpgrade(socket, 502);
       }
       upstream.destroy();
       return;
@@ -487,12 +637,14 @@ function isCanonicalLoopbackIpv4(host) {
 }
 
 /**
- * @param {{buildDirectory?: string, target?: string}} [options]
+ * @param {{buildDirectory?: string, target?: string, publicHost?: string, publicOrigin?: string}} [options]
  * @returns {import('node:http').Server}
  */
 export function createLiveHost({
   buildDirectory = resolve(cwd(), 'build'),
-  target
+  target,
+  publicHost,
+  publicOrigin
 } = {}) {
   // Credentialed proofs must bind to explicit launcher metadata; a fallback can
   // silently send auth traffic to an unrelated local listener.
@@ -501,8 +653,19 @@ export function createLiveHost({
     throw new Error('HERMES_LIVE_TARGET is required for the credentialed live lane.');
   }
   const validatedTarget = validateLiveTarget(configuredTarget);
+  const configuredPublicEndpoint = validatePublicEndpoint(publicHost, publicOrigin);
 
   const server = createServer(async (request, response) => {
+    const publicFailure = publicHeaderFailure(
+      request,
+      publicEndpointFor(request, configuredPublicEndpoint),
+      false
+    );
+    if (publicFailure !== undefined) {
+      response.statusCode = publicFailure;
+      response.end(publicFailure === 421 ? 'misdirected request' : 'forbidden');
+      return;
+    }
     const rawTarget = request.url ?? '';
     const parsed = parseRawRequestTarget(rawTarget);
     if (!parsed) {
@@ -564,12 +727,14 @@ export function createLiveHost({
       response.end('not found');
     }
   });
-  server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, validatedTarget));
+  server.on('upgrade', (request, socket, head) =>
+    proxyUpgrade(request, socket, head, validatedTarget, configuredPublicEndpoint)
+  );
   return server;
 }
 
 /**
- * @param {{buildDirectory?: string, target?: string, port?: number}} [options]
+ * @param {{buildDirectory?: string, target?: string, publicHost?: string, publicOrigin?: string, port?: number}} [options]
  * @returns {Promise<import('node:http').Server>}
  */
 export async function startLiveHost({ port = 4187, ...options } = {}) {
