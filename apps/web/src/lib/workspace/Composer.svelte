@@ -1,5 +1,4 @@
 <script lang="ts">
-  import Icon from './Icon.svelte';
   import Pill from './Pill.svelte';
   import type { LiveWorkspaceDraft } from './live-workspace-session';
   import type { WorkspaceAction } from './types';
@@ -9,7 +8,7 @@
   export let model = 'Atlas · balanced';
   export let disabled = false;
   export let isStreaming = false;
-  export let placeholder = 'Message Hermes…';
+  export let placeholder = 'Message Hermes...';
   export let retainedDraft: Readonly<LiveWorkspaceDraft> | undefined = undefined;
   export let onDraftChange: (draft: LiveWorkspaceDraft | undefined) => void = () => {};
   export let onAction: ComposerActionHandler = () => {};
@@ -115,57 +114,64 @@
 
   <div class="composer-controls">
     <div class="composer-left">
-      <Pill
-        ariaLabel="Add an attachment"
-        icon="paperclip"
-        iconOnly
-        label="Add attachment"
-        variant="ghost"
-        {disabled}
-        onActivate={addMockAttachment}
-      />
-      <Pill
-        ariaLabel="Open security policy"
-        icon="shield"
-        label="Restricted"
-        variant="ghost"
-        {disabled}
-        onActivate={() => onAction({ type: 'set-policy' })}
-      />
+      <div class="composer-action-island">
+        <Pill
+          ariaLabel="Add an attachment"
+          icon="plus"
+          iconOnly
+          label="Add attachment"
+          variant="ghost"
+          {disabled}
+          onActivate={addMockAttachment}
+        />
+        <Pill
+          ariaLabel="Open security policy"
+          icon="shield"
+          label="Restricted"
+          variant="ghost"
+          {disabled}
+          onActivate={() => onAction({ type: 'set-policy' })}
+        />
+      </div>
     </div>
 
     <div class="composer-right">
-      <Pill ariaLabel="Context usage 62 percent" icon="spark" label="62%" variant="ghost" {disabled} />
-      <label class="model-control">
-        <span class="sr-only">Model</span>
-        <Icon name="spark" size={14} />
-        <span aria-hidden="true" class="model-short">Atlas</span>
-        <select aria-label="Model" bind:value={selectedModel} {disabled} onchange={handleModelChange}>
-          <option>Atlas · balanced</option>
-          <option>Atlas · fast</option>
-          <option>Atlas · precise</option>
-        </select>
-      </label>
-      <Pill ariaLabel="Record a voice message" icon="mic" iconOnly label="Voice message" variant="ghost" {disabled} />
-      {#if isStreaming}
-        <Pill
-          ariaLabel="Stop response"
-          icon="stop"
-          label="Stop"
-          variant="danger"
-          onActivate={() => onAction({ type: 'stop' })}
-        />
-      {:else}
-        <Pill
-          ariaLabel="Send message"
-          icon="send"
-          iconOnly
-          label="Send message"
-          variant="action"
-          disabled={disabled || !draft.trim()}
-          onActivate={sendMessage}
-        />
-      {/if}
+      <div class="composer-context-island">
+        <div class="context-meter">
+          <Pill ariaLabel="Context usage 62 percent" icon="spark" iconOnly label="62%" variant="ghost" {disabled} />
+        </div>
+        <label class="model-control">
+          <span class="sr-only">Model</span>
+          <span aria-hidden="true" class="model-short">Atlas</span>
+          <select aria-label="Model" bind:value={selectedModel} {disabled} onchange={handleModelChange}>
+            <option>Atlas · balanced</option>
+            <option>Atlas · fast</option>
+            <option>Atlas · precise</option>
+          </select>
+        </label>
+        <Pill ariaLabel="Record a voice message" icon="mic" iconOnly label="Voice message" variant="ghost" {disabled} />
+      </div>
+      <div class="send-control">
+        {#if isStreaming}
+          <Pill
+            ariaLabel="Stop response"
+            icon="stop"
+            label="Stop"
+            variant="danger"
+            onActivate={() => onAction({ type: 'stop' })}
+          />
+        {:else}
+          <Pill
+            ariaLabel="Send message"
+            icon="send"
+            iconOnly
+            label="Send message"
+            variant="action"
+            disabled={disabled || !draft.trim()}
+            onActivate={sendMessage}
+          />
+        {/if}
+      </div>
     </div>
   </div>
 </form>
@@ -189,6 +195,7 @@
     background: var(--composer-surface);
     box-shadow: var(--composer-shadow);
     backdrop-filter: blur(18px) saturate(150%);
+    -webkit-backdrop-filter: blur(18px) saturate(150%);
   }
 
   .message-field {
@@ -250,19 +257,96 @@
 
   .composer-right {
     justify-content: flex-end;
+    gap: 0;
   }
 
+  /* Paper groups the compact actions into two visual islands. The child
+     buttons keep their 44px targets, while the islands provide the visible
+     36px narrow-board shells. */
   .composer-left :global(.pill),
   .composer-right :global(.pill) {
     min-height: 44px;
   }
 
-  .model-control {
+  .composer-action-island,
+  .composer-context-island {
     display: inline-flex;
+    height: 44px;
     min-height: 44px;
     align-items: center;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--muted) 8%, transparent);
+  }
+
+  .composer-action-island,
+  .composer-context-island,
+  .send-control {
+    flex: 0 0 auto;
+  }
+
+  .composer-action-island :global(.pill),
+  .composer-context-island :global(.pill) {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .composer-action-island :global(.pill + .pill) {
+    margin-left: -8px;
+  }
+
+  .context-meter {
+    position: relative;
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 44px;
+  }
+
+  .context-meter::before {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--signal);
+    border-right-color: color-mix(in srgb, var(--signal) 20%, transparent);
+    border-radius: 50%;
+    content: '';
+    transform: rotate(-30deg);
+  }
+
+  .context-meter :global(.pill) {
+    position: absolute;
+    inset: 0;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 8px;
+  }
+
+  .context-meter :global(.pill .icon-slot) {
+    visibility: hidden;
+  }
+
+  .context-meter :global(.pill:disabled) {
+    border-color: transparent;
+    background: transparent;
+    color: transparent;
+  }
+
+  .model-control {
+    position: relative;
+    display: inline-flex;
+    box-sizing: border-box;
+    width: 76px;
+    min-width: 76px;
+    height: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
     gap: 4px;
-    padding-inline: 8px;
+    padding-inline: 0;
     border: 1px solid transparent;
     border-radius: var(--radius-pill);
     color: var(--muted);
@@ -275,27 +359,52 @@
   }
 
   .model-control select {
-    max-width: 90px;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     border: 0;
     outline: 0;
     background: transparent;
-    color: var(--ink);
+    color: transparent;
     font: inherit;
     font-size: 12px;
     line-height: 16px;
+    opacity: 0;
     cursor: pointer;
   }
 
   .model-short {
-    display: none;
+    display: inline;
     color: var(--ink);
     font-size: 12px;
     font-weight: 600;
     line-height: 16px;
+    pointer-events: none;
   }
 
   .model-control select:disabled {
     cursor: not-allowed;
+  }
+
+  .send-control {
+    position: relative;
+    z-index: 2;
+    display: inline-flex;
+    margin-left: -16px;
+    align-items: center;
+  }
+
+  .send-control :global(.pill.action) {
+    --pill-action: var(--ink);
+    --action-ink: var(--canvas);
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--canvas);
   }
 
   .sr-only {
@@ -317,12 +426,12 @@
     }
 
     .composer-controls {
-      align-items: flex-start;
+      align-items: center;
     }
 
     .composer-left,
     .composer-right {
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
 
     .composer-right {
@@ -346,24 +455,74 @@
       padding-inline: 8px;
     }
 
-    .model-control {
-      width: 60px;
-      min-width: 60px;
+    .message-field {
+      padding-inline: 7px;
+    }
+
+    .composer-action-island,
+    .composer-context-island {
+      height: 36px;
+      min-height: 36px;
+    }
+
+    .composer-action-island {
+      width: 72px;
       justify-content: center;
-      padding-inline: 6px;
     }
 
-    .model-short {
-      display: inline;
+    .composer-action-island :global(.pill) {
+      width: 44px;
+      min-width: 44px;
+      min-height: 44px;
     }
 
-    .model-control select {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip: rect(0 0 0 0);
-      white-space: nowrap;
+    .composer-action-island :global(.pill + .pill) {
+      margin-left: -8px;
+    }
+
+    .composer-context-island {
+      width: 160px;
+      justify-content: flex-start;
+    }
+
+    .model-control {
+      width: 64px;
+      min-width: 64px;
+      height: 44px;
+      min-height: 44px;
+      justify-content: center;
+      padding-inline: 0;
+    }
+
+    .send-control {
+      margin-left: -30px;
+      transform: translateX(2px);
+    }
+
+    .send-control :global(.pill.action) {
+      background: transparent;
+      box-shadow: inset 0 0 0 3px var(--ink);
+    }
+
+    .message-field textarea {
+      transform: translateY(-6px);
+    }
+
+    .composer-controls {
+      transform: translateY(-11px);
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .composer {
+      background: var(--surface);
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+    }
+
+    .composer-action-island,
+    .composer-context-island {
+      background: color-mix(in srgb, var(--muted) 8%, var(--surface));
     }
   }
 </style>

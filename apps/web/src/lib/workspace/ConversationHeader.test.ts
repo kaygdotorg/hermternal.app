@@ -23,7 +23,20 @@ describe('ConversationHeader', () => {
     const titleButton = screen.getByRole('button', { name: 'Edit conversation title' });
     const chatButton = screen.getByRole('button', { name: 'Chat mode selected' });
     expect(titleButton).not.toHaveAttribute('aria-pressed');
+    expect(titleButton).not.toHaveClass('full-width');
+    expect(titleButton.querySelector('.trailing-slot')).not.toBeInTheDocument();
     expect(chatButton).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps the desktop header controls as separate floating targets', () => {
+    render(ConversationHeader);
+
+    const header = document.querySelector('.conversation-header');
+    expect(header).toHaveClass('conversation-header');
+    expect(header?.querySelector('.title-region')).toBeInTheDocument();
+    expect(header?.querySelector('.mode-controls')).toBeInTheDocument();
+    expect(header?.querySelector('.share-control')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Workspace options' })).toBeDisabled();
   });
 
   it('native-disables Terminal until the draft has a coordinator-owned session', async () => {

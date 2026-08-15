@@ -72,9 +72,7 @@
     {:else}
       <Pill
         ariaLabel="Edit conversation title"
-        fullWidth
         label={title}
-        trailingIcon="chevron-down"
         variant="neutral"
         onActivate={startEditing}
       />
@@ -118,14 +116,16 @@
     />
   </div>
 
-  <Pill
-    ariaLabel="Workspace options"
-    icon="share"
-    iconOnly
-    label="Workspace options"
-    title="Sharing is deferred in this preview"
-    variant="ghost"
-  />
+  <div class="share-control">
+    <Pill
+      ariaLabel="Workspace options"
+      icon="share"
+      iconOnly
+      label="Workspace options"
+      title="Sharing is deferred in this preview"
+      variant="neutral"
+    />
+  </div>
 
   <div class="header-model" aria-label={`Current model ${model}`}>
     <Icon name="spark" size={14} />
@@ -134,24 +134,34 @@
 </header>
 
 <style>
+  /* Paper uses an open 72px header. Each action has its own floating island;
+     the header itself must not add a field background or divider. */
   .conversation-header {
+    position: relative;
     box-sizing: border-box;
     display: flex;
+    height: 72px;
     min-height: 72px;
     align-items: center;
-    gap: 14px;
-    padding: 8px 8px 8px 12px;
-    border-bottom: 1px solid var(--line-soft);
+    padding: 0 8px 0 12px;
+    background: transparent;
   }
 
   .title-region {
-    width: min(486px, 100%);
+    width: auto;
+    max-width: calc(100% - 168px);
     min-width: 0;
-    flex: 0 1 486px;
+    flex: 0 1 auto;
   }
 
   .title-region :global(.pill) {
+    max-width: 100%;
     min-height: 44px;
+    padding-inline: 16px;
+  }
+
+  .title-region :global(.pill .icon-slot:empty) {
+    display: none;
   }
 
   .title-editor-label {
@@ -180,6 +190,9 @@
 
   .mode-controls {
     position: relative;
+    position: absolute;
+    top: 14px;
+    left: 50%;
     box-sizing: border-box;
     display: flex;
     width: 92px;
@@ -189,6 +202,7 @@
     gap: 2px;
     padding: 0;
     overflow: visible;
+    transform: translateX(-50%);
   }
 
   /* The mode island may grow visually, but its layout slot stays 92px wide.
@@ -205,6 +219,7 @@
     border: 1px solid var(--line-soft);
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--muted) 8%, transparent);
+    box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
     content: '';
     pointer-events: none;
     transition: width 150ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -237,8 +252,45 @@
     color: var(--ink);
   }
 
+  .mode-controls :global(.pill.selected) {
+    --pill-overlay-line: transparent;
+    --pill-overlay-surface: color-mix(in srgb, var(--muted) 10%, var(--surface));
+    border-color: transparent;
+    background: var(--pill-overlay-surface);
+  }
+
+  .share-control {
+    z-index: 1;
+    display: flex;
+    width: 44px;
+    height: 44px;
+    margin-left: auto;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 44px;
+  }
+
+  .share-control :global(.pill) {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    border-color: var(--chrome-line);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    box-shadow: 0 6px 14px color-mix(in srgb, var(--ink) 8%, transparent);
+    backdrop-filter: blur(18px) saturate(150%);
+  }
+
   .header-model {
     display: none;
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    .share-control :global(.pill),
+    .mode-controls::before {
+      background: var(--surface);
+      backdrop-filter: none;
+    }
   }
 
   @container workspace-preview (max-width: 760px) {

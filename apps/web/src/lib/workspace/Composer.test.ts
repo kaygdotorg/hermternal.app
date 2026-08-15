@@ -3,6 +3,19 @@ import { describe, expect, it, vi } from 'vitest';
 import Composer from './Composer.svelte';
 
 describe('Composer', () => {
+  it('keeps Paper action islands while retaining named controls', () => {
+    render(Composer);
+
+    expect(document.querySelector('.composer-action-island')).toBeInTheDocument();
+    expect(document.querySelector('.composer-context-island')).toBeInTheDocument();
+    expect(document.querySelector('.context-meter')).toBeInTheDocument();
+    expect(document.querySelector('.send-control')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add an attachment' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Open security policy' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Context usage 62 percent' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: 'Model' })).toBeEnabled();
+  });
+
   it('sends from pointer activation and suppresses the duplicate click', async () => {
     const onAction = vi.fn();
     render(Composer, { onAction });
