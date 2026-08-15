@@ -171,6 +171,7 @@ function publicEndpointFor(request, configured) {
   const port = request.socket.localPort;
   if (
     (address !== '127.0.0.1' && address !== '::1') ||
+    typeof port !== 'number' ||
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65_535
