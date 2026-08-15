@@ -191,8 +191,10 @@
   .inspector-tabs {
     display: flex;
     gap: 2px;
-    padding: 2px;
-    border-bottom: 1px solid var(--line-soft);
+    padding: 3px;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--surface) 72%, var(--line));
   }
 
   .inspector-tabs button {
@@ -215,9 +217,18 @@
   }
 
   .inspector-tabs button.active {
-    background: color-mix(in srgb, var(--signal) 10%, var(--surface));
+    background: color-mix(in srgb, var(--line) 34%, var(--surface));
     color: var(--ink);
     font-weight: 600;
+  }
+
+  /* A component-scoped display rule is required because the card styles are
+     author CSS. Without it, the generic empty-panel display can override the
+     browser's hidden attribute and leave mock source/file panels below the
+     approved Paper card. */
+  .artifact-card[hidden],
+  .empty-tab[hidden] {
+    display: none;
   }
 
   .inspector-tabs button:focus-visible {
@@ -246,6 +257,20 @@
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+
+  .artifact-header :global(.pill) {
+    min-width: 32px;
+    min-height: 32px;
+    padding-inline: 4px;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .artifact-header :global(.pill:disabled) {
+    border-color: transparent;
+    background: transparent;
+    color: var(--muted);
   }
 
   .artifact-icon {
@@ -289,7 +314,7 @@
     padding: 14px;
     margin: 0;
     border-radius: var(--radius-input);
-    background: color-mix(in srgb, var(--signal) 6%, var(--surface));
+    background: color-mix(in srgb, var(--line) 20%, var(--surface));
   }
 
   .artifact-preview figcaption {
@@ -327,7 +352,7 @@
     width: 100%;
     min-height: 8px;
     border-radius: 4px 4px 0 0;
-    background: var(--signal);
+    background: color-mix(in srgb, var(--signal) 58%, #ffffff);
   }
 
   .bar-one {
@@ -336,15 +361,18 @@
   }
   .bar-two {
     height: 72%;
-    opacity: 0.72;
+    background: var(--signal);
+    opacity: 0.9;
   }
   .bar-three {
     height: 88%;
-    opacity: 0.9;
+    background: color-mix(in srgb, var(--signal) 58%, #ffffff);
+    opacity: 0.72;
   }
   .bar-four {
     height: 62%;
-    opacity: 0.66;
+    background: var(--courier);
+    opacity: 0.9;
   }
 
   .thumbnail-note {
@@ -354,8 +382,25 @@
 
   .artifact-actions {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: 8px;
+  }
+
+  /* Deferred prototype actions retain their accessibility and disabled
+     semantics, but use the Paper resting materials so the mock does not look
+     like a broken card. */
+  .artifact-actions :global(.pill.action:disabled) {
+    border-color: var(--signal);
+    background: var(--signal);
+    color: var(--action-ink);
+    opacity: 1;
+  }
+
+  .artifact-actions :global(.pill.ghost:disabled) {
+    border-color: var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    opacity: 1;
   }
 
   .empty-tab {

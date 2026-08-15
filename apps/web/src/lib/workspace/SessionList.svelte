@@ -20,14 +20,17 @@
     <Pill ariaLabel="Collapse conversations" icon="arrow-left" iconOnly label="Collapse" variant="ghost" />
   </div>
 
-  <Pill
-    ariaLabel="Start a new chat"
-    fullWidth
-    icon="plus"
-    label="New chat"
-    shortcut="⌘N"
-    onActivate={() => onAction({ type: 'new-session' })}
-  />
+  <div class="new-chat-row">
+    <Pill
+      ariaLabel="Start a new chat"
+      fullWidth
+      icon="plus"
+      label="New chat"
+      shortcut="⌘N"
+      variant="ghost"
+      onActivate={() => onAction({ type: 'new-session' })}
+    />
+  </div>
 
   <div class="primary-destinations" aria-label="Workspace destinations">
     <Pill fullWidth icon="spark" label="Automations" variant="ghost" />
@@ -37,7 +40,7 @@
   <section aria-labelledby="pinned-heading" class="session-group">
     <div class="group-heading">
       <h2 id="pinned-heading">Pinned</h2>
-      <span class="group-count">{pinned.length}</span>
+      <span aria-hidden="true" class="group-count">{pinned.length}</span>
     </div>
     <div class="session-items">
       {#each pinned as session (session.id)}
@@ -64,7 +67,7 @@
   <section aria-labelledby="recent-heading" class="session-group recent-group">
     <div class="group-heading">
       <h2 id="recent-heading">Recents</h2>
-      <span class="group-count">{recent.length}</span>
+      <span aria-hidden="true" class="group-count">{recent.length}</span>
     </div>
     <div class="session-items">
       {#each recent as session (session.id)}
@@ -108,7 +111,7 @@
     min-width: 0;
     min-height: 100%;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
     padding: 16px;
     border: 1px solid var(--chrome-line);
     border-radius: var(--radius-glass);
@@ -126,7 +129,7 @@
   }
 
   .sidebar-heading {
-    min-height: 60px;
+    min-height: 56px;
     padding-inline: 10px 8px;
   }
 
@@ -143,8 +146,22 @@
   .primary-destinations {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    padding-block: 4px;
+    gap: 0;
+    padding-block: 2px;
+  }
+
+  .new-chat-row :global(.pill),
+  .primary-destinations :global(.pill) {
+    border-color: transparent;
+    background: transparent;
+  }
+
+  /* The preview keeps destinations inert until their product actions exist,
+     but their resting Paper state is still quiet ink instead of a disabled
+     button shell. The native disabled state and tooltip remain intact. */
+  .primary-destinations :global(.pill:disabled) {
+    color: color-mix(in srgb, var(--ink) 84%, var(--muted));
+    opacity: 0.9;
   }
 
   .session-group {
@@ -152,10 +169,11 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 8px 6px 10px;
-    border: 1px solid var(--chrome-line);
+    padding: 12px 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--chrome-line) 42%, transparent);
     border-radius: var(--radius-nested-glass);
-    background: color-mix(in srgb, var(--surface) 58%, transparent);
+    background: color-mix(in srgb, var(--surface) 66%, transparent);
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--ink) 4%, transparent);
   }
 
   .recent-group {
@@ -179,8 +197,7 @@
   }
 
   .group-count {
-    font-size: 12px;
-    line-height: 16px;
+    display: none;
   }
 
   .session-items {
@@ -196,11 +213,29 @@
 
   .session-row :global(.pill) {
     min-height: 44px;
-    padding-inline: 10px 12px;
+    padding-inline: 8px 10px;
+    border-color: transparent;
+    background: transparent;
   }
 
   .session-row :global(.pill-label) {
     font-size: 14px;
+  }
+
+  .session-row :global(.pill.selected) {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--signal) 12%, var(--surface));
+    box-shadow: none;
+  }
+
+  .session-row :global(.icon-slot) {
+    width: 20px;
+    flex-basis: 20px;
+    color: color-mix(in srgb, var(--muted) 72%, var(--surface));
+  }
+
+  .session-row :global(.pill.selected .icon-slot) {
+    color: var(--signal);
   }
 
   .unread-dot {
@@ -222,7 +257,8 @@
 
   .profile-row {
     min-height: 44px;
-    padding: 8px 4px 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--line-soft);
   }
 
   .avatar {
@@ -252,12 +288,18 @@
   .profile-actions {
     display: flex;
     flex: 0 0 auto;
-    gap: 2px;
+    gap: 0;
+    padding: 1px 2px;
+    border: 1px solid var(--chrome-line);
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--surface) 62%, transparent);
   }
 
   .profile-actions :global(.pill) {
     min-width: 44px;
     min-height: 44px;
     padding-inline: 6px;
+    border-color: transparent;
+    background: transparent;
   }
 </style>

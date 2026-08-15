@@ -241,8 +241,8 @@
     display: flex;
     min-width: 0;
     flex-direction: column;
-    gap: 18px;
-    padding: 28px 36px 176px;
+    gap: 30px;
+    padding: 28px 36px 152px;
     overflow: auto;
     scrollbar-width: thin;
     scrollbar-color: var(--line) transparent;
@@ -258,12 +258,14 @@
   }
 
   .user-message {
+    box-sizing: border-box;
     max-width: min(510px, 88%);
     padding: 14px 16px;
+    border: 1px solid #4c6fff26;
     border-radius: 17px 17px 6px 17px;
-    background: var(--signal);
-    color: var(--action-ink);
-    box-shadow: 0 8px 20px color-mix(in srgb, var(--signal) 18%, transparent);
+    background: #4c6fff14;
+    color: var(--ink);
+    box-shadow: none;
   }
 
   .user-message p,
@@ -298,7 +300,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding-inline: 8px;
+    padding-inline: 0;
   }
 
   .assistant-header,
@@ -359,11 +361,27 @@
   .assistant-copy {
     max-width: 640px;
     color: var(--ink);
+    margin-left: 34px;
+  }
+
+  /* Paper keeps the follow-up paragraph in the same response stream instead
+     of repeating the Hermes header. Keep the model metadata in the DOM for
+     assistive technology while matching that quieter visual state. */
+  .assistant-row:has(.draft-label) .assistant-header {
+    display: none;
+  }
+
+  .assistant-row:has(.draft-label) .assistant-copy {
+    margin-left: 0;
   }
 
   .tool-row {
     min-height: 28px;
-    padding-inline: 28px;
+    padding-inline: 0;
+  }
+
+  .tool-row .step-icon {
+    background: transparent;
   }
 
   .step-icon {
@@ -379,14 +397,13 @@
   }
 
   .step-icon.completed {
-    background: color-mix(in srgb, var(--success) 12%, var(--surface));
-    color: var(--success);
+    color: var(--muted);
   }
 
   .step-icon.pending,
   .step-icon.approval,
   .step-icon.clarification {
-    background: color-mix(in srgb, var(--courier) 15%, var(--surface));
+    background: transparent;
     color: var(--courier-ink, var(--courier));
   }
 
@@ -454,23 +471,35 @@
   }
 
   .approval-card {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    margin-inline: 28px;
+    margin-inline: 34px 0;
     border-color: color-mix(in srgb, var(--courier) 35%, var(--line));
-    background: color-mix(in srgb, var(--courier) 7%, var(--surface));
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
   }
 
   .approval-header {
     align-items: flex-start;
   }
 
+  .approval-header .step-icon {
+    position: absolute;
+    left: -42px;
+    top: 14px;
+    background: transparent;
+  }
+
+  .approval-header > div > span {
+    display: none;
+  }
+
   .approval-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    padding-left: 36px;
+    padding-left: 0;
   }
 
   .approval-actions :global(.pill.ghost) {
@@ -480,7 +509,7 @@
   }
 
   .approval-gate {
-    margin: -4px 0 0 36px;
+    margin: -4px 0 0;
     color: var(--muted);
     font-size: 12px;
     line-height: 16px;
@@ -679,7 +708,7 @@
     }
 
     .tool-row {
-      padding-inline: 4px;
+      padding-inline: 0;
     }
 
     .approval-actions,
@@ -689,6 +718,16 @@
 
     .approval-gate {
       margin-left: 0;
+    }
+
+    .approval-header .step-icon {
+      left: 0;
+      top: 0;
+      position: static;
+    }
+
+    .user-message {
+      max-width: min(324px, 100%);
     }
 
     .step-status,

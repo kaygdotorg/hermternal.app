@@ -35,6 +35,16 @@ The controller reads only documented text keys from known JSON-RPC events. Unkno
 
 `WorkspacePreview` defaults to deterministic fixture copy. Live callers pass `dataMode="live"` and explicit timeline data, so real server-owned messages replace the fixture timeline. The approved resting desktop shell still includes the workspace inspector. Its current cards remain visibly labeled as mock or synthetic and never claim to be Hermes artifacts, sources, or files. The live empty and recovery copy does not claim that controls are mocked or that an unretained draft is safe.
 
+The Paper resting composition is a content hierarchy as well as a shell: the
+sidebar presents pinned and recent sessions in quiet floating groups, the
+timeline uses a low-contrast user message followed by Hermes model metadata,
+tool or approval rows, and the response copy, and the inspector presents one
+artifact card with a compact chart and trailing actions. These styles apply to
+live values without replacing them with fixture values. The chart card remains
+explicitly synthetic in the prototype because artifact transport is not in
+scope; hidden Sources and Files panels do not occupy layout space until those
+data boundaries exist.
+
 The exact Paper references remain 1440×960 and 390×844. At runtime the shell follows `100dvh`. From 761px through 1439px, the conversation stays bounded to 720px and the approved compact toolbar and modal drawers replace both secondary columns. The conversation drawer opens from the leading edge, while the Workspace inspector drawer opens from the trailing edge beside its toolbar action; at 390px their equal side margins make that direction visually neutral, so the intermediate family keeps the placement regression visible. At 760px and below, the complete narrow family adds the represented mobile status bar. These deterministic transitions reuse approved controls; they do not introduce the deferred sidebar-free tab layout, shrink text, or reduce effective targets.
 
 The narrow Chat resting board keeps the Paper toolbar to its 198×44 title island and trailing 44×44 Workspace action. The shared Chat–Terminal selector remains an accessible runtime path for Terminal and becomes visible when Terminal owns the active presentation; it does not add a third visible island to the approved resting Chat board. The desktop header uses the same shared controls as floating 40px islands inside its 72px header. The desktop conversation surface stays on the canvas, while sidebar, inspector, and composer retain the measured Paper glass materials and blur values.
