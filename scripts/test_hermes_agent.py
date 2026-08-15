@@ -42,6 +42,10 @@ class FakePodman:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], dict[str, str]]] = []
         self.containers: dict[str, dict[str, object]] = {}
+        # Podman creates a cidfile with the process umask applied.  Keep the
+        # default fixture strict, and let contract tests select the observed
+        # 0644 mode without changing any other engine behaviour.
+        self.cidfile_mode = 0o600
         self.fail_run_for: set[str] = set()
         self.fail_start_for: set[str] = set()
         self.fail_stop_for: set[str] = set()
@@ -101,7 +105,7 @@ class FakePodman:
             if "--cidfile" in args:
                 cidfile = Path(args[args.index("--cidfile") + 1])
                 cidfile.write_text(container_id + "\n", encoding="ascii")
-                cidfile.chmod(0o600)
+                cidfile.chmod(self.cidfile_mode)
             self.containers[name] = {
                 "Id": container_id,
                 "Name": f"/{name}",
@@ -243,6 +247,30 @@ class HermesAgentLauncherTests(unittest.TestCase):
 
     def load(self, path: Path | None = None):
         return launcher.load_launcher_state(path or self.marker_path(), self.roots)
+
+    def make_proven_cleanup_failed(self, instance: str, port: int):
+        """Create a retained tombstone with an exact, proven container ID."""
+
+        spec = self.make_spec(instance, port)
+        marker = self.marker_path(f"{instance}.json")
+        self.fake.fail_rm_for.add(spec.container)
+
+        def wildcard_after_run(command, environment, timeout):
+            result = self.fake(command, environment, timeout)
+            if len(command) > 1 and command[1] == "run":
+                ports = self.fake.containers[spec.container]["NetworkSettings"]["Ports"]
+                self.assertIsInstance(ports, dict)
+                ports["9119/tcp"][0]["HostIp"] = "0.0.0.0"
+            return result
+
+        with self.assertRaises(launcher.LauncherError) as raised:
+            self.start(spec, marker_path=marker, runner=wildcard_after_run)
+        self.assertEqual(raised.exception.code, "container_endpoint_unproven")
+        self.fake.fail_rm_for.remove(spec.container)
+        state = launcher.load_launcher_state(marker, self.roots)
+        self.assertEqual(state.marker.status, launcher.live_run_marker.STATUS_CLEANUP_FAILED)
+        self.assertNotEqual(state.marker.container_id, launcher.UNPROVEN_CONTAINER_ID)
+        return spec, marker, state
 
     @staticmethod
     def replace_final_record(path: Path, suffix: str) -> Path:
@@ -1374,6 +1402,87 @@ class HermesAgentLauncherTests(unittest.TestCase):
         self.assertIn("127.0.0.1:19119:9119", command)
         forbidden = {"build", "compose", "tag", "--network", "host", "--cpus", "--memory", "--pids-limit", "--cap-add", "--cap-drop", "--security-opt", "podman.sock", "docker.sock"}
         self.assertTrue(forbidden.isdisjoint(command), command)
+
+    def test_read_cidfile_accepts_private_and_podman_default_modes(self) -> None:
+        container_id = "a" * 64
+        for mode in (0o600, 0o644):
+            with self.subTest(mode=oct(mode)):
+                path = self.runs / f"cidfile-{mode:o}"
+                path.write_text(container_id + "\n", encoding="ascii")
+                path.chmod(mode)
+
+                proof = launcher.read_cidfile(path)
+
+                self.assertEqual(proof.container_id, container_id)
+                self.assertEqual(proof.identity[0], path.stat().st_dev)
+                self.assertEqual(proof.identity[1], path.stat().st_ino)
+                self.assertEqual(proof.identity[2], 0o600)
+                self.assertEqual(proof.identity[3], len(container_id) + 1)
+                self.assertEqual(proof.identity[4], 1)
+                # The opened inode is hardened before the proof leaves the
+                # adapter; no pathname replacement can receive this chmod.
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_fake_podman_0644_cidfile_completes_full_start_contract(self) -> None:
+        self.fake.cidfile_mode = 0o644
+        marker = self.marker_path("podman-cidfile.json")
+        result, created = self.start(
+            self.make_spec("podman-cidfile", 19125),
+            marker_path=marker,
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(marker.exists())
+        cidfile = marker.with_name("podman-cidfile.cidfile")
+        self.assertFalse(cidfile.exists())
+        run_command = next(command for command, _ in self.fake.calls if command[1] == "run")
+        self.assertIn("--cidfile", run_command)
+
+    def test_cleanup_failed_status_does_not_traverse_container_data(self) -> None:
+        spec, marker, state = self.make_proven_cleanup_failed("tombstone-status", 19126)
+        old_data = self.root / "tombstone-status-data-old"
+        replacement = self.root / "tombstone-status-data-replacement"
+        replacement.mkdir(mode=0o700)
+        replacement.chmod(0o700)
+        spec.data_dir.rename(old_data)
+        spec.data_dir.symlink_to(replacement, target_is_directory=True)
+
+        result = launcher.status_instance(
+            marker,
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+
+        self.assertEqual(result, {"status": "cleanup_failed", "marker_path": str(state.marker_path)})
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(spec.data_dir.is_symlink())
+
+    def test_cleanup_failed_stop_does_not_traverse_container_data(self) -> None:
+        spec, marker, state = self.make_proven_cleanup_failed("tombstone-stop", 19127)
+        old_data = self.root / "tombstone-stop-data-old"
+        replacement = self.root / "tombstone-stop-data-replacement"
+        replacement.mkdir(mode=0o700)
+        replacement.chmod(0o700)
+        spec.data_dir.rename(old_data)
+        spec.data_dir.symlink_to(replacement, target_is_directory=True)
+
+        result = launcher.stop_instance(
+            marker,
+            roots=self.roots,
+            runner=self.fake,
+            executable="/usr/bin/podman",
+            source_environment={"PATH": "/usr/bin"},
+        )
+
+        self.assertEqual(result["status"], "removed")
+        self.assertNotIn(spec.container, self.fake.containers)
+        self.assertFalse(marker.exists())
+        self.assertFalse(state.marker.state_path.exists())
+        self.assertTrue(old_data.is_dir())
+        self.assertTrue(spec.data_dir.is_symlink())
 
     def test_batch_paths_are_caller_supplied_and_unique_specs_remain_deterministic(self) -> None:
         specs = launcher.specs_for_batch(

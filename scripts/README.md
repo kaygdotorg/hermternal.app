@@ -252,8 +252,15 @@ beneath a held data-root descriptor, and the parent identity is checked before
 and after the child boundary. Failed-create cleanup compares the opened child
 device, inode, and mode again, then preserves the leaf and reports bounded
 `owned_path_cleanup_failed` evidence: Python exposes no descriptor-atomic exact
--directory deletion operation, so this adapter never enters a pathname `rmdir`
-boundary. Subprocess vectors are validated before dispatch:
+directory deletion operation, so this adapter never enters a pathname `rmdir`
+boundary. The data-root parent stays a caller-owned private `0700` boundary;
+the official image may own files inside one instance leaf, but the launcher
+never applies a recursive `chmod` or `chown` to make that image work. Normal
+ready, reuse, endpoint, and running-status paths still require the persisted
+device/inode/mode witness and reject a replacement. A cleanup-failed tombstone
+may report status or remove its exact proven container without traversing that
+image-owned leaf; it never removes or repairs the data tree. Subprocess vectors
+are validated before dispatch:
 the executable and every argument must be a non-empty string without NUL bytes,
 and malformed or non-string argv produces one bounded launcher error.
 
@@ -312,8 +319,8 @@ python3 scripts/hermes_agent.py stop \
 
 This sequence is intentionally not atomic: a failure may stop between commands,
 so inspect and retry each remaining marker explicitly. Cleanup removes only the
-marker-pinned container, credential, and state, then
-removes the marker last. `--purge-data` is intentionally unsupported by this
+marker-pinned container, credential, state, and proven cidfile, then removes the
+marker last. `--purge-data` is intentionally unsupported by this
 strict ownership path; data is never removed by a broad prune or glob. The CLI
 rejects that flag before opening the marker lease, so invalid input does not
 create `.lifecycle.lock` state.
@@ -331,7 +338,11 @@ use mode `0600`. The live credential, state file, and cidfile paths are derived
 as siblings beside the exact caller-selected marker, under that marker's
 existing private `0700` runs directory. For example, a marker named
 `run.json` derives `run.credential`, `run.state.json`, and `run.cidfile` in the
-same directory. `--credential-root` does not control live credential placement.
+same directory. Podman may create the cidfile as `0644`; the launcher validates
+the opened regular inode, immediately changes that descriptor to `0600`, and
+then checks the unchanged device, inode, size, link count, and bounded content
+generation before it accepts or removes the proof. `--credential-root` does
+not control live credential placement.
 The container data directory defaults to
 `~/.local/share/hermternal-tests/hermes-agent/`; that data root is separate from
 the marker-bound live files. Each state record also persists the data
@@ -520,9 +531,12 @@ status, endpoint, stop, and credential-read operation captures the runs-director
 device, inode, and `0700` mode at entry, keeps that descriptor through all marker,
 state, credential, cidfile, cleanup, and tombstone work, and rechecks that the
 caller-selected pathname still names the held directory around every fake-engine
-boundary. The data-directory identity is also rechecked immediately before every
-successful public start, reuse, recovery, endpoint, and status return; stop
-rechecks it immediately before deleting marker/state/credential evidence. If a
+boundary. For normal lifecycle records, the data-directory identity is also
+rechecked immediately before every successful public start, reuse, recovery,
+endpoint, and status return; stop rechecks it immediately before deleting
+marker/state/credential evidence. A `cleanup_failed` tombstone is the bounded
+exception: status and exact-container stop do not traverse its image-owned data
+leaf. If a
 created child cannot be removed with a descriptor-atomic operation, cleanup
 preserves it and reports bounded `cleanup_failed` evidence rather than risking a
 same-name replacement. Marker and state records are capped at 16 KiB before publication.

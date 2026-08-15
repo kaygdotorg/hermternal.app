@@ -2253,6 +2253,7 @@ def load_launcher_state(
     roots: Roots,
     *,
     parent_fd: int | None = None,
+    allow_cleanup_failed_data_unavailable: bool = False,
 ) -> LauncherState:
     """Load one exact marker and its exact state file; never infer a run."""
 
@@ -2329,7 +2330,16 @@ def load_launcher_state(
     # Loading a future lifecycle record is itself a trust boundary. Do not
     # return a state object that points at a replacement tree under the same
     # persisted pathname; recovery must fail before Podman or credential use.
-    _revalidate_state_data_directory(state)
+    # A cleanup-failed tombstone is a bounded lifecycle receipt, not an
+    # authority to traverse the container data tree.  The official image may
+    # own that leaf after a failed start, so status and exact-ID stop must still
+    # be able to report or finish the tombstone without chmod/chown or a broad
+    # pathname walk.  Running records retain the normal replacement fence.
+    if not (
+        allow_cleanup_failed_data_unavailable
+        and state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED
+    ):
+        _revalidate_state_data_directory(state)
     return state
 
 
@@ -2751,13 +2761,33 @@ def read_cidfile(path: str | Path, *, parent_fd: int | None = None) -> CidfilePr
         before = os.fstat(descriptor)
         if (
             not stat.S_ISREG(before.st_mode)
-            or stat.S_IMODE(before.st_mode) != 0o600
+            or stat.S_IMODE(before.st_mode) not in {0o600, 0o644}
             or before.st_nlink != 1
             or before.st_size < 1
             or before.st_size > 66
         ):
             raise LauncherError("cidfile_invalid")
         before_identity = _private_file_identity_from_stat(before)
+        # Podman writes cidfiles with its process umask, normally ``0644``.
+        # Harden that exact opened inode before reading or returning any proof;
+        # never chmod the pathname, which could now name a replacement.  Keep
+        # device, inode, size, and link count as independent witnesses because
+        # the mode is intentionally changed by this operation.
+        try:
+            os.fchmod(descriptor, 0o600)
+            hardened = os.fstat(descriptor)
+        except OSError:
+            raise LauncherError("cidfile_invalid") from None
+        if (
+            not stat.S_ISREG(hardened.st_mode)
+            or stat.S_IMODE(hardened.st_mode) != 0o600
+            or hardened.st_dev != before.st_dev
+            or hardened.st_ino != before.st_ino
+            or hardened.st_size != before.st_size
+            or hardened.st_nlink != before.st_nlink
+        ):
+            raise LauncherError("cidfile_replaced")
+        before_identity = _private_file_identity_from_stat(hardened)
         raw = bytearray()
         while len(raw) <= 66:
             chunk = os.read(descriptor, 67 - len(raw))
@@ -2913,8 +2943,14 @@ def _load_bound_state(
     roots: Roots,
     *,
     parent_fd: int | None = None,
+    allow_cleanup_failed_data_unavailable: bool = False,
 ) -> LauncherState:
-    return load_launcher_state(marker_path, roots, parent_fd=parent_fd)
+    return load_launcher_state(
+        marker_path,
+        roots,
+        parent_fd=parent_fd,
+        allow_cleanup_failed_data_unavailable=allow_cleanup_failed_data_unavailable,
+    )
 
 
 def _inspect_bound_container(
@@ -2925,26 +2961,41 @@ def _inspect_bound_container(
     *,
     private_path: Path | None = None,
     private_identity: DirectoryIdentity | None = None,
+    require_data_identity: bool = True,
 ) -> tuple[dict[str, object], RecoverySnapshot]:
-    if private_path is None and private_identity is None:
+    """Inspect the exact container, optionally without walking image data.
+
+    Normal lifecycle operations keep the descriptor-bound data witness around
+    the pathname-based Podman call.  Cleanup-failed tombstones may instead use
+    ``require_data_identity=False``: the exact immutable container ID and its
+    recorded mount string still bind the engine action, while no host data path
+    is opened, changed, or deleted.
+    """
+
+    if require_data_identity and private_path is None and private_identity is None:
         private_path = state.spec.data_dir
         private_identity = state.data_identity
-    if private_path is None or private_identity is None:
+    if require_data_identity and (private_path is None or private_identity is None):
         raise LauncherError("ownership_snapshot_missing")
     # The inspecter's mount ``Source`` string is only a consistency field; it
     # is not host inode proof. The descriptor-bound identity check in
     # ``invoke_runner`` brackets the pathname-based Podman call instead.
-    _revalidate_private_directory_identity(private_path, private_identity)
+    if require_data_identity:
+        if private_path is None or private_identity is None:
+            raise LauncherError("ownership_snapshot_missing")
+        _revalidate_private_directory_identity(private_path, private_identity)
     document = inspect_container(
         state.spec,
         runner,
         environment,
         executable,
         target=state.container_id,
-        private_path=private_path,
-        private_identity=private_identity,
+        private_path=private_path if require_data_identity else None,
+        private_identity=private_identity if require_data_identity else None,
     )
-    if private_path is not None and private_identity is not None:
+    if require_data_identity:
+        if private_path is None or private_identity is None:
+            raise LauncherError("ownership_snapshot_missing")
         _revalidate_private_directory_identity(private_path, private_identity)
     snapshot = recovery_snapshot(state.spec, document, run_id=state.run_id)
     if snapshot.container_id != state.container_id:
@@ -3274,10 +3325,12 @@ def _revalidate_state_records(
     *,
     parent_fd: int,
     include_credential: bool = True,
+    include_data: bool = True,
 ) -> None:
     """Revalidate data and published records before or after lifecycle actions."""
 
-    _revalidate_state_data_directory(state)
+    if include_data:
+        _revalidate_state_data_directory(state)
     if state.marker_identity is None or state.state_identity is None:
         raise LauncherError("ownership_snapshot_missing")
     _revalidate_private_generation(
@@ -3325,6 +3378,8 @@ def _revalidate_public_state(
     require_running: bool = False,
     require_endpoint: bool = False,
     absent_names: Sequence[tuple[str, str]] = (),
+    include_data: bool = True,
+    include_credential: bool = True,
 ) -> RecoverySnapshot | None:
     """Fence every exact record and, when supplied, the immutable container.
 
@@ -3342,7 +3397,12 @@ def _revalidate_public_state(
         expected=_ACTIVE_PARENT_LEASE.get().identity if _ACTIVE_PARENT_LEASE.get() is not None else None,
         code="runs_dir",
     )
-    _revalidate_state_records(state, parent_fd=parent_fd)
+    _revalidate_state_records(
+        state,
+        parent_fd=parent_fd,
+        include_data=include_data,
+        include_credential=include_credential,
+    )
     snapshot: RecoverySnapshot | None = None
     if runner is not None:
         if environment is None or executable is None:
@@ -3363,7 +3423,12 @@ def _revalidate_public_state(
         expected=_ACTIVE_PARENT_LEASE.get().identity if _ACTIVE_PARENT_LEASE.get() is not None else None,
         code="runs_dir",
     )
-    _revalidate_state_records(state, parent_fd=parent_fd)
+    _revalidate_state_records(
+        state,
+        parent_fd=parent_fd,
+        include_data=include_data,
+        include_credential=include_credential,
+    )
     for name, code in absent_names:
         _require_exact_entry_absent(parent_fd, name, code=code)
     return snapshot
@@ -3686,7 +3751,16 @@ def _remove_bound_container(
     runner: Runner,
     environment: Mapping[str, str],
     executable: str,
+    *,
+    require_data_identity: bool = True,
 ) -> None:
+    """Remove one exact container, with an optional data-path boundary.
+
+    A cleanup-failed record can outlive the image's ownership of its bind leaf.
+    When the caller disables the data check, Podman still receives only the
+    persisted immutable ID; this operation never removes the host data path.
+    """
+
     # The unknown-outcome sentinel is never an engine target. An exact inspect
     # failure is also not evidence that the object is absent: the engine may be
     # unavailable, contradictory, or have hidden the actual child. Preserve the
@@ -3695,26 +3769,28 @@ def _remove_bound_container(
         validate_container_id(state.container_id)
     except LauncherError:
         raise LauncherError("container_identity_unproven") from None
-    _revalidate_state_data_directory(state)
     _inspect_bound_container(
         state,
         runner,
         environment,
         executable,
-        private_path=state.spec.data_dir,
-        private_identity=state.data_identity,
+        private_path=state.spec.data_dir if require_data_identity else None,
+        private_identity=state.data_identity if require_data_identity else None,
+        require_data_identity=require_data_identity,
     )
-    _revalidate_state_data_directory(state)
+    if require_data_identity:
+        _revalidate_state_data_directory(state)
     result = invoke_runner(
         runner,
         (executable, "rm", "--force", state.container_id),
         environment,
         CONTAINER_ACTION_TIMEOUT,
         failure_code="container_remove_failed",
-        private_path=state.spec.data_dir,
-        private_identity=state.data_identity,
+        private_path=state.spec.data_dir if require_data_identity else None,
+        private_identity=state.data_identity if require_data_identity else None,
     )
-    _revalidate_state_data_directory(state)
+    if require_data_identity:
+        _revalidate_state_data_directory(state)
     if result.returncode != 0:
         raise LauncherError("container_remove_failed")
 
@@ -5143,12 +5219,28 @@ def status_instance(
     source_environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     with _operation_lease(marker_path, code="marker_path_invalid") as lease:
-        state = _load_bound_state(marker_path, roots or default_roots(), parent_fd=lease.parent_fd)
+        state = _load_bound_state(
+            marker_path,
+            roots or default_roots(),
+            parent_fd=lease.parent_fd,
+            allow_cleanup_failed_data_unavailable=True,
+        )
         _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
-        _revalidate_state_records(state, parent_fd=lease.parent_fd)
+        cleanup_failed = state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED
+        _revalidate_state_records(
+            state,
+            parent_fd=lease.parent_fd,
+            include_data=not cleanup_failed,
+            include_credential=not cleanup_failed,
+        )
         if state.marker.status != live_run_marker.STATUS_RUNNING:
             _before_public_return("status")
-            _revalidate_public_state(state, parent_fd=lease.parent_fd)
+            _revalidate_public_state(
+                state,
+                parent_fd=lease.parent_fd,
+                include_data=not cleanup_failed,
+                include_credential=not cleanup_failed,
+            )
             return {"status": state.marker.status, "marker_path": str(state.marker.marker_path)}
         environment = clean_environment(source_environment)
         podman = executable or podman_path()
@@ -5212,7 +5304,12 @@ def stop_instance(
     if purge_data:
         raise LauncherError("purge_not_supported")
     with _operation_lease(marker_path, code="marker_path_invalid") as lease:
-        state = _load_bound_state(marker_path, roots or default_roots(), parent_fd=lease.parent_fd)
+        state = _load_bound_state(
+            marker_path,
+            roots or default_roots(),
+            parent_fd=lease.parent_fd,
+            allow_cleanup_failed_data_unavailable=True,
+        )
         marker_identity = state.marker_identity
         state_identity = state.state_identity
         if marker_identity is None or state_identity is None:
@@ -5221,7 +5318,13 @@ def stop_instance(
         # Cleanup-failed tombstones may intentionally have an already-erased
         # credential; the transaction below verifies it when present and keeps
         # replacement failures inside the bounded cleanup error path.
-        _revalidate_state_records(state, parent_fd=lease.parent_fd, include_credential=False)
+        cleanup_failed = state.marker.status == live_run_marker.STATUS_CLEANUP_FAILED
+        _revalidate_state_records(
+            state,
+            parent_fd=lease.parent_fd,
+            include_credential=False,
+            include_data=not cleanup_failed,
+        )
 
         try:
             environment = clean_environment(source_environment)
@@ -5265,17 +5368,53 @@ def stop_instance(
                     raise LauncherError(error.code) from None
             credential_identity = state.marker.credential_identity
             if not unknown_container:
-                _remove_bound_container(state, runner, environment, podman)
+                _remove_bound_container(
+                    state,
+                    runner,
+                    environment,
+                    podman,
+                    require_data_identity=not cleanup_failed,
+                )
             _revalidate_private_parent_path(state.marker_path, lease.parent_fd, expected=lease.identity, code="runs_dir")
-            _revalidate_state_records(state, parent_fd=lease.parent_fd, include_credential=False)
+            _revalidate_state_records(
+                state,
+                parent_fd=lease.parent_fd,
+                include_credential=False,
+                include_data=not cleanup_failed,
+            )
             if not credential_missing_after_failed_cleanup:
                 _revalidate_credential_identity(state.marker, parent_fd=lease.parent_fd)
             # Do not erase valid marker/state/credential evidence until the
             # persisted data directory is still proven. A replacement must
             # fail before cleanup can touch any launcher-owned record.
-            _revalidate_state_data_directory(state)
+            if not cleanup_failed:
+                _revalidate_state_data_directory(state)
             _before_stop_evidence_cleanup()
-            _revalidate_state_data_directory(state)
+            if not cleanup_failed:
+                _revalidate_state_data_directory(state)
+            # A failed start can retain its cidfile as bounded evidence.  If it
+            # is still a valid proof for this exact container, remove only that
+            # opened inode.  A missing, malformed, or mismatched cidfile stays
+            # as evidence and keeps stop fail-closed; no name-based deletion is
+            # allowed to erase a replacement.
+            if cleanup_failed:
+                cidfile = state.marker_path.with_name(f"{state.marker_path.stem}.cidfile")
+                try:
+                    cidfile_proof = read_cidfile(cidfile, parent_fd=lease.parent_fd)
+                except LauncherError as cidfile_error:
+                    if cidfile_error.code != "cidfile_missing":
+                        raise
+                else:
+                    if cidfile_proof.container_id != state.container_id:
+                        raise LauncherError("cidfile_replaced")
+                    _remove_exact_file(
+                        cidfile,
+                        code="cidfile_remove_failed",
+                        expected=cidfile_proof.identity,
+                        expected_generation=cidfile_proof.generation,
+                        generation_maximum=66,
+                        parent_fd=lease.parent_fd,
+                    )
             _remove_exact_file(
                 state.marker.credential_path,
                 code="credential_remove_failed",
@@ -5309,7 +5448,8 @@ def stop_instance(
                 expected=lease.identity,
                 code="runs_dir",
             )
-            _revalidate_state_data_directory(state)
+            if not cleanup_failed:
+                _revalidate_state_data_directory(state)
             for evidence_path in (
                 state.marker_path,
                 state.marker.state_path,
