@@ -13,6 +13,14 @@ describe('Composer', () => {
     expect(screen.getByRole('button', { name: 'Add an attachment' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Open security policy' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Context usage 62 percent' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Context usage 62 percent' })).toHaveAttribute(
+      'title',
+      'Context usage 62 percent'
+    );
+    expect(screen.getByRole('button', { name: 'Record a voice message' })).toHaveAttribute(
+      'title',
+      'Record a voice message'
+    );
     expect(screen.getByRole('combobox', { name: 'Model' })).toBeEnabled();
   });
 

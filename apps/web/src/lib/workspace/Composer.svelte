@@ -138,7 +138,15 @@
     <div class="composer-right">
       <div class="composer-context-island">
         <div class="context-meter">
-          <Pill ariaLabel="Context usage 62 percent" icon="spark" iconOnly label="62%" variant="ghost" {disabled} />
+          <Pill
+            ariaLabel="Context usage 62 percent"
+            icon="spark"
+            iconOnly
+            label="62%"
+            title="Context usage 62 percent"
+            variant="ghost"
+            {disabled}
+          />
         </div>
         <label class="model-control">
           <span class="sr-only">Model</span>
@@ -149,7 +157,15 @@
             <option>Atlas · precise</option>
           </select>
         </label>
-        <Pill ariaLabel="Record a voice message" icon="mic" iconOnly label="Voice message" variant="ghost" {disabled} />
+        <Pill
+          ariaLabel="Record a voice message"
+          icon="mic"
+          iconOnly
+          label="Voice message"
+          title="Record a voice message"
+          variant="ghost"
+          {disabled}
+        />
       </div>
       <div class="send-control">
         {#if isStreaming}
