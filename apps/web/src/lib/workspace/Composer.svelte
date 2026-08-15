@@ -291,6 +291,12 @@
     box-shadow: none;
   }
 
+  /* The Paper island is light in both themes. Darken enabled action copy a
+     small amount so the Restricted label clears the WCAG AA text threshold. */
+  .composer-action-island :global(.pill:not(:disabled)) {
+    color: color-mix(in srgb, var(--muted) 90%, var(--ink));
+  }
+
   .composer-action-island :global(.pill + .pill) {
     margin-left: -8px;
   }
