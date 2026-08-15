@@ -516,6 +516,7 @@ function proxyUpgrade(request, socket, head, target, configuredPublicEndpoint) {
       `GET ${rawTarget} HTTP/1.1\r\n${serializedRequestHeaders.join('\r\n')}\r\n\r\n`
     );
   });
+  /** @param {Buffer|string} chunk */
   const handleUpgradeResponse = (chunk) => {
     if (responseHandled || clientClosed) {
       upstream.destroy();
@@ -567,6 +568,10 @@ function proxyUpgrade(request, socket, head, target, configuredPublicEndpoint) {
     // stringified, copied into an application buffer, or written to a log.
     upstream.pipe(socket);
     socket.pipe(upstream);
+    // Node can retain the public HTTP-upgrade socket in paused mode after the
+    // handshake parser releases it. Resume it after both pipes exist so later
+    // client frames reach the private Hermes socket.
+    socket.resume();
   };
   upstream.on('data', handleUpgradeResponse);
 }

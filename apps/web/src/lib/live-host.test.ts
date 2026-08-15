@@ -25,12 +25,32 @@ async function close(server: NetServer): Promise<void> {
   });
 }
 
-async function startHost(upstreamPort: number): Promise<{ host: ReturnType<typeof createLiveHost>; port: number }> {
+async function startHost(
+  upstreamPort: number,
+  { pauseUpgradeSocket = false }: { pauseUpgradeSocket?: boolean } = {}
+): Promise<{ host: ReturnType<typeof createLiveHost>; port: number }> {
   const host = createLiveHost({ target: `http://127.0.0.1:${upstreamPort}` });
   host.on('connection', (socket) => {
     liveHostSockets.add(socket);
     socket.once('close', () => liveHostSockets.delete(socket));
   });
+  if (pauseUpgradeSocket) {
+    // Pause immediately after the client-side pipe is installed to reproduce
+    // an HTTP upgrade handoff that retains ownership of the public socket.
+    // The real host must resume it again after both raw pipes are installed.
+    host.prependListener('upgrade', (_request, socket) => {
+      const originalPipe = socket.pipe.bind(socket);
+      Object.defineProperty(socket, 'pipe', {
+        configurable: true,
+        writable: true,
+        value(destination: NodeJS.WritableStream) {
+          const result = originalPipe(destination);
+          socket.pause();
+          return result;
+        }
+      });
+    });
+  }
   const port = await listen(host);
   liveServers.push(host);
   return { host, port };
@@ -99,6 +119,12 @@ function maskedBinaryFrame(payload: Buffer, mask: Buffer): Buffer {
   const encoded = Buffer.alloc(payload.length);
   for (let index = 0; index < payload.length; index += 1) encoded[index] = payload[index] ^ mask[index % 4];
   return Buffer.concat([Buffer.from([0x82, 0x80 | payload.length]), mask, encoded]);
+}
+
+function maskedTextFrame(payload: string, mask: Buffer): Buffer {
+  const frame = maskedBinaryFrame(Buffer.from(payload), mask);
+  frame[0] = 0x81;
+  return frame;
 }
 
 function closeFrame(code: number): Buffer {
@@ -423,7 +449,7 @@ describe('disposable live PTY upgrade boundary', () => {
     });
     const upstreamPort = await listen(upstream);
     liveServers.push(upstream);
-    const { port } = await startHost(upstreamPort);
+    const { port } = await startHost(upstreamPort, { pauseUpgradeSocket: true });
     const client = await connect(port);
     client.write(
       `GET /api/ws?ticket=Ticket_A1 HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: http://127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n`
@@ -434,8 +460,13 @@ describe('disposable live PTY upgrade boundary', () => {
     upstreamSocket?.write(frame);
     expect(await nextData(client)).toEqual(frame);
 
-    const clientWire = maskedBinaryFrame(
-      Buffer.from([0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e]),
+    const clientWire = maskedTextFrame(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'probe-resume',
+        method: 'session.resume',
+        params: { session_id: 'Session_A1' }
+      }),
       Buffer.from([0x11, 0x22, 0x33, 0x44])
     );
     client.write(clientWire);
@@ -445,7 +476,15 @@ describe('disposable live PTY upgrade boundary', () => {
       digest: sha256(clientWire)
     });
 
-    const responseFrame = websocketTextFrame('session.resume.result');
+    const changedFrame = websocketTextFrame(
+      '{"method":"event","params":{"type":"sessions.changed"}}'
+    );
+    upstreamSocket?.write(changedFrame);
+    expect(await nextData(client)).toEqual(changedFrame);
+
+    const responseFrame = websocketTextFrame(
+      '{"jsonrpc":"2.0","id":"probe-resume","result":{}}'
+    );
     upstreamSocket?.write(responseFrame);
     expect(await nextData(client)).toEqual(responseFrame);
     client.destroy();
