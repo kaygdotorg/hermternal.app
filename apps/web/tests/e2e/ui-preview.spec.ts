@@ -282,6 +282,27 @@ test('Paper mobile geometry uses the fixed shell, modal drawers, and local Send 
   await expect(page.locator('.section-note').first()).toHaveText('send');
 });
 
+test('Paper intermediate workspace action opens its inspector drawer at the trailing edge', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 });
+  await page.goto(previewUrl('/ui-preview'));
+  await page.getByRole('combobox', { name: 'Runtime state' }).selectOption('ready');
+
+  const workspace = page.locator('.workspace-preview');
+  const workspaceBox = await workspace.boundingBox();
+  const trigger = workspace.getByRole('button', { name: 'Open workspace' });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+
+  const drawer = page.getByTestId('mobile-workspace-drawer');
+  const drawerBox = await drawer.boundingBox();
+  expect(workspaceBox).not.toBeNull();
+  expect(drawerBox).not.toBeNull();
+  expect((drawerBox?.x ?? 0) + (drawerBox?.width ?? 0)).toBe(
+    (workspaceBox?.x ?? 0) + (workspaceBox?.width ?? 0) - 12
+  );
+  await expect(drawer).toHaveCSS('right', '12px');
+});
+
 test('Paper effective widths use deterministic narrow, intermediate, and desktop families', async ({ page }) => {
   for (const width of [760, 761, 1439, 1440]) {
     await page.setViewportSize({ width, height: 844 });

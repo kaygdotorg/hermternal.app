@@ -928,7 +928,6 @@
     .mobile-workspace-drawer {
       position: absolute;
       top: 74px;
-      left: 12px;
       z-index: 11;
       display: block;
       box-sizing: border-box;
@@ -943,10 +942,15 @@
     }
 
     .mobile-session-drawer {
+      left: 12px;
       width: min(342px, calc(100% - 24px));
     }
 
     .mobile-workspace-drawer {
+      /* The trailing toolbar action owns the inspector, so keep its drawer on
+         the trailing edge. At 390px both 12px margins are equal; the explicit
+         direction remains visible in the wider intermediate family. */
+      right: 12px;
       width: min(366px, calc(100% - 24px));
     }
 
