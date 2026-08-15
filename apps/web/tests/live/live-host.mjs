@@ -516,7 +516,7 @@ function proxyUpgrade(request, socket, head, target, configuredPublicEndpoint) {
       `GET ${rawTarget} HTTP/1.1\r\n${serializedRequestHeaders.join('\r\n')}\r\n\r\n`
     );
   });
-  upstream.on('data', (chunk) => {
+  const handleUpgradeResponse = (chunk) => {
     if (responseHandled || clientClosed) {
       upstream.destroy();
       return;
@@ -559,11 +559,16 @@ function proxyUpgrade(request, socket, head, target, configuredPublicEndpoint) {
     responseBytes = Buffer.alloc(0);
     if (upstreamBody.length > 0) socket.write(upstreamBody);
     upstream.setTimeout(0);
+    // The listener above only parses the HTTP upgrade response. Leaving it
+    // attached would treat every later WebSocket frame as a second handshake
+    // and destroy the upstream before the duplex pipes can forward it.
+    upstream.off('data', handleUpgradeResponse);
     // These are raw duplex pipes by design. No WebSocket frame is decoded,
     // stringified, copied into an application buffer, or written to a log.
     upstream.pipe(socket);
     socket.pipe(upstream);
-  });
+  };
+  upstream.on('data', handleUpgradeResponse);
 }
 
 /**

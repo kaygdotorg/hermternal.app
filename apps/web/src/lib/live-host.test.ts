@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createLiveHost, validateLiveTarget } from '../../tests/live/live-host.mjs';
 
 const liveServers: NetServer[] = [];
+const liveHostSockets = new Set<Socket>();
 const WEBSOCKET_ACCEPT_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 async function listen(server: NetServer): Promise<number> {
@@ -16,6 +17,9 @@ async function listen(server: NetServer): Promise<number> {
 
 async function close(server: NetServer): Promise<void> {
   if (!server.listening) return;
+  // HTTP server close waits for upgraded sockets. Destroy the test-owned raw
+  // sockets first so one-way disconnect cases cannot leak into the next test.
+  for (const socket of liveHostSockets) socket.destroy();
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
@@ -23,6 +27,10 @@ async function close(server: NetServer): Promise<void> {
 
 async function startHost(upstreamPort: number): Promise<{ host: ReturnType<typeof createLiveHost>; port: number }> {
   const host = createLiveHost({ target: `http://127.0.0.1:${upstreamPort}` });
+  host.on('connection', (socket) => {
+    liveHostSockets.add(socket);
+    socket.once('close', () => liveHostSockets.delete(socket));
+  });
   const port = await listen(host);
   liveServers.push(host);
   return { host, port };
@@ -382,11 +390,15 @@ describe('disposable live PTY upgrade boundary', () => {
     socket.destroy();
   });
 
-  it('accepts a split 101 response head and forwards the first server frame', async () => {
+  it('keeps the Chat WebSocket duplex after a split 101 response head', async () => {
     let upstreamSocket: Socket | undefined;
     let resolveHandshake!: (key: string) => void;
     const handshake = new Promise<string>((resolve) => {
       resolveHandshake = resolve;
+    });
+    let resolveClientFrame!: (frame: Buffer) => void;
+    const clientFrame = new Promise<Buffer>((resolve) => {
+      resolveClientFrame = resolve;
     });
     const upstream = createNetServer((socket) => {
       upstreamSocket = socket;
@@ -406,6 +418,7 @@ describe('disposable live PTY upgrade boundary', () => {
         setImmediate(() => socket.write(response.subarray(split)));
         resolveHandshake(key);
         socket.removeAllListeners('data');
+        socket.on('data', (chunk) => resolveClientFrame(asBuffer(chunk)));
       });
     });
     const upstreamPort = await listen(upstream);
@@ -420,6 +433,21 @@ describe('disposable live PTY upgrade boundary', () => {
     const frame = websocketTextFrame('gateway.ready');
     upstreamSocket?.write(frame);
     expect(await nextData(client)).toEqual(frame);
+
+    const clientWire = maskedBinaryFrame(
+      Buffer.from([0x73, 0x65, 0x73, 0x73, 0x69, 0x6f, 0x6e]),
+      Buffer.from([0x11, 0x22, 0x33, 0x44])
+    );
+    client.write(clientWire);
+    const forwardedToUpstream = await clientFrame;
+    expect({ length: forwardedToUpstream.length, digest: sha256(forwardedToUpstream) }).toEqual({
+      length: clientWire.length,
+      digest: sha256(clientWire)
+    });
+
+    const responseFrame = websocketTextFrame('session.resume.result');
+    upstreamSocket?.write(responseFrame);
+    expect(await nextData(client)).toEqual(responseFrame);
     client.destroy();
   });
 
