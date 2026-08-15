@@ -177,13 +177,17 @@ test('Paper desktop geometry keeps the fixed three-column workspace and composer
   expect(composerBox?.height).toBe(112);
   expect(composerBox?.x).toBe((workspaceBox?.x ?? 0) + 344);
   expect(composerBox?.width).toBe(648);
-  expect(Math.abs((composerBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 800))).toBeLessThanOrEqual(1);
+  expect(Math.abs((composerBox?.y ?? 0) - ((workspaceBox?.y ?? 0) + 816))).toBeLessThanOrEqual(1);
   expect(titleIslandBox).toMatchObject({
     x: (workspaceBox?.x ?? 0) + 320,
     y: (workspaceBox?.y ?? 0) + 30,
     width: 160,
     height: 44
   });
+  await expect(workspace.getByRole('button', { name: 'Workspace options' })).toHaveCSS(
+    'backdrop-filter',
+    'blur(18px) saturate(1.5)'
+  );
   expect(modeIslandBox).toMatchObject({
     x: (workspaceBox?.x ?? 0) + 622,
     y: (workspaceBox?.y ?? 0) + 30,

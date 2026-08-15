@@ -167,7 +167,7 @@ describe('WorkspacePreview', () => {
     }
   });
 
-  it('disables both responsive Terminal controls while session promotion is pending', async () => {
+  it('disables the desktop Terminal control while session promotion is pending', async () => {
     const onAction = vi.fn();
     render(WorkspacePreview, {
       dataMode: 'live',
@@ -179,7 +179,9 @@ describe('WorkspacePreview', () => {
     const terminalControls = document.querySelectorAll<HTMLButtonElement>(
       'button[aria-label="Terminal unavailable until the first message is saved"]'
     );
-    expect(terminalControls).toHaveLength(2);
+    // The narrow resting Chat board does not mount a hidden selector. The
+    // desktop header remains the single disabled entry point until promotion.
+    expect(terminalControls).toHaveLength(1);
     for (const control of terminalControls) {
       expect(control).toBeDisabled();
       expect(control).toHaveAttribute(
@@ -330,8 +332,11 @@ describe('WorkspacePreview', () => {
     expect(controls[0]).toHaveAttribute('aria-pressed', 'false');
     expect(controls[1]).toHaveAttribute('aria-pressed', 'true');
 
-    await fireEvent.click(controls[0]);
-    await fireEvent.click(controls[1]);
+    // Terminal's selector supports both pointer activation and a keyboard
+    // activation path while it owns the active presentation.
+    await fireEvent.pointerDown(controls[0], { button: 0, pointerType: 'mouse' });
+    await fireEvent.pointerUp(controls[0]);
+    await fireEvent.click(controls[1], { detail: 0 });
     expect(onAction).toHaveBeenNthCalledWith(1, { type: 'set-mode', mode: 'chat' });
     expect(onAction).toHaveBeenNthCalledWith(2, { type: 'set-mode', mode: 'terminal' });
     expect(onAction).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'new-session' }));
@@ -339,6 +344,12 @@ describe('WorkspacePreview', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'Open conversations', hidden: true }));
     expect((selector as HTMLElement & { inert: boolean }).inert).toBe(true);
     expect(selector).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('does not mount a hidden mode selector in the resting live Chat board', () => {
+    render(WorkspacePreview, { state: 'ready', dataMode: 'live', mode: 'chat' });
+
+    expect(screen.queryByTestId('mobile-mode-selector')).not.toBeInTheDocument();
   });
 
   it('treats mobile drawers as modal surfaces and restores focus after Escape', async () => {

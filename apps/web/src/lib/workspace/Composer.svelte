@@ -179,17 +179,17 @@
 <style>
   .composer {
     position: absolute;
-    right: 36px;
-    bottom: 32px;
-    left: 36px;
+    right: var(--composer-inset-inline, 36px);
+    bottom: var(--composer-offset-block, 16px);
+    left: var(--composer-inset-inline, 36px);
     z-index: 3;
     box-sizing: border-box;
     display: flex;
-    height: 112px;
-    min-height: 112px;
+    height: var(--composer-height, 112px);
+    min-height: var(--composer-height, 112px);
     flex-direction: column;
     gap: 4px;
-    padding: 8px;
+    padding: var(--composer-padding, 8px);
     border: 1px solid var(--chrome-line);
     border-radius: var(--radius-glass);
     background: var(--composer-surface);
@@ -423,14 +423,6 @@
   }
 
   @container workspace-preview (max-width: 1439px) {
-    .composer {
-      right: 16px;
-      bottom: 16px;
-      left: 16px;
-      height: 100px;
-      min-height: 100px;
-    }
-
     .composer-controls {
       align-items: center;
     }
@@ -506,8 +498,10 @@
     }
 
     .send-control :global(.pill.action) {
-      background: transparent;
-      box-shadow: inset 0 0 0 3px var(--ink);
+      background: var(--ink);
+      border-color: var(--ink);
+      color: var(--canvas);
+      box-shadow: none;
     }
 
     .message-field textarea {

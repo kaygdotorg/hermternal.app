@@ -260,7 +260,6 @@
 <div class="workspace-preview-container">
   <section
     aria-label="Hermternal runtime workspace preview"
-    class:terminal-active={mode === 'terminal'}
     class="workspace-preview"
     data-appearance={appearance}
     data-mode-source={dataMode}
@@ -360,7 +359,7 @@
     </div>
   </div>
 
-  {#if dataMode === 'live'}
+  {#if dataMode === 'live' && (mode === 'terminal' || terminalPresentationActive || chatFocusHandoff)}
     <div
       aria-hidden={selectorBlocked ? 'true' : undefined}
       aria-label="Workspace mode"
@@ -516,6 +515,12 @@
     --chrome-shadow: #1f263429 0 22px 60px, #1f263414 0 2px 8px;
     --composer-surface: #ffffff99;
     --composer-shadow: #1f263424 0 16px 38px, #1f263412 0 2px 7px;
+    /* Composer owns its material; the shell supplies only responsive
+       placement and size tokens. */
+    --composer-inset-inline: 36px;
+    --composer-offset-block: 16px;
+    --composer-height: 112px;
+    --composer-padding: 8px;
     --radius-pill: 999px;
     --radius-input: 12px;
     --radius-nested-glass: 14px;
@@ -633,6 +638,14 @@
 
   .desktop-inspector {
     display: flex;
+  }
+
+  /* Inspector icon actions keep the shared 44px effective target even when a
+     child component uses a smaller visible shell for Paper's resting card. */
+  .workspace-preview :global(.desktop-inspector .pill),
+  .workspace-preview :global(.mobile-workspace-drawer .pill) {
+    min-width: 44px;
+    min-height: 44px;
   }
 
   .conversation-panel {
@@ -835,8 +848,10 @@
     }
 
     .mobile-title-island :global(.pill:last-child .pill-label) {
+      overflow: visible;
       font-size: 15px;
       line-height: 20px;
+      text-overflow: clip;
     }
 
     .mobile-toolbar > :global(.pill) {
@@ -1183,17 +1198,10 @@
       padding-inline: 16px;
     }
 
-    /* The approved narrow resting board shows only the title island and the
-       trailing Workspace action. Keep the shared mode controls in the DOM so
-       keyboard and terminal recovery paths stay available, then reveal the
-       same controls when Terminal owns the active presentation. Opacity keeps
-       the pointer and focus contract intact without adding a third visible
-       island to the Paper board. */
-    .workspace-preview:not(.terminal-active) .mobile-mode-selector {
-      opacity: 0;
-    }
-
-    .workspace-preview.terminal-active .mobile-mode-selector {
+    /* The selector is mounted only for Terminal or the short handoff state,
+       so resting Chat has no hidden focus or pointer target in its Paper
+       toolbar. */
+    .workspace-preview .mobile-mode-selector {
       opacity: 1;
     }
   }
@@ -1256,7 +1264,7 @@
       border: 0;
     }
 
-    .conversation-panel :global(.conversation-header > .pill) {
+    .conversation-panel :global(.conversation-header .share-control .pill) {
       position: absolute;
       top: 14px;
       right: 8px;
@@ -1274,30 +1282,16 @@
       display: none;
     }
 
-    .conversation-panel :global(.composer) {
-      right: 36px;
-      bottom: 32px;
-      left: 36px;
-      height: 112px;
-      min-height: 112px;
-      padding: 8px;
-      background: var(--composer-surface);
-      box-shadow: var(--composer-shadow);
-      backdrop-filter: blur(18px) saturate(150%);
-    }
   }
 
   @container workspace-preview (max-width: 1439px) {
-    .conversation-panel :global(.composer) {
-      right: 16px;
-      bottom: 16px;
-      left: 16px;
-      height: 100px;
-      min-height: 100px;
-      padding: 6px;
-      background: var(--composer-surface);
-      box-shadow: var(--composer-shadow);
-      backdrop-filter: blur(18px) saturate(150%);
+    /* Composer owns its material. The shell only supplies responsive
+       placement tokens so this column remains the single geometry owner. */
+    .workspace-preview {
+      --composer-inset-inline: 16px;
+      --composer-offset-block: 16px;
+      --composer-height: 100px;
+      --composer-padding: 6px;
     }
   }
 
