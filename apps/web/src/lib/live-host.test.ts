@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createLiveHost, validateLiveTarget } from '../../tests/live/live-host.mjs';
 
 const liveServers: NetServer[] = [];
+const WEBSOCKET_ACCEPT_MAGIC = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 async function listen(server: NetServer): Promise<number> {
   await new Promise<void>((resolve, reject) => {
@@ -68,6 +69,16 @@ function asBuffer(chunk: string | Buffer): Buffer {
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function websocketAccept(key: string): string {
+  return createHash('sha1').update(`${key}${WEBSOCKET_ACCEPT_MAGIC}`).digest('base64');
+}
+
+function websocketTextFrame(payload: string): Buffer {
+  const bytes = Buffer.from(payload);
+  if (bytes.length > 125) throw new Error('test WebSocket payload is too large');
+  return Buffer.concat([Buffer.from([0x81, bytes.length]), bytes]);
 }
 
 function binaryFrame(payload: Buffer): Buffer {
@@ -195,6 +206,7 @@ describe('disposable live PTY upgrade boundary', () => {
   it('forwards the exact PTY query and raw binary/close frames without application decoding', async () => {
     let upstreamSocket: Socket | undefined;
     let requestLine = '';
+    let requestKey = '';
     let resolveUpgrade!: () => void;
     const upgraded = new Promise<void>((resolve) => {
       resolveUpgrade = resolve;
@@ -219,10 +231,12 @@ describe('disposable live PTY upgrade boundary', () => {
         handshake = Buffer.concat([handshake, bytes]);
         const end = handshake.indexOf(Buffer.from('\r\n\r\n'));
         if (end === -1) return;
-        requestLine = handshake.subarray(0, end).toString('latin1').split('\r\n', 1)[0] ?? '';
+        const headers = handshake.subarray(0, end).toString('latin1');
+        requestLine = headers.split('\r\n', 1)[0] ?? '';
+        requestKey = /^Sec-WebSocket-Key: ([^\r\n]+)$/imu.exec(headers)?.[1] ?? '';
         isUpgraded = true;
         socket.write(
-          'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'
+          `HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${websocketAccept(requestKey)}\r\n\r\n`
         );
         resolveUpgrade();
       });
@@ -238,6 +252,8 @@ describe('disposable live PTY upgrade boundary', () => {
         'Host: 127.0.0.1',
         'Connection: Upgrade',
         'Upgrade: websocket',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version: 13',
         '',
         ''
       ].join('\r\n')
@@ -295,14 +311,19 @@ describe('disposable live PTY upgrade boundary', () => {
 
   it('preserves the reviewed Chat /api/ws upgrade route', async () => {
     let requestLine = '';
+    let requestKey = '';
     const upstream = createNetServer((socket) => {
       let request = Buffer.alloc(0);
       socket.on('data', (chunk) => {
         request = Buffer.concat([request, asBuffer(chunk)]);
         const end = request.indexOf(Buffer.from('\r\n\r\n'));
         if (end === -1) return;
-        requestLine = request.subarray(0, end).toString('latin1').split('\r\n', 1)[0] ?? '';
-        socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+        const headers = request.subarray(0, end).toString('latin1');
+        requestLine = headers.split('\r\n', 1)[0] ?? '';
+        requestKey = /^Sec-WebSocket-Key: ([^\r\n]+)$/imu.exec(headers)?.[1] ?? '';
+        socket.end(
+          `HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${websocketAccept(requestKey)}\r\n\r\n`
+        );
       });
     });
     const upstreamPort = await listen(upstream);
@@ -310,11 +331,53 @@ describe('disposable live PTY upgrade boundary', () => {
     const { port } = await startHost(upstreamPort);
     const socket = await connect(port);
     socket.write(
-      'GET /api/ws?ticket=Ticket_A1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n'
+      'GET /api/ws?ticket=Ticket_A1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'
     );
     expect(statusLine(await readHttpHead(socket))).toBe('HTTP/1.1 101 Switching Protocols');
     expect(requestLine).toBe('GET /api/ws?ticket=Ticket_A1 HTTP/1.1');
     socket.destroy();
+  });
+
+  it('passes a valid 101 handshake and post-handshake frame to a validating WebSocket client', async () => {
+    let upstreamSocket: Socket | undefined;
+    const upstream = createNetServer((socket) => {
+      upstreamSocket = socket;
+      let handshake = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        handshake = Buffer.concat([handshake, asBuffer(chunk)]);
+        const end = handshake.indexOf(Buffer.from('\r\n\r\n'));
+        if (end === -1) return;
+        const headers = handshake.subarray(0, end).toString('latin1');
+        const key = /^Sec-WebSocket-Key: ([^\r\n]+)$/imu.exec(headers)?.[1] ?? '';
+        socket.write(
+          `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${websocketAccept(key)}\r\n\r\n`
+        );
+        socket.write(websocketTextFrame('gateway.ready'));
+        socket.write(Buffer.from([0x88, 0x02, 0x03, 0xe8]));
+        socket.removeAllListeners('data');
+      });
+    });
+    const upstreamPort = await listen(upstream);
+    liveServers.push(upstream);
+    const { port } = await startHost(upstreamPort);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/api/ws?ticket=Ticket_A1`);
+    try {
+      const message = await new Promise<string>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('WebSocket message timed out')), 2_000);
+        client.addEventListener('message', (event) => {
+          clearTimeout(timeout);
+          resolve(String(event.data));
+        });
+        client.addEventListener('error', () => {
+          clearTimeout(timeout);
+          reject(new Error('validating WebSocket client rejected the handshake'));
+        });
+      });
+      expect(message).toBe('gateway.ready');
+    } finally {
+      client.close();
+      upstreamSocket?.destroy();
+    }
   });
 
   it.each([
