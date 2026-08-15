@@ -136,7 +136,8 @@
   .brand-mark {
     flex: 1 1 auto;
     color: var(--ink);
-    font-family: 'Dancing Script', 'Instrument Sans', cursive;
+    font-family: 'Dancing Script', system-ui, sans-serif;
+    font-style: normal;
     font-size: 27px;
     font-weight: 600;
     letter-spacing: -0.02em;

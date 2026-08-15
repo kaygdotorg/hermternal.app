@@ -1,3 +1,8 @@
+/* Paper uses Dancing Script for the Hermternal wordmark. Keep this single
+   Latin 600 face self-hosted and subsetted; the product does not fetch fonts
+   from a runtime network boundary. */
+@import '@fontsource/dancing-script/latin-600.css';
+
 :root {
   --color-canvas: #F3F5F8;
   --color-paper: #FFFFFF;
